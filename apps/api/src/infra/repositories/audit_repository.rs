@@ -281,17 +281,11 @@ fn push_list_audit_event_filters(
                 ae.action_kind ilike ",
         );
         builder.push_bind(pattern.clone());
-        builder.push(
-            " or coalesce(ae.redacted_message, '') ilike ",
-        );
+        builder.push(" or coalesce(ae.redacted_message, '') ilike ");
         builder.push_bind(pattern.clone());
-        builder.push(
-            " or coalesce(ae.internal_message, '') ilike ",
-        );
+        builder.push(" or coalesce(ae.internal_message, '') ilike ");
         builder.push_bind(pattern.clone());
-        builder.push(
-            " or coalesce(ae.actor_principal_id::text, '') ilike ",
-        );
+        builder.push(" or coalesce(ae.actor_principal_id::text, '') ilike ");
         builder.push_bind(pattern.clone());
         builder.push(
             " or exists (
@@ -302,21 +296,13 @@ fn push_list_audit_event_filters(
                             aes.subject_kind ilike ",
         );
         builder.push_bind(pattern.clone());
-        builder.push(
-            "       or aes.subject_id::text ilike ",
-        );
+        builder.push("       or aes.subject_id::text ilike ");
         builder.push_bind(pattern.clone());
-        builder.push(
-            "       or coalesce(aes.workspace_id::text, '') ilike ",
-        );
+        builder.push("       or coalesce(aes.workspace_id::text, '') ilike ");
         builder.push_bind(pattern.clone());
-        builder.push(
-            "       or coalesce(aes.library_id::text, '') ilike ",
-        );
+        builder.push("       or coalesce(aes.library_id::text, '') ilike ");
         builder.push_bind(pattern.clone());
-        builder.push(
-            "       or coalesce(aes.document_id::text, '') ilike ",
-        );
+        builder.push("       or coalesce(aes.document_id::text, '') ilike ");
         builder.push_bind(pattern);
         builder.push(
             "      )

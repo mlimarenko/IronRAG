@@ -28,6 +28,12 @@ export type AIPurpose = 'extract_graph' | 'embed_chunk' | 'query_answer' | 'visi
 
 export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed';
 export type DocumentReadiness = 'processing' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed';
+export type SourceAccessKind = 'stored_document' | 'external_url';
+
+export interface SourceAccess {
+  kind: SourceAccessKind;
+  href: string;
+}
 
 export interface DocumentItem {
   id: string;
@@ -45,6 +51,7 @@ export interface DocumentItem {
   canRetry?: boolean;
   sourceKind?: 'upload' | 'web_page' | 'append' | 'replace' | 'connector_sync' | 'import' | string;
   sourceUri?: string;
+  sourceAccess?: SourceAccess;
 }
 
 export interface DocumentRevision {
@@ -253,6 +260,7 @@ export interface SegmentReference {
   documentName: string;
   documentTitle: string | null;
   sourceUri: string | null;
+  sourceAccess: SourceAccess | null;
   segmentOrdinal: number;
   excerpt: string;
   relevance: number;
@@ -322,48 +330,82 @@ export interface TokenGrant {
   permission: string;
 }
 
+export type AIScopeKind = 'instance' | 'workspace' | 'library';
+
 export interface AIProvider {
   id: string;
   displayName: string;
   kind: string;
   apiStyle: string;
   lifecycleState: 'active' | 'deprecated' | 'preview';
+  defaultBaseUrl?: string;
+  apiKeyRequired: boolean;
+  baseUrlRequired: boolean;
   modelCount: number;
   credentialCount: number;
 }
 
 export interface AICredential {
   id: string;
+  scopeKind: AIScopeKind;
+  workspaceId?: string;
+  libraryId?: string;
   providerId: string;
   providerName: string;
+  providerKind: string;
   label: string;
-  state: 'valid' | 'invalid' | 'unchecked';
+  state: 'active' | 'invalid' | 'revoked' | 'unchecked';
   createdAt: string;
   updatedAt: string;
+  baseUrl?: string;
   apiKeySummary: string;
+}
+
+export type AIModelAvailabilityState = 'available' | 'unavailable' | 'unknown';
+
+export interface AIModelOption {
+  id: string;
+  providerCatalogId: string;
+  modelName: string;
+  capabilityKind: string;
+  modalityKind: string;
+  allowedBindingPurposes: AIPurpose[];
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  availabilityState: AIModelAvailabilityState;
+  availableCredentialIds: string[];
 }
 
 export interface ModelPreset {
   id: string;
+  scopeKind: AIScopeKind;
+  workspaceId?: string;
+  libraryId?: string;
   providerId: string;
-  model: string;
+  providerName: string;
+  providerKind: string;
+  modelCatalogId: string;
+  modelName: string;
   presetName: string;
+  allowedBindingPurposes: AIPurpose[];
   systemPrompt?: string;
-  temperature: number;
-  topP: number;
+  temperature?: number;
+  topP?: number;
   maxOutputTokens?: number;
   extraParams?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface LibraryBinding {
-  id?: string;
+export interface AIBindingAssignment {
+  id: string;
+  scopeKind: AIScopeKind;
+  workspaceId?: string;
+  libraryId?: string;
   purpose: AIPurpose;
-  credentialId?: string;
-  presetId?: string;
-  state: 'configured' | 'unconfigured' | 'invalid';
-  validation?: BindingValidation;
+  credentialId: string;
+  presetId: string;
+  state: 'configured' | 'inactive' | 'invalid';
 }
 
 export interface BindingValidation {

@@ -4,10 +4,10 @@ import { toast } from 'sonner';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useApp } from '@/contexts/AppContext';
 import { adminApi, apiFetch } from '@/api';
-import { BUILD_VERSION_LABEL } from '@/lib/build-version';
+import { ShellFooter } from '@/components/ShellFooter';
 import {
   Home, FileText, Share2, MessageSquare, Settings, Code2,
-  ChevronDown, Globe, LogOut, Menu, X, Plus, Trash2, AlertTriangle
+  ChevronDown, LogOut, Menu, X, Plus, Trash2, AlertTriangle
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -42,7 +42,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const {
     user, workspaces, activeWorkspace, libraries, activeLibrary,
     setActiveWorkspace, setActiveLibrary, logout,
-    setWorkspaces, setLibraries, refreshSession
+    refreshSession
   } = useApp();
   const navigate = useNavigate();
   const location = useLocation();
@@ -55,6 +55,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [newWsName, setNewWsName] = useState('');
   const [newLibName, setNewLibName] = useState('');
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const shellUserName = user?.displayName ?? t('shell.userFallback');
+  const shellAccessLabel = user?.accessLabel ?? t('shell.accessFallback');
 
   const isActive = (path: string) => location.pathname.startsWith(path);
 
@@ -65,7 +67,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       toast.success(t('shell.workspaceCreated'));
       await refreshSession();
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to create workspace');
+      toast.error(err?.message || t('shell.workspaceCreateFailed'));
     }
     setNewWsName('');
     setCreateWsOpen(false);
@@ -78,7 +80,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       toast.success(t('shell.libraryCreated'));
       await refreshSession();
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to create library');
+      toast.error(err?.message || t('shell.libraryCreateFailed'));
     }
     setNewLibName('');
     setCreateLibOpen(false);
@@ -91,7 +93,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       toast.success(t('shell.workspaceDeleted'));
       await refreshSession();
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to delete workspace');
+      toast.error(err?.message || t('shell.workspaceDeleteFailed'));
     }
     setDeleteConfirmName('');
     setDeleteWsOpen(false);
@@ -104,7 +106,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       toast.success(t('shell.libraryDeleted'));
       await refreshSession();
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to delete library');
+      toast.error(err?.message || t('shell.libraryDeleteFailed'));
     }
     setDeleteConfirmName('');
     setDeleteLibOpen(false);
@@ -122,11 +124,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       }}>
         {/* Brand */}
         <Link to="/dashboard" className="font-bold text-sm tracking-tight mr-4 flex items-center gap-2.5 group" style={{ color: 'hsl(var(--shell-foreground))' }}>
-          <div className="w-6 h-6 rounded-lg flex items-center justify-center text-[11px] font-black transition-transform duration-200 group-hover:scale-110" style={{
-            background: 'linear-gradient(135deg, hsl(var(--shell-active)), hsl(224 76% 42%))',
-            color: 'white',
-            boxShadow: '0 2px 8px -2px hsl(var(--shell-active) / 0.5)',
-          }}>R</div>
+          <img
+            src="/favicon.svg"
+            alt=""
+            aria-hidden="true"
+            className="h-6 w-auto shrink-0 transition-transform duration-200 group-hover:scale-110"
+          />
           <span className="hidden sm:inline">RustRAG</span>
         </Link>
 
@@ -149,7 +152,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           className="md:hidden ml-auto p-1.5 rounded-lg transition-colors"
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           style={{ color: 'hsl(var(--shell-foreground))' }}
-          aria-label="Toggle navigation"
+          aria-label={t('shell.toggleNavigation')}
         >
           {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
@@ -236,15 +239,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   background: 'linear-gradient(135deg, hsl(var(--shell-active) / 0.3), hsl(var(--shell-active) / 0.15))',
                   color: 'hsl(var(--shell-active))',
                 }}>
-                  {(user?.displayName ?? 'U')[0].toUpperCase()}
+                  {shellUserName[0].toUpperCase()}
                 </div>
-                <span className="truncate max-w-[80px] font-medium">{user?.displayName ?? 'User'}</span>
+                <span className="truncate max-w-[80px] font-medium">{shellUserName}</span>
                 <ChevronDown className="h-3 w-3 opacity-50" />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[180px]">
               <div className="px-2 py-1.5 text-xs text-muted-foreground font-medium">
-                {user?.accessLabel ?? 'Operator'}
+                {shellAccessLabel}
               </div>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => { logout(); navigate('/login'); }}>
@@ -327,21 +330,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </main>
 
       {/* Footer */}
-      <footer className="h-8 flex items-center justify-center px-4 gap-4 shrink-0 text-[11px] text-muted-foreground border-t" style={{
-        background: 'linear-gradient(180deg, hsl(var(--background)), hsl(var(--muted) / 0.3))',
-      }}>
-        <span className="font-medium">{BUILD_VERSION_LABEL}</span>
-        <span className="hidden sm:inline">{t('common.copyright', { year: new Date().getFullYear() })}</span>
-        <a
-          href="https://github.com/mlimarenko/RustRAG"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-1.5 hover:text-foreground transition-colors duration-200 font-medium"
-        >
-          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-          GitHub
-        </a>
-      </footer>
+      <ShellFooter />
 
       {/* Dialogs */}
       <Dialog open={createWsOpen} onOpenChange={setCreateWsOpen}>
@@ -353,7 +342,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="space-y-3">
             <div>
               <Label htmlFor="ws-name">{t('shell.workspaceName')}</Label>
-              <Input id="ws-name" value={newWsName} onChange={e => setNewWsName(e.target.value)} placeholder="My Workspace" className="mt-1.5" />
+              <Input id="ws-name" value={newWsName} onChange={e => setNewWsName(e.target.value)} placeholder={t('shell.workspaceNamePlaceholder')} className="mt-1.5" />
             </div>
           </div>
           <DialogFooter>
@@ -372,7 +361,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="space-y-3">
             <div>
               <Label htmlFor="lib-name">{t('shell.libraryName')}</Label>
-              <Input id="lib-name" value={newLibName} onChange={e => setNewLibName(e.target.value)} placeholder="My Library" className="mt-1.5" />
+              <Input id="lib-name" value={newLibName} onChange={e => setNewLibName(e.target.value)} placeholder={t('shell.libraryNamePlaceholder')} className="mt-1.5" />
             </div>
           </div>
           <DialogFooter>
@@ -386,7 +375,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t('shell.deleteWorkspaceTitle')}</DialogTitle>
-            <DialogDescription dangerouslySetInnerHTML={{ __html: t('shell.deleteWorkspaceDesc', { name: activeWorkspace?.name }) }} />
+            <DialogDescription>{t('shell.deleteWorkspaceDesc', { name: activeWorkspace?.name })}</DialogDescription>
           </DialogHeader>
           <div>
             <Label htmlFor="del-ws-confirm">{t('shell.typeToConfirm', { name: activeWorkspace?.name })}</Label>
@@ -403,7 +392,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t('shell.deleteLibraryTitle')}</DialogTitle>
-            <DialogDescription dangerouslySetInnerHTML={{ __html: t('shell.deleteLibraryDesc', { name: activeLibrary?.name }) }} />
+            <DialogDescription>{t('shell.deleteLibraryDesc', { name: activeLibrary?.name })}</DialogDescription>
           </DialogHeader>
           <div>
             <Label htmlFor="del-lib-confirm">{t('shell.typeToConfirm', { name: activeLibrary?.name })}</Label>

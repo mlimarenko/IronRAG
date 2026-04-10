@@ -7,7 +7,7 @@ use crate::{
         },
         ai::AiBindingPurpose,
     },
-    services::query_planner::{QueryPlanFailure, QueryPlanTaskInput, RuntimeQueryPlan},
+    services::query::planner::{QueryPlanFailure, QueryPlanTaskInput, RuntimeQueryPlan},
 };
 
 const QUERY_PLAN_STAGE_CATALOG: &[RuntimeStageKind] = &[RuntimeStageKind::Plan];

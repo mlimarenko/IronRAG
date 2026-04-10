@@ -14,12 +14,12 @@ use rustrag_backend::{
         repositories::{query_repository, runtime_repository},
     },
     services::{
-        billing_service::{
+        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
+        ingest::service::{AdmitIngestJobCommand, LeaseAttemptCommand},
+        ops::billing::{
             CaptureExecutionBillingCommand, CaptureIngestAttemptBillingCommand,
             CaptureQueryExecutionBillingCommand,
         },
-        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        ingest_service::{AdmitIngestJobCommand, LeaseAttemptCommand},
     },
 };
 
@@ -257,7 +257,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
             .context("failed to create redis client for billing_rollups test state")?,
     };
     let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-    Ok(AppState::from_dependencies(settings, persistence, arango_client))
+    AppState::from_dependencies(settings, persistence, arango_client)
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {

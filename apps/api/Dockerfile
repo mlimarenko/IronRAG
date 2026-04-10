@@ -35,7 +35,8 @@ COPY --from=builder /workspace/target/release/rebuild_runtime_graph /usr/local/b
 COPY apps/api/docker/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint.sh
 
 RUN adduser --disabled-password --gecos "" appuser \
-  && chown -R appuser:appuser /app \
+  && mkdir -p /var/lib/rustrag/content-storage \
+  && chown -R appuser:appuser /app /var/lib/rustrag \
   && chmod +x /usr/local/bin/runtime-entrypoint.sh
 
 EXPOSE 8080

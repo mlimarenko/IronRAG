@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '@/contexts/AppContext';
 import { authApi } from '@/api';
+import type { BootstrapProviderPresetBundle } from '@/api/auth';
+import { baseUrlForProviderInput, buildBootstrapAiSetup } from '@/lib/ai-provider';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -11,39 +13,34 @@ import { Loader2, FileText, Share2, Brain, Database, AlertCircle, CheckCircle2, 
 import type { AIPurpose } from '@/types';
 import { AVAILABLE_LOCALES } from '@/types';
 
-const AI_PURPOSES: { purpose: AIPurpose; label: string; description: string }[] = [
-  { purpose: 'extract_graph', label: 'Graph Extraction', description: 'Extract entities and relations from documents' },
-  { purpose: 'embed_chunk', label: 'Chunk Embedding', description: 'Generate vector embeddings for document chunks' },
-  { purpose: 'query_answer', label: 'Query Answering', description: 'Answer questions grounded in library content' },
-  { purpose: 'vision', label: 'Vision', description: 'Process images and visual content in documents' },
-];
-
-interface BootstrapProvider {
-  id: string;
-  providerKind: string;
-  displayName: string;
-  credentialSource: string;
-}
-
-interface BootstrapModel {
-  id: string;
-  providerCatalogId: string;
-  modelName: string;
-  capabilityKind: string;
-  allowedBindingPurposes: string[];
-}
-
-interface BootstrapBinding {
-  provider: string;
-  model: string;
-  modelCatalogId: string;
-  apiKey: string;
-}
+const AI_PURPOSE_ORDER: AIPurpose[] = ['extract_graph', 'embed_chunk', 'query_answer', 'vision'];
 
 export default function LoginPage() {
   const { t } = useTranslation();
   const { login, bootstrapSetup, isBootstrapRequired, locale, setLocale } = useApp();
   const navigate = useNavigate();
+  const aiPurposes: { purpose: AIPurpose; label: string; description: string }[] = [
+    {
+      purpose: 'extract_graph',
+      label: t('login.purposeExtractGraph'),
+      description: t('login.purposeExtractGraphDesc'),
+    },
+    {
+      purpose: 'embed_chunk',
+      label: t('login.purposeEmbedChunk'),
+      description: t('login.purposeEmbedChunkDesc'),
+    },
+    {
+      purpose: 'query_answer',
+      label: t('login.purposeQueryAnswer'),
+      description: t('login.purposeQueryAnswerDesc'),
+    },
+    {
+      purpose: 'vision',
+      label: t('login.purposeVision'),
+      description: t('login.purposeVisionDesc'),
+    },
+  ];
 
   const [loginVal, setLoginVal] = useState('');
   const [password, setPassword] = useState('');
@@ -51,26 +48,39 @@ export default function LoginPage() {
   const [error, setError] = useState('');
 
   const [displayName, setDisplayName] = useState('');
-  const [bindings, setBindings] = useState<Record<AIPurpose, BootstrapBinding>>({
-    extract_graph: { provider: '', model: '', modelCatalogId: '', apiKey: '' },
-    embed_chunk: { provider: '', model: '', modelCatalogId: '', apiKey: '' },
-    query_answer: { provider: '', model: '', modelCatalogId: '', apiKey: '' },
-    vision: { provider: '', model: '', modelCatalogId: '', apiKey: '' },
-  });
   const [bootstrapError, setBootstrapError] = useState('');
-  const [aiProviders, setAiProviders] = useState<BootstrapProvider[]>([]);
-  const [aiModels, setAiModels] = useState<BootstrapModel[]>([]);
+  const [presetBundles, setPresetBundles] = useState<BootstrapProviderPresetBundle[]>([]);
+  const [selectedProviderKind, setSelectedProviderKind] = useState('');
+  const [bootstrapBaseUrl, setBootstrapBaseUrl] = useState('');
+  const [bootstrapApiKey, setBootstrapApiKey] = useState('');
 
   useEffect(() => {
     if (isBootstrapRequired) {
       authApi.getBootstrapStatus().then(status => {
-        if (status.aiSetup) {
-          setAiProviders(status.aiSetup.providers ?? []);
-          setAiModels(status.aiSetup.models ?? []);
-        }
-      }).catch(() => { /* bootstrap status fetch is best-effort */ });
+        const bundles = status.aiSetup?.presetBundles ?? [];
+        setPresetBundles(bundles);
+        setSelectedProviderKind(current => {
+          if (current && bundles.some(bundle => bundle.providerKind === current)) {
+            return current;
+          }
+          return bundles.find(bundle => bundle.providerKind === 'openai')?.providerKind ?? bundles[0]?.providerKind ?? '';
+        });
+      }).catch((err) => {
+        setBootstrapError(err instanceof Error ? err.message : t('login.bootstrapStatusFetchFailed'));
+      });
     }
-  }, [isBootstrapRequired]);
+  }, [isBootstrapRequired, t]);
+
+  const selectedBundle =
+    presetBundles.find(bundle => bundle.providerKind === selectedProviderKind) ?? null;
+
+  useEffect(() => {
+    setBootstrapBaseUrl('');
+  }, [selectedBundle?.defaultBaseUrl, selectedBundle?.providerKind]);
+
+  useEffect(() => {
+    setBootstrapApiKey('');
+  }, [selectedBundle?.providerKind]);
 
   const handleLogin = async () => {
     if (!loginVal.trim() || !password.trim()) { setError(t('login.fillAllFields')); return; }
@@ -87,29 +97,41 @@ export default function LoginPage() {
   };
 
   const handleBootstrap = async () => {
-    if (!loginVal.trim() || !password.trim() || !displayName.trim()) {
+    if (!loginVal.trim() || !password.trim()) {
       setBootstrapError(t('login.fillRequired'));
       return;
     }
+    const requiresApiKey =
+      selectedBundle !== null
+      && selectedBundle.credentialSource !== 'env'
+      && selectedBundle.apiKeyRequired;
+    const requiresBaseUrl =
+      selectedBundle !== null
+      && selectedBundle.credentialSource !== 'env'
+      && selectedBundle.baseUrlRequired;
+    if (selectedBundle && requiresApiKey && !bootstrapApiKey.trim()) {
+      setBootstrapError(t('login.fillRequired'));
+      return;
+    }
+    if (selectedBundle && requiresBaseUrl && !bootstrapBaseUrl.trim()) {
+      setBootstrapError(t('login.fillRequired'));
+      return;
+    }
+
     setSubmitting(true);
     setBootstrapError('');
     try {
-      // Build AI setup payload from bindings
-      const configuredBindings = Object.entries(bindings).filter(([, b]) => b.provider && b.modelCatalogId);
-      const uniqueProviders = [...new Set(configuredBindings.map(([, b]) => b.provider))];
-      const aiSetup = configuredBindings.length > 0 ? {
-        credentials: uniqueProviders.map(pk => {
-          const binding = configuredBindings.find(([, b]) => b.provider === pk);
-          return { providerKind: pk, apiKey: binding?.[1].apiKey || undefined };
-        }),
-        bindingSelections: configuredBindings.map(([purpose, b]) => ({
-          bindingPurpose: purpose,
-          providerKind: b.provider,
-          modelCatalogId: b.modelCatalogId,
-        })),
-      } : undefined;
-
-      await bootstrapSetup({ login: loginVal, password, displayName, aiSetup });
+      const aiSetup = buildBootstrapAiSetup(
+        selectedBundle,
+        bootstrapApiKey,
+        bootstrapBaseUrl,
+      );
+      await bootstrapSetup({
+        login: loginVal,
+        password,
+        displayName: displayName.trim() || undefined,
+        aiSetup,
+      });
       navigate('/dashboard');
     } catch (err) {
       setBootstrapError(err instanceof Error ? err.message : t('login.setupFailed'));
@@ -117,18 +139,10 @@ export default function LoginPage() {
       setSubmitting(false);
     }
   };
-
-  const updateBinding = (purpose: AIPurpose, field: keyof BootstrapBinding, value: string) => {
-    setBindings(prev => {
-      const updated = { ...prev[purpose], [field]: value };
-      // When selecting a model by display name, also set its catalog ID
-      if (field === 'model') {
-        const modelEntry = aiModels.find(m => m.modelName === value);
-        updated.modelCatalogId = modelEntry?.id ?? '';
-      }
-      return { ...prev, [purpose]: updated };
-    });
-  };
+  const ollamaModels =
+    selectedBundle?.providerKind === 'ollama'
+      ? Array.from(new Set(selectedBundle.presets.map(preset => preset.modelName)))
+      : [];
 
   return (
     <div className="min-h-screen flex bg-background">
@@ -149,11 +163,12 @@ export default function LoginPage() {
         <div className="space-y-10 relative z-10">
           <div>
             <div className="flex items-center gap-3 mb-5">
-              <div className="w-9 h-9 rounded-xl flex items-center justify-center text-sm font-black" style={{
-                background: 'linear-gradient(135deg, hsl(224 76% 52%), hsl(224 76% 40%))',
-                color: 'white',
-                boxShadow: '0 4px 16px -4px hsl(224 76% 48% / 0.5)',
-              }}>R</div>
+              <img
+                src="/favicon.svg"
+                alt=""
+                aria-hidden="true"
+                className="h-9 w-auto shrink-0"
+              />
               <h1 className="text-2xl font-bold tracking-tight" style={{ color: 'hsl(var(--shell-foreground))' }}>RustRAG</h1>
             </div>
             <p className="text-sm leading-relaxed max-w-[320px]" style={{ color: 'hsl(224 14% 55%)' }}>
@@ -189,7 +204,12 @@ export default function LoginPage() {
         <div className="w-full max-w-md space-y-6 relative z-10">
           <div className="lg:hidden text-center mb-8">
             <div className="flex items-center justify-center gap-2.5 mb-2">
-              <div className="w-8 h-8 rounded-xl flex items-center justify-center text-xs font-black bg-primary text-primary-foreground shadow-glow-primary">R</div>
+              <img
+                src="/favicon.svg"
+                alt=""
+                aria-hidden="true"
+                className="h-8 w-auto shrink-0"
+              />
               <h1 className="text-xl font-bold tracking-tight">RustRAG</h1>
             </div>
             <p className="text-sm text-muted-foreground">{t('login.knowledgeSystemLogin')}</p>
@@ -230,7 +250,7 @@ export default function LoginPage() {
               <div className="space-y-4">
                 <div>
                   <Label htmlFor="login" className="text-sm font-semibold">{t('login.loginField')}</Label>
-                  <Input id="login" value={loginVal} onChange={e => setLoginVal(e.target.value)} placeholder="admin" autoFocus className="mt-2" />
+                  <Input id="login" value={loginVal} onChange={e => setLoginVal(e.target.value)} placeholder={t('login.loginPlaceholder')} autoFocus className="mt-2" />
                 </div>
                 <div>
                   <Label htmlFor="password" className="text-sm font-semibold">{t('login.password')}</Label>
@@ -262,75 +282,137 @@ export default function LoginPage() {
                 <div className="section-label">{t('login.adminAccount')}</div>
                 <div className="space-y-3">
                   <div>
-                    <Label htmlFor="admin-login" className="text-sm font-semibold">{t('login.adminLogin')}</Label>
-                    <Input id="admin-login" value={loginVal} onChange={e => setLoginVal(e.target.value)} placeholder="admin" className="mt-2" />
+                    <Label htmlFor="admin-login" className="text-sm font-semibold">
+                      {t('login.adminLogin')} <span className="text-destructive">*</span>
+                    </Label>
+                    <Input id="admin-login" value={loginVal} onChange={e => setLoginVal(e.target.value)} placeholder={t('login.loginPlaceholder')} className="mt-2" required />
                   </div>
                   <div>
-                    <Label htmlFor="admin-name" className="text-sm font-semibold">{t('login.displayName')}</Label>
-                    <Input id="admin-name" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Admin User" className="mt-2" />
+                    <Label htmlFor="admin-name" className="text-sm font-semibold">
+                      {t('login.displayName')} <span className="text-muted-foreground font-normal">({t('login.optional')})</span>
+                    </Label>
+                    <Input id="admin-name" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder={t('login.adminNamePlaceholder')} className="mt-2" />
                   </div>
                   <div>
-                    <Label htmlFor="admin-password" className="text-sm font-semibold">{t('login.password')}</Label>
-                    <Input id="admin-password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" className="mt-2" />
+                    <Label htmlFor="admin-password" className="text-sm font-semibold">
+                      {t('login.password')} <span className="text-destructive">*</span>
+                    </Label>
+                    <Input id="admin-password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" className="mt-2" required />
                   </div>
                 </div>
               </div>
 
-              {/* AI Bindings section */}
+              {/* AI bootstrap section */}
               <div className="space-y-3">
                 <div className="section-label px-1 flex items-center gap-2">
                   <Sparkles className="h-3 w-3" /> {t('login.aiConfig')}
                 </div>
-                {AI_PURPOSES.map(({ purpose, label, description }) => (
-                  <div key={purpose} className="p-4 border rounded-xl space-y-3 bg-card shadow-soft transition-all duration-200 hover:shadow-lifted">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="text-sm font-semibold">{label}</div>
-                        <div className="text-xs text-muted-foreground mt-0.5">{description}</div>
-                      </div>
-                      {bindings[purpose].provider && bindings[purpose].model && (
+                <div className="p-4 border rounded-xl space-y-4 bg-card shadow-soft">
+                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                    <div>
+                      <Label className="text-sm font-semibold">{t('admin.provider')}</Label>
+                      <Select value={selectedProviderKind} onValueChange={setSelectedProviderKind} disabled={presetBundles.length === 0}>
+                        <SelectTrigger className="mt-2 h-10 text-sm">
+                          <SelectValue placeholder={t('admin.selectProvider')} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {presetBundles.map(bundle => (
+                            <SelectItem key={bundle.providerKind} value={bundle.providerKind}>
+                              {bundle.displayName}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label htmlFor="bootstrap-api-key" className="text-sm font-semibold">
+                        {selectedBundle?.apiKeyRequired ? t('login.apiKey') : t('login.providerTokenOptional')}
+                      </Label>
+                      <Input
+                        id="bootstrap-api-key"
+                        className="mt-2 h-10 text-sm"
+                        type="password"
+                        placeholder={selectedBundle?.apiKeyRequired ? t('login.apiKey') : t('login.providerTokenOptional')}
+                        value={bootstrapApiKey}
+                        onChange={e => setBootstrapApiKey(e.target.value)}
+                        disabled={!selectedBundle || selectedBundle.credentialSource === 'env'}
+                      />
+                    </div>
+                  </div>
+                  {selectedBundle?.baseUrlRequired && (
+                    <div>
+                      <Label htmlFor="bootstrap-base-url" className="text-sm font-semibold">{t('login.providerAddress')}</Label>
+                      <Input
+                        id="bootstrap-base-url"
+                        className="mt-2 h-10 text-sm font-mono"
+                        type="text"
+                        placeholder={baseUrlForProviderInput(selectedBundle.providerKind, selectedBundle.defaultBaseUrl)}
+                        value={bootstrapBaseUrl}
+                        onChange={e => setBootstrapBaseUrl(e.target.value)}
+                        disabled={selectedBundle.credentialSource === 'env'}
+                      />
+                      {selectedBundle.providerKind === 'ollama' && (
+                        <div className="mt-1.5 text-xs text-muted-foreground">
+                          {t('login.ollamaAddressHint')}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {selectedBundle && (
+                    <div className="rounded-xl border border-border/60 bg-surface-sunken p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold">{selectedBundle.displayName}</div>
+                          <div className="text-xs text-muted-foreground mt-0.5">
+                            {selectedBundle.credentialSource === 'env'
+                              ? t('login.bundleConfiguredInEnv')
+                              : t('login.bundleReadyPreview')}
+                          </div>
+                        </div>
                         <div className="w-6 h-6 rounded-full flex items-center justify-center" style={{
                           background: 'hsl(var(--status-ready-bg))',
                           boxShadow: 'inset 0 0 0 1px hsl(var(--status-ready-ring) / 0.5)',
                         }}>
                           <CheckCircle2 className="h-3.5 w-3.5 text-status-ready" />
                         </div>
+                      </div>
+                      <div className="space-y-2">
+                        {selectedBundle.presets.map(preset => {
+                          const purposeMeta = aiPurposes.find(entry => entry.purpose === preset.bindingPurpose as AIPurpose);
+                          return (
+                            <div key={preset.bindingPurpose} className="rounded-lg border border-border/50 bg-background/70 px-3 py-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div>
+                                  <div className="text-sm font-medium">{purposeMeta?.label ?? preset.bindingPurpose}</div>
+                                  <div className="text-xs text-muted-foreground">{purposeMeta?.description ?? preset.bindingPurpose}</div>
+                                </div>
+                                <div className="text-xs font-mono text-foreground">{preset.modelName}</div>
+                              </div>
+                              <div className="text-xs text-muted-foreground mt-1.5">
+                                {preset.presetName}
+                                {preset.temperature !== null && preset.temperature !== undefined ? ` · temp=${preset.temperature}` : ''}
+                                {preset.topP !== null && preset.topP !== undefined ? ` · topP=${preset.topP}` : ''}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {ollamaModels.length > 0 && (
+                        <div className="rounded-lg border border-border/50 bg-background/70 px-3 py-2 text-xs text-muted-foreground space-y-1">
+                          <div className="font-medium">{t('login.ollamaModelsHint')}</div>
+                          {ollamaModels.map(model => (
+                            <div key={model} className="font-mono">{`ollama pull ${model}`}</div>
+                          ))}
+                        </div>
                       )}
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Select value={bindings[purpose].provider} onValueChange={v => { updateBinding(purpose, 'provider', v); updateBinding(purpose, 'model', ''); }}>
-                        <SelectTrigger className="h-9 text-xs">
-                          <SelectValue placeholder="Provider" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {aiProviders.map(p => <SelectItem key={p.providerKind} value={p.providerKind}>{p.displayName}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                      <Select value={bindings[purpose].model} onValueChange={v => updateBinding(purpose, 'model', v)} disabled={!bindings[purpose].provider}>
-                        <SelectTrigger className="h-9 text-xs">
-                          <SelectValue placeholder="Model" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {aiModels
-                            .filter(m => {
-                              const prov = aiProviders.find(p => p.providerKind === bindings[purpose].provider);
-                              return prov && m.providerCatalogId === prov.id && m.allowedBindingPurposes.includes(purpose);
-                            })
-                            .map(m => <SelectItem key={m.id} value={m.modelName}>{m.modelName}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
+                  )}
+                  {!selectedBundle && (
+                    <div className="rounded-xl border border-dashed border-border/70 bg-surface-sunken p-4 text-sm text-muted-foreground">
+                      {t('login.noBootstrapBundles')}
                     </div>
-                    {bindings[purpose].provider && (
-                      <Input
-                        className="h-9 text-xs"
-                        type="password"
-                        placeholder={t('login.apiKey')}
-                        value={bindings[purpose].apiKey}
-                        onChange={e => updateBinding(purpose, 'apiKey', e.target.value)}
-                      />
-                    )}
-                  </div>
-                ))}
+                  )}
+                </div>
               </div>
 
               <Button className="w-full h-11" onClick={handleBootstrap} disabled={submitting}>

@@ -61,6 +61,7 @@ pub fn extract_pptx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         }),
         provider_kind: None,
         model_name: None,
+        extracted_images: Vec::new(),
     })
 }
 

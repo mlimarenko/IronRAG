@@ -42,6 +42,25 @@ impl AiBindingPurpose {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AiScopeKind {
+    Instance,
+    Workspace,
+    Library,
+}
+
+impl AiScopeKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Instance => "instance",
+            Self::Workspace => "workspace",
+            Self::Library => "library",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCatalogEntry {
     pub id: Uuid,
@@ -49,6 +68,9 @@ pub struct ProviderCatalogEntry {
     pub display_name: String,
     pub api_style: String,
     pub lifecycle_state: String,
+    pub default_base_url: Option<String>,
+    pub api_key_required: bool,
+    pub base_url_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +83,21 @@ pub struct ModelCatalogEntry {
     pub allowed_binding_purposes: Vec<AiBindingPurpose>,
     pub context_window: Option<i32>,
     pub max_output_tokens: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAvailabilityState {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedModelCatalogEntry {
+    pub model: ModelCatalogEntry,
+    pub availability_state: ModelAvailabilityState,
+    pub available_credential_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,10 +117,11 @@ pub struct PriceCatalogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LibraryModelBinding {
+pub struct AiBindingAssignment {
     pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
@@ -93,10 +131,13 @@ pub struct LibraryModelBinding {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCredential {
     pub id: Uuid,
-    pub workspace_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub api_key: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
     pub credential_state: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -105,7 +146,9 @@ pub struct ProviderCredential {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPreset {
     pub id: Uuid,
-    pub workspace_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub model_catalog_id: Uuid,
     pub preset_name: String,
     pub system_prompt: Option<String>,

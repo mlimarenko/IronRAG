@@ -1,430 +1,24 @@
+#[path = "support/content_lifecycle_support.rs"]
+mod content_lifecycle_support;
 #[path = "support/web_ingest_support.rs"]
 mod web_ingest_support;
 
-use std::{sync::Arc, time::Duration};
-
 use anyhow::{Context, Result};
-use chrono::Utc;
-use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use rustrag_backend::{
-    app::{config::Settings, state::AppState},
-    infra::{
-        arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-        },
-        persistence::Persistence,
-    },
+    infra::repositories::iam_repository,
     services::{
-        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        content_service::{
-            AcceptMutationCommand, CreateDocumentCommand, CreateMutationItemCommand,
-            CreateRevisionCommand, PromoteHeadCommand, UpdateMutationCommand,
-            UpdateMutationItemCommand, UploadInlineDocumentCommand,
+        content::service::{
+            AcceptMutationCommand, AdmitMutationCommand, AppendInlineMutationCommand,
+            CreateDocumentCommand, PromoteHeadCommand, ReplaceInlineMutationCommand,
+            UploadInlineDocumentCommand,
         },
-        web_ingest_service::CreateWebIngestRunCommand,
+        ingest::web::CreateWebIngestRunCommand,
     },
 };
 
-struct TempDatabase {
-    name: String,
-    admin_url: String,
-    database_url: String,
-}
-
-impl TempDatabase {
-    async fn create(base_database_url: &str) -> Result<Self> {
-        let admin_url = replace_database_name(base_database_url, "postgres")?;
-        let database_name = format!("content_lifecycle_{}", Uuid::now_v7().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .context("failed to connect admin postgres for content lifecycle test")?;
-
-        terminate_database_connections(&admin_pool, &database_name).await?;
-        sqlx::query(&format!("drop database if exists \"{database_name}\""))
-            .execute(&admin_pool)
-            .await
-            .with_context(|| format!("failed to drop stale test database {database_name}"))?;
-        sqlx::query(&format!("create database \"{database_name}\""))
-            .execute(&admin_pool)
-            .await
-            .with_context(|| format!("failed to create test database {database_name}"))?;
-        admin_pool.close().await;
-
-        Ok(Self {
-            name: database_name.clone(),
-            admin_url,
-            database_url: replace_database_name(base_database_url, &database_name)?,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&self.admin_url)
-            .await
-            .context("failed to reconnect admin postgres for content lifecycle cleanup")?;
-        terminate_database_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
-            .execute(&admin_pool)
-            .await
-            .with_context(|| format!("failed to drop test database {}", self.name))?;
-        admin_pool.close().await;
-        Ok(())
-    }
-}
-
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: reqwest::Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("content_lifecycle_{}", Uuid::now_v7().simple());
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
-            .build()
-            .context("failed to build ArangoDB admin http client")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database for content_lifecycle")?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database for content_lifecycle")?;
-        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
-struct ContentLifecycleFixture {
-    state: AppState,
-    temp_database: TempDatabase,
-    temp_arango: TempArangoDatabase,
-    workspace_id: Uuid,
-    library_id: Uuid,
-}
-
-impl ContentLifecycleFixture {
-    async fn create() -> Result<Self> {
-        let mut settings =
-            Settings::from_env().context("failed to load settings for content lifecycle test")?;
-        let temp_database = TempDatabase::create(&settings.database_url).await?;
-        let temp_arango = TempArangoDatabase::create(&settings).await?;
-        settings.database_url = temp_database.database_url.clone();
-        settings.arangodb_database = temp_arango.name.clone();
-        let postgres = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&settings.database_url)
-            .await
-            .context("failed to connect content lifecycle postgres")?;
-
-        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
-            .execute(&postgres)
-            .await
-            .context("failed to apply canonical 0001_init.sql for content lifecycle test")?;
-
-        let arango_client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        arango_client.ping().await.context("failed to ping temp ArangoDB for content lifecycle")?;
-        bootstrap_knowledge_plane(
-            &arango_client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: false,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap Arango knowledge plane for content lifecycle")?;
-
-        let persistence = Persistence {
-            postgres,
-            redis: redis::Client::open(settings.redis_url.clone())
-                .context("failed to create redis client for content lifecycle test state")?,
-        };
-        let state = AppState::from_dependencies(settings, persistence, arango_client);
-        let workspace = state
-            .canonical_services
-            .catalog
-            .create_workspace(
-                &state,
-                CreateWorkspaceCommand {
-                    slug: Some(format!("content-workspace-{}", Uuid::now_v7().simple())),
-                    display_name: "Content Lifecycle Workspace".to_string(),
-                    created_by_principal_id: None,
-                },
-            )
-            .await
-            .context("failed to create content lifecycle workspace")?;
-        let library = state
-            .canonical_services
-            .catalog
-            .create_library(
-                &state,
-                CreateLibraryCommand {
-                    workspace_id: workspace.id,
-                    slug: Some(format!("content-library-{}", Uuid::now_v7().simple())),
-                    display_name: "Content Lifecycle Library".to_string(),
-                    description: Some("canonical content lifecycle test fixture".to_string()),
-                    created_by_principal_id: None,
-                },
-            )
-            .await
-            .context("failed to create content lifecycle library")?;
-
-        Ok(Self {
-            state,
-            temp_database,
-            temp_arango,
-            workspace_id: workspace.id,
-            library_id: library.id,
-        })
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.state.persistence.postgres.close().await;
-        self.temp_arango.drop().await?;
-        self.temp_database.drop().await
-    }
-}
-
-fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
-    let (without_query, query_suffix) = database_url
-        .split_once('?')
-        .map_or((database_url, None), |(prefix, suffix)| (prefix, Some(suffix)));
-    let slash_index = without_query
-        .rfind('/')
-        .with_context(|| format!("database url is missing database name: {database_url}"))?;
-    let mut rebuilt = format!("{}{new_database}", &without_query[..=slash_index]);
-    if let Some(query) = query_suffix {
-        rebuilt.push('?');
-        rebuilt.push_str(query);
-    }
-    Ok(rebuilt)
-}
-
-async fn terminate_database_connections(postgres: &PgPool, database_name: &str) -> Result<()> {
-    sqlx::query(
-        "select pg_terminate_backend(pid)
-         from pg_stat_activity
-         where datname = $1
-           and pid <> pg_backend_pid()",
-    )
-    .bind(database_name)
-    .execute(postgres)
-    .await
-    .with_context(|| format!("failed to terminate connections for {database_name}"))?;
-    Ok(())
-}
-
-fn revision_command(
-    document_id: Uuid,
-    source_kind: &str,
-    checksum: &str,
-    title: &str,
-    source_uri: Option<&str>,
-) -> CreateRevisionCommand {
-    CreateRevisionCommand {
-        document_id,
-        content_source_kind: source_kind.to_string(),
-        checksum: checksum.to_string(),
-        mime_type: "text/plain".to_string(),
-        byte_size: 128,
-        title: Some(title.to_string()),
-        language_code: Some("en".to_string()),
-        source_uri: source_uri.map(ToString::to_string),
-        storage_key: Some(format!("storage/{checksum}")),
-        created_by_principal_id: None,
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires local postgres with canonical extensions"]
-async fn canonical_content_lifecycle_preserves_logical_document_identity_and_revision_lineage()
--> Result<()> {
-    let fixture = ContentLifecycleFixture::create().await?;
-
-    let result = async {
-        let external_key = format!("logical-doc-{}", Uuid::now_v7());
-        let document = fixture
-            .state
-            .canonical_services
-            .content
-            .create_document(
-                &fixture.state,
-                CreateDocumentCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
-                    external_key: Some(external_key.clone()),
-                    created_by_principal_id: None,
-                },
-            )
-            .await
-            .context("failed to create canonical content document")?;
-        assert_eq!(document.workspace_id, fixture.workspace_id);
-        assert_eq!(document.library_id, fixture.library_id);
-        assert_eq!(document.external_key, external_key);
-        assert_eq!(document.document_state, "active");
-
-        let knowledge_document = fixture
-            .state
-            .arango_document_store
-            .get_document(document.id)
-            .await
-            .context("failed to load knowledge document shell for content lifecycle")?
-            .context("knowledge document shell missing from arango")?;
-        assert_eq!(knowledge_document.external_key, external_key);
-        assert_eq!(knowledge_document.document_state, "active");
-
-        let first_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .create_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "upload",
-                    "sha256:lifecycle-upload",
-                    "Initial Upload",
-                    Some("file:///initial.txt"),
-                ),
-            )
-            .await
-            .context("failed to create initial revision")?;
-        let appended_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .append_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "append",
-                    "sha256:lifecycle-append",
-                    "Appended Revision",
-                    None,
-                ),
-            )
-            .await
-            .context("failed to append revision")?;
-        let replaced_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .replace_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "replace",
-                    "sha256:lifecycle-replace",
-                    "Replacement Revision",
-                    Some("file:///replacement.txt"),
-                ),
-            )
-            .await
-            .context("failed to replace revision")?;
-
-        assert_eq!(first_revision.revision_number, 1);
-        assert_eq!(appended_revision.revision_number, 2);
-        assert_eq!(replaced_revision.revision_number, 3);
-        assert_eq!(appended_revision.parent_revision_id, Some(first_revision.id));
-        assert_eq!(replaced_revision.parent_revision_id, Some(appended_revision.id));
-        assert_eq!(appended_revision.document_id, document.id);
-        assert_eq!(replaced_revision.document_id, document.id);
-
-        let revisions = fixture
-            .state
-            .canonical_services
-            .content
-            .list_revisions(&fixture.state, document.id)
-            .await
-            .context("failed to list canonical revisions")?;
-        assert_eq!(revisions.len(), 3);
-        assert_eq!(
-            revisions.iter().map(|revision| revision.id).collect::<Vec<_>>(),
-            vec![replaced_revision.id, appended_revision.id, first_revision.id]
-        );
-
-        let knowledge_revisions = fixture
-            .state
-            .arango_document_store
-            .list_revisions_by_document(document.id)
-            .await
-            .context("failed to list knowledge revisions for content lifecycle")?;
-        assert_eq!(
-            knowledge_revisions.iter().map(|revision| revision.revision_id).collect::<Vec<_>>(),
-            vec![replaced_revision.id, appended_revision.id, first_revision.id]
-        );
-        assert_eq!(knowledge_revisions[0].revision_kind, "replace");
-        assert_eq!(knowledge_revisions[1].revision_kind, "append");
-        assert_eq!(knowledge_revisions[2].revision_kind, "upload");
-
-        let summaries = fixture
-            .state
-            .canonical_services
-            .content
-            .list_documents(&fixture.state, fixture.library_id)
-            .await
-            .context("failed to list canonical document summaries")?;
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].document.id, document.id);
-        assert_eq!(summaries[0].document.external_key, external_key);
-
-        Ok(())
-    }
-    .await;
-
-    fixture.cleanup().await?;
-    result
-}
+use content_lifecycle_support::{ContentLifecycleFixture, revision_command};
 
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]
@@ -443,6 +37,7 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: Some(format!("head-doc-{}", Uuid::now_v7())),
+                    file_name: None,
                     created_by_principal_id: None,
                 },
             )
@@ -755,6 +350,14 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
     let fixture = ContentLifecycleFixture::create().await?;
 
     let result = async {
+        let principal = iam_repository::create_principal(
+            &fixture.state.persistence.postgres,
+            "user",
+            "Content Lifecycle Mutation Principal",
+            None,
+        )
+        .await
+        .context("failed to create content lifecycle mutation principal")?;
         let document = fixture
             .state
             .canonical_services
@@ -765,6 +368,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: Some(format!("mutation-doc-{}", Uuid::now_v7())),
+                    file_name: None,
                     created_by_principal_id: None,
                 },
             )
@@ -803,314 +407,275 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             .await
             .context("failed to promote base head")?;
 
-        let append_mutation = fixture
+        let replace_admission = fixture
             .state
             .canonical_services
             .content
-            .accept_mutation(
+            .replace_inline_mutation(
                 &fixture.state,
-                AcceptMutationCommand {
+                ReplaceInlineMutationCommand {
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
-                    operation_kind: "append".to_string(),
-                    requested_by_principal_id: None,
-                    request_surface: "rest".to_string(),
-                    idempotency_key: Some(format!("append-{}", Uuid::now_v7())),
-                    source_identity: None,
-                },
-            )
-            .await
-            .context("failed to accept append mutation")?;
-        let pending_append_item = fixture
-            .state
-            .canonical_services
-            .content
-            .create_mutation_item(
-                &fixture.state,
-                CreateMutationItemCommand {
-                    mutation_id: append_mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(base_revision.id),
-                    result_revision_id: None,
-                    item_state: "pending".to_string(),
-                    message: Some("append scheduled".to_string()),
-                },
-            )
-            .await
-            .context("failed to create pending append item")?;
-        assert_eq!(pending_append_item.item_state, "pending");
-
-        let appended_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .append_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "append",
-                    "sha256:mutation-append",
-                    "Appended Content",
-                    None,
-                ),
-            )
-            .await
-            .context("failed to append content revision")?;
-        let applied_append_item = fixture
-            .state
-            .canonical_services
-            .content
-            .update_mutation_item(
-                &fixture.state,
-                UpdateMutationItemCommand {
-                    item_id: pending_append_item.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(base_revision.id),
-                    result_revision_id: Some(appended_revision.id),
-                    item_state: "applied".to_string(),
-                    message: Some("append applied".to_string()),
-                },
-            )
-            .await
-            .context("failed to mark append item applied")?;
-        assert_eq!(applied_append_item.item_state, "applied");
-        assert_eq!(applied_append_item.result_revision_id, Some(appended_revision.id));
-
-        let failed_append_item = fixture
-            .state
-            .canonical_services
-            .content
-            .create_mutation_item(
-                &fixture.state,
-                CreateMutationItemCommand {
-                    mutation_id: append_mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(base_revision.id),
-                    result_revision_id: None,
-                    item_state: "pending".to_string(),
-                    message: Some("append retry pending".to_string()),
-                },
-            )
-            .await
-            .context("failed to create failed append item placeholder")?;
-        let failed_append_item = fixture
-            .state
-            .canonical_services
-            .content
-            .update_mutation_item(
-                &fixture.state,
-                UpdateMutationItemCommand {
-                    item_id: failed_append_item.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(base_revision.id),
-                    result_revision_id: None,
-                    item_state: "failed".to_string(),
-                    message: Some("append provider failure".to_string()),
-                },
-            )
-            .await
-            .context("failed to mark append item failed")?;
-        assert_eq!(failed_append_item.item_state, "failed");
-
-        let append_mutation = fixture
-            .state
-            .canonical_services
-            .content
-            .update_mutation(
-                &fixture.state,
-                UpdateMutationCommand {
-                    mutation_id: append_mutation.id,
-                    mutation_state: "applied".to_string(),
-                    completed_at: Some(Utc::now()),
-                    failure_code: None,
-                    conflict_code: None,
-                },
-            )
-            .await
-            .context("failed to mark append mutation applied")?;
-        assert_eq!(append_mutation.mutation_state, "applied");
-
-        let replace_mutation = fixture
-            .state
-            .canonical_services
-            .content
-            .accept_mutation(
-                &fixture.state,
-                AcceptMutationCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
-                    operation_kind: "replace".to_string(),
-                    requested_by_principal_id: None,
-                    request_surface: "rest".to_string(),
-                    idempotency_key: Some(format!("replace-{}", Uuid::now_v7())),
-                    source_identity: None,
-                },
-            )
-            .await
-            .context("failed to accept replace mutation")?;
-        let replaced_revision = fixture
-            .state
-            .canonical_services
-            .content
-            .replace_revision(
-                &fixture.state,
-                revision_command(
-                    document.id,
-                    "replace",
-                    "sha256:mutation-replace",
-                    "Replacement Content",
-                    Some("file:///replace.txt"),
-                ),
-            )
-            .await
-            .context("failed to replace revision content")?;
-        let applied_replace_item = fixture
-            .state
-            .canonical_services
-            .content
-            .create_mutation_item(
-                &fixture.state,
-                CreateMutationItemCommand {
-                    mutation_id: replace_mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(appended_revision.id),
-                    result_revision_id: Some(replaced_revision.id),
-                    item_state: "applied".to_string(),
-                    message: Some("replace applied".to_string()),
-                },
-            )
-            .await
-            .context("failed to create applied replace item")?;
-        let conflicted_replace_item = fixture
-            .state
-            .canonical_services
-            .content
-            .create_mutation_item(
-                &fixture.state,
-                CreateMutationItemCommand {
-                    mutation_id: replace_mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(appended_revision.id),
-                    result_revision_id: None,
-                    item_state: "conflicted".to_string(),
-                    message: Some("stale base revision".to_string()),
-                },
-            )
-            .await
-            .context("failed to create conflicted replace item")?;
-        assert_eq!(applied_replace_item.item_state, "applied");
-        assert_eq!(conflicted_replace_item.item_state, "conflicted");
-
-        fixture
-            .state
-            .canonical_services
-            .content
-            .promote_document_head(
-                &fixture.state,
-                PromoteHeadCommand {
                     document_id: document.id,
-                    active_revision_id: Some(replaced_revision.id),
-                    readable_revision_id: Some(replaced_revision.id),
-                    latest_mutation_id: Some(replace_mutation.id),
-                    latest_successful_attempt_id: None,
+                    idempotency_key: Some("canonical-replace".to_string()),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    file_name: "replacement.txt".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    file_bytes:
+                        b"Replacement content that must stay pending until ingest finishes."
+                            .to_vec(),
                 },
             )
             .await
-            .context("failed to promote replacement head")?;
+            .context("failed to admit canonical replace mutation")?;
+        assert_eq!(replace_admission.mutation.mutation_state, "accepted");
+        let replace_mutation_id = replace_admission.mutation.id;
+        let replace_item = replace_admission
+            .items
+            .first()
+            .context("replace admission must create one mutation item")?;
+        assert_eq!(replace_item.item_state, "pending");
+        let replace_revision_id = replace_item
+            .result_revision_id
+            .context("replace admission must create a pending replacement revision")?;
 
-        let delete_mutation = fixture
+        let replace_job_handle = fixture
+            .state
+            .canonical_services
+            .ingest
+            .get_job_handle_by_mutation_id(&fixture.state, replace_mutation_id)
+            .await
+            .context("failed to load replace ingest job handle")?
+            .context("replace mutation must enqueue an ingest job")?;
+        assert_eq!(replace_job_handle.job.queue_state, "queued");
+        assert_eq!(replace_job_handle.job.knowledge_revision_id, Some(replace_revision_id));
+
+        let repeated_replace_admission = fixture
             .state
             .canonical_services
             .content
-            .accept_mutation(
+            .replace_inline_mutation(
                 &fixture.state,
-                AcceptMutationCommand {
+                ReplaceInlineMutationCommand {
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
-                    operation_kind: "delete".to_string(),
-                    requested_by_principal_id: None,
+                    document_id: document.id,
+                    idempotency_key: Some("canonical-replace".to_string()),
+                    requested_by_principal_id: Some(principal.id),
                     request_surface: "rest".to_string(),
-                    idempotency_key: Some(format!("delete-{}", Uuid::now_v7())),
                     source_identity: None,
+                    file_name: "replacement.txt".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    file_bytes:
+                        b"Replacement content that must stay pending until ingest finishes."
+                            .to_vec(),
                 },
             )
             .await
-            .context("failed to accept delete mutation")?;
-        let applied_delete_item = fixture
-            .state
-            .canonical_services
-            .content
-            .create_mutation_item(
-                &fixture.state,
-                CreateMutationItemCommand {
-                    mutation_id: delete_mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(replaced_revision.id),
-                    result_revision_id: None,
-                    item_state: "applied".to_string(),
-                    message: Some("delete applied".to_string()),
-                },
-            )
-            .await
-            .context("failed to create applied delete item")?;
-        let skipped_delete_item = fixture
-            .state
-            .canonical_services
-            .content
-            .create_mutation_item(
-                &fixture.state,
-                CreateMutationItemCommand {
-                    mutation_id: delete_mutation.id,
-                    document_id: Some(document.id),
-                    base_revision_id: Some(replaced_revision.id),
-                    result_revision_id: None,
-                    item_state: "skipped".to_string(),
-                    message: Some("delete skipped because already tombstoned".to_string()),
-                },
-            )
-            .await
-            .context("failed to create skipped delete item")?;
-        assert_eq!(applied_delete_item.item_state, "applied");
-        assert_eq!(skipped_delete_item.item_state, "skipped");
+            .context("failed to replay canonical replace mutation")?;
+        assert_eq!(repeated_replace_admission.mutation.id, replace_mutation_id);
+        assert_eq!(
+            repeated_replace_admission.items.first().and_then(|item| item.result_revision_id),
+            Some(replace_revision_id)
+        );
+        assert_eq!(repeated_replace_admission.job_id, replace_admission.job_id);
+        assert_eq!(
+            repeated_replace_admission.async_operation_id,
+            replace_admission.async_operation_id
+        );
 
-        let deleted_document = fixture
+        let head_after_replace = fixture
             .state
             .canonical_services
             .content
-            .delete_document(&fixture.state, document.id)
+            .get_document_head(&fixture.state, document.id)
             .await
-            .context("failed to delete document")?;
-        assert_eq!(deleted_document.document_state, "deleted");
+            .context("failed to load head after replace admission")?
+            .context("document head missing after replace admission")?;
+        assert_eq!(head_after_replace.latest_mutation_id, Some(replace_mutation_id));
+        assert_eq!(head_after_replace.active_revision_id, Some(base_revision.id));
+        assert_eq!(head_after_replace.readable_revision_id, Some(base_revision.id));
 
-        let delete_mutation = fixture
+        let active_documents_before_delete = fixture
             .state
             .canonical_services
             .content
-            .update_mutation(
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list active documents after replace admission")?;
+        assert_eq!(active_documents_before_delete.len(), 1);
+        assert_eq!(active_documents_before_delete[0].document.id, document.id);
+        assert_eq!(
+            active_documents_before_delete[0].active_revision.as_ref().map(|revision| revision.id),
+            Some(base_revision.id)
+        );
+        assert_eq!(
+            active_documents_before_delete[0]
+                .active_revision
+                .as_ref()
+                .and_then(|revision| revision.source_uri.as_deref()),
+            Some("file:///base.txt")
+        );
+        let referenced_chunk_id = Uuid::now_v7();
+        let query_conversation_id = Uuid::now_v7();
+        let query_execution_id = Uuid::now_v7();
+        sqlx::query(
+            "insert into content_chunk (
+                id, revision_id, chunk_index, start_offset, end_offset, token_count,
+                normalized_text, text_checksum
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(referenced_chunk_id)
+        .bind(base_revision.id)
+        .bind(0_i32)
+        .bind(0_i32)
+        .bind(32_i32)
+        .bind(8_i32)
+        .bind("base revision content for query ref")
+        .bind("sha256:content-lifecycle-query-ref")
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert base chunk referenced by query history")?;
+        sqlx::query(
+            "insert into query_conversation (id, workspace_id, library_id, title)
+             values ($1, $2, $3, $4)",
+        )
+        .bind(query_conversation_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind("Delete cleanup regression conversation")
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert query conversation for delete cleanup regression")?;
+        sqlx::query(
+            "insert into query_execution (
+                id, workspace_id, library_id, conversation_id, context_bundle_id, query_text
+             ) values ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(query_execution_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(query_conversation_id)
+        .bind(Uuid::now_v7())
+        .bind("Which facts came from the base revision?")
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert query execution for delete cleanup regression")?;
+        sqlx::query(
+            "insert into query_chunk_reference (execution_id, chunk_id, rank, score)
+             values ($1, $2, $3, $4)",
+        )
+        .bind(query_execution_id)
+        .bind(referenced_chunk_id)
+        .bind(1_i32)
+        .bind(0.91_f64)
+        .execute(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to insert query chunk reference for delete cleanup regression")?;
+        let query_reference_count_before_delete = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint from query_chunk_reference where chunk_id = $1",
+        )
+        .bind(referenced_chunk_id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to count query chunk references before delete")?;
+        assert_eq!(query_reference_count_before_delete, 1);
+
+        let delete_admission = fixture
+            .state
+            .canonical_services
+            .content
+            .admit_mutation(
                 &fixture.state,
-                UpdateMutationCommand {
-                    mutation_id: delete_mutation.id,
-                    mutation_state: "applied".to_string(),
-                    completed_at: Some(Utc::now()),
-                    failure_code: None,
-                    conflict_code: None,
+                AdmitMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: document.id,
+                    operation_kind: "delete".to_string(),
+                    idempotency_key: Some("canonical-delete".to_string()),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    revision: None,
                 },
             )
             .await
-            .context("failed to mark delete mutation applied")?;
-        assert_eq!(delete_mutation.mutation_state, "applied");
+            .context("failed to admit canonical delete mutation")?;
+        assert_eq!(delete_admission.mutation.mutation_state, "applied");
+        let delete_mutation_id = delete_admission.mutation.id;
+        let delete_item = delete_admission
+            .items
+            .first()
+            .context("delete admission must create one mutation item")?;
+        assert_eq!(delete_item.item_state, "applied");
+        assert_eq!(delete_item.base_revision_id, Some(base_revision.id));
+        assert!(delete_admission.job_id.is_none());
+        let delete_operation_id = delete_admission
+            .async_operation_id
+            .context("delete admission must expose a completed async operation")?;
+        let delete_operation = fixture
+            .state
+            .canonical_services
+            .ops
+            .get_async_operation(&fixture.state, delete_operation_id)
+            .await
+            .context("failed to reload delete async operation")?;
+        assert_eq!(delete_operation.status, "ready");
 
-        let delete_items = fixture
+        let head_after_delete = fixture
             .state
             .canonical_services
             .content
-            .list_mutation_items(&fixture.state, delete_mutation.id)
+            .get_document_head(&fixture.state, document.id)
             .await
-            .context("failed to list delete mutation items")?;
-        let delete_item_states: Vec<&str> =
-            delete_items.iter().map(|item| item.item_state.as_str()).collect();
-        assert!(delete_item_states.contains(&"applied"));
-        assert!(delete_item_states.contains(&"skipped"));
+            .context("failed to load head after delete")?
+            .context("document head missing after delete")?;
+        assert_eq!(head_after_delete.active_revision_id, None);
+        assert_eq!(head_after_delete.readable_revision_id, Some(base_revision.id));
+        assert_eq!(head_after_delete.latest_mutation_id, Some(delete_mutation_id));
+
+        let replace_admission_after_delete = fixture
+            .state
+            .canonical_services
+            .content
+            .get_mutation_admission(&fixture.state, replace_mutation_id)
+            .await
+            .context("failed to reload superseded replace mutation after delete")?;
+        assert_eq!(replace_admission_after_delete.mutation.mutation_state, "canceled");
+        assert_eq!(
+            replace_admission_after_delete.mutation.failure_code.as_deref(),
+            Some("document_deleted")
+        );
+        assert!(
+            replace_admission_after_delete.items.iter().all(|item| item.item_state == "skipped"),
+            "delete must settle all superseded replace items as skipped"
+        );
+        let replace_async_operation_id = replace_admission_after_delete
+            .async_operation_id
+            .context("replace admission must retain its async operation id")?;
+        let replace_async_operation = fixture
+            .state
+            .canonical_services
+            .ops
+            .get_async_operation(&fixture.state, replace_async_operation_id)
+            .await
+            .context("failed to reload superseded replace async operation")?;
+        assert_eq!(replace_async_operation.status, "failed");
+        assert_eq!(replace_async_operation.failure_code.as_deref(), Some("document_deleted"));
+        let replace_job_handle_after_delete = fixture
+            .state
+            .canonical_services
+            .ingest
+            .get_job_handle_by_mutation_id(&fixture.state, replace_mutation_id)
+            .await
+            .context("failed to reload superseded replace ingest job after delete")?
+            .context("superseded replace mutation must retain its ingest job handle")?;
+        assert_eq!(
+            replace_job_handle_after_delete.job.queue_state, "canceled",
+            "delete must retire queued superseded ingest work immediately"
+        );
 
         let knowledge_document = fixture
             .state
@@ -1121,9 +686,203 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             .context("deleted knowledge document missing from arango")?;
         assert_eq!(knowledge_document.document_state, "deleted");
         assert_eq!(knowledge_document.active_revision_id, None);
-        assert_eq!(knowledge_document.readable_revision_id, Some(replaced_revision.id));
-
+        assert_eq!(knowledge_document.readable_revision_id, Some(base_revision.id));
         assert!(knowledge_document.deleted_at.is_some());
+
+        let active_documents = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list active documents after delete")?;
+        assert!(
+            active_documents.iter().all(|summary| summary.document.id != document.id),
+            "deleted document must not appear in canonical active document listings"
+        );
+
+        let all_documents = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents_with_deleted(&fixture.state, fixture.library_id, true)
+            .await
+            .context("failed to list documents including deleted after delete")?;
+        assert!(
+            all_documents.iter().any(|summary| {
+                summary.document.id == document.id && summary.document.document_state == "deleted"
+            }),
+            "explicit include_deleted listing must retain deleted documents"
+        );
+        let deleted_summary = fixture
+            .state
+            .canonical_services
+            .content
+            .get_document(&fixture.state, document.id)
+            .await
+            .context("failed to load deleted document summary")?;
+        assert_eq!(deleted_summary.document.document_state, "deleted");
+        assert!(deleted_summary.active_revision.is_none());
+        assert!(
+            deleted_summary.readiness.is_none(),
+            "deleted document detail must not expose stale readiness state"
+        );
+        assert!(
+            deleted_summary.readiness_summary.is_none(),
+            "deleted document detail must not expose stale readiness summary"
+        );
+        assert!(
+            deleted_summary.prepared_revision.is_none(),
+            "deleted document detail must not expose stale prepared revision"
+        );
+        assert!(
+            deleted_summary.source_access.is_none(),
+            "deleted document detail must not expose source download access"
+        );
+        let ops_snapshot = fixture
+            .state
+            .canonical_services
+            .ops
+            .get_library_state_snapshot(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to refresh ops snapshot after delete")?;
+        assert_eq!(ops_snapshot.state.readable_document_count, 0);
+        assert_eq!(ops_snapshot.state.failed_document_count, 0);
+
+        let knowledge_summary = fixture
+            .state
+            .canonical_services
+            .knowledge
+            .get_library_summary(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to refresh knowledge summary after delete")?;
+        assert!(
+            knowledge_summary.document_counts_by_readiness.is_empty(),
+            "deleted documents must not contribute to knowledge summary readiness counts"
+        );
+        let query_reference_count_after_delete = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint from query_chunk_reference where chunk_id = $1",
+        )
+        .bind(referenced_chunk_id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await
+        .context("failed to count query chunk references after delete")?;
+        assert_eq!(
+            query_reference_count_after_delete, 0,
+            "delete must clear query chunk references contributed by the deleted document"
+        );
+
+        let repaired_projection = fixture
+            .state
+            .arango_document_store
+            .update_document_pointers(
+                document.id,
+                "active",
+                Some(base_revision.id),
+                Some(base_revision.id),
+                Some(i64::from(base_revision.revision_number)),
+                Some("base.txt"),
+                None,
+            )
+            .await
+            .context("failed to force stale active Arango projection before repeated delete")?
+            .context("forced stale active Arango projection missing")?;
+        assert_eq!(repaired_projection.document_state, "active");
+        let leaked_documents = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list documents after forcing stale active Arango projection")?;
+        assert!(
+            leaked_documents.iter().any(|summary| summary.document.id == document.id),
+            "stale active Arango projection must reproduce the leaked deleted document before repair"
+        );
+
+        let repeated_delete = fixture
+            .state
+            .canonical_services
+            .content
+            .admit_mutation(
+                &fixture.state,
+                AdmitMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: document.id,
+                    operation_kind: "delete".to_string(),
+                    idempotency_key: None,
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    revision: None,
+                },
+            )
+            .await;
+        let repeated_delete =
+            repeated_delete.context("failed to replay canonical delete mutation")?;
+        assert_eq!(repeated_delete.mutation.id, delete_mutation_id);
+        assert_eq!(repeated_delete.mutation.mutation_state, "applied");
+        let healed_knowledge_document = fixture
+            .state
+            .arango_document_store
+            .get_document(document.id)
+            .await
+            .context("failed to reload healed knowledge document after repeated delete")?
+            .context("healed knowledge document missing from arango")?;
+        assert_eq!(healed_knowledge_document.document_state, "deleted");
+        assert_eq!(healed_knowledge_document.active_revision_id, None);
+        assert_eq!(healed_knowledge_document.readable_revision_id, Some(base_revision.id));
+        assert!(healed_knowledge_document.deleted_at.is_some());
+        let active_documents_after_repeated_delete = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list active documents after repeated delete repair")?;
+        assert!(
+            active_documents_after_repeated_delete
+                .iter()
+                .all(|summary| summary.document.id != document.id),
+            "repeated delete must heal stale Arango projections and hide the deleted document again"
+        );
+
+        let library_mutations = fixture
+            .state
+            .canonical_services
+            .content
+            .list_mutations(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list library mutations after repeated delete")?;
+        assert_eq!(
+            library_mutations.iter().filter(|mutation| mutation.operation_kind == "delete").count(),
+            1,
+            "repeated delete must reuse the canonical delete mutation"
+        );
+
+        let append_after_delete = fixture
+            .state
+            .canonical_services
+            .content
+            .append_inline_mutation(
+                &fixture.state,
+                AppendInlineMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: document.id,
+                    idempotency_key: Some(format!("append-after-delete-{}", Uuid::now_v7())),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "test".to_string(),
+                    source_identity: None,
+                    appended_text: "this must be rejected".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            append_after_delete.is_err(),
+            "deleted documents must reject subsequent append mutations"
+        );
 
         Ok(())
     }

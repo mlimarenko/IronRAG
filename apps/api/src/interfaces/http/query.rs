@@ -37,8 +37,8 @@ use crate::{
         router_support::ApiError,
     },
     services::{
-        audit_service::AppendAuditEventCommand,
-        query_service::{
+        iam::audit::AppendAuditEventCommand,
+        query::service::{
             CreateConversationCommand, ExecuteConversationTurnCommand, QueryTurnProgressEvent,
         },
     },
@@ -132,7 +132,7 @@ async fn create_session(
             },
         )
         .await?;
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -156,7 +156,10 @@ async fn create_session(
                 )],
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
     Ok(Json(conversation))
 }
 
@@ -293,7 +296,7 @@ fn accepts_event_stream(headers: &HeaderMap) -> bool {
 }
 
 fn map_turn_execution_response(
-    outcome: crate::services::query_service::QueryTurnExecutionResult,
+    outcome: crate::services::query::service::QueryTurnExecutionResult,
 ) -> rustrag_contracts::assistant::AssistantExecutionDetail {
     rustrag_contracts::assistant::AssistantExecutionDetail {
         context_bundle_id: outcome.context_bundle_id,
@@ -520,6 +523,19 @@ fn map_prepared_segment_reference(
         document_id: reference.document_id,
         document_title: reference.document_title,
         source_uri: reference.source_uri,
+        source_access: reference.source_access.map(|access| {
+            rustrag_contracts::assistant::AssistantContentSourceAccess {
+                kind: match access.kind {
+                    crate::domains::content::ContentSourceAccessKind::StoredDocument => {
+                        "stored_document".to_string()
+                    }
+                    crate::domains::content::ContentSourceAccessKind::ExternalUrl => {
+                        "external_url".to_string()
+                    }
+                },
+                href: access.href,
+            }
+        }),
     }
 }
 
@@ -568,7 +584,7 @@ const fn map_graph_edge_reference(
 async fn append_query_execution_audit(
     state: &AppState,
     principal_id: Uuid,
-    outcome: &crate::services::query_service::QueryTurnExecutionResult,
+    outcome: &crate::services::query::service::QueryTurnExecutionResult,
 ) {
     let Ok(async_operation) = state
         .canonical_services
@@ -602,7 +618,7 @@ async fn append_query_execution_audit(
             outcome.execution.library_id,
         ));
     }
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -625,7 +641,10 @@ async fn append_query_execution_audit(
                 subjects,
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
 }
 
 fn create_session_turn_stream(

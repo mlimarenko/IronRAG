@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, pool::PoolConnection};
+use sqlx::{Executor, FromRow, PgPool, Postgres, QueryBuilder, pool::PoolConnection};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -271,6 +271,18 @@ pub async fn update_document_state(
     document_state: &str,
     deleted_at: Option<DateTime<Utc>>,
 ) -> Result<Option<ContentDocumentRow>, sqlx::Error> {
+    update_document_state_with_executor(postgres, document_id, document_state, deleted_at).await
+}
+
+pub async fn update_document_state_with_executor<'e, E>(
+    executor: E,
+    document_id: Uuid,
+    document_state: &str,
+    deleted_at: Option<DateTime<Utc>>,
+) -> Result<Option<ContentDocumentRow>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentDocumentRow>(
         "update content_document
          set document_state = $2::content_document_state,
@@ -289,7 +301,7 @@ pub async fn update_document_state(
     .bind(document_id)
     .bind(document_state)
     .bind(deleted_at)
-    .fetch_optional(postgres)
+    .fetch_optional(executor)
     .await
 }
 
@@ -343,6 +355,16 @@ pub async fn upsert_document_head(
     postgres: &PgPool,
     new_head: &NewContentDocumentHead,
 ) -> Result<ContentDocumentHeadRow, sqlx::Error> {
+    upsert_document_head_with_executor(postgres, new_head).await
+}
+
+pub async fn upsert_document_head_with_executor<'e, E>(
+    executor: E,
+    new_head: &NewContentDocumentHead,
+) -> Result<ContentDocumentHeadRow, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentDocumentHeadRow>(
         "insert into content_document_head (
             document_id,
@@ -373,7 +395,7 @@ pub async fn upsert_document_head(
     .bind(new_head.readable_revision_id)
     .bind(new_head.latest_mutation_id)
     .bind(new_head.latest_successful_attempt_id)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await
 }
 
@@ -969,12 +991,35 @@ pub async fn acquire_content_mutation_lock(
     Ok(connection)
 }
 
+pub async fn acquire_content_document_lock(
+    postgres: &PgPool,
+    document_id: Uuid,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    let mut connection = postgres.acquire().await?;
+    sqlx::query("select pg_advisory_lock(hashtextextended($1::text, 0))")
+        .bind(format!("content.document:{document_id}"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(connection)
+}
+
 pub async fn release_content_mutation_lock(
     mut connection: PoolConnection<Postgres>,
     mutation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
         .bind(format!("content.mutation:{mutation_id}"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+pub async fn release_content_document_lock(
+    mut connection: PoolConnection<Postgres>,
+    document_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
+        .bind(format!("content.document:{document_id}"))
         .execute(&mut *connection)
         .await?;
     Ok(())

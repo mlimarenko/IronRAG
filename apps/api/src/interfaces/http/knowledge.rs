@@ -46,7 +46,7 @@ use crate::{
         authorization::{POLICY_KNOWLEDGE_READ, load_library_and_authorize},
         router_support::ApiError,
     },
-    shared::text_render::repair_technical_layout_noise,
+    shared::extraction::text_render::repair_technical_layout_noise,
 };
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
@@ -322,7 +322,7 @@ fn normalize_search_hit_text(text: &str) -> String {
 }
 
 fn document_search_keywords(query_text: &str) -> Vec<String> {
-    crate::services::query_planner::extract_keywords(query_text)
+    crate::services::query::planner::extract_keywords(query_text)
 }
 
 fn document_chunk_keyword_coverage(hit: &KnowledgeChunkSearchRow, keywords: &[String]) -> usize {
@@ -633,7 +633,7 @@ async fn list_documents(
         load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let documents = state
         .arango_document_store
-        .list_documents_by_library(library.workspace_id, library.id)
+        .list_documents_by_library(library.workspace_id, library.id, false)
         .await
         .map_err(|_| ApiError::Internal)?;
     Ok(Json(documents))
@@ -1258,7 +1258,7 @@ async fn backfill_document_chunk_hits(
     chunk_hit_limit_per_document: usize,
     accumulator: &mut KnowledgeDocumentAccumulator,
 ) -> Result<(), ApiError> {
-    let keywords = crate::services::query_planner::extract_keywords(query_text);
+    let keywords = crate::services::query::planner::extract_keywords(query_text);
     if keywords.is_empty() {
         return Ok(());
     }
@@ -1309,7 +1309,7 @@ async fn backfill_document_chunk_hits(
 fn document_search_chunk_relevance(query_text: &str, hit: &KnowledgeChunkSearchRow) -> usize {
     let lowered_query = query_text.to_lowercase();
     let lowered_text = format!("{} {}", hit.content_text, hit.normalized_text).to_lowercase();
-    let keywords = crate::services::query_planner::extract_keywords(query_text);
+    let keywords = crate::services::query::planner::extract_keywords(query_text);
     let keyword_score = keywords
         .iter()
         .map(|keyword| lowered_text.matches(keyword.as_str()).count())
@@ -1408,7 +1408,7 @@ async fn resolve_hybrid_search_context(
             provider_kind: binding.provider_kind.clone(),
             model_name: binding.model_name.clone(),
             input: query_text.to_string(),
-            api_key_override: Some(binding.api_key),
+            api_key_override: binding.api_key.clone(),
             base_url_override: binding.provider_base_url.clone(),
         })
         .await
@@ -1786,11 +1786,8 @@ fn graph_workbench_status(
     summary: &crate::domains::knowledge::KnowledgeLibrarySummary,
     snapshot: Option<&repositories::RuntimeGraphSnapshotRow>,
 ) -> GraphStatus {
-    let readable_without_graph_count = summary
-        .document_counts_by_readiness
-        .get("readable")
-        .copied()
-        .unwrap_or(0);
+    let readable_without_graph_count =
+        summary.document_counts_by_readiness.get("readable").copied().unwrap_or(0);
 
     if let Some(snapshot) = snapshot {
         return match snapshot.graph_status.as_str() {
@@ -1825,11 +1822,8 @@ fn graph_workbench_status_from_summary(
     summary: &crate::domains::knowledge::KnowledgeLibrarySummary,
 ) -> GraphStatus {
     let total_documents = summary.document_counts_by_readiness.values().copied().sum::<i64>();
-    let readable_without_graph_count = summary
-        .document_counts_by_readiness
-        .get("readable")
-        .copied()
-        .unwrap_or(0);
+    let readable_without_graph_count =
+        summary.document_counts_by_readiness.get("readable").copied().unwrap_or(0);
     if total_documents == 0 {
         GraphStatus::Empty
     } else if summary.graph_ready_document_count > 0
@@ -2181,7 +2175,11 @@ fn map_runtime_graph_node_to_entity_row(
         canonical_label: row.label,
         aliases: runtime_graph_aliases(&row.aliases_json),
         entity_type: row.node_type,
-        entity_sub_type: row.metadata_json.get("sub_type").and_then(serde_json::Value::as_str).map(ToString::to_string),
+        entity_sub_type: row
+            .metadata_json
+            .get("sub_type")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
         summary: row.summary,
         confidence: runtime_graph_confidence(&row.metadata_json),
         support_count: row.support_count,

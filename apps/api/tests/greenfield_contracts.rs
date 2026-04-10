@@ -1,6 +1,11 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
-use std::{fs, path::PathBuf};
+use std::{collections::HashSet, fs, path::PathBuf};
+
+use yaml_rust2::{
+    parser::{Event, MarkedEventReceiver, Parser},
+    scanner::Marker,
+};
 
 const CANONICAL_TAGS: &[&str] = &[
     "catalog",
@@ -131,27 +136,22 @@ pub fn assert_contains_canonical_paths(contract: &str) {
 
 pub fn assert_fresh_deploy_surface_uses_canonical_vocabulary(contract: &str) {
     let fresh_bootstrap_section = contract
-        .split("/v1/iam/bootstrap/claim:")
+        .split("/v1/iam/bootstrap/setup:")
         .nth(1)
         .and_then(|section| section.split("/v1/mcp:").next())
         .expect("fresh bootstrap path block present in contract");
     let discovery_section = contract
         .split("/v1/openapi/rustrag.openapi.yaml:")
         .nth(1)
-        .and_then(|section| section.split("/v1/iam/bootstrap/claim:").next())
+        .and_then(|section| section.split("/v1/iam/bootstrap/setup:").next())
         .expect("openapi discovery path block present in contract");
-    let schema_section = contract
-        .split("BootstrapClaimRequest:")
-        .nth(1)
-        .and_then(|section| section.split("AiCatalogEntry:").next())
-        .expect("bootstrap schemas present in contract");
     let scaffold_section = contract
         .split("freshBootstrapDiscovery:")
         .nth(1)
         .and_then(|section| section.split("scaffoldStatus:").next())
         .expect("fresh bootstrap discovery block present in contract");
 
-    for section in [fresh_bootstrap_section, discovery_section, schema_section, scaffold_section] {
+    for section in [fresh_bootstrap_section, discovery_section, scaffold_section] {
         let normalized = section.to_ascii_lowercase();
         assert!(
             !normalized.contains("project"),
@@ -166,8 +166,87 @@ pub fn assert_fresh_deploy_surface_uses_canonical_vocabulary(contract: &str) {
     assert!(contract.contains("CatalogWorkspace"));
     assert!(contract.contains("CatalogLibrary"));
     assert!(contract.contains("ArangoDB"));
-    assert!(contract.contains("/v1/iam/bootstrap/claim"));
+    assert!(contract.contains("/v1/iam/bootstrap/setup"));
     assert!(contract.contains("/v1/openapi/rustrag.openapi.yaml"));
+}
+
+#[derive(Debug)]
+enum YamlContainer {
+    Mapping { keys: HashSet<String>, expecting_key: bool },
+    Sequence,
+}
+
+#[derive(Debug, Default)]
+struct DuplicateYamlKeyCollector {
+    containers: Vec<YamlContainer>,
+    duplicates: Vec<String>,
+}
+
+impl DuplicateYamlKeyCollector {
+    fn on_scalar(&mut self, key: String, mark: Marker) {
+        let Some(YamlContainer::Mapping { keys, expecting_key }) = self.containers.last_mut()
+        else {
+            return;
+        };
+
+        if *expecting_key {
+            if !keys.insert(key.clone()) {
+                self.duplicates.push(format!(
+                    "duplicate YAML key `{key}` at line {}, column {}",
+                    mark.line() + 1,
+                    mark.col() + 1
+                ));
+            }
+            *expecting_key = false;
+        } else {
+            *expecting_key = true;
+        }
+    }
+
+    fn finish_nested_value(&mut self) {
+        if let Some(YamlContainer::Mapping { expecting_key, .. }) = self.containers.last_mut()
+            && !*expecting_key
+        {
+            *expecting_key = true;
+        }
+    }
+}
+
+impl MarkedEventReceiver for DuplicateYamlKeyCollector {
+    fn on_event(&mut self, event: Event, mark: Marker) {
+        match event {
+            Event::MappingStart(..) => self
+                .containers
+                .push(YamlContainer::Mapping { keys: HashSet::new(), expecting_key: true }),
+            Event::MappingEnd => {
+                let _ = self.containers.pop();
+                self.finish_nested_value();
+            }
+            Event::SequenceStart(..) => self.containers.push(YamlContainer::Sequence),
+            Event::SequenceEnd => {
+                let _ = self.containers.pop();
+                self.finish_nested_value();
+            }
+            Event::Scalar(value, ..) => self.on_scalar(value, mark),
+            Event::Alias(anchor) => self.on_scalar(format!("*{anchor}"), mark),
+            Event::Nothing
+            | Event::StreamStart
+            | Event::StreamEnd
+            | Event::DocumentStart
+            | Event::DocumentEnd => {}
+        }
+    }
+}
+
+pub fn assert_no_duplicate_yaml_mapping_keys(contract: &str) {
+    let mut parser = Parser::new_from_str(contract);
+    let mut collector = DuplicateYamlKeyCollector::default();
+    parser.load(&mut collector, true).expect("OpenAPI contract should parse as valid YAML");
+    assert!(
+        collector.duplicates.is_empty(),
+        "OpenAPI contract contains duplicate YAML keys: {:?}",
+        collector.duplicates
+    );
 }
 
 #[test]
@@ -217,6 +296,12 @@ paths:
 ";
 
     assert_greenfield_openapi_scaffold(sample);
+}
+
+#[test]
+fn contract_has_no_duplicate_yaml_mapping_keys() {
+    let contract = load_openapi_contract_text();
+    assert_no_duplicate_yaml_mapping_keys(&contract);
 }
 
 #[test]

@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use crate::{
     domains::agent_runtime::{RuntimeExecutionSummary, RuntimeLifecycleState, RuntimeStageKind},
-    shared::{structured_document::StructuredBlockKind, technical_facts::TechnicalFactKind},
+    domains::content::ContentSourceAccess,
+    shared::extraction::{
+        structured_document::StructuredBlockKind, technical_facts::TechnicalFactKind,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +282,7 @@ pub struct PreparedSegmentReference {
     pub document_id: Option<Uuid>,
     pub document_title: Option<String>,
     pub source_uri: Option<String>,
+    pub source_access: Option<ContentSourceAccess>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

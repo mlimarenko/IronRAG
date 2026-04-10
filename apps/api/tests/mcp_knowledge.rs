@@ -159,12 +159,7 @@ impl McpKnowledgeFixture {
         let temp_arango = TempArangoDatabase::create(&settings).await?;
         settings.database_url = temp_database.database_url.clone();
         settings.arangodb_database = temp_arango.name.clone();
-        settings.bootstrap_token = Some("mcp-knowledge-bootstrap".to_string());
-        settings.bootstrap_claim_enabled = true;
-        settings.legacy_ui_bootstrap_enabled = false;
-        settings.legacy_bootstrap_token_endpoint_enabled = false;
         settings.destructive_fresh_bootstrap_required = true;
-        settings.destructive_allow_legacy_startup_side_effects = false;
         settings.arangodb_bootstrap_vector_indexes = false;
 
         let postgres = PgPoolOptions::new()

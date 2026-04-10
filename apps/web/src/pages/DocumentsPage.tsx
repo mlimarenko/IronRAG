@@ -6,135 +6,38 @@ import { useApp } from '@/contexts/AppContext';
 import { documentsApi, billingApi, apiFetch } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
-} from '@/components/ui/dialog';
-import {
-  Upload, Link as LinkIcon, Search, FileText, Loader2, XCircle,
-  RotateCw, Trash2, Download, Plus, AlertTriangle,
-  CheckCircle2, Clock, X, File, ArrowUpDown, Globe, ExternalLink,
+  Upload, Search, FileText, Loader2, XCircle,
+  RotateCw, AlertTriangle,
+  CheckCircle2, Clock, X, File, ArrowUpDown, Globe,
   CheckSquare
 } from 'lucide-react';
-import { humanizeDocumentFailure, humanizeDocumentStage } from '@/lib/document-processing';
-import type { DocumentItem, DocumentReadiness, DocumentStatus } from '@/types';
-
-type DocumentsStatusFilter = 'all' | 'in_progress' | 'ready' | 'failed';
-const PAGE_SIZE_OPTIONS = [50, 100, 250, 1000] as const;
-
-function parseStatusFilter(value: string | null): DocumentsStatusFilter {
-  if (value === 'in_progress' || value === 'ready' || value === 'failed') {
-    return value;
-  }
-
-  return 'all';
-}
-
-function parseReadinessFilter(value: string | null): DocumentReadiness | null {
-  if (
-    value === 'processing' ||
-    value === 'readable' ||
-    value === 'graph_sparse' ||
-    value === 'graph_ready' ||
-    value === 'failed'
-  ) {
-    return value;
-  }
-
-  return null;
-}
-
-function parsePageSize(value: string | null): (typeof PAGE_SIZE_OPTIONS)[number] {
-  const parsed = Number.parseInt(value ?? '', 10);
-
-  if (PAGE_SIZE_OPTIONS.includes(parsed as (typeof PAGE_SIZE_OPTIONS)[number])) {
-    return parsed as (typeof PAGE_SIZE_OPTIONS)[number];
-  }
-
-  return PAGE_SIZE_OPTIONS[0];
-}
-
-function parsePage(value: string | null): number {
-  const parsed = Number.parseInt(value ?? '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
-}
-
-/** Map a single API response item to the UI's DocumentItem shape. */
-function mapApiDocument(raw: any, t: ReturnType<typeof useTranslation>['t']): DocumentItem {
-  const fileName: string = raw.fileName ?? raw.document?.external_key ?? 'unknown';
-  const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
-  const mimeType: string = raw.activeRevision?.mime_type ?? raw.active_revision?.mime_type ?? '';
-  const fileType = ext || mimeType.split('/').pop() || 'file';
-  const fileSize: number = raw.activeRevision?.byte_size ?? raw.active_revision?.byte_size ?? 0;
-  const uploadedAt: string = raw.document?.created_at ?? '';
-
-  // Derive readiness from readinessSummary or pipeline state
-  const readinessKind: string = raw.readinessSummary?.readinessKind ?? raw.readiness_summary?.readiness_kind ?? '';
-  const jobState: string = raw.pipeline?.latest_job?.queue_state ?? '';
-  const jobStage: string | undefined = raw.pipeline?.latest_job?.current_stage ?? undefined;
-  const failureCode: string | undefined = raw.pipeline?.latest_job?.failure_code ?? undefined;
-  const retryable: boolean = raw.pipeline?.latest_job?.retryable ?? false;
-  const activityStatus: string = raw.readinessSummary?.activityStatus ?? raw.readiness_summary?.activity_status ?? '';
-
-  let readiness: DocumentReadiness = 'processing';
-  if (readinessKind === 'graph_ready') readiness = 'graph_ready';
-  else if (readinessKind === 'graph_sparse') readiness = 'graph_sparse';
-  else if (readinessKind === 'readable') readiness = 'readable';
-  else if (readinessKind === 'failed' || jobState === 'failed') readiness = 'failed';
-  else readiness = 'processing';
-
-  let status: DocumentStatus = 'processing';
-  if (readiness === 'graph_ready') status = 'ready';
-  else if (readiness === 'readable') status = 'ready';
-  else if (readiness === 'graph_sparse') status = 'ready_no_graph';
-  else if (readiness === 'failed') status = 'failed';
-  else if (jobState === 'queued' || activityStatus === 'queued') status = 'queued';
-  else status = 'processing';
-
-  let failureMessage: string | undefined;
-  if (readiness === 'failed') {
-    failureMessage = humanizeDocumentFailure({
-      failureCode,
-      stalledReason: raw.readinessSummary?.stalledReason ?? raw.readiness_summary?.stalled_reason,
-      stage: jobStage,
-    }, t);
-  }
-
-  const rev = raw.activeRevision ?? raw.active_revision;
-  const sourceKind: string | undefined = rev?.content_source_kind ?? undefined;
-  const sourceUri: string | undefined = rev?.source_uri ?? undefined;
-
-  return {
-    id: raw.document?.id ?? raw.id ?? '',
-    fileName,
-    fileType,
-    fileSize,
-    uploadedAt,
-    cost: null,
-    status,
-    readiness,
-    stage: humanizeDocumentStage(jobStage, t),
-    failureMessage,
-    canRetry: readiness === 'failed' ? retryable : undefined,
-    sourceKind,
-    sourceUri,
-  };
-}
-
-function formatSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
+import type { DocumentItem, DocumentReadiness } from '@/types';
+import type { RawPreparedSegmentItem } from '@/api/documents';
+import type {
+  RawWebIngestRunListItem,
+  RawWebIngestRunPage,
+  RawListEnvelope,
+} from '@/types/api-responses';
+import {
+  PAGE_SIZE_OPTIONS,
+  formatDate,
+  formatSize,
+  mapApiDocument,
+  parsePage,
+  parsePageSize,
+  parseReadinessFilter,
+  parseStatusFilter,
+} from '@/pages/documents/mappers';
+import type { RawDocumentForUI } from '@/pages/documents/mappers';
+import { DocumentsPageHeader } from '@/pages/documents/DocumentsPageHeader';
+import { DocumentsInspectorPanel } from '@/pages/documents/DocumentsInspectorPanel';
+import { DocumentsOverlays } from '@/pages/documents/DocumentsOverlays';
 
 export default function DocumentsPage() {
   const { t } = useTranslation();
-  const { activeLibrary } = useApp();
+  const { activeLibrary, locale } = useApp();
   const [searchParams, setSearchParams] = useSearchParams();
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -175,9 +78,9 @@ export default function DocumentsPage() {
   const [selectionMode, setSelectionMode] = useState(false);
 
   // Web ingest runs
-  const [webRuns, setWebRuns] = useState<any[]>([]);
+  const [webRuns, setWebRuns] = useState<RawWebIngestRunListItem[]>([]);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-  const [runPages, setRunPages] = useState<any[]>([]);
+  const [runPages, setRunPages] = useState<RawWebIngestRunPage[]>([]);
 
   const searchQuery = searchParams.get('q') ?? '';
   const statusFilter = parseStatusFilter(searchParams.get('status'));
@@ -207,6 +110,10 @@ export default function DocumentsPage() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
+  const errorMessage = useCallback((error: unknown, fallback: string) => (
+    error instanceof Error && error.message ? error.message : fallback
+  ), []);
+
   const fetchDocuments = useCallback(async () => {
     if (!activeLibrary) return;
     setLoading(true);
@@ -220,7 +127,8 @@ export default function DocumentsPage() {
       for (const c of costs) {
         costMap.set(c.documentId, parseFloat(c.totalCost));
       }
-      const items = (Array.isArray(raw) ? raw : []).map((r: any) => {
+      const rawList: RawDocumentForUI[] = Array.isArray(raw) ? (raw as RawDocumentForUI[]) : [];
+      const items = rawList.map((r) => {
         const doc = mapApiDocument(r, t);
         const cost = costMap.get(doc.id);
         if (cost != null && !isNaN(cost)) {
@@ -231,17 +139,19 @@ export default function DocumentsPage() {
       setDocuments(items);
       // Also load web ingest runs
       try {
-        const runsRaw = await apiFetch<any>(`/content/web-runs?libraryId=${activeLibrary.id}`);
+        const runsRaw = await apiFetch<
+          RawWebIngestRunListItem[] | RawListEnvelope<RawWebIngestRunListItem>
+        >(`/content/web-runs?libraryId=${activeLibrary.id}`);
         const runs = Array.isArray(runsRaw) ? runsRaw : runsRaw?.items ?? [];
         setWebRuns(runs);
       } catch { setWebRuns([]); }
-    } catch (err: any) {
-      setLoadError(err?.message ?? 'Failed to load documents');
+    } catch (err: unknown) {
+      setLoadError(errorMessage(err, t('documents.failedToLoad')));
       setDocuments([]);
     } finally {
       setLoading(false);
     }
-  }, [activeLibrary, t]);
+  }, [activeLibrary, errorMessage, t]);
 
   useEffect(() => {
     fetchDocuments();
@@ -255,14 +165,15 @@ export default function DocumentsPage() {
       try {
         await documentsApi.upload(activeLibrary.id, file);
         setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'done' } : u));
-      } catch (err: any) {
-        setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'error', error: err?.message ?? 'Upload failed' } : u));
+      } catch (err: unknown) {
+        const message = errorMessage(err, t('documents.uploadFailed'));
+        setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'error', error: message } : u));
       }
     }
     // Refresh list after all uploads complete
     await fetchDocuments();
     setTimeout(() => setUploadQueue([]), 3000);
-  }, [activeLibrary, fetchDocuments]);
+  }, [activeLibrary, errorMessage, fetchDocuments, t]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -285,11 +196,11 @@ export default function DocumentsPage() {
       setSelectedDoc(null);
       updateSearchParamState({ documentId: null });
       await fetchDocuments();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Delete failed:', err);
-      toast.error(err?.message || "Failed to delete document");
+      toast.error(errorMessage(err, t('documents.deleteFailed')));
     }
-  }, [selectedDoc, fetchDocuments, updateSearchParamState]);
+  }, [errorMessage, fetchDocuments, selectedDoc, t, updateSearchParamState]);
 
   const handleRetry = useCallback(async () => {
     if (!selectedDoc) return;
@@ -298,12 +209,12 @@ export default function DocumentsPage() {
       await fetchDocuments();
       // Refresh the selected doc
       const raw = await documentsApi.get(selectedDoc.id);
-      setSelectedDoc(mapApiDocument(raw, t));
-    } catch (err: any) {
+      setSelectedDoc(mapApiDocument(raw as RawDocumentForUI, t));
+    } catch (err: unknown) {
       console.error('Reprocess failed:', err);
-      toast.error(err?.message || "Failed to reprocess document");
+      toast.error(errorMessage(err, t('documents.reprocessFailed')));
     }
-  }, [selectedDoc, fetchDocuments, t]);
+  }, [errorMessage, fetchDocuments, selectedDoc, t]);
 
   const handleSelectDoc = useCallback(async (doc: DocumentItem, syncQuery = true) => {
     if (syncQuery) {
@@ -314,7 +225,7 @@ export default function DocumentsPage() {
     setInspectorFacts(null);
     try {
       const raw = await documentsApi.get(doc.id);
-      setSelectedDoc(mapApiDocument(raw, t));
+      setSelectedDoc(mapApiDocument(raw as RawDocumentForUI, t));
     } catch {
       // Keep the list-level data if detail fetch fails
     }
@@ -355,7 +266,12 @@ export default function DocumentsPage() {
     if (!selectedDoc) return;
     try {
       const segments = await documentsApi.getPreparedSegments(selectedDoc.id);
-      const textParts = (Array.isArray(segments) ? segments : []).map((s: any) => s.text ?? s.content ?? '');
+      const segmentList: RawPreparedSegmentItem[] = Array.isArray(segments) ? segments : [];
+      const textParts = segmentList.map((s) => {
+        const text = typeof s.text === 'string' ? s.text : undefined;
+        const content = typeof s.content === 'string' ? s.content : undefined;
+        return text ?? content ?? '';
+      });
       const blob = new Blob([textParts.join('\n\n')], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -365,43 +281,43 @@ export default function DocumentsPage() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      toast.success("Text downloaded");
-    } catch (err: any) {
-      toast.error(err?.message ?? "Failed to download text");
+      toast.success(t('documents.downloadTextSuccess'));
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('documents.downloadTextFailed')));
     }
-  }, [selectedDoc]);
+  }, [errorMessage, selectedDoc, t]);
 
   const handleAppendText = useCallback(async () => {
     if (!selectedDoc || !appendContent.trim()) return;
     setAppendLoading(true);
     try {
       await documentsApi.append(selectedDoc.id, appendContent);
-      toast.success("Text appended successfully");
+      toast.success(t('documents.appendTextSuccess'));
       setAppendTextOpen(false);
       setAppendContent('');
       await fetchDocuments();
-    } catch (err: any) {
-      toast.error(err?.message ?? "Failed to append text");
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('documents.appendTextFailed')));
     } finally {
       setAppendLoading(false);
     }
-  }, [selectedDoc, appendContent, fetchDocuments]);
+  }, [appendContent, errorMessage, fetchDocuments, selectedDoc, t]);
 
   const handleReplaceFile = useCallback(async () => {
     if (!selectedDoc || !replaceFile) return;
     setReplaceLoading(true);
     try {
       await documentsApi.replace(selectedDoc.id, replaceFile);
-      toast.success("File replaced successfully");
+      toast.success(t('documents.replaceFileSuccess'));
       setReplaceFileOpen(false);
       setReplaceFile(null);
       await fetchDocuments();
-    } catch (err: any) {
-      toast.error(err?.message ?? "Failed to replace file");
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('documents.replaceFileFailed')));
     } finally {
       setReplaceLoading(false);
     }
-  }, [selectedDoc, replaceFile, fetchDocuments]);
+  }, [errorMessage, fetchDocuments, replaceFile, selectedDoc, t]);
 
   const handleStartWebIngest = useCallback(async () => {
     if (!activeLibrary || !seedUrl.trim()) return;
@@ -428,12 +344,12 @@ export default function DocumentsPage() {
       setMaxDepth('3');
       setMaxPages('30');
       await fetchDocuments();
-    } catch (err: any) {
-      toast.error(err?.message || t('documents.webIngestFailed'));
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('documents.webIngestFailed')));
     } finally {
       setWebIngestLoading(false);
     }
-  }, [activeLibrary, seedUrl, crawlMode, boundaryPolicy, maxDepth, maxPages, fetchDocuments, t]);
+  }, [activeLibrary, boundaryPolicy, crawlMode, errorMessage, fetchDocuments, maxDepth, maxPages, seedUrl, t]);
 
   // --- Bulk selection helpers ---
   const toggleSelection = (id: string) => {
@@ -578,73 +494,25 @@ export default function DocumentsPage() {
       </div>
     );
   }
-
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="page-header">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="text-lg font-bold tracking-tight">{t('documents.title')}</h1>
-            <p className="text-sm text-muted-foreground">{activeLibrary.name} — {t('documents.subtitle')}</p>
-          </div>
-
-          {/* Tab switcher */}
-          <div className="flex gap-0.5 p-1 bg-muted rounded-xl border border-border/50">
-            <button
-              className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${activeTab === 'documents' ? 'bg-primary text-primary-foreground font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
-              onClick={() => setActiveTab('documents')}
-            >
-              {t('documents.tabs.documents')}
-              <span className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === 'documents' ? 'bg-primary-foreground/20' : 'bg-background/60'}`}>{documents.length}</span>
-            </button>
-            <button
-              className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${activeTab === 'web' ? 'bg-primary text-primary-foreground font-semibold' : 'text-muted-foreground hover:text-foreground'}`}
-              onClick={() => setActiveTab('web')}
-            >
-              {t('documents.tabs.webIngest')}
-              <span className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === 'web' ? 'bg-primary-foreground/20' : 'bg-background/60'}`}>{webRuns.length}</span>
-            </button>
-          </div>
-
-          <div className="flex gap-2">
-            {activeTab === 'documents' && (
-              <Button size="sm" onClick={() => fileInputRef.current?.click()}>
-                <Upload className="h-3.5 w-3.5 mr-1.5" /> {t('documents.upload')}
-              </Button>
-            )}
-            {activeTab === 'web' && (
-              <Button size="sm" variant="outline" onClick={() => {
-                setSeedUrl('');
-                setCrawlMode('recursive_crawl');
-                setBoundaryPolicy('same_host');
-                setMaxDepth('3');
-                setMaxPages('30');
-                setAddLinkOpen(true);
-              }}>
-                <LinkIcon className="h-3.5 w-3.5 mr-1.5" /> {t('documents.addLink')}
-              </Button>
-            )}
-            <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-          </div>
-        </div>
-
-
-        {/* Upload queue */}
-        {uploadQueue.length > 0 && (
-          <div className="mt-3 space-y-1.5">
-            {uploadQueue.map((u, i) => (
-              <div key={i} className="flex items-center gap-2.5 text-xs p-3 rounded-xl bg-card border shadow-soft">
-                {u.state === 'uploading' ? <Loader2 className="h-3 w-3 animate-spin text-primary" /> : u.state === 'done' ? <CheckCircle2 className="h-3 w-3 text-status-ready" /> : <XCircle className="h-3 w-3 text-status-failed" />}
-                <span className="font-semibold">{u.name}</span>
-                <span className="text-muted-foreground ml-auto">{u.state === 'uploading' ? t('documents.uploading') : u.state === 'done' ? t('documents.queued') : u.error}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Filters — documents tab only */}
+      <DocumentsPageHeader
+        activeLibraryName={activeLibrary.name}
+        activeTab={activeTab}
+        documentsCount={documents.length}
+        fileInputRef={fileInputRef}
+        handleFileSelect={handleFileSelect}
+        setActiveTab={setActiveTab}
+        setAddLinkOpen={setAddLinkOpen}
+        setBoundaryPolicy={setBoundaryPolicy}
+        setCrawlMode={setCrawlMode}
+        setMaxDepth={setMaxDepth}
+        setMaxPages={setMaxPages}
+        setSeedUrl={setSeedUrl}
+        t={t}
+        uploadQueue={uploadQueue}
+        webRunsCount={webRuns.length}
+      />
       {activeTab === 'documents' && <div className="px-6 py-3 border-b flex flex-wrap items-center gap-3 bg-surface-sunken/50">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
@@ -885,7 +753,7 @@ export default function DocumentsPage() {
                           </td>
                           <td className="px-4 py-3.5 text-muted-foreground uppercase text-[10px] font-bold tracking-widest">{doc.fileType}</td>
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{formatSize(doc.fileSize)}</td>
-                          <td className="px-4 py-3.5 text-muted-foreground text-xs">{formatDate(doc.uploadedAt)}</td>
+                          <td className="px-4 py-3.5 text-muted-foreground text-xs">{formatDate(doc.uploadedAt, locale)}</td>
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{doc.cost != null ? `$${doc.cost.toFixed(3)}` : '—'}</td>
                           <td className="px-4 py-3.5">
                             <div className="flex items-center gap-2">
@@ -976,11 +844,11 @@ export default function DocumentsPage() {
           {/* Web Ingest Runs — web tab */}
           {(() => {
             const terminalStates = new Set(['completed', 'completed_partial', 'failed']);
-            const activeRuns = webRuns.filter((r: any) => !terminalStates.has(r.runState?.toLowerCase()));
+            const activeRuns = webRuns.filter((r) => !terminalStates.has(r.runState?.toLowerCase()));
             return activeRuns.length > 0 ? (
               <div className="mx-4 mt-4 flex items-center gap-2 text-xs px-3 py-2 rounded-xl bg-card border shadow-soft">
                 <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                <span className="font-semibold">{activeRuns.length} web ingest {activeRuns.length === 1 ? 'run' : 'runs'} in progress</span>
+                <span className="font-semibold">{t('documents.webRunActiveSummary', { count: activeRuns.length })}</span>
               </div>
             ) : null;
           })()}
@@ -992,7 +860,7 @@ export default function DocumentsPage() {
                 <span className="text-xs text-muted-foreground ml-auto">{webRuns.length}</span>
               </div>
               <div className="divide-y">
-                {webRuns.slice(0, 10).map((run: any) => (
+                {webRuns.slice(0, 10).map((run) => (
                   <div key={run.runId}>
                     <button
                       className="w-full px-4 py-2.5 flex items-center gap-3 text-left hover:bg-accent/30 transition-colors text-xs"
@@ -1000,7 +868,9 @@ export default function DocumentsPage() {
                         if (expandedRunId === run.runId) { setExpandedRunId(null); setRunPages([]); return; }
                         setExpandedRunId(run.runId);
                         try {
-                          const pages = await apiFetch<any>(`/content/web-runs/${run.runId}/pages`);
+                          const pages = await apiFetch<
+                            RawWebIngestRunPage[] | RawListEnvelope<RawWebIngestRunPage>
+                          >(`/content/web-runs/${run.runId}/pages`);
                           setRunPages(Array.isArray(pages) ? pages : pages?.items ?? []);
                         } catch { setRunPages([]); }
                       }}
@@ -1030,7 +900,7 @@ export default function DocumentsPage() {
                     </button>
                     {expandedRunId === run.runId && runPages.length > 0 && (
                       <div className="bg-muted/30 px-4 py-2 space-y-1">
-                        {runPages.map((page: any, i: number) => (
+                        {runPages.map((page, i) => (
                           <div key={i} className="flex items-center gap-2 text-[11px]">
                             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                               page.candidateState === 'processed' ? 'bg-green-500' :
@@ -1060,226 +930,70 @@ export default function DocumentsPage() {
           )}
         </div>
 
-        {/* Inspector panel */}
         {selectedDoc && (
-          <div className={`inspector-panel w-80 lg:w-96 shrink-0 hidden md:block overflow-y-auto animate-slide-in-right ${selectionMode ? 'opacity-40 pointer-events-none' : ''}`}>
-            <div className="p-4 border-b flex items-center justify-between">
-              <h3 className="text-sm font-bold truncate tracking-tight">{selectedDoc.fileName}</h3>
-              <button onClick={() => updateSearchParamState({ documentId: null })} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label="Close inspector">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="p-4 space-y-5">
-              <div>
-                <span className={`status-badge ${readinessConfig[selectedDoc.readiness].cls}`}>
-                  {readinessConfig[selectedDoc.readiness].label}
-                </span>
-                {selectedDoc.stage && <span className="text-xs text-muted-foreground ml-2">{selectedDoc.stage}</span>}
-              </div>
-
-              {selectedDoc.failureMessage && (
-                <div className="inline-error">
-                  <div className="flex items-center gap-1.5 font-bold text-destructive mb-1.5">
-                    <XCircle className="h-3.5 w-3.5" /> {t('documents.error')}
-                  </div>
-                  {selectedDoc.failureMessage}
-                </div>
-              )}
-
-              {selectedDoc.progressPercent != null && (
-                <div>
-                  <div className="flex justify-between text-xs mb-2">
-                    <span className="font-semibold">Progress</span>
-                    <span className="tabular-nums font-medium">{selectedDoc.progressPercent}%</span>
-                  </div>
-                  <div className="h-2 bg-surface-sunken rounded-full overflow-hidden" style={{ boxShadow: 'inset 0 1px 2px hsl(var(--foreground) / 0.04)' }}>
-                    <div className="h-full bg-primary rounded-full transition-all duration-500" style={{
-                      width: `${selectedDoc.progressPercent}%`,
-                      boxShadow: '0 0 8px -2px hsl(var(--primary) / 0.4)',
-                    }} />
-                  </div>
-                </div>
-              )}
-
-              {/* Source info — different for web vs upload */}
-              {selectedDoc.sourceKind === 'web_page' && selectedDoc.sourceUri ? (
-                <div className="space-y-2.5">
-                  <div className="section-label flex items-center gap-1.5">
-                    <Globe className="h-3 w-3" /> {t('documents.webSource')}
-                  </div>
-                  <a href={selectedDoc.sourceUri} target="_blank" rel="noopener noreferrer"
-                    className="text-xs text-primary hover:underline flex items-center gap-1 truncate">
-                    {selectedDoc.sourceUri} <ExternalLink className="h-3 w-3 shrink-0" />
-                  </a>
-                  {[
-                    [t('documents.type'), selectedDoc.fileType.toUpperCase()],
-                    [t('documents.size'), formatSize(selectedDoc.fileSize)],
-                    [t('documents.uploaded'), formatDate(selectedDoc.uploadedAt)],
-                    [t('documents.cost'), selectedDoc.cost != null ? `$${selectedDoc.cost.toFixed(3)}` : '—'],
-                  ].map(([k, v]) => (
-                    <div key={k} className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">{k}</span>
-                      <span className="font-mono text-xs font-semibold">{v}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="space-y-2.5">
-                  <div className="section-label">{t('documents.fileInfo')}</div>
-                  {[
-                    [t('documents.type'), selectedDoc.fileType.toUpperCase()],
-                    [t('documents.size'), formatSize(selectedDoc.fileSize)],
-                    [t('documents.uploaded'), formatDate(selectedDoc.uploadedAt)],
-                    [t('documents.cost'), selectedDoc.cost != null ? `$${selectedDoc.cost.toFixed(3)}` : '—'],
-                    ['Document ID', selectedDoc.id],
-                  ].map(([k, v]) => (
-                    <div key={k} className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">{k}</span>
-                      <span className="font-mono text-xs font-semibold">{v}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="space-y-2.5">
-                <div className="section-label">{t('documents.preparation')}</div>
-                <div className="text-xs text-muted-foreground">
-                  {selectedDoc.readiness === 'graph_ready' || selectedDoc.readiness === 'readable' || selectedDoc.readiness === 'graph_sparse' ? (
-                    <div className="space-y-1.5">
-                      <div className="flex justify-between"><span>Segments</span><span className="font-semibold text-foreground">{inspectorSegments ?? '...'}</span></div>
-                      <div className="flex justify-between"><span>Technical Facts</span><span className="font-semibold text-foreground">{inspectorFacts ?? '...'}</span></div>
-                      <div className="flex justify-between"><span>Source Format</span><span className="font-semibold text-foreground">{selectedDoc.fileType.toUpperCase()}</span></div>
-                    </div>
-                  ) : selectedDoc.readiness === 'processing' ? (
-                    <div className="flex items-center gap-2"><Loader2 className="h-3 w-3 animate-spin text-primary" /> Processing...</div>
-                  ) : (
-                    <span>Not yet available</span>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <div className="section-label">{t('documents.actions')}</div>
-                {selectedDoc.canRetry && (
-                  <Button variant="outline" size="sm" className="w-full justify-start" onClick={handleRetry}>
-                    <RotateCw className="h-3.5 w-3.5 mr-2" /> {t('documents.retryProcessing')}
-                  </Button>
-                )}
-                {selectedDoc.sourceKind === 'web_page' && selectedDoc.sourceUri && (
-                  <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => {
-                    setSeedUrl(selectedDoc.sourceUri || '');
-                    setCrawlMode('single_page');
-                    setMaxDepth('1');
-                    setMaxPages('10');
-                    setAddLinkOpen(true);
-                  }}>
-                    <Globe className="h-3.5 w-3.5 mr-2" /> {t('documents.reIngest')}
-                  </Button>
-                )}
-                <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setAppendTextOpen(true)}>
-                  <Plus className="h-3.5 w-3.5 mr-2" /> {t('documents.appendText')}
-                </Button>
-                <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setReplaceFileOpen(true)}>
-                  <Upload className="h-3.5 w-3.5 mr-2" /> {t('documents.replaceFile')}
-                </Button>
-                <Button variant="outline" size="sm" className="w-full justify-start" onClick={handleDownloadText}>
-                  <Download className="h-3.5 w-3.5 mr-2" /> {t('documents.downloadText')}
-                </Button>
-                <Button variant="outline" size="sm" className="w-full justify-start text-destructive hover:text-destructive" onClick={() => setDeleteDocOpen(true)}>
-                  <Trash2 className="h-3.5 w-3.5 mr-2" /> {t('documents.delete')}
-                </Button>
-              </div>
-            </div>
-          </div>
+          <DocumentsInspectorPanel
+            locale={locale}
+            t={t}
+            inspectorFacts={inspectorFacts}
+            inspectorSegments={inspectorSegments}
+            readinessConfig={readinessConfig}
+            selectedDoc={selectedDoc}
+            selectionMode={selectionMode}
+            setAddLinkOpen={setAddLinkOpen}
+            setAppendTextOpen={setAppendTextOpen}
+            setCrawlMode={setCrawlMode}
+            setDeleteDocOpen={setDeleteDocOpen}
+            setMaxDepth={setMaxDepth}
+            setMaxPages={setMaxPages}
+            setReplaceFileOpen={setReplaceFileOpen}
+            setSeedUrl={setSeedUrl}
+            updateSearchParamState={updateSearchParamState}
+            onDownloadText={handleDownloadText}
+            onRetry={handleRetry}
+          />
         )}
       </div>
 
-      {/* Bulk action toolbar — documents tab only */}
-      {activeTab === 'documents' && selectedCount > 0 && (
-        <div className="sticky bottom-0 z-10 flex items-center gap-3 border-t bg-background px-4 py-3 shadow-lg">
-          <span className="text-sm font-medium tabular-nums">
-            {t('documents.nSelected', { count: selectedCount })}
-          </span>
-          <Button variant="destructive" size="sm" onClick={handleBulkDelete}>
-            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('documents.deleteSelected')}
-          </Button>
-          <Button variant="outline" size="sm" onClick={handleBulkCancel}>
-            <XCircle className="h-3.5 w-3.5 mr-1.5" /> {t('documents.cancelProcessing')}
-          </Button>
-          <Button variant="outline" size="sm" onClick={handleBulkReprocess}>
-            <RotateCw className="h-3.5 w-3.5 mr-1.5" /> {t('documents.retrySelected')}
-          </Button>
-          <div className="flex-1" />
-          <Button variant="ghost" size="sm" onClick={clearSelection}>
-            {t('documents.clearSelection')}
-          </Button>
-        </div>
-      )}
-
-      {/* Dialogs */}
-      <Dialog open={addLinkOpen} onOpenChange={setAddLinkOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t('documents.addWebContent')}</DialogTitle>
-            <DialogDescription>{t('documents.addWebContentDesc')}</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div><Label>{t('documents.seedUrl')}</Label><Input value={seedUrl} onChange={e => setSeedUrl(e.target.value)} placeholder="https://docs.example.com" className="mt-2" /></div>
-            <div className="grid grid-cols-2 gap-3">
-              <div><Label>{t('documents.mode')}</Label><Select value={crawlMode} onValueChange={setCrawlMode}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="single_page">{t('documents.singlePage')}</SelectItem><SelectItem value="recursive_crawl">{t('documents.recursiveCrawl')}</SelectItem></SelectContent></Select></div>
-              <div><Label>{t('documents.boundary')}</Label><Select value={boundaryPolicy} onValueChange={setBoundaryPolicy}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="same_host">{t('documents.sameHost')}</SelectItem><SelectItem value="allow_external">{t('documents.allowExternal')}</SelectItem></SelectContent></Select></div>
-            </div>
-            {crawlMode === 'recursive_crawl' && <div className="grid grid-cols-2 gap-3">
-              <div><Label>{t('documents.maxDepth')}</Label><Input type="number" value={maxDepth} onChange={e => setMaxDepth(e.target.value)} min="1" max="10" className="mt-2" /></div>
-              <div><Label>{t('documents.maxPages')}</Label><Input type="number" value={maxPages} onChange={e => setMaxPages(e.target.value)} min="1" max="500" className="mt-2" /></div>
-            </div>}
-          </div>
-          <DialogFooter><Button variant="outline" onClick={() => setAddLinkOpen(false)}>{t('documents.cancel')}</Button><Button disabled={!seedUrl.trim() || webIngestLoading} onClick={handleStartWebIngest}>{webIngestLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {t('documents.starting')}</> : t('documents.startIngest')}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={deleteDocOpen} onOpenChange={setDeleteDocOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>{t('documents.deleteDoc')}</DialogTitle><DialogDescription dangerouslySetInnerHTML={{ __html: t('documents.confirmDelete', { name: selectedDoc?.fileName }) }} /></DialogHeader>
-          <DialogFooter><Button variant="outline" onClick={() => setDeleteDocOpen(false)}>{t('documents.cancel')}</Button><Button variant="destructive" onClick={handleDelete}>{t('documents.delete')}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={appendTextOpen} onOpenChange={v => { setAppendTextOpen(v); if (!v) setAppendContent(''); }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>{t('documents.appendTextTitle')}</DialogTitle><DialogDescription>{t('documents.appendTextDesc', { name: selectedDoc?.fileName })}</DialogDescription></DialogHeader>
-          <div><Label>{t('documents.textContent')}</Label><textarea className="w-full h-32 border rounded-xl p-3.5 text-sm mt-2 resize-none bg-card focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all" placeholder={t('documents.appendTextPlaceholder')} value={appendContent} onChange={e => setAppendContent(e.target.value)} /></div>
-          <DialogFooter><Button variant="outline" onClick={() => { setAppendTextOpen(false); setAppendContent(''); }}>{t('documents.cancel')}</Button><Button disabled={!appendContent.trim() || appendLoading} onClick={handleAppendText}>{appendLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {t('documents.append')}...</> : t('documents.append')}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={replaceFileOpen} onOpenChange={v => { setReplaceFileOpen(v); if (!v) setReplaceFile(null); }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>{t('documents.replaceFileTitle')}</DialogTitle><DialogDescription>{t('documents.replaceFileDesc', { name: selectedDoc?.fileName })}</DialogDescription></DialogHeader>
-          <div
-            className="border-2 border-dashed rounded-xl p-10 text-center transition-all duration-200 hover:border-primary/40 hover:bg-primary/5 cursor-pointer hover:shadow-soft"
-            onClick={() => replaceFileInputRef.current?.click()}
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) setReplaceFile(f); }}
-          >
-            <input ref={replaceFileInputRef} type="file" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) setReplaceFile(f); e.target.value = ''; }} />
-            {replaceFile ? (
-              <>
-                <File className="h-8 w-8 text-primary mx-auto mb-3" />
-                <p className="text-sm font-bold">{replaceFile.name}</p>
-                <p className="text-xs text-muted-foreground mt-1.5">{formatSize(replaceFile.size)}</p>
-              </>
-            ) : (
-              <>
-                <Upload className="h-8 w-8 text-muted-foreground mx-auto mb-3" />
-                <p className="text-sm font-bold">{t('documents.selectFile')}</p>
-                <p className="text-xs text-muted-foreground mt-1.5">{t('documents.selectFileHint')}</p>
-              </>
-            )}
-          </div>
-          <DialogFooter><Button variant="outline" onClick={() => { setReplaceFileOpen(false); setReplaceFile(null); }}>{t('documents.cancel')}</Button><Button disabled={!replaceFile || replaceLoading} onClick={handleReplaceFile}>{replaceLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {t('documents.replace')}...</> : t('documents.replace')}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DocumentsOverlays
+        activeTab={activeTab}
+        addLinkOpen={addLinkOpen}
+        appendContent={appendContent}
+        appendLoading={appendLoading}
+        appendTextOpen={appendTextOpen}
+        boundaryPolicy={boundaryPolicy}
+        clearSelection={clearSelection}
+        crawlMode={crawlMode}
+        deleteDocOpen={deleteDocOpen}
+        handleAppendText={handleAppendText}
+        handleBulkCancel={handleBulkCancel}
+        handleBulkDelete={handleBulkDelete}
+        handleBulkReprocess={handleBulkReprocess}
+        handleDelete={handleDelete}
+        handleReplaceFile={handleReplaceFile}
+        handleStartWebIngest={handleStartWebIngest}
+        maxDepth={maxDepth}
+        maxPages={maxPages}
+        replaceFile={replaceFile}
+        replaceFileInputRef={replaceFileInputRef}
+        replaceFileOpen={replaceFileOpen}
+        replaceLoading={replaceLoading}
+        seedUrl={seedUrl}
+        selectedCount={selectedCount}
+        selectedDoc={selectedDoc}
+        setAddLinkOpen={setAddLinkOpen}
+        setAppendContent={setAppendContent}
+        setAppendTextOpen={setAppendTextOpen}
+        setBoundaryPolicy={setBoundaryPolicy}
+        setCrawlMode={setCrawlMode}
+        setDeleteDocOpen={setDeleteDocOpen}
+        setMaxDepth={setMaxDepth}
+        setMaxPages={setMaxPages}
+        setReplaceFile={setReplaceFile}
+        setReplaceFileOpen={setReplaceFileOpen}
+        setSeedUrl={setSeedUrl}
+        t={t}
+        webIngestLoading={webIngestLoading}
+      />
     </div>
   );
 }

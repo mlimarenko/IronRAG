@@ -66,6 +66,20 @@ pub struct ContentRevision {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentSourceAccessKind {
+    StoredDocument,
+    ExternalUrl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSourceAccess {
+    pub kind: ContentSourceAccessKind,
+    pub href: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentRevisionReadiness {
     pub revision_id: Uuid,
@@ -187,8 +201,10 @@ pub struct LibraryKnowledgeCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentDocumentSummary {
     pub document: ContentDocument,
+    pub file_name: String,
     pub head: Option<ContentDocumentHead>,
     pub active_revision: Option<ContentRevision>,
+    pub source_access: Option<ContentSourceAccess>,
     pub readiness: Option<ContentRevisionReadiness>,
     pub readiness_summary: Option<DocumentReadinessSummary>,
     pub prepared_revision: Option<StructuredDocumentRevision>,

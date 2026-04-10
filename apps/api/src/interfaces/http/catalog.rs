@@ -22,8 +22,8 @@ use crate::{
         router_support::{ApiError, RequestId},
     },
     services::{
-        audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand, UpdateLibraryCommand},
+        iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     },
 };
 
@@ -438,7 +438,7 @@ async fn record_catalog_audit_event(
     internal_message: Option<String>,
     subjects: Vec<AppendAuditEventSubjectCommand>,
 ) {
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -455,5 +455,8 @@ async fn record_catalog_audit_event(
                 subjects,
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
 }

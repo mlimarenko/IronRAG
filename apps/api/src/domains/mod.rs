@@ -4,6 +4,7 @@ pub mod audit;
 pub mod billing;
 pub mod catalog;
 pub mod content;
+pub mod deployment;
 pub mod extract;
 pub(crate) mod graph_quality;
 pub mod iam;

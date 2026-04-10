@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::shared::{
+use crate::shared::extraction::{
     structured_document::{
         StructuredBlockKind, StructuredOutlineEntry, StructuredSourceSpan,
         StructuredTableCoordinates,

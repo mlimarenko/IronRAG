@@ -20,9 +20,20 @@ use tower_http::{
 use tracing::{Span, error, info, warn};
 
 use crate::{
+    domains::deployment::ServiceRole,
+    infra::{
+        arangodb::bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
+        persistence::{
+            run_postgres_migrations, validate_arango_bootstrap_state,
+            validate_canonical_bootstrap_state,
+        },
+    },
     interfaces::http::{self, router_support},
-    services::ingestion_worker,
+    services::content::storage::types::ContentStorageProbeStatus,
 };
+
+const STARTUP_ARANGO_READY_MAX_ATTEMPTS: usize = 10;
+const STARTUP_ARANGO_READY_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// Boots the HTTP server and serves the `RustRAG` API.
 ///
@@ -31,36 +42,37 @@ use crate::{
 pub async fn run() -> anyhow::Result<()> {
     let config = config::Settings::from_env()?;
     crate::shared::telemetry::init(&config.log_filter);
+    let role = config.service_role_kind().map_err(anyhow::Error::msg)?;
 
     let state = state::AppState::new(config.clone()).await?;
-    if config.runs_http_api() {
-        run_startup_bootstraps(
-            &state,
-            &config.bootstrap_settings(),
-            &config.destructive_fresh_bootstrap_settings(),
-        )
-        .await?;
-    }
     let graph_backend = state.graph_runtime.backend_name.as_str();
     let shutdown = shutdown::ShutdownSignal::new();
     let signal_listener = spawn_signal_listener(shutdown.clone());
-    let worker_handle = config
-        .runs_ingestion_workers()
-        .then(|| ingestion_worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe()));
+    let worker_handle = role.runs_ingestion_workers().then(|| {
+        crate::services::ingest::worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe())
+    });
 
-    let run_result = if config.runs_http_api() {
-        run_http_api(&config, &state, graph_backend, shutdown.clone()).await
-    } else {
-        info!(
-            service = %config.service_name,
-            service_role = %config.service_role,
-            environment = %config.environment,
-            graph_backend,
-            worker_concurrency = config.ingestion_worker_concurrency.max(1),
-            "starting rustrag worker service",
-        );
-        shutdown.wait().await;
-        Ok(())
+    let run_result = match role {
+        ServiceRole::Startup => {
+            run_startup_authority(
+                &state,
+                &config.bootstrap_settings(),
+                &config.destructive_fresh_bootstrap_settings(),
+            )
+            .await
+        }
+        ServiceRole::Api => run_http_api(&config, &state, graph_backend, shutdown.clone()).await,
+        ServiceRole::Worker => {
+            info!(
+                service = %config.service_name,
+                service_role = %config.service_role,
+                environment = %config.environment,
+                graph_backend,
+                worker_concurrency = config.ingestion_worker_concurrency.max(1),
+                "starting rustrag worker service",
+            );
+            run_probe_http_api(&config, &state, graph_backend, shutdown.clone()).await
+        }
     };
 
     let _ = shutdown.trigger();
@@ -73,10 +85,23 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 fn build_router(config: &config::Settings, state: state::AppState) -> Router {
+    build_http_router(config, state, false)
+}
+
+fn build_probe_router(config: &config::Settings, state: state::AppState) -> Router {
+    build_http_router(config, state, true)
+}
+
+fn build_http_router(
+    config: &config::Settings,
+    state: state::AppState,
+    probe_only: bool,
+) -> Router {
     let public_origin_settings = config.public_origin_settings();
     let max_request_body_bytes = state.mcp_memory.max_request_body_bytes();
+    let api_router = if probe_only { http::probe_router() } else { http::router() };
     Router::new()
-        .nest("/v1", http::router())
+        .nest("/v1", api_router)
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .layer(middleware::map_request(inject_request_id))
         .layer(middleware::map_response(propagate_request_id))
@@ -226,6 +251,107 @@ async fn run_http_api(
     });
     server.await?;
     Ok(())
+}
+
+async fn run_probe_http_api(
+    config: &config::Settings,
+    state: &state::AppState,
+    graph_backend: &str,
+    shutdown: shutdown::ShutdownSignal,
+) -> anyhow::Result<()> {
+    let router = build_probe_router(config, state.clone());
+    let addr: SocketAddr = config.bind_addr.parse()?;
+    info!(
+        service = %config.service_name,
+        service_role = %config.service_role,
+        environment = %config.environment,
+        graph_backend,
+        %addr,
+        "starting rustrag probe server",
+    );
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        shutdown.wait().await;
+    });
+    server.await?;
+    Ok(())
+}
+
+async fn run_startup_authority(
+    state: &state::AppState,
+    bootstrap_settings: &config::BootstrapSettings,
+    destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
+) -> anyhow::Result<()> {
+    info!(
+        service = %state.settings.service_name,
+        service_role = %state.settings.service_role,
+        environment = %state.settings.environment,
+        startup_authority_mode = %state.settings.startup_authority_mode,
+        "running startup authority",
+    );
+
+    run_postgres_migrations(&state.persistence.postgres).await?;
+    validate_canonical_bootstrap_state(&state.persistence.postgres, &state.settings).await?;
+    run_startup_arango_bootstrap(state).await?;
+    let storage_probe = state.content_storage.prepare_startup().await?;
+    if !matches!(storage_probe.status, ContentStorageProbeStatus::Ok) {
+        anyhow::bail!(
+            "content storage startup validation failed: {}",
+            storage_probe
+                .message
+                .unwrap_or_else(|| "provider did not report a healthy startup state".to_string())
+        );
+    }
+    run_startup_bootstraps(state, bootstrap_settings, destructive_bootstrap).await?;
+    info!("startup authority completed");
+    Ok(())
+}
+
+async fn run_startup_arango_bootstrap(state: &state::AppState) -> anyhow::Result<()> {
+    let bootstrap_options = ArangoBootstrapOptions {
+        collections: state.settings.arangodb_bootstrap_collections,
+        views: state.settings.arangodb_bootstrap_views,
+        graph: state.settings.arangodb_bootstrap_graph,
+        vector_indexes: state.settings.arangodb_bootstrap_vector_indexes,
+        vector_dimensions: state.settings.arangodb_vector_dimensions,
+        vector_index_n_lists: state.settings.arangodb_vector_index_n_lists,
+        vector_index_default_n_probe: state.settings.arangodb_vector_index_default_n_probe,
+        vector_index_training_iterations: state.settings.arangodb_vector_index_training_iterations,
+    };
+
+    for attempt in 1..=STARTUP_ARANGO_READY_MAX_ATTEMPTS {
+        let startup_result = async {
+            state.arango_client.ensure_database().await?;
+            if bootstrap_options.any_enabled() {
+                bootstrap_knowledge_plane(&state.arango_client, &bootstrap_options).await?;
+            }
+            validate_arango_bootstrap_state(&state.arango_client, &state.settings).await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        match startup_result {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < STARTUP_ARANGO_READY_MAX_ATTEMPTS => {
+                warn!(
+                    attempt,
+                    max_attempts = STARTUP_ARANGO_READY_MAX_ATTEMPTS,
+                    retry_delay_seconds = STARTUP_ARANGO_READY_RETRY_DELAY.as_secs(),
+                    error = %error,
+                    "startup authority is waiting for ArangoDB bootstrap readiness",
+                );
+                tokio::time::sleep(STARTUP_ARANGO_READY_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                return Err(error.context(format!(
+                    "ArangoDB bootstrap did not become ready after {} attempts",
+                    STARTUP_ARANGO_READY_MAX_ATTEMPTS
+                )));
+            }
+        }
+    }
+
+    unreachable!("ArangoDB startup retry loop must return or fail")
 }
 
 async fn run_startup_bootstraps(

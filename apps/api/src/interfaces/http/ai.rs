@@ -10,31 +10,35 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::{
-        AiBindingPurpose, BindingValidation, LibraryModelBinding, ModelCatalogEntry, ModelPreset,
-        PriceCatalogEntry, ProviderCatalogEntry, ProviderCredential,
+        AiBindingAssignment, AiBindingPurpose, AiScopeKind, BindingValidation,
+        ModelAvailabilityState, ModelPreset, PriceCatalogEntry, ProviderCatalogEntry,
+        ProviderCredential, ResolvedModelCatalogEntry,
     },
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_MCP_DISCOVERY, POLICY_PROVIDERS_ADMIN, authorize_library_permission,
-            authorize_workspace_discovery, authorize_workspace_permission,
-            load_library_and_authorize, load_library_binding_and_authorize,
+            POLICY_MCP_DISCOVERY, POLICY_PROVIDERS_ADMIN, authorize_workspace_discovery,
+            authorize_workspace_permission, load_library_and_authorize,
         },
         router_support::{ApiError, RequestId},
     },
     services::ai_catalog_service::{
-        CreateBindingValidationCommand, CreateLibraryBindingCommand, CreateModelPresetCommand,
-        CreateProviderCredentialCommand, CreateWorkspacePriceOverrideCommand,
-        UpdateLibraryBindingCommand, UpdateModelPresetCommand, UpdateProviderCredentialCommand,
+        AiScopeRef, CreateBindingAssignmentCommand, CreateBindingValidationCommand,
+        CreateModelPresetCommand, CreateProviderCredentialCommand,
+        CreateWorkspacePriceOverrideCommand, UpdateBindingAssignmentCommand,
+        UpdateModelPresetCommand, UpdateProviderCredentialCommand,
         UpdateWorkspacePriceOverrideCommand,
     },
-    services::audit_service::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
+    services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
 };
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsQuery {
     pub provider_catalog_id: Option<Uuid>,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
+    pub credential_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,23 +50,22 @@ pub struct PricesQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CredentialsQuery {
+pub struct AiScopeQuery {
+    pub scope_kind: Option<AiScopeKind>,
     pub workspace_id: Option<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelPresetsQuery {
-    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProviderCredentialRequest {
-    pub workspace_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub provider_catalog_id: Uuid,
     pub label: String,
-    pub api_key: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +73,7 @@ pub struct CreateProviderCredentialRequest {
 pub struct UpdateProviderCredentialRequest {
     pub label: String,
     pub api_key: Option<String>,
+    pub base_url: Option<String>,
     pub credential_state: String,
 }
 
@@ -99,13 +103,16 @@ pub struct UpdateWorkspacePriceOverrideRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateModelPresetRequest {
-    pub workspace_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub model_catalog_id: Uuid,
     pub preset_name: String,
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
+    #[serde(default)]
     pub extra_parameters_json: serde_json::Value,
 }
 
@@ -117,14 +124,16 @@ pub struct UpdateModelPresetRequest {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
+    #[serde(default)]
     pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateLibraryBindingRequest {
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
+pub struct CreateBindingAssignmentRequest {
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
@@ -132,7 +141,7 @@ pub struct CreateLibraryBindingRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateLibraryBindingRequest {
+pub struct UpdateBindingAssignmentRequest {
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
     pub binding_state: String,
@@ -146,6 +155,9 @@ pub struct ProviderCatalogEntryResponse {
     pub display_name: String,
     pub api_style: String,
     pub lifecycle_state: String,
+    pub default_base_url: Option<String>,
+    pub api_key_required: bool,
+    pub base_url_required: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +171,8 @@ pub struct ModelCatalogEntryResponse {
     pub allowed_binding_purposes: Vec<AiBindingPurpose>,
     pub context_window: Option<i32>,
     pub max_output_tokens: Option<i32>,
+    pub availability_state: ModelAvailabilityState,
+    pub available_credential_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,9 +196,12 @@ pub struct PriceCatalogEntryResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCredentialResponse {
     pub id: Uuid,
-    pub workspace_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub provider_catalog_id: Uuid,
     pub label: String,
+    pub base_url: Option<String>,
     pub api_key_summary: String,
     pub credential_state: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -195,7 +212,9 @@ pub struct ProviderCredentialResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ModelPresetResponse {
     pub id: Uuid,
-    pub workspace_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub model_catalog_id: Uuid,
     pub preset_name: String,
     pub system_prompt: Option<String>,
@@ -209,10 +228,11 @@ pub struct ModelPresetResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LibraryModelBindingResponse {
+pub struct AiBindingAssignmentResponse {
     pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
+    pub scope_kind: AiScopeKind,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
     pub binding_purpose: AiBindingPurpose,
     pub provider_credential_id: Uuid,
     pub model_preset_id: Uuid,
@@ -240,10 +260,12 @@ pub fn router() -> Router<AppState> {
         .route("/ai/prices/{price_id}", put(update_price_override))
         .route("/ai/credentials", get(list_credentials).post(create_credential))
         .route("/ai/credentials/{credential_id}", put(update_credential))
-        .route("/ai/libraries/{library_id}/bindings", get(list_library_bindings))
-        .route("/ai/library-bindings", post(create_library_binding))
-        .route("/ai/library-bindings/{binding_id}", put(update_library_binding))
-        .route("/ai/library-bindings/{binding_id}/validate", post(validate_library_binding))
+        .route("/ai/bindings", get(list_binding_assignments).post(create_binding_assignment))
+        .route(
+            "/ai/bindings/{binding_id}",
+            put(update_binding_assignment).delete(delete_binding_assignment),
+        )
+        .route("/ai/bindings/{binding_id}/validate", post(validate_binding_assignment))
 }
 
 async fn list_providers(
@@ -261,10 +283,24 @@ async fn list_models(
     Query(query): Query<ModelsQuery>,
 ) -> Result<Json<Vec<ModelCatalogEntryResponse>>, ApiError> {
     auth.require_any_scope(POLICY_MCP_DISCOVERY)?;
+    let (workspace_id, library_id) = if query.workspace_id.is_some()
+        || query.library_id.is_some()
+        || query.credential_id.is_some()
+    {
+        authorize_visible_ai_context(&auth, &state, query.workspace_id, query.library_id).await?
+    } else {
+        (None, None)
+    };
     let entries = state
         .canonical_services
         .ai_catalog
-        .list_model_catalog(&state, query.provider_catalog_id)
+        .list_resolved_model_catalog(
+            &state,
+            query.provider_catalog_id,
+            workspace_id,
+            library_id,
+            query.credential_id,
+        )
         .await?;
     Ok(Json(entries.into_iter().map(map_model).collect()))
 }
@@ -293,27 +329,73 @@ async fn list_prices(
 async fn list_model_presets(
     auth: AuthContext,
     State(state): State<AppState>,
-    Query(query): Query<ModelPresetsQuery>,
+    Query(query): Query<AiScopeQuery>,
 ) -> Result<Json<Vec<ModelPresetResponse>>, ApiError> {
-    let workspace_id =
-        resolve_workspace_scope(&auth, query.workspace_id).ok_or(ApiError::Unauthorized)?;
-    authorize_workspace_permission(&auth, workspace_id, POLICY_PROVIDERS_ADMIN)?;
-    let entries =
-        state.canonical_services.ai_catalog.list_model_presets(&state, workspace_id).await?;
+    let entries = if let Some(scope_kind) = query.scope_kind {
+        let scope = authorize_exact_ai_scope(
+            &auth,
+            &state,
+            scope_kind,
+            query.workspace_id,
+            query.library_id,
+        )
+        .await?;
+        state.canonical_services.ai_catalog.list_model_presets_exact(&state, scope).await?
+    } else {
+        let (workspace_id, library_id) =
+            authorize_visible_ai_context(&auth, &state, query.workspace_id, query.library_id)
+                .await?;
+        state
+            .canonical_services
+            .ai_catalog
+            .list_visible_model_presets(&state, workspace_id, library_id)
+            .await?
+    };
     Ok(Json(entries.into_iter().map(map_model_preset).collect()))
 }
 
 async fn list_credentials(
     auth: AuthContext,
     State(state): State<AppState>,
-    Query(query): Query<CredentialsQuery>,
+    Query(query): Query<AiScopeQuery>,
 ) -> Result<Json<Vec<ProviderCredentialResponse>>, ApiError> {
-    let workspace_id =
-        resolve_workspace_scope(&auth, query.workspace_id).ok_or(ApiError::Unauthorized)?;
-    authorize_workspace_permission(&auth, workspace_id, POLICY_PROVIDERS_ADMIN)?;
-    let entries =
-        state.canonical_services.ai_catalog.list_provider_credentials(&state, workspace_id).await?;
+    let entries = if let Some(scope_kind) = query.scope_kind {
+        let scope = authorize_exact_ai_scope(
+            &auth,
+            &state,
+            scope_kind,
+            query.workspace_id,
+            query.library_id,
+        )
+        .await?;
+        state.canonical_services.ai_catalog.list_provider_credentials_exact(&state, scope).await?
+    } else {
+        let (workspace_id, library_id) =
+            authorize_visible_ai_context(&auth, &state, query.workspace_id, query.library_id)
+                .await?;
+        state
+            .canonical_services
+            .ai_catalog
+            .list_visible_provider_credentials(&state, workspace_id, library_id)
+            .await?
+    };
     Ok(Json(entries.into_iter().map(map_provider_credential).collect()))
+}
+
+async fn list_binding_assignments(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Query(query): Query<AiScopeQuery>,
+) -> Result<Json<Vec<AiBindingAssignmentResponse>>, ApiError> {
+    let scope_kind = query.scope_kind.ok_or_else(|| {
+        ApiError::BadRequest("scopeKind is required for binding queries".to_string())
+    })?;
+    let scope =
+        authorize_exact_ai_scope(&auth, &state, scope_kind, query.workspace_id, query.library_id)
+            .await?;
+    let entries =
+        state.canonical_services.ai_catalog.list_binding_assignments(&state, scope).await?;
+    Ok(Json(entries.into_iter().map(map_binding_assignment).collect()))
 }
 
 async fn create_credential(
@@ -323,49 +405,30 @@ async fn create_credential(
     Json(payload): Json<CreateProviderCredentialRequest>,
 ) -> Result<Json<ProviderCredentialResponse>, ApiError> {
     let request_id = request_id.map(|value| value.0.0);
-    if let Err(error) =
-        authorize_workspace_permission(&auth, payload.workspace_id, POLICY_PROVIDERS_ADMIN)
-    {
-        record_ai_audit_event(
-            &state,
-            &auth,
-            request_id.clone(),
-            "ai.provider_credential.create",
-            "rejected",
-            Some("provider credential create denied".to_string()),
-            Some(format!(
-                "principal {} was denied provider credential create for workspace {}",
-                auth.principal_id, payload.workspace_id
-            )),
-            vec![AppendAuditEventSubjectCommand {
-                subject_kind: "workspace".to_string(),
-                subject_id: payload.workspace_id,
-                workspace_id: Some(payload.workspace_id),
-                library_id: None,
-                document_id: None,
-            }],
-        )
-        .await;
-        return Err(error);
-    }
+    let scope = authorize_exact_ai_scope(
+        &auth,
+        &state,
+        payload.scope_kind,
+        payload.workspace_id,
+        payload.library_id,
+    )
+    .await?;
     let entry = state
         .canonical_services
         .ai_catalog
         .create_provider_credential(
             &state,
             CreateProviderCredentialCommand {
-                workspace_id: payload.workspace_id,
+                scope_kind: payload.scope_kind,
+                workspace_id: scope.workspace_id,
+                library_id: scope.library_id,
                 provider_catalog_id: payload.provider_catalog_id,
                 label: payload.label,
                 api_key: payload.api_key,
+                base_url: payload.base_url,
                 created_by_principal_id: Some(auth.principal_id),
             },
         )
-        .await?;
-    state
-        .canonical_services
-        .ai_catalog
-        .ensure_workspace_runtime_profiles(&state, entry.workspace_id, Some(auth.principal_id))
         .await?;
     record_ai_audit_event(
         &state,
@@ -375,16 +438,17 @@ async fn create_credential(
         "succeeded",
         Some(format!("provider credential {} created", entry.label)),
         Some(format!(
-            "principal {} created provider credential {} in workspace {}",
-            auth.principal_id, entry.id, entry.workspace_id
+            "principal {} created provider credential {} in {}",
+            auth.principal_id,
+            entry.id,
+            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
         )),
-        vec![AppendAuditEventSubjectCommand {
-            subject_kind: "provider_credential".to_string(),
-            subject_id: entry.id,
-            workspace_id: Some(entry.workspace_id),
-            library_id: None,
-            document_id: None,
-        }],
+        vec![subject_from_scope(
+            "provider_credential",
+            entry.id,
+            entry.workspace_id,
+            entry.library_id,
+        )],
     )
     .await;
     Ok(Json(map_provider_credential(entry)))
@@ -399,7 +463,14 @@ async fn update_credential(
 ) -> Result<Json<ProviderCredentialResponse>, ApiError> {
     let credential =
         state.canonical_services.ai_catalog.get_provider_credential(&state, credential_id).await?;
-    authorize_workspace_permission(&auth, credential.workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        credential.scope_kind,
+        credential.workspace_id,
+        credential.library_id,
+    )
+    .await?;
     let entry = state
         .canonical_services
         .ai_catalog
@@ -409,14 +480,10 @@ async fn update_credential(
                 credential_id,
                 label: payload.label,
                 api_key: payload.api_key,
+                base_url: payload.base_url,
                 credential_state: payload.credential_state,
             },
         )
-        .await?;
-    state
-        .canonical_services
-        .ai_catalog
-        .ensure_workspace_runtime_profiles(&state, entry.workspace_id, Some(auth.principal_id))
         .await?;
     record_ai_audit_event(
         &state,
@@ -426,16 +493,17 @@ async fn update_credential(
         "succeeded",
         Some(format!("provider credential {} updated", entry.label)),
         Some(format!(
-            "principal {} updated provider credential {} in workspace {}",
-            auth.principal_id, entry.id, entry.workspace_id
+            "principal {} updated provider credential {} in {}",
+            auth.principal_id,
+            entry.id,
+            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
         )),
-        vec![AppendAuditEventSubjectCommand {
-            subject_kind: "provider_credential".to_string(),
-            subject_id: entry.id,
-            workspace_id: Some(entry.workspace_id),
-            library_id: None,
-            document_id: None,
-        }],
+        vec![subject_from_scope(
+            "provider_credential",
+            entry.id,
+            entry.workspace_id,
+            entry.library_id,
+        )],
     )
     .await;
     Ok(Json(map_provider_credential(entry)))
@@ -548,14 +616,23 @@ async fn create_model_preset(
     request_id: Option<axum::Extension<RequestId>>,
     Json(payload): Json<CreateModelPresetRequest>,
 ) -> Result<Json<ModelPresetResponse>, ApiError> {
-    authorize_workspace_permission(&auth, payload.workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    let scope = authorize_exact_ai_scope(
+        &auth,
+        &state,
+        payload.scope_kind,
+        payload.workspace_id,
+        payload.library_id,
+    )
+    .await?;
     let entry = state
         .canonical_services
         .ai_catalog
         .create_model_preset(
             &state,
             CreateModelPresetCommand {
-                workspace_id: payload.workspace_id,
+                scope_kind: payload.scope_kind,
+                workspace_id: scope.workspace_id,
+                library_id: scope.library_id,
                 model_catalog_id: payload.model_catalog_id,
                 preset_name: payload.preset_name,
                 system_prompt: payload.system_prompt,
@@ -575,16 +652,12 @@ async fn create_model_preset(
         "succeeded",
         Some(format!("model preset {} created", entry.preset_name)),
         Some(format!(
-            "principal {} created model preset {} in workspace {}",
-            auth.principal_id, entry.id, entry.workspace_id
+            "principal {} created model preset {} in {}",
+            auth.principal_id,
+            entry.id,
+            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
         )),
-        vec![AppendAuditEventSubjectCommand {
-            subject_kind: "model_preset".to_string(),
-            subject_id: entry.id,
-            workspace_id: Some(entry.workspace_id),
-            library_id: None,
-            document_id: None,
-        }],
+        vec![subject_from_scope("model_preset", entry.id, entry.workspace_id, entry.library_id)],
     )
     .await;
     Ok(Json(map_model_preset(entry)))
@@ -598,7 +671,14 @@ async fn update_model_preset(
     Json(payload): Json<UpdateModelPresetRequest>,
 ) -> Result<Json<ModelPresetResponse>, ApiError> {
     let preset = state.canonical_services.ai_catalog.get_model_preset(&state, preset_id).await?;
-    authorize_workspace_permission(&auth, preset.workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        preset.scope_kind,
+        preset.workspace_id,
+        preset.library_id,
+    )
+    .await?;
     let entry = state
         .canonical_services
         .ai_catalog
@@ -623,104 +703,40 @@ async fn update_model_preset(
         "succeeded",
         Some(format!("model preset {} updated", entry.preset_name)),
         Some(format!(
-            "principal {} updated model preset {} in workspace {}",
-            auth.principal_id, entry.id, entry.workspace_id
+            "principal {} updated model preset {} in {}",
+            auth.principal_id,
+            entry.id,
+            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
         )),
-        vec![AppendAuditEventSubjectCommand {
-            subject_kind: "model_preset".to_string(),
-            subject_id: entry.id,
-            workspace_id: Some(entry.workspace_id),
-            library_id: None,
-            document_id: None,
-        }],
+        vec![subject_from_scope("model_preset", entry.id, entry.workspace_id, entry.library_id)],
     )
     .await;
     Ok(Json(map_model_preset(entry)))
 }
 
-async fn list_library_bindings(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(library_id): Path<Uuid>,
-) -> Result<Json<Vec<LibraryModelBindingResponse>>, ApiError> {
-    let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_PROVIDERS_ADMIN).await?;
-    let entries =
-        state.canonical_services.ai_catalog.list_library_bindings(&state, library_id).await?;
-    Ok(Json(entries.into_iter().map(map_library_binding).collect()))
-}
-
-async fn create_library_binding(
+async fn create_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<CreateLibraryBindingRequest>,
-) -> Result<Json<LibraryModelBindingResponse>, ApiError> {
-    let request_id = request_id.map(|value| value.0.0);
-    if let Err(error) =
-        authorize_workspace_permission(&auth, payload.workspace_id, POLICY_PROVIDERS_ADMIN)
-    {
-        record_ai_audit_event(
-            &state,
-            &auth,
-            request_id.clone(),
-            "ai.library_binding.create",
-            "rejected",
-            Some("library binding create denied".to_string()),
-            Some(format!(
-                "principal {} was denied library binding create for workspace {} library {}",
-                auth.principal_id, payload.workspace_id, payload.library_id
-            )),
-            vec![AppendAuditEventSubjectCommand {
-                subject_kind: "workspace".to_string(),
-                subject_id: payload.workspace_id,
-                workspace_id: Some(payload.workspace_id),
-                library_id: Some(payload.library_id),
-                document_id: None,
-            }],
-        )
-        .await;
-        return Err(error);
-    }
-    let library = state.canonical_services.catalog.get_library(&state, payload.library_id).await?;
-    if library.workspace_id != payload.workspace_id {
-        return Err(ApiError::BadRequest("libraryId does not belong to workspaceId".to_string()));
-    }
-    if let Err(error) = authorize_library_permission(
+    Json(payload): Json<CreateBindingAssignmentRequest>,
+) -> Result<Json<AiBindingAssignmentResponse>, ApiError> {
+    let scope = authorize_exact_ai_scope(
         &auth,
-        library.workspace_id,
-        library.id,
-        POLICY_PROVIDERS_ADMIN,
-    ) {
-        record_ai_audit_event(
-            &state,
-            &auth,
-            request_id.clone(),
-            "ai.library_binding.create",
-            "rejected",
-            Some("library binding create denied".to_string()),
-            Some(format!(
-                "principal {} was denied library binding create for workspace {} library {}",
-                auth.principal_id, library.workspace_id, library.id
-            )),
-            vec![AppendAuditEventSubjectCommand {
-                subject_kind: "library".to_string(),
-                subject_id: library.id,
-                workspace_id: Some(library.workspace_id),
-                library_id: Some(library.id),
-                document_id: None,
-            }],
-        )
-        .await;
-        return Err(error);
-    }
+        &state,
+        payload.scope_kind,
+        payload.workspace_id,
+        payload.library_id,
+    )
+    .await?;
     let entry = state
         .canonical_services
         .ai_catalog
-        .create_library_binding(
+        .create_binding_assignment(
             &state,
-            CreateLibraryBindingCommand {
-                workspace_id: payload.workspace_id,
-                library_id: payload.library_id,
+            CreateBindingAssignmentCommand {
+                scope_kind: payload.scope_kind,
+                workspace_id: scope.workspace_id,
+                library_id: scope.library_id,
                 binding_purpose: payload.binding_purpose,
                 provider_credential_id: payload.provider_credential_id,
                 model_preset_id: payload.model_preset_id,
@@ -731,42 +747,50 @@ async fn create_library_binding(
     record_ai_audit_event(
         &state,
         &auth,
-        request_id,
-        "ai.library_binding.create",
+        request_id.map(|value| value.0.0),
+        "ai.binding_assignment.create",
         "succeeded",
-        Some(format!("library binding {} created", entry.id)),
+        Some(format!("binding assignment {} created", entry.id)),
         Some(format!(
-            "principal {} created library binding {} for library {}",
-            auth.principal_id, entry.id, entry.library_id
+            "principal {} created binding assignment {} in {}",
+            auth.principal_id,
+            entry.id,
+            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
         )),
-        vec![AppendAuditEventSubjectCommand {
-            subject_kind: "library_binding".to_string(),
-            subject_id: entry.id,
-            workspace_id: Some(entry.workspace_id),
-            library_id: Some(entry.library_id),
-            document_id: None,
-        }],
+        vec![subject_from_scope(
+            "binding_assignment",
+            entry.id,
+            entry.workspace_id,
+            entry.library_id,
+        )],
     )
     .await;
-    Ok(Json(map_library_binding(entry)))
+    Ok(Json(map_binding_assignment(entry)))
 }
 
-async fn update_library_binding(
+async fn update_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(binding_id): Path<Uuid>,
-    Json(payload): Json<UpdateLibraryBindingRequest>,
-) -> Result<Json<LibraryModelBindingResponse>, ApiError> {
+    Json(payload): Json<UpdateBindingAssignmentRequest>,
+) -> Result<Json<AiBindingAssignmentResponse>, ApiError> {
     let binding =
-        load_library_binding_and_authorize(&auth, &state, binding_id, POLICY_PROVIDERS_ADMIN)
-            .await?;
+        state.canonical_services.ai_catalog.get_binding_assignment(&state, binding_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        binding.scope_kind,
+        binding.workspace_id,
+        binding.library_id,
+    )
+    .await?;
     let entry = state
         .canonical_services
         .ai_catalog
-        .update_library_binding(
+        .update_binding_assignment(
             &state,
-            UpdateLibraryBindingCommand {
+            UpdateBindingAssignmentCommand {
                 binding_id,
                 provider_credential_id: payload.provider_credential_id,
                 model_preset_id: payload.model_preset_id,
@@ -779,34 +803,83 @@ async fn update_library_binding(
         &state,
         &auth,
         request_id.map(|value| value.0.0),
-        "ai.library_binding.update",
+        "ai.binding_assignment.update",
         "succeeded",
-        Some(format!("library binding {} updated", entry.id)),
+        Some(format!("binding assignment {} updated", entry.id)),
         Some(format!(
-            "principal {} updated library binding {} for library {}",
-            auth.principal_id, entry.id, entry.library_id
+            "principal {} updated binding assignment {} in {}",
+            auth.principal_id,
+            entry.id,
+            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
         )),
-        vec![AppendAuditEventSubjectCommand {
-            subject_kind: "library_binding".to_string(),
-            subject_id: entry.id,
-            workspace_id: Some(binding.workspace_id),
-            library_id: Some(binding.library_id),
-            document_id: None,
-        }],
+        vec![subject_from_scope(
+            "binding_assignment",
+            entry.id,
+            entry.workspace_id,
+            entry.library_id,
+        )],
     )
     .await;
-    Ok(Json(map_library_binding(entry)))
+    Ok(Json(map_binding_assignment(entry)))
 }
 
-async fn validate_library_binding(
+async fn delete_binding_assignment(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(binding_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let binding =
+        state.canonical_services.ai_catalog.get_binding_assignment(&state, binding_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        binding.scope_kind,
+        binding.workspace_id,
+        binding.library_id,
+    )
+    .await?;
+    state.canonical_services.ai_catalog.delete_binding_assignment(&state, binding_id).await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.binding_assignment.delete",
+        "succeeded",
+        Some(format!("binding assignment {} deleted", binding_id)),
+        Some(format!(
+            "principal {} deleted binding assignment {} in {}",
+            auth.principal_id,
+            binding_id,
+            describe_scope(binding.scope_kind, binding.workspace_id, binding.library_id),
+        )),
+        vec![subject_from_scope(
+            "binding_assignment",
+            binding_id,
+            binding.workspace_id,
+            binding.library_id,
+        )],
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+async fn validate_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(binding_id): Path<Uuid>,
 ) -> Result<Json<BindingValidationResponse>, ApiError> {
     let binding =
-        load_library_binding_and_authorize(&auth, &state, binding_id, POLICY_PROVIDERS_ADMIN)
-            .await?;
+        state.canonical_services.ai_catalog.get_binding_assignment(&state, binding_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        binding.scope_kind,
+        binding.workspace_id,
+        binding.library_id,
+    )
+    .await?;
     let validation = state
         .canonical_services
         .ai_catalog
@@ -824,20 +897,21 @@ async fn validate_library_binding(
         &state,
         &auth,
         request_id.map(|value| value.0.0),
-        "ai.library_binding.validate",
+        "ai.binding_assignment.validate",
         "succeeded",
-        Some(format!("library binding {} validation requested", binding_id)),
+        Some(format!("binding assignment {} validation requested", binding_id)),
         Some(format!(
-            "principal {} requested validation for library binding {}",
-            auth.principal_id, binding_id
+            "principal {} requested validation for binding assignment {} in {}",
+            auth.principal_id,
+            binding_id,
+            describe_scope(binding.scope_kind, binding.workspace_id, binding.library_id),
         )),
-        vec![AppendAuditEventSubjectCommand {
-            subject_kind: "library_binding".to_string(),
-            subject_id: binding_id,
-            workspace_id: Some(binding.workspace_id),
-            library_id: Some(binding.library_id),
-            document_id: None,
-        }],
+        vec![subject_from_scope(
+            "binding_assignment",
+            binding_id,
+            binding.workspace_id,
+            binding.library_id,
+        )],
     )
     .await;
     Ok(Json(map_binding_validation(validation)))
@@ -853,7 +927,7 @@ async fn record_ai_audit_event(
     internal_message: Option<String>,
     subjects: Vec<AppendAuditEventSubjectCommand>,
 ) {
-    let _ = state
+    if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
@@ -870,7 +944,10 @@ async fn record_ai_audit_event(
                 subjects,
             },
         )
-        .await;
+        .await
+    {
+        tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
 }
 
 fn map_provider(entry: ProviderCatalogEntry) -> ProviderCatalogEntryResponse {
@@ -880,19 +957,24 @@ fn map_provider(entry: ProviderCatalogEntry) -> ProviderCatalogEntryResponse {
         display_name: entry.display_name,
         api_style: entry.api_style,
         lifecycle_state: entry.lifecycle_state,
+        default_base_url: entry.default_base_url,
+        api_key_required: entry.api_key_required,
+        base_url_required: entry.base_url_required,
     }
 }
 
-fn map_model(entry: ModelCatalogEntry) -> ModelCatalogEntryResponse {
+fn map_model(entry: ResolvedModelCatalogEntry) -> ModelCatalogEntryResponse {
     ModelCatalogEntryResponse {
-        id: entry.id,
-        provider_catalog_id: entry.provider_catalog_id,
-        model_name: entry.model_name,
-        capability_kind: entry.capability_kind,
-        modality_kind: entry.modality_kind,
-        allowed_binding_purposes: entry.allowed_binding_purposes,
-        context_window: entry.context_window,
-        max_output_tokens: entry.max_output_tokens,
+        id: entry.model.id,
+        provider_catalog_id: entry.model.provider_catalog_id,
+        model_name: entry.model.model_name,
+        capability_kind: entry.model.capability_kind,
+        modality_kind: entry.model.modality_kind,
+        allowed_binding_purposes: entry.model.allowed_binding_purposes,
+        context_window: entry.model.context_window,
+        max_output_tokens: entry.model.max_output_tokens,
+        availability_state: entry.availability_state,
+        available_credential_ids: entry.available_credential_ids,
     }
 }
 
@@ -916,21 +998,23 @@ fn map_price(entry: PriceCatalogEntry) -> PriceCatalogEntryResponse {
 fn map_provider_credential(entry: ProviderCredential) -> ProviderCredentialResponse {
     ProviderCredentialResponse {
         id: entry.id,
+        scope_kind: entry.scope_kind,
         workspace_id: entry.workspace_id,
+        library_id: entry.library_id,
         provider_catalog_id: entry.provider_catalog_id,
         label: entry.label,
-        api_key_summary: summarize_api_key(&entry.api_key),
+        base_url: entry.base_url,
+        api_key_summary: summarize_api_key(entry.api_key.as_deref()),
         credential_state: entry.credential_state,
         created_at: entry.created_at,
         updated_at: entry.updated_at,
     }
 }
 
-fn summarize_api_key(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return "stored".to_string();
-    }
+fn summarize_api_key(value: Option<&str>) -> String {
+    let Some(trimmed) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "not_configured".to_string();
+    };
     let prefix: String = trimmed.chars().take(4).collect();
     let suffix =
         trimmed.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>();
@@ -944,7 +1028,9 @@ fn summarize_api_key(value: &str) -> String {
 fn map_model_preset(entry: ModelPreset) -> ModelPresetResponse {
     ModelPresetResponse {
         id: entry.id,
+        scope_kind: entry.scope_kind,
         workspace_id: entry.workspace_id,
+        library_id: entry.library_id,
         model_catalog_id: entry.model_catalog_id,
         preset_name: entry.preset_name,
         system_prompt: entry.system_prompt,
@@ -957,9 +1043,10 @@ fn map_model_preset(entry: ModelPreset) -> ModelPresetResponse {
     }
 }
 
-fn map_library_binding(entry: LibraryModelBinding) -> LibraryModelBindingResponse {
-    LibraryModelBindingResponse {
+fn map_binding_assignment(entry: AiBindingAssignment) -> AiBindingAssignmentResponse {
+    AiBindingAssignmentResponse {
         id: entry.id,
+        scope_kind: entry.scope_kind,
         workspace_id: entry.workspace_id,
         library_id: entry.library_id,
         binding_purpose: entry.binding_purpose,
@@ -980,20 +1067,122 @@ fn map_binding_validation(entry: BindingValidation) -> BindingValidationResponse
     }
 }
 
-fn resolve_workspace_scope(
+async fn authorize_visible_ai_context(
     auth: &AuthContext,
-    requested_workspace_id: Option<Uuid>,
-) -> Option<Uuid> {
-    match requested_workspace_id {
-        Some(workspace_id) => {
-            if !auth.can_access_workspace(workspace_id) {
-                return None;
+    state: &AppState,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
+) -> Result<(Option<Uuid>, Option<Uuid>), ApiError> {
+    if let Some(library_id) = library_id {
+        let library =
+            load_library_and_authorize(auth, state, library_id, POLICY_PROVIDERS_ADMIN).await?;
+        if let Some(workspace_id) = workspace_id {
+            if workspace_id != library.workspace_id {
+                return Err(ApiError::BadRequest(
+                    "libraryId does not belong to workspaceId".to_string(),
+                ));
             }
-            Some(workspace_id)
         }
-        None if auth.visible_workspace_ids.len() == 1 => {
-            auth.visible_workspace_ids.iter().copied().next()
+        return Ok((Some(library.workspace_id), Some(library.id)));
+    }
+
+    if let Some(workspace_id) = workspace_id {
+        authorize_workspace_permission(auth, workspace_id, POLICY_PROVIDERS_ADMIN)?;
+        return Ok((Some(workspace_id), None));
+    }
+
+    if auth.is_system_admin {
+        return Ok((None, None));
+    }
+
+    Err(ApiError::BadRequest(
+        "workspaceId or libraryId is required for AI configuration".to_string(),
+    ))
+}
+
+async fn authorize_exact_ai_scope(
+    auth: &AuthContext,
+    state: &AppState,
+    scope_kind: AiScopeKind,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
+) -> Result<AiScopeRef, ApiError> {
+    match scope_kind {
+        AiScopeKind::Instance => {
+            if workspace_id.is_some() || library_id.is_some() {
+                return Err(ApiError::BadRequest(
+                    "instance scope cannot include workspaceId or libraryId".to_string(),
+                ));
+            }
+            if auth.is_system_admin {
+                Ok(AiScopeRef { scope_kind, workspace_id: None, library_id: None })
+            } else {
+                Err(ApiError::Unauthorized)
+            }
         }
-        None => auth.workspace_id.filter(|workspace_id| auth.can_access_workspace(*workspace_id)),
+        AiScopeKind::Workspace => {
+            if library_id.is_some() {
+                return Err(ApiError::BadRequest(
+                    "workspace scope cannot include libraryId".to_string(),
+                ));
+            }
+            let workspace_id = workspace_id.ok_or_else(|| {
+                ApiError::BadRequest("workspaceId is required for workspace scope".to_string())
+            })?;
+            authorize_workspace_permission(auth, workspace_id, POLICY_PROVIDERS_ADMIN)?;
+            Ok(AiScopeRef { scope_kind, workspace_id: Some(workspace_id), library_id: None })
+        }
+        AiScopeKind::Library => {
+            let library_id = library_id.ok_or_else(|| {
+                ApiError::BadRequest("libraryId is required for library scope".to_string())
+            })?;
+            let library =
+                load_library_and_authorize(auth, state, library_id, POLICY_PROVIDERS_ADMIN).await?;
+            if let Some(workspace_id) = workspace_id {
+                if workspace_id != library.workspace_id {
+                    return Err(ApiError::BadRequest(
+                        "libraryId does not belong to workspaceId".to_string(),
+                    ));
+                }
+            }
+            Ok(AiScopeRef {
+                scope_kind,
+                workspace_id: Some(library.workspace_id),
+                library_id: Some(library.id),
+            })
+        }
+    }
+}
+
+fn describe_scope(
+    scope_kind: AiScopeKind,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
+) -> String {
+    match scope_kind {
+        AiScopeKind::Instance => "instance scope".to_string(),
+        AiScopeKind::Workspace => format!(
+            "workspace {}",
+            workspace_id.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())
+        ),
+        AiScopeKind::Library => format!(
+            "library {}",
+            library_id.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())
+        ),
+    }
+}
+
+fn subject_from_scope(
+    subject_kind: &str,
+    subject_id: Uuid,
+    workspace_id: Option<Uuid>,
+    library_id: Option<Uuid>,
+) -> AppendAuditEventSubjectCommand {
+    AppendAuditEventSubjectCommand {
+        subject_kind: subject_kind.to_string(),
+        subject_id,
+        workspace_id,
+        library_id,
+        document_id: None,
     }
 }

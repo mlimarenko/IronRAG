@@ -16,6 +16,11 @@ repos:
       - id: detect-private-key
   - repo: local
     hooks:
+      - id: max-lines
+        name: max-lines
+        entry: scripts/pre-commit/check-max-lines.sh
+        language: system
+        pass_filenames: true
       - id: backend-fmt
         name: backend-fmt
         entry: bash -lc 'cargo fmt --all'

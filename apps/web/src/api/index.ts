@@ -6,3 +6,5 @@ export { dashboardApi } from "./dashboard";
 export { queryApi } from "./query";
 export { knowledgeApi } from "./knowledge";
 export { adminApi } from "./admin";
+export { versionApi } from "./version";
+export type { ReleaseUpdateResponse, ReleaseUpdateStatus } from "./version";

@@ -10,7 +10,7 @@ use crate::{
         },
         ai::AiBindingPurpose,
     },
-    services::graph_extract::{
+    services::graph::extract::{
         GraphExtractionCandidateSet, GraphExtractionTaskFailure, GraphExtractionTechnicalFact,
     },
 };
