@@ -131,7 +131,7 @@ pub async fn update_document(
         .arango_document_store
         .get_document(request.document_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("document", request.document_id))?;
     authorize_document_permission(
         auth,
@@ -412,7 +412,7 @@ pub(crate) async fn ensure_matching_mutation_payload_identity(
                 .arango_document_store
                 .get_revision(revision_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .and_then(|revision| {
                     payload_identity_from_source_uri(revision.source_uri.as_deref())
                 })
@@ -682,7 +682,7 @@ pub(crate) async fn resolve_mutation_receipt(
             .arango_document_store
             .get_revision(revision_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .map(|revision| revision.document_id);
     }
 
@@ -691,7 +691,7 @@ pub(crate) async fn resolve_mutation_receipt(
             .arango_document_store
             .get_document(document_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
         authorize_library_discovery(auth, document.workspace_id, document.library_id)?;
         authorize_document_permission(
@@ -717,7 +717,7 @@ pub(crate) async fn resolve_mutation_receipt(
             .arango_document_store
             .get_document(document_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .and_then(|row| row.readable_revision_id);
         if current_revision_id != Some(result_revision_id) {
             status = McpMutationReceiptStatus::Superseded;

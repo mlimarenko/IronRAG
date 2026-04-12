@@ -14,7 +14,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
         arangodb::client::ArangoClient,

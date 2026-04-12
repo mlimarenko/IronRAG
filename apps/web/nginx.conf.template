@@ -21,7 +21,7 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 300s;
-        proxy_pass ${RUSTRAG_API_UPSTREAM};
+        proxy_pass ${IRONRAG_API_UPSTREAM};
     }
 
     location /assets/ {

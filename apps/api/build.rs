@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hasher.update(&contents);
     }
 
-    println!("cargo:rustc-env=RUSTRAG_MIGRATIONS_FINGERPRINT={:016x}", hasher.finish());
+    println!("cargo:rustc-env=IRONRAG_MIGRATIONS_FINGERPRINT={:016x}", hasher.finish());
     Ok(())
 }
 

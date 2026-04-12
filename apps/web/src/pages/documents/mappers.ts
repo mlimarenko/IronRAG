@@ -10,6 +10,7 @@ import type { DocumentItem, DocumentReadiness, DocumentStatus } from '@/types';
  * UI reads (the raw backend payload is intentionally richer).
  */
 interface RawDocumentRevision {
+  title?: string;
   mime_type?: string;
   byte_size?: number;
   content_source_kind?: string;
@@ -44,6 +45,8 @@ export interface RawDocumentForUI {
       current_stage?: string;
       failure_code?: string;
       retryable?: boolean;
+      queued_at?: string;
+      completed_at?: string;
     };
   };
   sourceAccess?: unknown;
@@ -134,6 +137,8 @@ export function mapApiDocument(raw: RawDocumentForUI, t: TFunction): DocumentIte
 
   const revision = raw.activeRevision ?? raw.active_revision;
 
+  const lastActivity = raw.pipeline?.latest_job?.completed_at ?? undefined;
+
   return {
     id: raw.document?.id ?? raw.id ?? '',
     fileName,
@@ -144,6 +149,7 @@ export function mapApiDocument(raw: RawDocumentForUI, t: TFunction): DocumentIte
     status,
     readiness,
     stage: humanizeDocumentStage(jobStage, t),
+    lastActivity,
     failureMessage,
     canRetry: readiness === 'failed' ? retryable : undefined,
     sourceKind: revision?.content_source_kind ?? undefined,

@@ -263,6 +263,334 @@
   }
 }
 
+@layer components {
+  .document-editor-prosemirror {
+    color: hsl(var(--foreground));
+    line-height: 1.65;
+  }
+
+  .document-editor-prosemirror > * + * {
+    margin-top: 0.9rem;
+  }
+
+  .document-editor-prosemirror h1,
+  .document-editor-prosemirror h2,
+  .document-editor-prosemirror h3,
+  .document-editor-prosemirror h4,
+  .document-editor-prosemirror h5,
+  .document-editor-prosemirror h6 {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .document-editor-prosemirror h1 {
+    font-size: 1.5rem;
+  }
+
+  .document-editor-prosemirror h2 {
+    font-size: 1.25rem;
+  }
+
+  .document-editor-prosemirror--prose {
+    max-width: 54rem;
+    margin: 0 auto;
+  }
+
+  .document-editor-prosemirror--code {
+    min-width: max-content;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      "Courier New", monospace;
+    font-size: 0.94rem;
+    line-height: 1.7;
+    tab-size: 4;
+    font-variant-ligatures: none;
+  }
+
+  .document-editor-prosemirror--code p,
+  .document-editor-prosemirror--code h1,
+  .document-editor-prosemirror--code h2,
+  .document-editor-prosemirror--code h3,
+  .document-editor-prosemirror--code h4,
+  .document-editor-prosemirror--code h5,
+  .document-editor-prosemirror--code h6 {
+    font-family: inherit;
+    letter-spacing: 0;
+    white-space: pre;
+    font-size: inherit;
+    font-weight: 400;
+  }
+
+  .document-editor-prosemirror--code > * + * {
+    margin-top: 0;
+  }
+
+  .document-editor-prosemirror pre {
+    overflow-x: auto;
+    border-radius: 1rem;
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--card));
+    padding: 1rem;
+    font-size: 0.875rem;
+  }
+
+  .document-editor-prosemirror--code pre {
+    margin: 0;
+    min-width: 100%;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+  }
+
+  .document-editor-prosemirror--code code {
+    font-family: inherit;
+  }
+
+  .document-editor-code-shell {
+    display: flex;
+    min-height: 100%;
+    min-width: max(100%, 62rem);
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 1.5rem;
+    border: 1px solid hsl(var(--border));
+    background:
+      linear-gradient(180deg, hsl(var(--surface-sunken)), hsl(var(--background)) 12rem);
+    box-shadow: var(--shadow-soft);
+  }
+
+  .document-editor-code-shell__header,
+  .document-editor-code-shell__footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.8rem 1rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      "Courier New", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.01em;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .document-editor-code-shell__header {
+    border-bottom: 1px solid hsl(var(--border));
+    background: hsl(var(--background) / 0.76);
+    backdrop-filter: blur(12px);
+  }
+
+  .document-editor-code-shell__footer {
+    border-top: 1px solid hsl(var(--border));
+    background: hsl(var(--background) / 0.82);
+    backdrop-filter: blur(12px);
+  }
+
+  .document-editor-code-shell__body {
+    display: grid;
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .document-editor-code-shell__gutter {
+    position: sticky;
+    left: 0;
+    display: flex;
+    min-height: 100%;
+    flex-direction: column;
+    align-self: stretch;
+    border-right: 1px solid hsl(var(--border));
+    background: hsl(var(--surface-sunken) / 0.92);
+    padding: 1rem 0.75rem 1rem 0.5rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      "Courier New", monospace;
+    font-size: 0.78rem;
+    line-height: 1.7;
+    text-align: right;
+    color: hsl(var(--muted-foreground));
+    user-select: none;
+  }
+
+  .document-editor-code-shell__content {
+    min-width: 0;
+    padding: 1rem 1.25rem 1.25rem;
+  }
+
+  .document-editor-prosemirror blockquote {
+    border-left: 3px solid hsl(var(--border));
+    padding-left: 1rem;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .document-editor-prosemirror--table {
+    min-width: max-content;
+    padding-bottom: 0.5rem;
+  }
+
+  .document-editor-table-scroll {
+    position: relative;
+    scrollbar-gutter: stable;
+    scrollbar-width: auto;
+  }
+
+  .document-editor-table-scroll::before,
+  .document-editor-table-scroll::after {
+    content: "";
+    pointer-events: none;
+    position: sticky;
+    top: 0;
+    bottom: 0;
+    z-index: 2;
+    display: block;
+    width: 1.5rem;
+  }
+
+  .document-editor-table-scroll::before {
+    left: 0;
+    float: left;
+    margin-right: -1.5rem;
+    background: linear-gradient(90deg, hsl(var(--background) / 0.96), transparent);
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+
+  .document-editor-table-scroll::after {
+    right: 0;
+    float: right;
+    margin-left: -1.5rem;
+    background: linear-gradient(270deg, hsl(var(--background) / 0.96), transparent);
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+
+  .document-editor-table-scroll--can-left::before {
+    opacity: 1;
+  }
+
+  .document-editor-table-scroll--can-right::after {
+    opacity: 1;
+  }
+
+  .document-editor-table-scroll::-webkit-scrollbar:vertical {
+    width: 12px;
+  }
+
+  .document-editor-table-scroll::-webkit-scrollbar:horizontal {
+    height: 0;
+  }
+
+  .document-editor-table-scroll::-webkit-scrollbar-thumb:vertical {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: hsl(var(--border));
+    background-clip: padding-box;
+  }
+
+  .document-editor-table-scroll::-webkit-scrollbar-track:vertical {
+    background: hsl(var(--background));
+  }
+
+  .document-editor-table-rail-shell {
+    border-top: 1px solid hsl(var(--border));
+    background: hsl(var(--background) / 0.96);
+    padding: 0.45rem 1rem 0.7rem;
+  }
+
+  .document-editor-table-slider {
+    width: 100%;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .document-editor-table-slider::-webkit-slider-runnable-track {
+    height: 0.45rem;
+    border-radius: 999px;
+    background: hsl(var(--muted) / 0.92);
+    box-shadow: inset 0 0 0 1px hsl(var(--border));
+  }
+
+  .document-editor-table-slider::-webkit-slider-thumb {
+    appearance: none;
+    margin-top: -4px;
+    height: 1rem;
+    width: 9rem;
+    border: 1px solid hsl(var(--primary) / 0.16);
+    border-radius: 999px;
+    background: linear-gradient(90deg, hsl(var(--primary) / 0.5), hsl(var(--primary) / 0.78));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.28),
+      0 2px 8px hsl(var(--primary) / 0.18);
+  }
+
+  .document-editor-table-slider::-moz-range-track {
+    height: 0.45rem;
+    border-radius: 999px;
+    background: hsl(var(--muted) / 0.92);
+    box-shadow: inset 0 0 0 1px hsl(var(--border));
+  }
+
+  .document-editor-table-slider::-moz-range-thumb {
+    height: 1rem;
+    width: 9rem;
+    border: 1px solid hsl(var(--primary) / 0.16);
+    border-radius: 999px;
+    background: linear-gradient(90deg, hsl(var(--primary) / 0.5), hsl(var(--primary) / 0.78));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.28),
+      0 2px 8px hsl(var(--primary) / 0.18);
+  }
+
+  .document-editor-prosemirror table {
+    width: max-content;
+    min-width: 100%;
+    border-collapse: collapse;
+    overflow: hidden;
+    border-radius: 1rem;
+    background: hsl(var(--card));
+    box-shadow: var(--shadow-soft);
+  }
+
+  .document-editor-prosemirror th,
+  .document-editor-prosemirror td {
+    min-width: 8rem;
+    border: 1px solid hsl(var(--border));
+    padding: 0.65rem 0.8rem;
+    vertical-align: top;
+  }
+
+  .document-editor-prosemirror--table table {
+    min-width: max(100%, 68rem);
+    table-layout: auto;
+  }
+
+  .document-editor-prosemirror--table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: hsl(var(--background));
+    box-shadow: inset 0 -1px 0 hsl(var(--border));
+  }
+
+  .document-editor-prosemirror--table td {
+    white-space: nowrap;
+  }
+
+  .document-editor-prosemirror--table th {
+    white-space: nowrap;
+  }
+
+  .document-editor-prosemirror th {
+    background: hsl(var(--surface-sunken));
+    font-weight: 700;
+  }
+
+  .document-editor-prosemirror .selectedCell::after {
+    border: 2px solid hsl(var(--primary));
+    inset: -1px;
+  }
+}
+
 @layer base {
   * {
     @apply border-border;

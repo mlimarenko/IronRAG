@@ -13,8 +13,7 @@ import {
   CheckCircle2, Clock, X, File, ArrowUpDown, Globe,
   CheckSquare
 } from 'lucide-react';
-import type { DocumentItem, DocumentReadiness } from '@/types';
-import type { RawPreparedSegmentItem } from '@/api/documents';
+import type { DocumentItem, DocumentLifecycle, DocumentReadiness } from '@/types';
 import type {
   RawWebIngestRunListItem,
   RawWebIngestRunPage,
@@ -33,7 +32,11 @@ import {
 import type { RawDocumentForUI } from '@/pages/documents/mappers';
 import { DocumentsPageHeader } from '@/pages/documents/DocumentsPageHeader';
 import { DocumentsInspectorPanel } from '@/pages/documents/DocumentsInspectorPanel';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { DocumentsOverlays } from '@/pages/documents/DocumentsOverlays';
+import { DocumentEditorShell } from '@/pages/documents/editor/DocumentEditorShell';
+import { isEditorEditableSourceFormat } from '@/pages/documents/editor/editorSurfaceMode';
+import { useDocumentEditor } from '@/pages/documents/editor/useDocumentEditor';
 
 export default function DocumentsPage() {
   const { t } = useTranslation();
@@ -48,20 +51,23 @@ export default function DocumentsPage() {
 
   const [addLinkOpen, setAddLinkOpen] = useState(false);
   const [deleteDocOpen, setDeleteDocOpen] = useState(false);
-  const [appendTextOpen, setAppendTextOpen] = useState(false);
   const [replaceFileOpen, setReplaceFileOpen] = useState(false);
 
   const [dragOver, setDragOver] = useState(false);
   const [uploadQueue, setUploadQueue] = useState<{ name: string; state: 'uploading' | 'done' | 'error'; error?: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [duplicateConflict, setDuplicateConflict] = useState<{
+    file: File;
+    existingDocId: string;
+    remaining: File[];
+  } | null>(null);
 
-  const [appendContent, setAppendContent] = useState('');
-  const [appendLoading, setAppendLoading] = useState(false);
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
   const [replaceLoading, setReplaceLoading] = useState(false);
   const replaceFileInputRef = useRef<HTMLInputElement>(null);
   const [inspectorSegments, setInspectorSegments] = useState<number | null>(null);
   const [inspectorFacts, setInspectorFacts] = useState<number | null>(null);
+  const [inspectorLifecycle, setInspectorLifecycle] = useState<DocumentLifecycle | null>(null);
 
   const [seedUrl, setSeedUrl] = useState('');
   const [crawlMode, setCrawlMode] = useState('recursive_crawl');
@@ -114,10 +120,40 @@ export default function DocumentsPage() {
     error instanceof Error && error.message ? error.message : fallback
   ), []);
 
-  const fetchDocuments = useCallback(async () => {
+  const editAvailability = useCallback((doc: DocumentItem | null) => {
+    if (!doc) {
+      return { enabled: false, reason: null as string | null };
+    }
+
+    if (!isEditorEditableSourceFormat(doc.fileType)) {
+      return { enabled: false, reason: t('documents.editUnavailableFormat') };
+    }
+
+    if (
+      doc.readiness === 'readable'
+      || doc.readiness === 'graph_sparse'
+      || doc.readiness === 'graph_ready'
+    ) {
+      return { enabled: true, reason: null as string | null };
+    }
+
+    if (doc.readiness === 'processing') {
+      return { enabled: false, reason: t('documents.editUnavailableProcessing') };
+    }
+
+    if (doc.readiness === 'failed') {
+      return { enabled: false, reason: t('documents.editUnavailableFailed') };
+    }
+
+    return { enabled: false, reason: t('documents.editUnavailableGeneric') };
+  }, [t]);
+
+  const fetchDocuments = useCallback(async (silent = false) => {
     if (!activeLibrary) return;
-    setLoading(true);
-    setLoadError(null);
+    if (!silent) {
+      setLoading(true);
+      setLoadError(null);
+    }
     try {
       const [raw, costs] = await Promise.all([
         documentsApi.list(activeLibrary.id),
@@ -146,10 +182,12 @@ export default function DocumentsPage() {
         setWebRuns(runs);
       } catch { setWebRuns([]); }
     } catch (err: unknown) {
-      setLoadError(errorMessage(err, t('documents.failedToLoad')));
-      setDocuments([]);
+      if (!silent) {
+        setLoadError(errorMessage(err, t('documents.failedToLoad')));
+        setDocuments([]);
+      }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [activeLibrary, errorMessage, t]);
 
@@ -157,23 +195,81 @@ export default function DocumentsPage() {
     fetchDocuments();
   }, [fetchDocuments]);
 
+  // Auto-refresh while any document is processing
+  useEffect(() => {
+    const hasProcessing = documents.some(d => d.readiness === 'processing');
+    if (!hasProcessing) return;
+    const interval = setInterval(() => { fetchDocuments(true); }, 15000);
+    return () => clearInterval(interval);
+  }, [documents, fetchDocuments]);
+
+  const doUploadFile = useCallback(async (file: File) => {
+    if (!activeLibrary) return;
+    setUploadQueue(prev => [...prev, { name: file.name, state: 'uploading' }]);
+    try {
+      await documentsApi.upload(activeLibrary.id, file);
+      setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'done' } : u));
+    } catch (err: unknown) {
+      const message = errorMessage(err, t('documents.uploadFailed'));
+      setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'error', error: message } : u));
+    }
+  }, [activeLibrary, errorMessage, t]);
+
+  const doReplaceFile = useCallback(async (docId: string, file: File) => {
+    setUploadQueue(prev => [...prev, { name: file.name, state: 'uploading' }]);
+    try {
+      await documentsApi.replace(docId, file);
+      setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'done' } : u));
+    } catch (err: unknown) {
+      const message = errorMessage(err, t('documents.replaceFileFailed'));
+      setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'error', error: message } : u));
+    }
+  }, [errorMessage, t]);
+
+  const finalizeUpload = useCallback(async () => {
+    await fetchDocuments(true);
+    setTimeout(() => setUploadQueue([]), 3000);
+  }, [fetchDocuments]);
+
+  const processUploadQueue = useCallback(async (files: File[]) => {
+    if (!activeLibrary || files.length === 0) { await finalizeUpload(); return; }
+    const [file, ...remaining] = files;
+    const existing = documents.find(d => d.fileName.toLowerCase() === file.name.toLowerCase());
+    if (existing) {
+      setDuplicateConflict({ file, existingDocId: existing.id, remaining });
+      return;
+    }
+    await doUploadFile(file);
+    await processUploadQueue(remaining);
+  }, [activeLibrary, documents, doUploadFile, finalizeUpload]);
+
   const uploadFiles = useCallback(async (files: File[]) => {
     if (!activeLibrary) return;
-    const items = files.map(f => ({ name: f.name, state: 'uploading' as const }));
-    setUploadQueue(prev => [...prev, ...items]);
-    for (const file of files) {
-      try {
-        await documentsApi.upload(activeLibrary.id, file);
-        setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'done' } : u));
-      } catch (err: unknown) {
-        const message = errorMessage(err, t('documents.uploadFailed'));
-        setUploadQueue(prev => prev.map(u => u.name === file.name ? { ...u, state: 'error', error: message } : u));
-      }
-    }
-    // Refresh list after all uploads complete
-    await fetchDocuments();
-    setTimeout(() => setUploadQueue([]), 3000);
-  }, [activeLibrary, errorMessage, fetchDocuments, t]);
+    await processUploadQueue(files);
+  }, [activeLibrary, processUploadQueue]);
+
+  const handleDuplicateReplace = useCallback(async () => {
+    if (!duplicateConflict) return;
+    const { file, existingDocId, remaining } = duplicateConflict;
+    setDuplicateConflict(null);
+    await doReplaceFile(existingDocId, file);
+    await processUploadQueue(remaining);
+  }, [duplicateConflict, doReplaceFile, processUploadQueue]);
+
+  const handleDuplicateAddNew = useCallback(async () => {
+    if (!duplicateConflict) return;
+    const { file, remaining } = duplicateConflict;
+    setDuplicateConflict(null);
+    await doUploadFile(file);
+    await processUploadQueue(remaining);
+  }, [duplicateConflict, doUploadFile, processUploadQueue]);
+
+  const handleDuplicateSkip = useCallback(async () => {
+    if (!duplicateConflict) return;
+    const { remaining } = duplicateConflict;
+    setDuplicateConflict(null);
+    await processUploadQueue(remaining);
+  }, [duplicateConflict, processUploadQueue]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -223,9 +319,13 @@ export default function DocumentsPage() {
     setSelectedDoc(doc);
     setInspectorSegments(null);
     setInspectorFacts(null);
+    setInspectorLifecycle(null);
     try {
       const raw = await documentsApi.get(doc.id);
       setSelectedDoc(mapApiDocument(raw as RawDocumentForUI, t));
+      if (raw.lifecycle) {
+        setInspectorLifecycle(raw.lifecycle as DocumentLifecycle);
+      }
     } catch {
       // Keep the list-level data if detail fetch fails
     }
@@ -234,8 +334,8 @@ export default function DocumentsPage() {
       documentsApi.getPreparedSegments(doc.id).catch(() => []),
       documentsApi.getTechnicalFacts(doc.id).catch(() => []),
     ]).then(([segments, facts]) => {
-      setInspectorSegments(Array.isArray(segments) ? segments.length : 0);
-      setInspectorFacts(Array.isArray(facts) ? facts.length : 0);
+      setInspectorSegments(segments.length);
+      setInspectorFacts(facts.length);
     });
   }, [t, updateSearchParamState]);
 
@@ -244,6 +344,7 @@ export default function DocumentsPage() {
       setSelectedDoc(null);
       setInspectorSegments(null);
       setInspectorFacts(null);
+      setInspectorLifecycle(null);
       return;
     }
 
@@ -262,47 +363,6 @@ export default function DocumentsPage() {
     setInspectorFacts(null);
   }, [documents, handleSelectDoc, selectedDoc?.id, selectedDocumentId]);
 
-  const handleDownloadText = useCallback(async () => {
-    if (!selectedDoc) return;
-    try {
-      const segments = await documentsApi.getPreparedSegments(selectedDoc.id);
-      const segmentList: RawPreparedSegmentItem[] = Array.isArray(segments) ? segments : [];
-      const textParts = segmentList.map((s) => {
-        const text = typeof s.text === 'string' ? s.text : undefined;
-        const content = typeof s.content === 'string' ? s.content : undefined;
-        return text ?? content ?? '';
-      });
-      const blob = new Blob([textParts.join('\n\n')], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${selectedDoc.fileName.replace(/\.[^.]+$/, '')}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      toast.success(t('documents.downloadTextSuccess'));
-    } catch (err: unknown) {
-      toast.error(errorMessage(err, t('documents.downloadTextFailed')));
-    }
-  }, [errorMessage, selectedDoc, t]);
-
-  const handleAppendText = useCallback(async () => {
-    if (!selectedDoc || !appendContent.trim()) return;
-    setAppendLoading(true);
-    try {
-      await documentsApi.append(selectedDoc.id, appendContent);
-      toast.success(t('documents.appendTextSuccess'));
-      setAppendTextOpen(false);
-      setAppendContent('');
-      await fetchDocuments();
-    } catch (err: unknown) {
-      toast.error(errorMessage(err, t('documents.appendTextFailed')));
-    } finally {
-      setAppendLoading(false);
-    }
-  }, [appendContent, errorMessage, fetchDocuments, selectedDoc, t]);
-
   const handleReplaceFile = useCallback(async () => {
     if (!selectedDoc || !replaceFile) return;
     setReplaceLoading(true);
@@ -318,6 +378,27 @@ export default function DocumentsPage() {
       setReplaceLoading(false);
     }
   }, [errorMessage, fetchDocuments, replaceFile, selectedDoc, t]);
+
+  const handleDocumentEditorSaveRefresh = useCallback(async (documentId: string) => {
+    await fetchDocuments();
+    setInspectorSegments(null);
+    setInspectorFacts(null);
+    setInspectorLifecycle(null);
+    const raw = await documentsApi.get(documentId);
+    setSelectedDoc(mapApiDocument(raw as RawDocumentForUI, t));
+    if (raw.lifecycle) {
+      setInspectorLifecycle(raw.lifecycle as DocumentLifecycle);
+    }
+  }, [fetchDocuments, t]);
+
+  const documentEditor = useDocumentEditor({
+    editAvailability,
+    errorMessage,
+    onDocumentSaved: handleDocumentEditorSaveRefresh,
+    onDocumentSelected: handleSelectDoc,
+    selectedDocumentId: selectedDoc?.id ?? null,
+    t,
+  });
 
   const handleStartWebIngest = useCallback(async () => {
     if (!activeLibrary || !seedUrl.trim()) return;
@@ -423,6 +504,11 @@ export default function DocumentsPage() {
     if (sortField === 'fileName') return a.fileName.localeCompare(b.fileName) * dir;
     if (sortField === 'fileSize') return (a.fileSize - b.fileSize) * dir;
     if (sortField === 'cost') return ((a.cost ?? 0) - (b.cost ?? 0)) * dir;
+    if (sortField === 'time') {
+      const aTime = a.lastActivity && a.uploadedAt ? new Date(a.lastActivity).getTime() - new Date(a.uploadedAt).getTime() : 0;
+      const bTime = b.lastActivity && b.uploadedAt ? new Date(b.lastActivity).getTime() - new Date(b.uploadedAt).getTime() : 0;
+      return (aTime - bTime) * dir;
+    }
     return (new Date(a.uploadedAt).getTime() - new Date(b.uploadedAt).getTime()) * dir;
   });
   const selectedDocPage = selectedDocumentId
@@ -704,6 +790,7 @@ export default function DocumentsPage() {
                         { key: 'fileSize', label: t('documents.size') },
                         { key: 'uploadedAt', label: t('documents.uploaded') },
                         { key: 'cost', label: t('documents.cost') },
+                        { key: 'time', label: t('documents.pipelineTime') },
                         { key: 'status', label: t('documents.status') },
                       ].map(col => (
                         <th key={col.key} className="px-4 py-3 section-label">
@@ -718,6 +805,7 @@ export default function DocumentsPage() {
                   <tbody>
                     {pagedDocuments.map(doc => {
                       const rc = readinessConfig[doc.readiness];
+                      const canEditDocument = editAvailability(doc);
                       return (
                         <tr
                           key={doc.id}
@@ -755,6 +843,11 @@ export default function DocumentsPage() {
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{formatSize(doc.fileSize)}</td>
                           <td className="px-4 py-3.5 text-muted-foreground text-xs">{formatDate(doc.uploadedAt, locale)}</td>
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{doc.cost != null ? `$${doc.cost.toFixed(3)}` : '—'}</td>
+                          <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
+                            {doc.lastActivity && doc.uploadedAt
+                              ? `${((new Date(doc.lastActivity).getTime() - new Date(doc.uploadedAt).getTime()) / 1000).toFixed(0)}s`
+                              : '—'}
+                          </td>
                           <td className="px-4 py-3.5">
                             <div className="flex items-center gap-2">
                               <span className={`status-badge ${rc.cls}`}>{rc.label}</span>
@@ -932,15 +1025,17 @@ export default function DocumentsPage() {
 
         {selectedDoc && (
           <DocumentsInspectorPanel
+            canEdit={editAvailability(selectedDoc).enabled}
+            editDisabledReason={editAvailability(selectedDoc).reason}
             locale={locale}
             t={t}
             inspectorFacts={inspectorFacts}
             inspectorSegments={inspectorSegments}
+            lifecycle={inspectorLifecycle}
             readinessConfig={readinessConfig}
             selectedDoc={selectedDoc}
             selectionMode={selectionMode}
             setAddLinkOpen={setAddLinkOpen}
-            setAppendTextOpen={setAppendTextOpen}
             setCrawlMode={setCrawlMode}
             setDeleteDocOpen={setDeleteDocOpen}
             setMaxDepth={setMaxDepth}
@@ -948,7 +1043,7 @@ export default function DocumentsPage() {
             setReplaceFileOpen={setReplaceFileOpen}
             setSeedUrl={setSeedUrl}
             updateSearchParamState={updateSearchParamState}
-            onDownloadText={handleDownloadText}
+            onEdit={() => void documentEditor.openEditor(selectedDoc)}
             onRetry={handleRetry}
           />
         )}
@@ -957,14 +1052,10 @@ export default function DocumentsPage() {
       <DocumentsOverlays
         activeTab={activeTab}
         addLinkOpen={addLinkOpen}
-        appendContent={appendContent}
-        appendLoading={appendLoading}
-        appendTextOpen={appendTextOpen}
         boundaryPolicy={boundaryPolicy}
         clearSelection={clearSelection}
         crawlMode={crawlMode}
         deleteDocOpen={deleteDocOpen}
-        handleAppendText={handleAppendText}
         handleBulkCancel={handleBulkCancel}
         handleBulkDelete={handleBulkDelete}
         handleBulkReprocess={handleBulkReprocess}
@@ -981,8 +1072,6 @@ export default function DocumentsPage() {
         selectedCount={selectedCount}
         selectedDoc={selectedDoc}
         setAddLinkOpen={setAddLinkOpen}
-        setAppendContent={setAppendContent}
-        setAppendTextOpen={setAppendTextOpen}
         setBoundaryPolicy={setBoundaryPolicy}
         setCrawlMode={setCrawlMode}
         setDeleteDocOpen={setDeleteDocOpen}
@@ -994,6 +1083,41 @@ export default function DocumentsPage() {
         t={t}
         webIngestLoading={webIngestLoading}
       />
+      <Dialog open={Boolean(duplicateConflict)} onOpenChange={(open) => { if (!open) handleDuplicateSkip(); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('documents.duplicateTitle')}</DialogTitle>
+            <DialogDescription className="break-all">
+              {t('documents.duplicateDescription', { name: duplicateConflict?.file.name ?? '' })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
+            <Button variant="default" onClick={handleDuplicateReplace}>
+              <RotateCw className="mr-2 h-3.5 w-3.5" /> {t('documents.duplicateReplace')}
+            </Button>
+            <Button variant="outline" onClick={handleDuplicateAddNew}>
+              <Upload className="mr-2 h-3.5 w-3.5" /> {t('documents.duplicateAddNew')}
+            </Button>
+            <Button variant="ghost" onClick={handleDuplicateSkip}>
+              {t('documents.duplicateSkip')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {documentEditor.editorDocument && (
+        <DocumentEditorShell
+          documentName={documentEditor.editorDocument.fileName}
+          error={documentEditor.editorError}
+          loading={documentEditor.editorLoading}
+          markdown={documentEditor.editorMarkdown}
+          onOpenChange={documentEditor.handleEditorOpenChange}
+          onSave={documentEditor.saveEditor}
+          open={documentEditor.editorOpen}
+          saving={documentEditor.editorSaving}
+          sourceFormat={documentEditor.editorDocument.fileType}
+          t={t}
+        />
+      )}
     </div>
   );
 }

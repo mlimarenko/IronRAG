@@ -8,7 +8,7 @@ use chrono::{Duration, Utc};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
         arangodb::{
@@ -485,7 +485,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         let _ = ingest
             .heartbeat_attempt(
                 &fixture.state,
-                rustrag_backend::services::ingest::service::HeartbeatAttemptCommand {
+                ironrag_backend::services::ingest::service::HeartbeatAttemptCommand {
                     attempt_id: first_attempt.id,
                     knowledge_generation_id: Some(fixture.generation_id),
                     current_stage: Some("extracting".to_string()),
@@ -508,6 +508,15 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                         stage_state: stage_state.to_string(),
                         message: message.map(ToString::to_string),
                         details_json: serde_json::json!({ "stage": stage_name, "state": stage_state }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: None,
                     },
                 )
                 .await
@@ -587,6 +596,15 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     stage_state: "completed".to_string(),
                     message: Some("retry worker completed extraction".to_string()),
                     details_json: serde_json::json!({ "worker": worker_b }),
+                    provider_kind: None,
+                    model_name: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
+                    cached_tokens: None,
+                    estimated_cost: None,
+                    currency_code: None,
+                    elapsed_ms: None,
                 },
             )
             .await
@@ -802,6 +820,15 @@ async fn ingest_attempt_emits_stage_events_for_worker_progress() -> Result<()> {
                             "stage": stage_name,
                             "state": stage_state,
                         }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: None,
                     },
                 )
                 .await

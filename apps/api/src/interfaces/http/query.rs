@@ -12,7 +12,7 @@ use axum::{
 };
 use chrono::Utc;
 use futures::stream;
-use rustrag_contracts;
+use ironrag_contracts;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -97,7 +97,7 @@ async fn list_sessions(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
-) -> Result<Json<Vec<rustrag_contracts::assistant::AssistantSessionListItem>>, ApiError> {
+) -> Result<Json<Vec<ironrag_contracts::assistant::AssistantSessionListItem>>, ApiError> {
     let library_id = query
         .library_id
         .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
@@ -167,7 +167,7 @@ async fn get_session(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
-) -> Result<Json<rustrag_contracts::assistant::AssistantHydratedConversation>, ApiError> {
+) -> Result<Json<ironrag_contracts::assistant::AssistantHydratedConversation>, ApiError> {
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_READ).await?;
     let detail = state.canonical_services.query.get_conversation(&state, session_id).await?;
     Ok(Json(map_session_detail(detail)))
@@ -182,8 +182,7 @@ async fn create_session_turn(
 ) -> Result<Response, ApiError> {
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
     if accepts_event_stream(&headers) {
-        return Ok(create_session_turn_stream(auth.principal_id, state, session_id, payload)
-            .into_response());
+        return Ok(create_session_turn_stream(auth, state, session_id, payload).into_response());
     }
     let outcome = state
         .canonical_services
@@ -196,6 +195,7 @@ async fn create_session_turn(
                 content_text: payload.content_text,
                 top_k: payload.top_k.unwrap_or(8),
                 include_debug: payload.include_debug.unwrap_or(false),
+                auth: auth.clone(),
             },
         )
         .await?;
@@ -207,7 +207,7 @@ async fn get_execution(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(execution_id): Path<Uuid>,
-) -> Result<Json<rustrag_contracts::assistant::AssistantExecutionDetail>, ApiError> {
+) -> Result<Json<ironrag_contracts::assistant::AssistantExecutionDetail>, ApiError> {
     let _ =
         load_query_execution_and_authorize(&auth, &state, execution_id, POLICY_QUERY_READ).await?;
     let detail = state.canonical_services.query.get_execution(&state, execution_id).await?;
@@ -216,15 +216,15 @@ async fn get_execution(
 
 fn map_session_list_item_with_defaults(
     session: QueryConversation,
-) -> rustrag_contracts::assistant::AssistantSessionListItem {
+) -> ironrag_contracts::assistant::AssistantSessionListItem {
     map_session_list_item_with_turn_count(session, 0)
 }
 
 fn map_session_list_item_with_turn_count(
     session: QueryConversation,
     turn_count: usize,
-) -> rustrag_contracts::assistant::AssistantSessionListItem {
-    rustrag_contracts::assistant::AssistantSessionListItem {
+) -> ironrag_contracts::assistant::AssistantSessionListItem {
+    ironrag_contracts::assistant::AssistantSessionListItem {
         id: session.id,
         workspace_id: session.workspace_id,
         library_id: session.library_id,
@@ -238,8 +238,8 @@ fn map_session_list_item_with_turn_count(
 
 fn map_session_detail(
     detail: QueryConversationDetail,
-) -> rustrag_contracts::assistant::AssistantHydratedConversation {
-    rustrag_contracts::assistant::AssistantHydratedConversation {
+) -> ironrag_contracts::assistant::AssistantHydratedConversation {
+    ironrag_contracts::assistant::AssistantHydratedConversation {
         session: map_session_list_item_with_turn_count(detail.conversation, detail.turns.len()),
         messages: detail.turns.into_iter().map(map_turn_to_message).collect(),
     }
@@ -247,8 +247,8 @@ fn map_session_detail(
 
 fn map_execution_detail(
     detail: QueryExecutionDetail,
-) -> rustrag_contracts::assistant::AssistantExecutionDetail {
-    rustrag_contracts::assistant::AssistantExecutionDetail {
+) -> ironrag_contracts::assistant::AssistantExecutionDetail {
+    ironrag_contracts::assistant::AssistantExecutionDetail {
         context_bundle_id: detail.execution.context_bundle_id,
         execution: map_execution(detail.execution),
         runtime_summary: map_runtime_summary(detail.runtime_summary),
@@ -297,8 +297,8 @@ fn accepts_event_stream(headers: &HeaderMap) -> bool {
 
 fn map_turn_execution_response(
     outcome: crate::services::query::service::QueryTurnExecutionResult,
-) -> rustrag_contracts::assistant::AssistantExecutionDetail {
-    rustrag_contracts::assistant::AssistantExecutionDetail {
+) -> ironrag_contracts::assistant::AssistantExecutionDetail {
+    ironrag_contracts::assistant::AssistantExecutionDetail {
         context_bundle_id: outcome.context_bundle_id,
         execution: map_execution(outcome.execution),
         runtime_summary: map_runtime_summary(outcome.runtime_summary),
@@ -341,8 +341,8 @@ fn map_turn_execution_response(
 
 fn map_turn_to_message(
     turn: QueryTurn,
-) -> rustrag_contracts::assistant::AssistantConversationMessage {
-    rustrag_contracts::assistant::AssistantConversationMessage {
+) -> ironrag_contracts::assistant::AssistantConversationMessage {
+    ironrag_contracts::assistant::AssistantConversationMessage {
         id: turn.id,
         role: map_turn_role(turn.turn_kind),
         content: turn.content_text,
@@ -352,8 +352,8 @@ fn map_turn_to_message(
     }
 }
 
-fn map_turn(turn: QueryTurn) -> rustrag_contracts::assistant::AssistantTurn {
-    rustrag_contracts::assistant::AssistantTurn {
+fn map_turn(turn: QueryTurn) -> ironrag_contracts::assistant::AssistantTurn {
+    ironrag_contracts::assistant::AssistantTurn {
         id: turn.id,
         conversation_id: turn.conversation_id,
         turn_index: turn.turn_index,
@@ -367,25 +367,25 @@ fn map_turn(turn: QueryTurn) -> rustrag_contracts::assistant::AssistantTurn {
 
 const fn map_turn_role(
     turn_kind: crate::domains::query::QueryTurnKind,
-) -> rustrag_contracts::assistant::AssistantTurnRole {
+) -> ironrag_contracts::assistant::AssistantTurnRole {
     match turn_kind {
         crate::domains::query::QueryTurnKind::User => {
-            rustrag_contracts::assistant::AssistantTurnRole::User
+            ironrag_contracts::assistant::AssistantTurnRole::User
         }
         crate::domains::query::QueryTurnKind::Assistant => {
-            rustrag_contracts::assistant::AssistantTurnRole::Assistant
+            ironrag_contracts::assistant::AssistantTurnRole::Assistant
         }
         crate::domains::query::QueryTurnKind::System => {
-            rustrag_contracts::assistant::AssistantTurnRole::System
+            ironrag_contracts::assistant::AssistantTurnRole::System
         }
         crate::domains::query::QueryTurnKind::Tool => {
-            rustrag_contracts::assistant::AssistantTurnRole::Tool
+            ironrag_contracts::assistant::AssistantTurnRole::Tool
         }
     }
 }
 
-fn map_execution(execution: QueryExecution) -> rustrag_contracts::assistant::AssistantExecution {
-    rustrag_contracts::assistant::AssistantExecution {
+fn map_execution(execution: QueryExecution) -> ironrag_contracts::assistant::AssistantExecution {
+    ironrag_contracts::assistant::AssistantExecution {
         id: execution.id,
         workspace_id: execution.workspace_id,
         library_id: execution.library_id,
@@ -406,9 +406,9 @@ fn map_execution(execution: QueryExecution) -> rustrag_contracts::assistant::Ass
 
 fn map_runtime_summary(
     runtime_summary: RuntimeExecutionSummary,
-) -> rustrag_contracts::assistant::AssistantRuntimeSummary {
+) -> ironrag_contracts::assistant::AssistantRuntimeSummary {
     let runtime_accepted_at = runtime_summary.accepted_at;
-    rustrag_contracts::assistant::AssistantRuntimeSummary {
+    ironrag_contracts::assistant::AssistantRuntimeSummary {
         runtime_execution_id: runtime_summary.runtime_execution_id,
         lifecycle_state: runtime_summary.lifecycle_state.as_str().to_string(),
         active_stage: runtime_summary.active_stage.map(|stage| stage.as_str().to_string()),
@@ -425,8 +425,8 @@ fn map_runtime_summary(
 
 fn map_runtime_stage_summary(
     summary: QueryRuntimeStageSummary,
-) -> rustrag_contracts::assistant::AssistantRuntimeStageSummary {
-    rustrag_contracts::assistant::AssistantRuntimeStageSummary {
+) -> ironrag_contracts::assistant::AssistantRuntimeStageSummary {
+    ironrag_contracts::assistant::AssistantRuntimeStageSummary {
         stage_kind: summary.stage_kind.as_str().to_string(),
         stage_label: summary.stage_label,
     }
@@ -435,8 +435,8 @@ fn map_runtime_stage_summary(
 fn map_policy_summary(
     policy_summary: RuntimePolicySummary,
     decision_timestamp: chrono::DateTime<Utc>,
-) -> rustrag_contracts::assistant::AssistantPolicySummary {
-    rustrag_contracts::assistant::AssistantPolicySummary {
+) -> ironrag_contracts::assistant::AssistantPolicySummary {
+    ironrag_contracts::assistant::AssistantPolicySummary {
         allow_count: policy_summary.allow_count.try_into().unwrap_or(i32::MAX),
         reject_count: policy_summary.reject_count.try_into().unwrap_or(i32::MAX),
         terminate_count: policy_summary.terminate_count.try_into().unwrap_or(i32::MAX),
@@ -451,8 +451,8 @@ fn map_policy_summary(
 fn map_policy_decision_summary(
     policy_decision: RuntimePolicyDecisionSummary,
     decision_timestamp: chrono::DateTime<Utc>,
-) -> rustrag_contracts::assistant::AssistantPolicyDecisionSummary {
-    rustrag_contracts::assistant::AssistantPolicyDecisionSummary {
+) -> ironrag_contracts::assistant::AssistantPolicyDecisionSummary {
+    ironrag_contracts::assistant::AssistantPolicyDecisionSummary {
         target_kind: policy_decision.target_kind.as_str().to_string(),
         decision_kind: policy_decision.decision_kind.as_str().to_string(),
         reason_code: policy_decision.reason_code,
@@ -463,33 +463,33 @@ fn map_policy_decision_summary(
 
 const fn map_verification_state(
     state: QueryVerificationState,
-) -> rustrag_contracts::assistant::AssistantVerificationState {
+) -> ironrag_contracts::assistant::AssistantVerificationState {
     match state {
         QueryVerificationState::NotRun => {
-            rustrag_contracts::assistant::AssistantVerificationState::NotRun
+            ironrag_contracts::assistant::AssistantVerificationState::NotRun
         }
         QueryVerificationState::Verified => {
-            rustrag_contracts::assistant::AssistantVerificationState::Verified
+            ironrag_contracts::assistant::AssistantVerificationState::Verified
         }
         QueryVerificationState::PartiallySupported => {
-            rustrag_contracts::assistant::AssistantVerificationState::PartiallySupported
+            ironrag_contracts::assistant::AssistantVerificationState::PartiallySupported
         }
         QueryVerificationState::Conflicting => {
-            rustrag_contracts::assistant::AssistantVerificationState::Conflicting
+            ironrag_contracts::assistant::AssistantVerificationState::Conflicting
         }
         QueryVerificationState::InsufficientEvidence => {
-            rustrag_contracts::assistant::AssistantVerificationState::InsufficientEvidence
+            ironrag_contracts::assistant::AssistantVerificationState::InsufficientEvidence
         }
         QueryVerificationState::Failed => {
-            rustrag_contracts::assistant::AssistantVerificationState::Failed
+            ironrag_contracts::assistant::AssistantVerificationState::Failed
         }
     }
 }
 
 fn map_verification_warning(
     warning: QueryVerificationWarning,
-) -> rustrag_contracts::assistant::AssistantVerificationWarning {
-    rustrag_contracts::assistant::AssistantVerificationWarning {
+) -> ironrag_contracts::assistant::AssistantVerificationWarning {
+    ironrag_contracts::assistant::AssistantVerificationWarning {
         code: warning.code,
         message: warning.message,
         related_segment_id: warning.related_segment_id,
@@ -499,8 +499,8 @@ fn map_verification_warning(
 
 const fn map_chunk_reference(
     reference: QueryChunkReference,
-) -> rustrag_contracts::assistant::AssistantChunkReference {
-    rustrag_contracts::assistant::AssistantChunkReference {
+) -> ironrag_contracts::assistant::AssistantChunkReference {
+    ironrag_contracts::assistant::AssistantChunkReference {
         execution_id: reference.execution_id,
         chunk_id: reference.chunk_id,
         rank: reference.rank,
@@ -510,8 +510,8 @@ const fn map_chunk_reference(
 
 fn map_prepared_segment_reference(
     reference: PreparedSegmentReference,
-) -> rustrag_contracts::assistant::AssistantPreparedSegmentReference {
-    rustrag_contracts::assistant::AssistantPreparedSegmentReference {
+) -> ironrag_contracts::assistant::AssistantPreparedSegmentReference {
+    ironrag_contracts::assistant::AssistantPreparedSegmentReference {
         execution_id: reference.execution_id,
         segment_id: reference.segment_id,
         revision_id: reference.revision_id,
@@ -524,7 +524,7 @@ fn map_prepared_segment_reference(
         document_title: reference.document_title,
         source_uri: reference.source_uri,
         source_access: reference.source_access.map(|access| {
-            rustrag_contracts::assistant::AssistantContentSourceAccess {
+            ironrag_contracts::assistant::AssistantContentSourceAccess {
                 kind: match access.kind {
                     crate::domains::content::ContentSourceAccessKind::StoredDocument => {
                         "stored_document".to_string()
@@ -541,8 +541,8 @@ fn map_prepared_segment_reference(
 
 fn map_technical_fact_reference(
     reference: TechnicalFactReference,
-) -> rustrag_contracts::assistant::AssistantTechnicalFactReference {
-    rustrag_contracts::assistant::AssistantTechnicalFactReference {
+) -> ironrag_contracts::assistant::AssistantTechnicalFactReference {
+    ironrag_contracts::assistant::AssistantTechnicalFactReference {
         execution_id: reference.execution_id,
         fact_id: reference.fact_id,
         revision_id: reference.revision_id,
@@ -556,8 +556,8 @@ fn map_technical_fact_reference(
 
 fn map_graph_node_reference(
     reference: QueryGraphNodeReference,
-) -> rustrag_contracts::assistant::AssistantEntityReference {
-    rustrag_contracts::assistant::AssistantEntityReference {
+) -> ironrag_contracts::assistant::AssistantEntityReference {
+    ironrag_contracts::assistant::AssistantEntityReference {
         execution_id: reference.execution_id,
         node_id: reference.node_id,
         rank: reference.rank,
@@ -570,8 +570,8 @@ fn map_graph_node_reference(
 
 const fn map_graph_edge_reference(
     reference: QueryGraphEdgeReference,
-) -> rustrag_contracts::assistant::AssistantRelationReference {
-    rustrag_contracts::assistant::AssistantRelationReference {
+) -> ironrag_contracts::assistant::AssistantRelationReference {
+    ironrag_contracts::assistant::AssistantRelationReference {
         execution_id: reference.execution_id,
         edge_id: reference.edge_id,
         rank: reference.rank,
@@ -648,11 +648,12 @@ async fn append_query_execution_audit(
 }
 
 fn create_session_turn_stream(
-    principal_id: Uuid,
+    auth: AuthContext,
     state: AppState,
     session_id: Uuid,
     payload: CreateSessionTurnRequest,
 ) -> Sse<impl stream::Stream<Item = Result<Event, Infallible>>> {
+    let principal_id = auth.principal_id;
     let (sender, receiver) = mpsc::unbounded_channel::<QueryTurnStreamFrame>();
     let state_for_task = state.clone();
     tokio::spawn(async move {
@@ -677,6 +678,7 @@ fn create_session_turn_stream(
                     content_text: payload.content_text,
                     top_k: payload.top_k.unwrap_or(8),
                     include_debug: payload.include_debug.unwrap_or(false),
+                    auth: auth.clone(),
                 },
                 progress_sender,
             )
@@ -709,7 +711,7 @@ fn create_session_turn_stream(
 enum QueryTurnStreamFrame {
     Runtime(QueryTurnStreamRuntimePayload),
     Delta(QueryTurnStreamDeltaPayload),
-    Completed(rustrag_contracts::assistant::AssistantExecutionDetail),
+    Completed(ironrag_contracts::assistant::AssistantExecutionDetail),
     Error(QueryTurnStreamErrorPayload),
 }
 

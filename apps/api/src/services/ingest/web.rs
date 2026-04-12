@@ -8,15 +8,13 @@
     clippy::too_many_lines
 )]
 
-use std::{
-    collections::{HashSet, VecDeque},
-    time::Duration,
-};
+mod recursive;
+mod single_page;
+
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use futures::stream::{self, StreamExt};
-use reqwest::{Client, Url, header::CONTENT_TYPE};
-use sha2::Digest;
+use reqwest::{Client, Url};
 use tracing::error;
 use uuid::Uuid;
 
@@ -47,7 +45,7 @@ use crate::{
                 WebCandidateState, WebClassificationReason, WebIngestMode, WebRunFailureCode,
                 WebRunState, derive_terminal_run_state, now_if_terminal, validate_web_run_settings,
             },
-            url_identity::{HostClassification, normalize_absolute_url, normalize_seed_url},
+            url_identity::{HostClassification, normalize_seed_url},
         },
     },
 };
@@ -78,7 +76,7 @@ impl Default for WebIngestRuntimeSettings {
         Self {
             request_timeout_seconds: 20,
             max_redirects: 10,
-            user_agent: "RustRAG-WebIngest/0.1".to_string(),
+            user_agent: "IronRAG-WebIngest/0.1".to_string(),
         }
     }
 }
@@ -184,7 +182,7 @@ impl WebIngestService {
             mutation.id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         {
             return self.build_run(state, existing).await;
         }
@@ -241,7 +239,7 @@ impl WebIngestService {
                     mutation.id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or(ApiError::Internal)?
             }
             Err(_) => return Err(ApiError::Internal),
@@ -272,7 +270,7 @@ impl WebIngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         let run_row = if validated.mode == WebIngestMode::SinglePage.as_str() {
             self.execute_single_page_run(state, row, seed_candidate).await?
@@ -299,7 +297,7 @@ impl WebIngestService {
     ) -> Result<Vec<WebIngestRunSummary>, ApiError> {
         let rows = ingest_repository::list_web_ingest_runs(&state.persistence.postgres, library_id)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let mut summaries = Vec::with_capacity(rows.len());
         for row in rows {
             summaries.push(self.build_run_summary(state, row).await?);
@@ -310,7 +308,7 @@ impl WebIngestService {
     pub async fn get_run(&self, state: &AppState, run_id: Uuid) -> Result<WebIngestRun, ApiError> {
         let row = ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, run_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", run_id))?;
         self.build_run(state, row).await
     }
@@ -323,7 +321,7 @@ impl WebIngestService {
         let rows =
             ingest_repository::list_web_discovered_pages(&state.persistence.postgres, run_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_web_page_row).collect())
     }
 
@@ -352,7 +350,7 @@ impl WebIngestService {
                 },
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", run_id))?;
         }
         self.mark_pending_pages_canceled(state, run_id).await?;
@@ -377,7 +375,7 @@ impl WebIngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", run_id))?;
 
         Ok(map_web_run_receipt(self.build_run(state, updated).await?))
@@ -390,7 +388,7 @@ impl WebIngestService {
     ) -> Result<(), ApiError> {
         let run = ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, run_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", run_id))?;
         if matches!(
             run.run_state.as_str(),
@@ -409,7 +407,7 @@ impl WebIngestService {
             &run.normalized_seed_url,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", run.id))?;
         let discovering_row = if run.run_state == WebRunState::Discovering.as_str() {
             run
@@ -483,14 +481,14 @@ impl WebIngestService {
             candidate_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate_id))?;
         let run = ingest_repository::get_web_ingest_run_by_id(
             &state.persistence.postgres,
             candidate.run_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", candidate.run_id))?;
 
         if matches!(
@@ -526,7 +524,7 @@ impl WebIngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
 
         let resource = match self.load_candidate_snapshot_resource(state, &processing_page).await {
@@ -566,7 +564,7 @@ impl WebIngestService {
                     },
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
             }
             Err(failure) => {
                 let _ = self.mark_recursive_page_failed(state, &processing_page, failure).await?;
@@ -586,7 +584,7 @@ impl WebIngestService {
         let failure_code = WebRunFailureCode::WebDiscoveryFailed.as_str();
         let row = ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, run_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", run_id))?;
         if matches!(
             row.run_state.as_str(),
@@ -606,7 +604,7 @@ impl WebIngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id))?;
 
         let _ = state
@@ -654,7 +652,7 @@ impl WebIngestService {
             candidate_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate_id))?;
         let failure = WebRunFailure {
             failure_code: failure_code.to_string(),
@@ -674,7 +672,7 @@ impl WebIngestService {
     ) -> Result<WebIngestRun, ApiError> {
         let counts_row = ingest_repository::get_web_run_counts(&state.persistence.postgres, row.id)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let counts = map_web_run_counts_row(counts_row);
         Ok(WebIngestRun {
             run_id: row.id,
@@ -706,7 +704,7 @@ impl WebIngestService {
     ) -> Result<WebIngestRunSummary, ApiError> {
         let counts_row = ingest_repository::get_web_run_counts(&state.persistence.postgres, row.id)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let counts = map_web_run_counts_row(counts_row);
         Ok(WebIngestRunSummary {
             run_id: row.id,
@@ -727,46 +725,7 @@ impl WebIngestService {
         state: &AppState,
         row: WebIngestRunRow,
     ) -> Result<WebIngestRunRow, ApiError> {
-        let job_operation = state
-            .canonical_services
-            .ops
-            .create_async_operation(
-                state,
-                CreateAsyncOperationCommand {
-                    workspace_id: row.workspace_id,
-                    library_id: row.library_id,
-                    operation_kind: "web_discovery".to_string(),
-                    surface_kind: "worker".to_string(),
-                    requested_by_principal_id: row.requested_by_principal_id,
-                    status: "accepted".to_string(),
-                    subject_kind: "content_web_ingest_run".to_string(),
-                    subject_id: Some(row.id),
-                    completed_at: None,
-                    failure_code: None,
-                },
-            )
-            .await?;
-        let _ = state
-            .canonical_services
-            .ingest
-            .admit_job(
-                state,
-                AdmitIngestJobCommand {
-                    workspace_id: row.workspace_id,
-                    library_id: row.library_id,
-                    mutation_id: None,
-                    connector_id: None,
-                    async_operation_id: Some(job_operation.id),
-                    knowledge_document_id: None,
-                    knowledge_revision_id: None,
-                    job_kind: "web_discovery".to_string(),
-                    priority: 40,
-                    dedupe_key: Some(format!("web-discovery:{}", row.id)),
-                    available_at: None,
-                },
-            )
-            .await?;
-        Ok(row)
+        recursive::enqueue_recursive_run(self, state, row).await
     }
 
     async fn discover_recursive_scope(
@@ -775,384 +734,7 @@ impl WebIngestService {
         run: &WebIngestRunRow,
         seed_candidate: WebDiscoveredPageRow,
     ) -> Result<Vec<WebDiscoveredPageRow>, ApiError> {
-        let mut frontier = VecDeque::from([seed_candidate]);
-        let mut seen_urls = HashSet::from([run.normalized_seed_url.clone()]);
-        let mut budgeted_urls = HashSet::from([run.normalized_seed_url.clone()]);
-        let mut canonical_urls = HashSet::<String>::new();
-        let mut eligible_pages = Vec::<WebDiscoveredPageRow>::new();
-
-        // RUSTRAG_WEB_INGEST_CRAWL_CONCURRENCY controls how many candidates are
-        // fetched in parallel each BFS wave. DB writes and frontier mutation
-        // remain sequential per-result so canonical/seen-set logic stays
-        // deterministic.
-        let fetch_concurrency = state.settings.web_ingest_crawl_concurrency.max(1);
-
-        'outer: while !frontier.is_empty() {
-            if self.run_cancel_requested(state, run.id).await? {
-                break;
-            }
-
-            // Drain a wave of candidates from the frontier and fetch them all
-            // in parallel before processing the results sequentially.
-            let mut wave: Vec<WebDiscoveredPageRow> = Vec::new();
-            while wave.len() < fetch_concurrency {
-                match frontier.pop_front() {
-                    Some(candidate) => wave.push(candidate),
-                    None => break,
-                }
-            }
-            let fetched_wave: Vec<(
-                WebDiscoveredPageRow,
-                Result<FetchedWebResource, WebRunFailure>,
-            )> = stream::iter(wave.into_iter().map(|candidate| {
-                let url = candidate.normalized_url.clone();
-                async move {
-                    let result = self.fetch_web_resource(&url).await;
-                    (candidate, result)
-                }
-            }))
-            .buffer_unordered(fetch_concurrency)
-            .collect::<Vec<_>>()
-            .await;
-
-            for (candidate, fetch_result) in fetched_wave {
-                if self.run_cancel_requested(state, run.id).await? {
-                    break 'outer;
-                }
-                let resource = match fetch_result {
-                    Ok(resource) => resource,
-                    Err(failure) => {
-                        telemetry::web_failure_event(
-                            "candidate_fetch_failed",
-                            run.id,
-                            Some(candidate.id),
-                            &failure.failure_code,
-                            failure.candidate_reason.as_deref(),
-                            failure.final_url.as_deref(),
-                            failure.content_type.as_deref(),
-                            failure.http_status,
-                        );
-                        let _ = ingest_repository::update_web_discovered_page(
-                        &state.persistence.postgres,
-                        candidate.id,
-                        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                            final_url: failure.final_url.as_deref(),
-                            canonical_url: failure.final_url.as_deref(),
-                            host_classification: None,
-                            candidate_state: WebCandidateState::Blocked.as_str(),
-                            classification_reason: failure.candidate_reason.as_deref(),
-                            content_type: failure.content_type.as_deref(),
-                            http_status: failure.http_status,
-                            snapshot_storage_key: candidate.snapshot_storage_key.as_deref(),
-                            updated_at: Some(Utc::now()),
-                            document_id: None,
-                            result_revision_id: None,
-                            mutation_item_id: None,
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        error!(
-                            run_id = %run.id,
-                            candidate_id = %candidate.id,
-                            normalized_url = %candidate.normalized_url,
-                            failure_code = %failure.failure_code,
-                            db_error = %error,
-                            "web ingest failed to persist blocked candidate after fetch failure"
-                        );
-                        ApiError::Internal
-                    })?;
-                        continue;
-                    }
-                };
-                if self.run_cancel_requested(state, run.id).await? {
-                    break;
-                }
-
-                let host_classification = crate::shared::web::url_identity::classify_host(
-                    &run.normalized_seed_url,
-                    &resource.final_url,
-                )
-                .unwrap_or(HostClassification::External);
-                let resource_canonical_url = extract_html_canonical_url(
-                    &resource.payload_bytes,
-                    resource.content_type.as_deref(),
-                    &resource.final_url,
-                )
-                .unwrap_or_else(|| resource.final_url.clone());
-                let is_same_host = host_classification == HostClassification::SameHost;
-                let host_classification_label = host_classification.as_str();
-
-                if run.boundary_policy == "same_host" && !is_same_host {
-                    let _ = ingest_repository::update_web_discovered_page(
-                        &state.persistence.postgres,
-                        candidate.id,
-                        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                            final_url: Some(resource.final_url.as_str()),
-                            canonical_url: Some(resource_canonical_url.as_str()),
-                            host_classification: Some(host_classification_label),
-                            candidate_state: WebCandidateState::Excluded.as_str(),
-                            classification_reason: Some(
-                                WebClassificationReason::OutsideBoundaryPolicy.as_str(),
-                            ),
-                            content_type: resource.content_type.as_deref(),
-                            http_status: Some(resource.http_status),
-                            snapshot_storage_key: None,
-                            updated_at: Some(Utc::now()),
-                            document_id: None,
-                            result_revision_id: None,
-                            mutation_item_id: None,
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        error!(
-                            run_id = %run.id,
-                            candidate_id = %candidate.id,
-                            normalized_url = %candidate.normalized_url,
-                            final_url = %resource.final_url,
-                            db_error = %error,
-                            "web ingest failed to persist boundary-excluded candidate"
-                        );
-                        ApiError::Internal
-                    })?;
-                    telemetry::web_candidate_event(
-                        "candidate_excluded_boundary",
-                        run.id,
-                        candidate.id,
-                        WebCandidateState::Excluded.as_str(),
-                        &candidate.normalized_url,
-                        candidate.depth,
-                        Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
-                        Some(host_classification_label),
-                    );
-                    continue;
-                }
-
-                if canonical_urls.contains(&resource_canonical_url) {
-                    let _ = ingest_repository::update_web_discovered_page(
-                        &state.persistence.postgres,
-                        candidate.id,
-                        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                            final_url: Some(resource.final_url.as_str()),
-                            canonical_url: Some(resource_canonical_url.as_str()),
-                            host_classification: Some(host_classification_label),
-                            candidate_state: WebCandidateState::Duplicate.as_str(),
-                            classification_reason: Some(
-                                WebClassificationReason::DuplicateCanonicalUrl.as_str(),
-                            ),
-                            content_type: resource.content_type.as_deref(),
-                            http_status: Some(resource.http_status),
-                            snapshot_storage_key: None,
-                            updated_at: Some(Utc::now()),
-                            document_id: None,
-                            result_revision_id: None,
-                            mutation_item_id: None,
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        error!(
-                            run_id = %run.id,
-                            candidate_id = %candidate.id,
-                            normalized_url = %candidate.normalized_url,
-                            final_url = %resource.final_url,
-                            canonical_url = %resource_canonical_url,
-                            db_error = %error,
-                            "web ingest failed to persist duplicate canonical candidate"
-                        );
-                        ApiError::Internal
-                    })?;
-                    telemetry::web_candidate_event(
-                        "candidate_duplicate",
-                        run.id,
-                        candidate.id,
-                        WebCandidateState::Duplicate.as_str(),
-                        &candidate.normalized_url,
-                        candidate.depth,
-                        Some(WebClassificationReason::DuplicateCanonicalUrl.as_str()),
-                        Some(host_classification_label),
-                    );
-                    continue;
-                }
-                canonical_urls.insert(resource_canonical_url.clone());
-
-                let snapshot_storage_key = self
-                    .persist_resource_snapshot(state, run, &resource)
-                    .await
-                    .map_err(|failure| {
-                        ApiError::BadRequest(
-                            failure
-                                .candidate_reason
-                                .clone()
-                                .unwrap_or_else(|| failure.failure_code.clone()),
-                        )
-                    })?;
-                let candidate_row = ingest_repository::update_web_discovered_page(
-                    &state.persistence.postgres,
-                    candidate.id,
-                    &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                        final_url: Some(resource.final_url.as_str()),
-                        canonical_url: Some(resource_canonical_url.as_str()),
-                        host_classification: Some(host_classification_label),
-                        candidate_state: WebCandidateState::Eligible.as_str(),
-                        classification_reason: candidate.classification_reason.as_deref(),
-                        content_type: resource.content_type.as_deref(),
-                        http_status: Some(resource.http_status),
-                        snapshot_storage_key: Some(snapshot_storage_key.as_str()),
-                        updated_at: Some(Utc::now()),
-                        document_id: None,
-                        result_revision_id: None,
-                        mutation_item_id: None,
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    error!(
-                        run_id = %run.id,
-                        candidate_id = %candidate.id,
-                        normalized_url = %candidate.normalized_url,
-                        final_url = %resource.final_url,
-                        content_type = ?resource.content_type,
-                        snapshot_storage_key = %snapshot_storage_key,
-                        db_error = %error,
-                        "web ingest failed to persist discovered candidate snapshot state"
-                    );
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
-                telemetry::web_candidate_event(
-                    "candidate_eligible",
-                    run.id,
-                    candidate_row.id,
-                    &candidate_row.candidate_state,
-                    &candidate_row.normalized_url,
-                    candidate_row.depth,
-                    candidate_row.classification_reason.as_deref(),
-                    Some(candidate_row.host_classification.as_str()),
-                );
-
-                if candidate_row.depth < run.max_depth {
-                    for discovered_url in
-                        self.discover_outbound_links(state, run.library_id, &resource).await?
-                    {
-                        if self.run_cancel_requested(state, run.id).await? {
-                            return Ok(eligible_pages);
-                        }
-                        let Ok(resolved_url) =
-                            crate::shared::web::url_identity::resolve_discovered_url(
-                                &resource.final_url,
-                                &discovered_url,
-                            )
-                        else {
-                            continue;
-                        };
-                        let next_depth = candidate_row.depth.saturating_add(1);
-                        let discovered_host = crate::shared::web::url_identity::classify_host(
-                            &run.normalized_seed_url,
-                            &resolved_url,
-                        )
-                        .unwrap_or(HostClassification::External);
-
-                        if seen_urls.contains(&resolved_url) {
-                            continue;
-                        }
-                        seen_urls.insert(resolved_url.clone());
-
-                        let (candidate_state, classification_reason) = if next_depth > run.max_depth
-                        {
-                            (
-                                WebCandidateState::Excluded,
-                                Some(WebClassificationReason::ExceededMaxDepth.as_str()),
-                            )
-                        } else if run.boundary_policy == "same_host"
-                            && discovered_host != HostClassification::SameHost
-                        {
-                            (
-                                WebCandidateState::Excluded,
-                                Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
-                            )
-                        } else if let Some(reason) = classify_confluence_system_page(&resolved_url)
-                        {
-                            (WebCandidateState::Excluded, Some(reason))
-                        } else if i32::try_from(budgeted_urls.len()).unwrap_or(i32::MAX)
-                            >= run.max_pages
-                        {
-                            (
-                                WebCandidateState::Excluded,
-                                Some(WebClassificationReason::ExceededMaxPages.as_str()),
-                            )
-                        } else {
-                            budgeted_urls.insert(resolved_url.clone());
-                            (
-                                WebCandidateState::Eligible,
-                                Some(WebClassificationReason::SeedAccepted.as_str()),
-                            )
-                        };
-                        if self.run_cancel_requested(state, run.id).await? {
-                            return Ok(eligible_pages);
-                        }
-
-                        let discovered_row = ingest_repository::create_web_discovered_page(
-                            &state.persistence.postgres,
-                            &NewWebDiscoveredPage {
-                                id: Uuid::now_v7(),
-                                run_id: run.id,
-                                discovered_url: Some(discovered_url.as_str()),
-                                normalized_url: &resolved_url,
-                                final_url: None,
-                                canonical_url: Some(&resolved_url),
-                                depth: next_depth,
-                                referrer_candidate_id: Some(candidate_row.id),
-                                host_classification: discovered_host.as_str(),
-                                candidate_state: candidate_state.as_str(),
-                                classification_reason,
-                                content_type: None,
-                                http_status: None,
-                                snapshot_storage_key: None,
-                                discovered_at: None,
-                                updated_at: None,
-                                document_id: None,
-                                result_revision_id: None,
-                                mutation_item_id: None,
-                            },
-                        )
-                        .await
-                        .map_err(|error| {
-                            error!(
-                                run_id = %run.id,
-                                referrer_candidate_id = %candidate_row.id,
-                                normalized_url = %resolved_url,
-                                depth = next_depth,
-                                candidate_state = %candidate_state.as_str(),
-                                classification_reason = ?classification_reason,
-                                db_error = %error,
-                                "web ingest failed to persist discovered outbound candidate"
-                            );
-                            ApiError::Internal
-                        })?;
-                        telemetry::web_candidate_event(
-                            "candidate_discovered",
-                            run.id,
-                            discovered_row.id,
-                            discovered_row.candidate_state.as_str(),
-                            &discovered_row.normalized_url,
-                            discovered_row.depth,
-                            discovered_row.classification_reason.as_deref(),
-                            Some(discovered_row.host_classification.as_str()),
-                        );
-
-                        if candidate_state == WebCandidateState::Eligible {
-                            frontier.push_back(discovered_row);
-                        }
-                    }
-                }
-
-                eligible_pages.push(candidate_row);
-            }
-        }
-
-        Ok(eligible_pages)
+        recursive::discover_recursive_scope(self, state, run, seed_candidate).await
     }
 
     async fn queue_recursive_page_jobs(
@@ -1161,112 +743,7 @@ impl WebIngestService {
         run: &WebIngestRunRow,
         pages: &[WebDiscoveredPageRow],
     ) -> Result<(), ApiError> {
-        for page in pages {
-            let cancel_requested = match self.run_cancel_requested(state, run.id).await {
-                Ok(value) => value,
-                Err(error) => {
-                    error!(run_id = %run.id, candidate_id = %page.id, error = %error, "web ingest failed to refresh cancel state before queueing page");
-                    return Err(error);
-                }
-            };
-            if cancel_requested {
-                self.mark_pending_pages_canceled(state, run.id).await?;
-                return Ok(());
-            }
-            let queued_page = match ingest_repository::update_web_discovered_page(
-                &state.persistence.postgres,
-                page.id,
-                &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                    final_url: page.final_url.as_deref(),
-                    canonical_url: page.canonical_url.as_deref(),
-                    host_classification: Some(page.host_classification.as_str()),
-                    candidate_state: WebCandidateState::Queued.as_str(),
-                    classification_reason: page.classification_reason.as_deref(),
-                    content_type: page.content_type.as_deref(),
-                    http_status: page.http_status,
-                    snapshot_storage_key: page.snapshot_storage_key.as_deref(),
-                    updated_at: Some(Utc::now()),
-                    document_id: None,
-                    result_revision_id: None,
-                    mutation_item_id: None,
-                },
-            )
-            .await
-            {
-                Ok(Some(page)) => page,
-                Ok(None) => {
-                    let error = ApiError::resource_not_found("web_discovered_page", page.id);
-                    error!(run_id = %run.id, candidate_id = %page.id, error = %error, "web ingest failed to mark candidate queued because page row disappeared");
-                    return Err(error);
-                }
-                Err(_) => {
-                    error!(run_id = %run.id, candidate_id = %page.id, "web ingest failed to persist queued candidate state");
-                    return Err(ApiError::Internal);
-                }
-            };
-            telemetry::web_candidate_event(
-                "candidate_queued",
-                run.id,
-                queued_page.id,
-                &queued_page.candidate_state,
-                &queued_page.normalized_url,
-                queued_page.depth,
-                queued_page.classification_reason.as_deref(),
-                Some(queued_page.host_classification.as_str()),
-            );
-            let job_operation = match state
-                .canonical_services
-                .ops
-                .create_async_operation(
-                    state,
-                    CreateAsyncOperationCommand {
-                        workspace_id: run.workspace_id,
-                        library_id: run.library_id,
-                        operation_kind: "web_materialize_page".to_string(),
-                        surface_kind: "worker".to_string(),
-                        requested_by_principal_id: run.requested_by_principal_id,
-                        status: "accepted".to_string(),
-                        subject_kind: "content_web_discovered_page".to_string(),
-                        subject_id: Some(queued_page.id),
-                        completed_at: None,
-                        failure_code: None,
-                    },
-                )
-                .await
-            {
-                Ok(operation) => operation,
-                Err(error) => {
-                    error!(run_id = %run.id, candidate_id = %queued_page.id, error = %error, "web ingest failed to create async operation for queued candidate");
-                    return Err(error);
-                }
-            };
-            if let Err(error) = state
-                .canonical_services
-                .ingest
-                .admit_job(
-                    state,
-                    AdmitIngestJobCommand {
-                        workspace_id: run.workspace_id,
-                        library_id: run.library_id,
-                        mutation_id: None,
-                        connector_id: None,
-                        async_operation_id: Some(job_operation.id),
-                        knowledge_document_id: None,
-                        knowledge_revision_id: None,
-                        job_kind: "web_materialize_page".to_string(),
-                        priority: 60,
-                        dedupe_key: Some(format!("web-materialize-page:{}", queued_page.id)),
-                        available_at: None,
-                    },
-                )
-                .await
-            {
-                error!(run_id = %run.id, candidate_id = %queued_page.id, async_operation_id = %job_operation.id, error = %error, "web ingest failed to admit web materialize page job");
-                return Err(error);
-            }
-        }
-
-        Ok(())
+        recursive::queue_recursive_page_jobs(self, state, run, pages).await
     }
 
     async fn load_eligible_pages_for_run(
@@ -1274,15 +751,7 @@ impl WebIngestService {
         state: &AppState,
         run_id: Uuid,
     ) -> Result<Vec<WebDiscoveredPageRow>, ApiError> {
-        Ok(ingest_repository::list_web_discovered_pages(&state.persistence.postgres, run_id)
-            .await
-            .map_err(|error| {
-                error!(%run_id, db_error = %error, "web ingest failed to load discovered pages for run");
-                ApiError::Internal
-            })?
-            .into_iter()
-            .filter(|page| page.candidate_state == WebCandidateState::Eligible.as_str())
-            .collect())
+        recursive::load_eligible_pages_for_run(self, state, run_id).await
     }
 
     async fn finalize_recursive_run_if_settled(
@@ -1290,26 +759,7 @@ impl WebIngestService {
         state: &AppState,
         run_id: Uuid,
     ) -> Result<WebIngestRunRow, ApiError> {
-        let row = ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, run_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", run_id))?;
-        if matches!(
-            row.run_state.as_str(),
-            "completed" | "completed_partial" | "failed" | "canceled"
-        ) {
-            return Ok(row);
-        }
-        let counts = map_web_run_counts_row(
-            ingest_repository::get_web_run_counts(&state.persistence.postgres, row.id)
-                .await
-                .map_err(|_| ApiError::Internal)?,
-        )
-        .counts;
-        if counts.queued > 0 || counts.processing > 0 {
-            return Ok(row);
-        }
-        self.finalize_recursive_run(state, row).await
+        recursive::finalize_recursive_run_if_settled(self, state, run_id).await
     }
 
     async fn mark_recursive_page_failed(
@@ -1318,42 +768,7 @@ impl WebIngestService {
         page: &WebDiscoveredPageRow,
         failure: WebRunFailure,
     ) -> Result<WebDiscoveredPageRow, ApiError> {
-        let updated = ingest_repository::update_web_discovered_page(
-            &state.persistence.postgres,
-            page.id,
-            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                final_url: failure.final_url.as_deref().or(page.final_url.as_deref()),
-                canonical_url: failure.final_url.as_deref().or(page.canonical_url.as_deref()),
-                host_classification: Some(page.host_classification.as_str()),
-                candidate_state: WebCandidateState::Failed.as_str(),
-                classification_reason: failure
-                    .candidate_reason
-                    .as_deref()
-                    .or(page.classification_reason.as_deref()),
-                content_type: failure.content_type.as_deref().or(page.content_type.as_deref()),
-                http_status: failure.http_status.or(page.http_status),
-                snapshot_storage_key: page.snapshot_storage_key.as_deref(),
-                updated_at: Some(Utc::now()),
-                document_id: None,
-                result_revision_id: None,
-                mutation_item_id: None,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", page.id))?;
-        telemetry::web_failure_event(
-            "candidate_failed",
-            updated.run_id,
-            Some(updated.id),
-            &failure.failure_code,
-            updated.classification_reason.as_deref(),
-            updated.final_url.as_deref(),
-            updated.content_type.as_deref(),
-            updated.http_status,
-        );
-        let _ = self.finalize_recursive_run_if_settled(state, updated.run_id).await?;
-        Ok(updated)
+        recursive::mark_recursive_page_failed(self, state, page, failure).await
     }
 
     async fn cancel_page_candidate(
@@ -1361,38 +776,7 @@ impl WebIngestService {
         state: &AppState,
         page: &WebDiscoveredPageRow,
     ) -> Result<WebDiscoveredPageRow, ApiError> {
-        let updated = ingest_repository::update_web_discovered_page(
-            &state.persistence.postgres,
-            page.id,
-            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                final_url: page.final_url.as_deref(),
-                canonical_url: page.canonical_url.as_deref(),
-                host_classification: Some(page.host_classification.as_str()),
-                candidate_state: WebCandidateState::Canceled.as_str(),
-                classification_reason: Some(WebClassificationReason::CancelRequested.as_str()),
-                content_type: page.content_type.as_deref(),
-                http_status: page.http_status,
-                snapshot_storage_key: page.snapshot_storage_key.as_deref(),
-                updated_at: Some(Utc::now()),
-                document_id: page.document_id,
-                result_revision_id: page.result_revision_id,
-                mutation_item_id: page.mutation_item_id,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", page.id))?;
-        telemetry::web_candidate_event(
-            "candidate_canceled",
-            updated.run_id,
-            updated.id,
-            &updated.candidate_state,
-            &updated.normalized_url,
-            updated.depth,
-            updated.classification_reason.as_deref(),
-            Some(updated.host_classification.as_str()),
-        );
-        Ok(updated)
+        recursive::cancel_page_candidate(self, state, page).await
     }
 
     async fn mark_pending_pages_canceled(
@@ -1400,16 +784,7 @@ impl WebIngestService {
         state: &AppState,
         run_id: Uuid,
     ) -> Result<(), ApiError> {
-        let pages =
-            ingest_repository::list_web_discovered_pages(&state.persistence.postgres, run_id)
-                .await
-                .map_err(|_| ApiError::Internal)?;
-        for page in pages {
-            if matches!(page.candidate_state.as_str(), "discovered" | "eligible" | "queued") {
-                let _ = self.cancel_page_candidate(state, &page).await?;
-            }
-        }
-        Ok(())
+        recursive::mark_pending_pages_canceled(self, state, run_id).await
     }
 
     async fn finalize_recursive_run(
@@ -1417,104 +792,7 @@ impl WebIngestService {
         state: &AppState,
         row: WebIngestRunRow,
     ) -> Result<WebIngestRunRow, ApiError> {
-        let counts = map_web_run_counts_row(
-            ingest_repository::get_web_run_counts(&state.persistence.postgres, row.id)
-                .await
-                .map_err(|_| ApiError::Internal)?,
-        )
-        .counts;
-        let terminal_state = derive_terminal_run_state(&crate::shared::web::ingest::WebRunCounts {
-            discovered: counts.discovered,
-            eligible: counts.eligible,
-            processed: counts.processed,
-            queued: counts.queued,
-            processing: counts.processing,
-            duplicates: counts.duplicates,
-            excluded: counts.excluded,
-            blocked: counts.blocked,
-            failed: counts.failed,
-            canceled: counts.canceled,
-        });
-        let completed_at = now_if_terminal(terminal_state.as_str());
-        let completed_row = ingest_repository::update_web_ingest_run(
-            &state.persistence.postgres,
-            row.id,
-            &UpdateWebIngestRun {
-                run_state: terminal_state.as_str(),
-                completed_at,
-                failure_code: (terminal_state == WebRunState::Failed)
-                    .then_some(WebRunFailureCode::RecursiveCrawlFailed.as_str()),
-                cancel_requested_at: row.cancel_requested_at,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id))?;
-        telemetry::web_run_event(
-            "run_finalized",
-            completed_row.id,
-            completed_row.library_id,
-            &completed_row.mode,
-            &completed_row.run_state,
-            &completed_row.seed_url,
-        );
-
-        if let Some(async_operation_id) = completed_row.async_operation_id {
-            let status = match terminal_state {
-                WebRunState::Completed | WebRunState::CompletedPartial => "ready",
-                WebRunState::Canceled => "canceled",
-                WebRunState::Failed => "failed",
-                _ => "processing",
-            };
-            let _ = state
-                .canonical_services
-                .ops
-                .update_async_operation(
-                    state,
-                    UpdateAsyncOperationCommand {
-                        operation_id: async_operation_id,
-                        status: status.to_string(),
-                        completed_at,
-                        failure_code: (terminal_state == WebRunState::Failed).then_some(
-                            WebRunFailureCode::RecursiveCrawlFailed.as_str().to_string(),
-                        ),
-                    },
-                )
-                .await?;
-        }
-
-        let mutation_state = match terminal_state {
-            WebRunState::Completed | WebRunState::CompletedPartial => "applied",
-            WebRunState::Canceled => "canceled",
-            WebRunState::Failed => "failed",
-            _ => "processing",
-        };
-        if matches!(
-            terminal_state,
-            WebRunState::Completed
-                | WebRunState::CompletedPartial
-                | WebRunState::Canceled
-                | WebRunState::Failed
-        ) {
-            let _ = state
-                .canonical_services
-                .content
-                .update_mutation(
-                    state,
-                    UpdateMutationCommand {
-                        mutation_id: completed_row.mutation_id,
-                        mutation_state: mutation_state.to_string(),
-                        completed_at,
-                        failure_code: (terminal_state == WebRunState::Failed).then_some(
-                            WebRunFailureCode::RecursiveCrawlFailed.as_str().to_string(),
-                        ),
-                        conflict_code: None,
-                    },
-                )
-                .await?;
-        }
-
-        Ok(completed_row)
+        recursive::finalize_recursive_run(self, state, row).await
     }
 
     async fn transition_run_state(
@@ -1524,37 +802,7 @@ impl WebIngestService {
         run_state: WebRunState,
         async_status: &str,
     ) -> Result<WebIngestRunRow, ApiError> {
-        let updated_row = ingest_repository::update_web_ingest_run(
-            &state.persistence.postgres,
-            row.id,
-            &UpdateWebIngestRun {
-                run_state: run_state.as_str(),
-                completed_at: None,
-                failure_code: None,
-                cancel_requested_at: row.cancel_requested_at,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id))?;
-
-        if let Some(async_operation_id) = updated_row.async_operation_id {
-            let _ = state
-                .canonical_services
-                .ops
-                .update_async_operation(
-                    state,
-                    UpdateAsyncOperationCommand {
-                        operation_id: async_operation_id,
-                        status: async_status.to_string(),
-                        completed_at: None,
-                        failure_code: None,
-                    },
-                )
-                .await?;
-        }
-
-        Ok(updated_row)
+        recursive::transition_run_state(self, state, row, run_state, async_status).await
     }
 
     async fn get_run_row(
@@ -1562,14 +810,11 @@ impl WebIngestService {
         state: &AppState,
         run_id: Uuid,
     ) -> Result<WebIngestRunRow, ApiError> {
-        ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, run_id)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", run_id))
+        recursive::get_run_row(self, state, run_id).await
     }
 
     async fn run_cancel_requested(&self, state: &AppState, run_id: Uuid) -> Result<bool, ApiError> {
-        Ok(self.get_run_row(state, run_id).await?.cancel_requested_at.is_some())
+        recursive::run_cancel_requested(self, state, run_id).await
     }
 
     async fn discover_outbound_links(
@@ -1578,42 +823,7 @@ impl WebIngestService {
         library_id: Uuid,
         resource: &FetchedWebResource,
     ) -> Result<Vec<String>, ApiError> {
-        let looks_like_html = resource.content_type.as_deref().map_or_else(
-            || payload_looks_like_html_document(&String::from_utf8_lossy(&resource.payload_bytes)),
-            |value| value.starts_with("text/html") || value == "application/xhtml+xml",
-        );
-        if !looks_like_html {
-            return Ok(Vec::new());
-        }
-
-        let file_name =
-            source_file_name_from_url(&resource.final_url, resource.content_type.as_deref());
-        let extraction_plan = state
-            .canonical_services
-            .content
-            .build_runtime_extraction_plan(
-                state,
-                library_id,
-                &file_name,
-                resource.content_type.as_deref(),
-                &resource.payload_bytes,
-            )
-            .await
-            .map_err(|_| ApiError::Internal)?;
-        Ok(extraction_plan
-            .source_map
-            .get("outboundLinks")
-            .and_then(serde_json::Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default())
+        recursive::discover_outbound_links(self, state, library_id, resource).await
     }
 
     async fn execute_single_page_run(
@@ -1622,232 +832,14 @@ impl WebIngestService {
         row: WebIngestRunRow,
         seed_candidate: WebDiscoveredPageRow,
     ) -> Result<WebIngestRunRow, ApiError> {
-        let processing_row = ingest_repository::update_web_ingest_run(
-            &state.persistence.postgres,
-            row.id,
-            &UpdateWebIngestRun {
-                run_state: WebRunState::Processing.as_str(),
-                completed_at: None,
-                failure_code: None,
-                cancel_requested_at: None,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id))?;
-        telemetry::web_run_event(
-            "single_page_started",
-            processing_row.id,
-            processing_row.library_id,
-            &processing_row.mode,
-            &processing_row.run_state,
-            &processing_row.seed_url,
-        );
-
-        if let Some(async_operation_id) = processing_row.async_operation_id {
-            let _ = state
-                .canonical_services
-                .ops
-                .update_async_operation(
-                    state,
-                    UpdateAsyncOperationCommand {
-                        operation_id: async_operation_id,
-                        status: "processing".to_string(),
-                        completed_at: None,
-                        failure_code: None,
-                    },
-                )
-                .await?;
-        }
-
-        let _ = ingest_repository::update_web_discovered_page(
-            &state.persistence.postgres,
-            seed_candidate.id,
-            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                final_url: None,
-                canonical_url: Some(processing_row.normalized_seed_url.as_str()),
-                host_classification: None,
-                candidate_state: WebCandidateState::Processing.as_str(),
-                classification_reason: Some(WebClassificationReason::SeedAccepted.as_str()),
-                content_type: None,
-                http_status: None,
-                snapshot_storage_key: None,
-                updated_at: Some(Utc::now()),
-                document_id: None,
-                result_revision_id: None,
-                mutation_item_id: None,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        telemetry::web_candidate_event(
-            "candidate_processing",
-            processing_row.id,
-            seed_candidate.id,
-            WebCandidateState::Processing.as_str(),
-            &processing_row.normalized_seed_url,
-            0,
-            Some(WebClassificationReason::SeedAccepted.as_str()),
-            None,
-        );
-
-        let resource = match self.fetch_web_resource(&processing_row.seed_url).await {
-            Ok(resource) => resource,
-            Err(failure) => {
-                return self
-                    .fail_single_page_run(state, processing_row, seed_candidate.id, failure)
-                    .await;
-            }
-        };
-        let snapshot_storage_key =
-            match self.persist_resource_snapshot(state, &processing_row, &resource).await {
-                Ok(storage_key) => storage_key,
-                Err(failure) => {
-                    return self
-                        .fail_single_page_run(state, processing_row, seed_candidate.id, failure)
-                        .await;
-                }
-            };
-        let materialized = match self
-            .materialize_snapshot_resource(state, &processing_row, &resource, &snapshot_storage_key)
-            .await
-        {
-            Ok(page) => page,
-            Err(failure) => {
-                return self
-                    .fail_single_page_run(state, processing_row, seed_candidate.id, failure)
-                    .await;
-            }
-        };
-
-        let _ = ingest_repository::update_web_discovered_page(
-            &state.persistence.postgres,
-            seed_candidate.id,
-            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                final_url: Some(materialized.final_url.as_str()),
-                canonical_url: Some(materialized.final_url.as_str()),
-                host_classification: None,
-                candidate_state: WebCandidateState::Processed.as_str(),
-                classification_reason: Some(WebClassificationReason::SeedAccepted.as_str()),
-                content_type: Some(materialized.content_type.as_str()),
-                http_status: Some(resource.http_status),
-                snapshot_storage_key: Some(snapshot_storage_key.as_str()),
-                updated_at: Some(Utc::now()),
-                document_id: Some(materialized.document_id),
-                result_revision_id: Some(materialized.revision_id),
-                mutation_item_id: Some(materialized.mutation_item_id),
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-        telemetry::web_candidate_event(
-            "candidate_processed",
-            processing_row.id,
-            seed_candidate.id,
-            WebCandidateState::Processed.as_str(),
-            &materialized.final_url,
-            0,
-            Some(WebClassificationReason::SeedAccepted.as_str()),
-            None,
-        );
-
-        let counts = map_web_run_counts_row(
-            ingest_repository::get_web_run_counts(&state.persistence.postgres, processing_row.id)
-                .await
-                .map_err(|_| ApiError::Internal)?,
-        )
-        .counts;
-        let terminal_state = derive_terminal_run_state(&crate::shared::web::ingest::WebRunCounts {
-            discovered: counts.discovered,
-            eligible: counts.eligible,
-            processed: counts.processed,
-            queued: counts.queued,
-            processing: counts.processing,
-            duplicates: counts.duplicates,
-            excluded: counts.excluded,
-            blocked: counts.blocked,
-            failed: counts.failed,
-            canceled: counts.canceled,
-        });
-        let completed_at = now_if_terminal(terminal_state.as_str());
-        let completed_row = ingest_repository::update_web_ingest_run(
-            &state.persistence.postgres,
-            processing_row.id,
-            &UpdateWebIngestRun {
-                run_state: terminal_state.as_str(),
-                completed_at,
-                failure_code: None,
-                cancel_requested_at: None,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", processing_row.id))?;
-
-        if let Some(async_operation_id) = completed_row.async_operation_id {
-            let _ = state
-                .canonical_services
-                .ops
-                .update_async_operation(
-                    state,
-                    UpdateAsyncOperationCommand {
-                        operation_id: async_operation_id,
-                        status: "ready".to_string(),
-                        completed_at,
-                        failure_code: None,
-                    },
-                )
-                .await?;
-        }
-
-        Ok(completed_row)
+        single_page::execute_single_page_run(self, state, row, seed_candidate).await
     }
 
     async fn fetch_web_resource(
         &self,
         seed_url: &str,
     ) -> Result<FetchedWebResource, WebRunFailure> {
-        let response = self.http_client().get(seed_url).send().await.map_err(|error| {
-            WebRunFailure::inaccessible(format!("failed to fetch seed url: {error}"))
-        })?;
-        let http_status = i32::from(response.status().as_u16());
-        let final_url = normalize_absolute_url(response.url().as_str()).map_err(|error| {
-            WebRunFailure::invalid_url(format!(
-                "fetched resource resolved to invalid final url: {error}"
-            ))
-        })?;
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_ascii_lowercase);
-
-        if !response.status().is_success() {
-            return Err(WebRunFailure::inaccessible_with_response(
-                format!("remote server returned status {}", response.status()),
-                Some(final_url),
-                content_type,
-                Some(http_status),
-            ));
-        }
-
-        let payload_bytes = response.bytes().await.map_err(|error| {
-            WebRunFailure::inaccessible_with_response(
-                format!("failed to read fetched response body: {error}"),
-                Some(final_url.clone()),
-                content_type.clone(),
-                Some(http_status),
-            )
-        })?;
-
-        Ok(FetchedWebResource {
-            final_url,
-            content_type,
-            http_status,
-            payload_bytes: payload_bytes.to_vec(),
-        })
+        single_page::fetch_web_resource(self, seed_url).await
     }
 
     async fn persist_resource_snapshot(
@@ -1856,27 +848,7 @@ impl WebIngestService {
         run: &WebIngestRunRow,
         resource: &FetchedWebResource,
     ) -> Result<String, WebRunFailure> {
-        let checksum =
-            format!("sha256:{}", hex::encode(sha2::Sha256::digest(&resource.payload_bytes)));
-        state
-            .content_storage
-            .persist_web_snapshot(
-                run.workspace_id,
-                run.library_id,
-                &resource.final_url,
-                &checksum,
-                &resource.payload_bytes,
-            )
-            .await
-            .map_err(|error| {
-                WebRunFailure::internal(
-                    WebRunFailureCode::WebSnapshotPersistFailed.as_str(),
-                    format!("failed to persist fetched resource snapshot: {error}"),
-                    Some(resource.final_url.clone()),
-                    resource.content_type.clone(),
-                    Some(resource.http_status),
-                )
-            })
+        single_page::persist_resource_snapshot(self, state, run, resource).await
     }
 
     async fn load_candidate_snapshot_resource(
@@ -1884,48 +856,7 @@ impl WebIngestService {
         state: &AppState,
         candidate: &WebDiscoveredPageRow,
     ) -> Result<FetchedWebResource, WebRunFailure> {
-        let storage_key = candidate
-            .snapshot_storage_key
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                WebRunFailure::internal(
-                    WebRunFailureCode::WebSnapshotMissing.as_str(),
-                    "eligible page is missing stored snapshot reference".to_string(),
-                    candidate.final_url.clone().or_else(|| candidate.canonical_url.clone()),
-                    candidate.content_type.clone(),
-                    candidate.http_status,
-                )
-            })?;
-        let final_url =
-            candidate.final_url.as_ref().or(candidate.canonical_url.as_ref()).cloned().ok_or_else(
-                || {
-                    WebRunFailure::internal(
-                        WebRunFailureCode::WebSnapshotMissingFinalUrl.as_str(),
-                        "eligible page is missing final url identity".to_string(),
-                        None,
-                        candidate.content_type.clone(),
-                        candidate.http_status,
-                    )
-                },
-            )?;
-        let payload_bytes =
-            state.content_storage.read_revision_source(storage_key).await.map_err(|error| {
-                WebRunFailure::internal(
-                    WebRunFailureCode::WebSnapshotUnavailable.as_str(),
-                    format!("failed to read stored web snapshot: {error}"),
-                    Some(final_url.clone()),
-                    candidate.content_type.clone(),
-                    candidate.http_status,
-                )
-            })?;
-
-        Ok(FetchedWebResource {
-            final_url,
-            content_type: candidate.content_type.clone(),
-            http_status: candidate.http_status.unwrap_or(200),
-            payload_bytes,
-        })
+        single_page::load_candidate_snapshot_resource(self, state, candidate).await
     }
 
     async fn materialize_snapshot_resource(
@@ -1935,161 +866,7 @@ impl WebIngestService {
         resource: &FetchedWebResource,
         storage_key: &str,
     ) -> Result<MaterializedWebPage, WebRunFailure> {
-        let file_name =
-            source_file_name_from_url(&resource.final_url, resource.content_type.as_deref());
-        let extraction_plan = state
-            .canonical_services
-            .content
-            .build_runtime_extraction_plan(
-                state,
-                run.library_id,
-                &file_name,
-                resource.content_type.as_deref(),
-                &resource.payload_bytes,
-            )
-            .await
-            .map_err(|error| {
-                WebRunFailure::unsupported_content(
-                    error.message().to_string(),
-                    Some(resource.final_url.clone()),
-                    resource.content_type.clone(),
-                    Some(resource.http_status),
-                )
-            })?;
-
-        let checksum =
-            format!("sha256:{}", hex::encode(sha2::Sha256::digest(&resource.payload_bytes)));
-        let materialized = state
-            .canonical_services
-            .content
-            .materialize_web_capture(
-                state,
-                MaterializeWebCaptureCommand {
-                    workspace_id: run.workspace_id,
-                    library_id: run.library_id,
-                    mutation_id: run.mutation_id,
-                    requested_by_principal_id: run.requested_by_principal_id,
-                    final_url: resource.final_url.clone(),
-                    checksum,
-                    mime_type: resolved_web_mime_type(
-                        resource.content_type.as_deref(),
-                        &extraction_plan,
-                    ),
-                    byte_size: i64::try_from(resource.payload_bytes.len()).unwrap_or(i64::MAX),
-                    title: extraction_title(&extraction_plan.source_map)
-                        .or_else(|| fallback_title_from_url(&resource.final_url)),
-                    storage_key: storage_key.to_string(),
-                },
-            )
-            .await
-            .map_err(|_| {
-                WebRunFailure::internal(
-                    WebRunFailureCode::WebCaptureMaterializationFailed.as_str(),
-                    "failed to materialize canonical web capture".to_string(),
-                    Some(resource.final_url.clone()),
-                    resource.content_type.clone(),
-                    Some(resource.http_status),
-                )
-            })?;
-
-        Ok(MaterializedWebPage {
-            final_url: resource.final_url.clone(),
-            content_type: resolved_web_mime_type(
-                resource.content_type.as_deref(),
-                &extraction_plan,
-            ),
-            document_id: materialized.document.id,
-            revision_id: materialized.revision.id,
-            mutation_item_id: materialized.mutation_item.id,
-            _job_id: materialized.job_id,
-        })
-    }
-
-    async fn fail_single_page_run(
-        &self,
-        state: &AppState,
-        row: WebIngestRunRow,
-        candidate_id: Uuid,
-        failure: WebRunFailure,
-    ) -> Result<WebIngestRunRow, ApiError> {
-        let _ = ingest_repository::update_web_discovered_page(
-            &state.persistence.postgres,
-            candidate_id,
-            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                final_url: failure.final_url.as_deref(),
-                canonical_url: failure.final_url.as_deref(),
-                host_classification: None,
-                candidate_state: WebCandidateState::Failed.as_str(),
-                classification_reason: failure.candidate_reason.as_deref(),
-                content_type: failure.content_type.as_deref(),
-                http_status: failure.http_status,
-                snapshot_storage_key: None,
-                updated_at: Some(Utc::now()),
-                document_id: None,
-                result_revision_id: None,
-                mutation_item_id: None,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?;
-
-        let completed_at = Some(Utc::now());
-        let failed_row = ingest_repository::update_web_ingest_run(
-            &state.persistence.postgres,
-            row.id,
-            &UpdateWebIngestRun {
-                run_state: WebRunState::Failed.as_str(),
-                completed_at,
-                failure_code: Some(failure.failure_code.as_str()),
-                cancel_requested_at: row.cancel_requested_at,
-            },
-        )
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id))?;
-        telemetry::web_failure_event(
-            "single_page_failed",
-            row.id,
-            Some(candidate_id),
-            &failure.failure_code,
-            failure.candidate_reason.as_deref(),
-            failure.final_url.as_deref(),
-            failure.content_type.as_deref(),
-            failure.http_status,
-        );
-
-        let _ = state
-            .canonical_services
-            .content
-            .update_mutation(
-                state,
-                UpdateMutationCommand {
-                    mutation_id: row.mutation_id,
-                    mutation_state: "failed".to_string(),
-                    completed_at,
-                    failure_code: Some(failure.failure_code.clone()),
-                    conflict_code: None,
-                },
-            )
-            .await?;
-
-        if let Some(async_operation_id) = failed_row.async_operation_id {
-            let _ = state
-                .canonical_services
-                .ops
-                .update_async_operation(
-                    state,
-                    UpdateAsyncOperationCommand {
-                        operation_id: async_operation_id,
-                        status: "failed".to_string(),
-                        completed_at,
-                        failure_code: Some(failure.failure_code),
-                    },
-                )
-                .await?;
-        }
-
-        Ok(failed_row)
+        single_page::materialize_snapshot_resource(self, state, run, resource, storage_key).await
     }
 }
 
@@ -2287,6 +1064,10 @@ fn resolved_web_mime_type(
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     .to_string()
             }
+            "tabular_text" => {
+                spreadsheet_mime_type(extraction_plan.source_format_metadata.source_format.as_str())
+                    .to_string()
+            }
             "pptx_text" => {
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                     .to_string()
@@ -2306,6 +1087,14 @@ fn source_file_name_from_url(final_url: &str, content_type: Option<&str>) -> Str
         Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document") => {
             "document.docx"
         }
+        Some("text/csv") | Some("application/csv") => "table.csv",
+        Some("text/tab-separated-values") => "table.tsv",
+        Some("application/vnd.ms-excel") => "workbook.xls",
+        Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
+            "workbook.xlsx"
+        }
+        Some("application/vnd.ms-excel.sheet.binary.macroenabled.12") => "workbook.xlsb",
+        Some("application/vnd.oasis.opendocument.spreadsheet") => "workbook.ods",
         Some("application/vnd.openxmlformats-officedocument.presentationml.presentation") => {
             "slides.pptx"
         }
@@ -2321,6 +1110,17 @@ fn source_file_name_from_url(final_url: &str, content_type: Option<&str>) -> Str
                 .map(ToString::to_string)
         })
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn spreadsheet_mime_type(source_format: &str) -> &'static str {
+    match source_format {
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "xls" => "application/vnd.ms-excel",
+        "xlsb" => "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        _ => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
 }
 
 fn fallback_title_from_url(final_url: &str) -> Option<String> {

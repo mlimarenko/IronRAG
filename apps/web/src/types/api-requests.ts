@@ -1,4 +1,4 @@
-// Request body shapes for the RustRAG HTTP API.
+// Request body shapes for the IronRAG HTTP API.
 //
 // Write endpoints accept JSON objects validated by the backend.
 // We surface them as opaque records to keep call-sites flexible while

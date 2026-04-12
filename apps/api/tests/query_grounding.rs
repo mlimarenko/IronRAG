@@ -7,7 +7,7 @@ use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     domains::{
         agent_runtime::{
@@ -386,7 +386,7 @@ impl QueryGroundingAppFixture {
         query_text: &str,
         verification_state: &str,
         verification_warnings: serde_json::Value,
-    ) -> Result<rustrag_backend::domains::query::QueryExecutionDetail> {
+    ) -> Result<ironrag_backend::domains::query::QueryExecutionDetail> {
         let request_turn = query_repository::create_turn(
             &self.state.persistence.postgres,
             &query_repository::NewQueryTurn {
@@ -475,7 +475,7 @@ impl QueryGroundingAppFixture {
         relation_ids: Vec<Uuid>,
         structured_blocks: Vec<KnowledgeStructuredBlockRow>,
         technical_facts: Vec<KnowledgeTechnicalFactRow>,
-    ) -> Result<rustrag_backend::domains::query::QueryExecutionDetail> {
+    ) -> Result<ironrag_backend::domains::query::QueryExecutionDetail> {
         let request_turn = query_repository::create_turn(
             &self.state.persistence.postgres,
             &query_repository::NewQueryTurn {

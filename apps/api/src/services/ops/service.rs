@@ -88,7 +88,7 @@ impl OpsService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_async_operation_row(row))
     }
 
@@ -107,7 +107,7 @@ impl OpsService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("async_operation", command.operation_id))?;
         Ok(map_async_operation_row(row))
     }
@@ -120,7 +120,7 @@ impl OpsService {
         let row =
             ops_repository::get_async_operation_by_id(&state.persistence.postgres, operation_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("async_operation", operation_id))?;
         Ok(map_async_operation_row(row))
     }
@@ -137,7 +137,7 @@ impl OpsService {
             subject_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(row.map(map_async_operation_row))
     }
 
@@ -148,7 +148,7 @@ impl OpsService {
     ) -> Result<OpsLibraryStateSnapshot, ApiError> {
         let facts = ops_repository::get_library_facts(&state.persistence.postgres, library_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
         let mut knowledge_generations =
             state.canonical_services.knowledge.list_library_generations(state, library_id).await?;
@@ -168,14 +168,14 @@ impl OpsService {
             10,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let bundle_failures = ops_repository::list_recent_bundle_assembly_failures(
             &state.persistence.postgres,
             library_id,
             10,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let state = map_library_facts_row(
             &facts,
             &coverage,
@@ -200,14 +200,14 @@ impl OpsService {
             10,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let bundle_failures = ops_repository::list_recent_bundle_assembly_failures(
             &state.persistence.postgres,
             library_id,
             10,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(build_library_warnings(
             library_id,
             &document_summaries,

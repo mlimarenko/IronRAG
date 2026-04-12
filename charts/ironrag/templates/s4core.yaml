@@ -1,0 +1,104 @@
+{{- if and (eq .Values.storage.provider "s3") (eq .Values.storage.s3.mode "bundled") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ironrag.fullname" . }}-s4core
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.storage.s3.persistence.size }}
+  {{- with .Values.storage.s3.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ironrag.fullname" . }}-s4core
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: s4core
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  selector:
+    matchLabels:
+      {{- include "ironrag.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: s4core
+  template:
+    metadata:
+      labels:
+        {{- include "ironrag.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: s4core
+    spec:
+      containers:
+        - name: s4core
+          {{- if .Values.storage.s3.image.digest }}
+          image: "{{ .Values.storage.s3.image.repository }}@{{ .Values.storage.s3.image.digest }}"
+          {{- else }}
+          image: "{{ .Values.storage.s3.image.repository }}:{{ .Values.storage.s3.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.storage.s3.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+          env:
+            - name: S4_BIND
+              value: 0.0.0.0:9000
+            - name: S4_ACCESS_KEY_ID
+              value: {{ .Values.storage.s3.accessKeyId | quote }}
+            - name: S4_SECRET_ACCESS_KEY
+              value: {{ .Values.storage.s3.secretAccessKey | quote }}
+            - name: S4_DATA_DIR
+              value: /data
+          ports:
+            - containerPort: 9000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.storage.s3.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "ironrag.fullname" . }}-s4core
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ironrag.fullname" . }}-s4core
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: s4core
+spec:
+  selector:
+    {{- include "ironrag.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: s4core
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http
+{{- end }}

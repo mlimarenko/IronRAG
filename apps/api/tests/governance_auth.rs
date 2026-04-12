@@ -16,7 +16,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
         arangodb::client::ArangoClient,
@@ -657,7 +657,7 @@ async fn probe_workspace_admin(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
-) -> Result<StatusCode, rustrag_backend::interfaces::http::router_support::ApiError> {
+) -> Result<StatusCode, ironrag_backend::interfaces::http::router_support::ApiError> {
     let _ =
         load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -667,7 +667,7 @@ async fn probe_library_read(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
-) -> Result<StatusCode, rustrag_backend::interfaces::http::router_support::ApiError> {
+) -> Result<StatusCode, ironrag_backend::interfaces::http::router_support::ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -676,7 +676,7 @@ async fn probe_library_write(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
-) -> Result<StatusCode, rustrag_backend::interfaces::http::router_support::ApiError> {
+) -> Result<StatusCode, ironrag_backend::interfaces::http::router_support::ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -685,7 +685,7 @@ async fn probe_document_read(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
-) -> Result<StatusCode, rustrag_backend::interfaces::http::router_support::ApiError> {
+) -> Result<StatusCode, ironrag_backend::interfaces::http::router_support::ApiError> {
     let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -695,7 +695,7 @@ async fn probe_document_write(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
-) -> Result<StatusCode, rustrag_backend::interfaces::http::router_support::ApiError> {
+) -> Result<StatusCode, ironrag_backend::interfaces::http::router_support::ApiError> {
     let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_WRITE)
         .await?;
     Ok(StatusCode::NO_CONTENT)

@@ -14,7 +14,7 @@ use tokio::time::{Duration, sleep};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::repositories::iam_repository,
     interfaces::http::{
@@ -384,6 +384,8 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(!read_tools.contains(&"create_workspace".to_string()));
         assert!(!read_tools.contains(&"create_library".to_string()));
         assert!(!read_tools.contains(&"upload_documents".to_string()));
+        assert!(!read_tools.contains(&"update_document".to_string()));
+        assert!(!read_tools.contains(&"delete_document".to_string()));
         assert!(!read_tools.contains(&"get_mutation_status".to_string()));
         assert!(!read_tools.contains(&"submit_web_ingest_run".to_string()));
         assert!(!read_tools.contains(&"cancel_web_ingest_run".to_string()));
@@ -395,6 +397,7 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(write_tools.contains(&"read_document".to_string()));
         assert!(write_tools.contains(&"upload_documents".to_string()));
         assert!(write_tools.contains(&"update_document".to_string()));
+        assert!(write_tools.contains(&"delete_document".to_string()));
         assert!(write_tools.contains(&"get_mutation_status".to_string()));
         assert!(write_tools.contains(&"get_runtime_execution".to_string()));
         assert!(write_tools.contains(&"get_runtime_execution_trace".to_string()));

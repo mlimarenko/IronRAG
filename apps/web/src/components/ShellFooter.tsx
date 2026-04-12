@@ -50,7 +50,7 @@ export function ShellFooter() {
         {t("common.copyright", { year: new Date().getFullYear() })}
       </span>
       <a
-        href="https://github.com/mlimarenko/RustRAG"
+        href="https://github.com/mlimarenko/IronRAG"
         target="_blank"
         rel="noopener noreferrer"
         className="hover:text-foreground transition-colors flex items-center gap-1"

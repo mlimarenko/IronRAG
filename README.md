@@ -3,23 +3,24 @@
 </p>
 
 <p align="center">
-  <img src="./docs/assets/readme-flow.gif" alt="RustRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="840">
+  <img src="./docs/assets/readme-flow.gif" alt="IronRAG demo: dashboard, documents, grounded assistant, and graph exploration">
 </p>
 
-<h1 align="center">RustRAG</h1>
+<h1 align="center">IronRAG</h1>
 <p align="center">One-click knowledge system for documents, internal bots, and AI agents</p>
 
 <p align="center">
-  <a href="https://github.com/mlimarenko/RustRAG/stargazers"><img src="https://img.shields.io/github/stars/mlimarenko/RustRAG?style=flat-square" alt="Stars"></a>
-  <a href="https://github.com/mlimarenko/RustRAG/releases"><img src="https://img.shields.io/github/v/release/mlimarenko/RustRAG?style=flat-square" alt="Release"></a>
-  <a href="https://hub.docker.com/r/pipingspace/rustrag-backend"><img src="https://img.shields.io/docker/pulls/pipingspace/rustrag-backend?style=flat-square" alt="Docker Pulls"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/github/license/mlimarenko/RustRAG?style=flat-square" alt="License"></a>
+  <a href="https://github.com/mlimarenko/IronRAG/stargazers"><img src="https://img.shields.io/github/stars/mlimarenko/IronRAG?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/mlimarenko/IronRAG/releases"><img src="https://img.shields.io/github/v/release/mlimarenko/IronRAG?style=flat-square" alt="Release"></a>
+  <a href="https://hub.docker.com/r/pipingspace/ironrag-backend"><img src="https://img.shields.io/docker/pulls/pipingspace/ironrag-backend?style=flat-square" alt="Docker Pulls"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/mlimarenko/IronRAG?style=flat-square" alt="License"></a>
 </p>
 
 <p align="center">
   <a href="./README-RU.md">README-RU</a> &bull;
-  <a href="./MCP.md">MCP</a> &bull;
-  <a href="./MCP-RU.md">MCP-RU</a>
+  <a href="./docs/en/MCP.md">MCP</a> &bull;
+  <a href="./docs/en/CLI.md">CLI</a> &bull;
+  <a href="./docs/en/IAM.md">IAM</a>
 </p>
 
 ---
@@ -62,13 +63,20 @@ upload / URL → extract text → structured blocks → boilerplate filter
   → quality scoring → hybrid index (BM25 + vector) → UI + MCP + API
 ```
 
+### Table Pipeline
+
+- **One canonical path** -- `csv`, `xls`, `xlsx`, `xlsb`, `ods`, and table blocks extracted from `docx`/`pdf` are normalized into the same markdown-table representation before ingest.
+- **Row-first retrieval** -- each table row is stored as self-describing normalized text (`Sheet: ... | Row N | Header: value | ...`), so row-level questions work without relying on the whole table being co-retrieved.
+- **Summary-grounded analytics** -- per-column table summaries persist `average`, `min/max`, `distinct count`, and `most frequent` signals, and aggregate questions are answered from those summaries instead of ad hoc LLM guessing.
+- **Sparse graph by default for low-signal sheets** -- pure numeric or headerless tables stay retrieval-friendly but graph-sparse; semantic business rows remain graph-eligible and can still build useful entities and relations.
+
 ## Deploy
 
 Prerequisite: Docker with Compose v2, or Kubernetes with Helm.
 
 ```bash
 # Install without cloning
-curl -fsSL https://raw.githubusercontent.com/mlimarenko/RustRAG/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh | bash
 
 # Or from a cloned repo
 cp .env.example .env
@@ -95,11 +103,11 @@ Helm:
 
 ```bash
 OPENAI_API_KEY=... \
-helm upgrade --install rustrag charts/rustrag \
-  --namespace rustrag \
+helm upgrade --install ironrag charts/ironrag \
+  --namespace ironrag \
   --create-namespace \
-  --values charts/rustrag/values/examples/bundled-s3.yaml \
-  --set-string app.frontendOrigin=https://rustrag.example.com \
+  --values charts/ironrag/values/examples/bundled-s3.yaml \
+  --set-string app.frontendOrigin=https://ironrag.example.com \
   --set-string app.providerSecrets.openaiApiKey="${OPENAI_API_KEY}" \
   --wait \
   --wait-for-jobs \
@@ -109,10 +117,10 @@ helm upgrade --install rustrag charts/rustrag \
 External dependencies:
 
 ```bash
-helm upgrade --install rustrag charts/rustrag \
-  --namespace rustrag \
+helm upgrade --install ironrag charts/ironrag \
+  --namespace ironrag \
   --create-namespace \
-  --values charts/rustrag/values/examples/external-services.yaml
+  --values charts/ironrag/values/examples/external-services.yaml
 ```
 
 Chart profiles:
@@ -131,9 +139,10 @@ Full runtime reference: [apps/api/.env.example](./apps/api/.env.example)
 - **Typed knowledge graph** -- 10 universal entity types (person, organization, location, event, artifact, natural, process, concept, attribute, entity), 88 relation types, entity resolution, and document summaries
 - **Hybrid search** -- BM25 + vector cosine via Reciprocal Rank Fusion, field-weighted scoring (heading matches boosted 1.5x)
 - **Grounded assistant** -- built-in chat UI with answer verification and evidence panel
-- **21 MCP tools** -- Q&A (`ask`), search, read, upload, graph exploration, web crawl, and admin
+- **21 MCP tools** -- search, read, upload, graph exploration, web crawl, and admin (the in-app assistant uses these tools as a normal MCP client)
 - **Smart chunking** -- 2800-char semantic chunks with 10% overlap, heading-aware splitting, code-aware boundaries, boilerplate detection
-- **Access control** -- API tokens, grants, library scoping, and ready-made MCP client snippets
+- **Access control** -- API tokens with 13 permission kinds, hierarchical scopes (system/workspace/library/document), and grant-based MCP tool filtering
+- **Admin CLI** -- `ironrag-cli` for user/token management, workspace/library provisioning, and data export/import without HTTP
 - **Spending tracking** -- per-document and per-library cost visibility
 - **Model selection** -- configurable providers and models per pipeline stage
 
@@ -143,13 +152,12 @@ Full runtime reference: [apps/api/.env.example](./apps/api/.env.example)
 
 | Category | Tools |
 |----------|-------|
-| **Q&A** | `ask` -- grounded question answering |
 | **Documents** | `search_documents`, `read_document`, `list_documents`, `upload_documents`, `update_document`, `delete_document` |
 | **Graph** | `search_entities`, `get_graph_topology`, `list_relations` |
 | **Web Crawl** | `submit_web_ingest_run`, `get_web_ingest_run`, `cancel_web_ingest_run` |
 | **Discovery** | `list_workspaces`, `list_libraries` |
 
-Search and read responses default to `includeReferences=false` to minimize token usage. Full guide: [MCP.md](./MCP.md)
+Search and read responses default to `includeReferences=false` to minimize token usage. Full guide: [MCP](./docs/en/MCP.md) | [IAM & Tokens](./docs/en/IAM.md) | [CLI](./docs/en/CLI.md)
 
 ## Tech Stack
 
@@ -165,7 +173,7 @@ Search and read responses default to `includeReferences=false` to minimize token
 
 ## Configuration
 
-All variables use `RUSTRAG_*` prefix. Key files:
+All variables use `IRONRAG_*` prefix. Key files:
 
 | File | Purpose |
 |------|---------|
@@ -178,8 +186,8 @@ All variables use `RUSTRAG_*` prefix. Key files:
 Two golden datasets: Wikipedia corpus (30 questions) and code corpus (20 questions across Go/TS/Python/Rust/Terraform/React/K8s/Docker).
 
 ```bash
-export RUSTRAG_SESSION_COOKIE="..."
-export RUSTRAG_BENCHMARK_WORKSPACE_ID="workspace-uuid"
+export IRONRAG_SESSION_COOKIE="..."
+export IRONRAG_BENCHMARK_WORKSPACE_ID="workspace-uuid"
 make benchmark-grounded-seed   # upload corpus
 make benchmark-grounded-all    # run QA matrix
 make benchmark-golden          # golden dataset
@@ -193,25 +201,24 @@ make benchmark-golden          # golden dataset
 - [x] Graph extraction v6 (few-shot, 10 entity types, 88 relation types)
 - [x] Semantic chunking (2800 chars, overlap, heading-aware, code-aware)
 - [x] Boilerplate detection, quality scoring, entity resolution
-- [x] 21 MCP tools including `ask` and graph navigation
+- [x] 21 MCP tools for search, read, upload, and graph navigation
 - [x] Typed entity coloring and edge labels in graph UI
 - [x] Parallel graph extraction (up to 8 concurrent chunks)
-- [ ] SSE streaming for query answers
-- [ ] Conversation context in multi-turn queries
-- [ ] Incremental re-processing (diff-aware ingest)
-- [ ] Export/import libraries
-- [x] Ollama/local model support
-  Verified live with Ollama `qwen3:4b`; stale-model detection verified against missing `qwen3:0.6b`.
-- [ ] Confluence, Notion, Google Drive connectors
+- [x] SSE streaming for query answers
+- [x] Conversation context in multi-turn queries
+- [x] Incremental re-processing (diff-aware ingest)
+- [x] Export/import libraries
+- [x] Admin CLI (`ironrag-cli`) with granular token permissions
+- [x] Ollama/local model support, verified live with Ollama `qwen3:4b`; stale-model detection verified against missing `qwen3:0.6b`.
 
 ## Star History
 
 <p align="center">
-  <a href="https://star-history.com/#mlimarenko/RustRAG&Date">
+  <a href="https://star-history.com/#mlimarenko/IronRAG&Date">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mlimarenko/RustRAG&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mlimarenko/RustRAG&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mlimarenko/RustRAG&type=Date" width="700" />
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" width="700" />
     </picture>
   </a>
 </p>

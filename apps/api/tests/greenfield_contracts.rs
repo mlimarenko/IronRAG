@@ -52,7 +52,7 @@ const FORBIDDEN_LEGACY_VOCABULARY: &[&str] = &[
 #[must_use]
 pub fn load_openapi_contract_text() -> String {
     let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts").join("rustrag.openapi.yaml");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts").join("ironrag.openapi.yaml");
     fs::read_to_string(&path).unwrap_or_default()
 }
 
@@ -141,7 +141,7 @@ pub fn assert_fresh_deploy_surface_uses_canonical_vocabulary(contract: &str) {
         .and_then(|section| section.split("/v1/mcp:").next())
         .expect("fresh bootstrap path block present in contract");
     let discovery_section = contract
-        .split("/v1/openapi/rustrag.openapi.yaml:")
+        .split("/v1/openapi/ironrag.openapi.yaml:")
         .nth(1)
         .and_then(|section| section.split("/v1/iam/bootstrap/setup:").next())
         .expect("openapi discovery path block present in contract");
@@ -167,7 +167,7 @@ pub fn assert_fresh_deploy_surface_uses_canonical_vocabulary(contract: &str) {
     assert!(contract.contains("CatalogLibrary"));
     assert!(contract.contains("ArangoDB"));
     assert!(contract.contains("/v1/iam/bootstrap/setup"));
-    assert!(contract.contains("/v1/openapi/rustrag.openapi.yaml"));
+    assert!(contract.contains("/v1/openapi/ironrag.openapi.yaml"));
 }
 
 #[derive(Debug)]

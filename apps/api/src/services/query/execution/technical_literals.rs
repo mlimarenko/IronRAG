@@ -1,18 +1,19 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use super::{
-    RuntimeMatchedChunk, concise_document_subject_label, focused_excerpt_for, score_value,
-};
+use super::answer::concise_document_subject_label;
+use super::retrieve::{focused_excerpt_for, score_value};
+use super::types::RuntimeMatchedChunk;
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct TechnicalLiteralIntent {
-    pub(super) wants_urls: bool,
-    pub(super) wants_prefixes: bool,
-    pub(super) wants_paths: bool,
-    pub(super) wants_methods: bool,
-    pub(super) wants_parameters: bool,
+pub(crate) struct TechnicalLiteralIntent {
+    pub(crate) wants_urls: bool,
+    pub(crate) wants_prefixes: bool,
+    pub(crate) wants_paths: bool,
+    pub(crate) wants_methods: bool,
+    pub(crate) wants_parameters: bool,
 }
 
 #[derive(Debug, Clone, Default)]

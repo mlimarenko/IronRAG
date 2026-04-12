@@ -1,14 +1,17 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use super::{
-    RuntimeMatchedChunk, concise_document_subject_label, document_local_focus_keywords,
-    extract_protocol_literals, extract_url_literals, focused_excerpt_for,
-    question_mentions_protocol, score_value, technical_chunk_selection_score,
+use super::answer::concise_document_subject_label;
+use super::retrieve::{focused_excerpt_for, score_value};
+use super::technical_literals::{
+    document_local_focus_keywords, extract_protocol_literals, extract_url_literals,
+    question_mentions_protocol, technical_chunk_selection_score,
     technical_literal_focus_keyword_segments, technical_literal_focus_keywords,
     technical_literal_focus_segments_text, trim_literal_token,
 };
+use super::types::RuntimeMatchedChunk;
 
 pub(super) fn build_graphql_absence_answer(
     question: &str,

@@ -41,7 +41,7 @@ impl S3ContentStorageProvider {
             settings.secret_access_key,
             settings.session_token,
             None,
-            "rustrag-content-storage",
+            "ironrag-content-storage",
         );
         let config = aws_sdk_s3::Config::builder()
             .behavior_version_latest()

@@ -371,11 +371,11 @@ const LIB_PERMISSIONS = ['library_read', 'library_write', 'document_read', 'docu
 function getMcpConfigs(origin: string) {
   const mcpUrl = `${origin}/v1/mcp`;
   return [
-    { name: 'Codex', icon: Terminal, config: `{\n  "mcpServers": {\n    "rustrag": {\n      "url": "${mcpUrl}",\n      "env": { "RUSTRAG_API_KEY": "<your-token>" }\n    }\n  }\n}` },
-    { name: 'Cursor', icon: Code2, config: `// .cursor/mcp.json\n{\n  "mcpServers": {\n    "rustrag": {\n      "url": "${mcpUrl}",\n      "env": { "RUSTRAG_API_KEY": "<your-token>" }\n    }\n  }\n}` },
-    { name: 'Claude Code', icon: Terminal, config: `claude mcp add rustrag -- \\\n  npx @anthropic-ai/mcp-proxy@latest \\\n  "${mcpUrl}"` },
-    { name: 'Claude Desktop', icon: Brain, config: `{\n  "mcpServers": {\n    "rustrag": {\n      "url": "${mcpUrl}",\n      "env": { "RUSTRAG_API_KEY": "<your-token>" }\n    }\n  }\n}` },
-    { name: 'VS Code', icon: Code2, config: `// .vscode/settings.json\n{\n  "mcp.servers": {\n    "rustrag": {\n      "url": "${mcpUrl}",\n      "env": { "RUSTRAG_API_KEY": "<your-token>" }\n    }\n  }\n}` },
+    { name: 'Codex', icon: Terminal, config: `{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}` },
+    { name: 'Cursor', icon: Code2, config: `// .cursor/mcp.json\n{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}` },
+    { name: 'Claude Code', icon: Terminal, config: `claude mcp add ironrag -- \\\n  npx @anthropic-ai/mcp-proxy@latest \\\n  "${mcpUrl}"` },
+    { name: 'Claude Desktop', icon: Brain, config: `{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}` },
+    { name: 'VS Code', icon: Code2, config: `// .vscode/settings.json\n{\n  "mcp.servers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}` },
   ];
 }
 

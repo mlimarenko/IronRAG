@@ -184,6 +184,16 @@ pub async fn get_document_by_id(
     postgres: &PgPool,
     document_id: Uuid,
 ) -> Result<Option<ContentDocumentRow>, sqlx::Error> {
+    get_document_by_id_with_executor(postgres, document_id).await
+}
+
+pub async fn get_document_by_id_with_executor<'e, E>(
+    executor: E,
+    document_id: Uuid,
+) -> Result<Option<ContentDocumentRow>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentDocumentRow>(
         "select
             id,
@@ -198,7 +208,7 @@ pub async fn get_document_by_id(
          where id = $1",
     )
     .bind(document_id)
-    .fetch_optional(postgres)
+    .fetch_optional(executor)
     .await
 }
 
@@ -233,6 +243,16 @@ pub async fn create_document(
     postgres: &PgPool,
     new_document: &NewContentDocument<'_>,
 ) -> Result<ContentDocumentRow, sqlx::Error> {
+    create_document_with_executor(postgres, new_document).await
+}
+
+pub async fn create_document_with_executor<'e, E>(
+    executor: E,
+    new_document: &NewContentDocument<'_>,
+) -> Result<ContentDocumentRow, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentDocumentRow>(
         "insert into content_document (
             id,
@@ -261,7 +281,7 @@ pub async fn create_document(
     .bind(new_document.external_key)
     .bind(new_document.document_state)
     .bind(new_document.created_by_principal_id)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await
 }
 
@@ -745,6 +765,24 @@ pub async fn create_chunks(
         return Ok(Vec::new());
     }
 
+    const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
+    const CONTENT_CHUNK_INSERT_BIND_COUNT: usize = 8;
+    const CONTENT_CHUNK_INSERT_BATCH_SIZE: usize =
+        POSTGRES_MAX_BIND_PARAMETERS / CONTENT_CHUNK_INSERT_BIND_COUNT;
+
+    let mut created_chunks = Vec::with_capacity(new_chunks.len());
+    for chunk_batch in new_chunks.chunks(CONTENT_CHUNK_INSERT_BATCH_SIZE) {
+        let mut batch_rows = create_chunk_batch(postgres, chunk_batch).await?;
+        created_chunks.append(&mut batch_rows);
+    }
+    created_chunks.sort_by_key(|chunk| chunk.chunk_index);
+    Ok(created_chunks)
+}
+
+async fn create_chunk_batch(
+    postgres: &PgPool,
+    new_chunks: &[NewContentChunk<'_>],
+) -> Result<Vec<ContentChunkRow>, sqlx::Error> {
     let mut builder = QueryBuilder::<Postgres>::new(
         "insert into content_chunk (
             id,

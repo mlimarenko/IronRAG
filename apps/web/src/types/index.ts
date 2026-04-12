@@ -1,11 +1,11 @@
-// Core domain types for RustRAG
+// Core domain types for IronRAG
 
 export interface User {
   id: string;
   login: string;
   displayName: string;
   accessLabel: string;
-  role: 'admin' | 'operator' | 'viewer';
+  role: "admin" | "operator" | "viewer";
 }
 
 export interface Workspace {
@@ -24,11 +24,25 @@ export interface Library {
   missingBindingPurposes: AIPurpose[];
 }
 
-export type AIPurpose = 'extract_graph' | 'embed_chunk' | 'query_answer' | 'vision';
+export type AIPurpose =
+  | "extract_graph"
+  | "embed_chunk"
+  | "query_answer"
+  | "vision";
 
-export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'ready_no_graph' | 'failed';
-export type DocumentReadiness = 'processing' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed';
-export type SourceAccessKind = 'stored_document' | 'external_url';
+export type DocumentStatus =
+  | "queued"
+  | "processing"
+  | "ready"
+  | "ready_no_graph"
+  | "failed";
+export type DocumentReadiness =
+  | "processing"
+  | "readable"
+  | "graph_sparse"
+  | "graph_ready"
+  | "failed";
+export type SourceAccessKind = "stored_document" | "external_url";
 
 export interface SourceAccess {
   kind: SourceAccessKind;
@@ -49,7 +63,15 @@ export interface DocumentItem {
   lastActivity?: string;
   failureMessage?: string;
   canRetry?: boolean;
-  sourceKind?: 'upload' | 'web_page' | 'append' | 'replace' | 'connector_sync' | 'import' | string;
+  sourceKind?:
+    | "upload"
+    | "web_page"
+    | "append"
+    | "edit"
+    | "replace"
+    | "connector_sync"
+    | "import"
+    | string;
   sourceUri?: string;
   sourceAccess?: SourceAccess;
 }
@@ -83,7 +105,7 @@ export interface DocumentDetail extends DocumentItem {
 export interface MutationRecord {
   id: string;
   kind: string;
-  state: 'accepted' | 'reconciling' | 'completed' | 'failed';
+  state: "accepted" | "reconciling" | "completed" | "failed";
   createdAt: string;
   completedAt?: string;
   message?: string;
@@ -153,14 +175,31 @@ export interface WebProvenance {
 }
 
 // Web ingest types
-export type WebIngestRunState = 'accepted' | 'discovering' | 'processing' | 'completed' | 'completed_partial' | 'failed' | 'canceled';
-export type WebIngestPageState = 'discovered' | 'eligible' | 'duplicate' | 'excluded' | 'blocked' | 'queued' | 'processing' | 'processed' | 'failed' | 'canceled';
+export type WebIngestRunState =
+  | "accepted"
+  | "discovering"
+  | "processing"
+  | "completed"
+  | "completed_partial"
+  | "failed"
+  | "canceled";
+export type WebIngestPageState =
+  | "discovered"
+  | "eligible"
+  | "duplicate"
+  | "excluded"
+  | "blocked"
+  | "queued"
+  | "processing"
+  | "processed"
+  | "failed"
+  | "canceled";
 
 export interface WebIngestRun {
   id: string;
   seedUrl: string;
-  mode: 'single_page' | 'recursive_crawl';
-  boundaryPolicy: 'same_host' | 'allow_external';
+  mode: "single_page" | "recursive_crawl";
+  boundaryPolicy: "same_host" | "allow_external";
   maxDepth: number;
   maxPages: number;
   state: WebIngestRunState;
@@ -182,8 +221,26 @@ export interface WebIngestPage {
 }
 
 // Graph types
-export type GraphStatus = 'empty' | 'building' | 'rebuilding' | 'ready' | 'partial' | 'failed' | 'stale';
-export type GraphNodeType = 'document' | 'person' | 'organization' | 'location' | 'event' | 'artifact' | 'natural' | 'process' | 'concept' | 'attribute' | 'entity';
+export type GraphStatus =
+  | "empty"
+  | "building"
+  | "rebuilding"
+  | "ready"
+  | "partial"
+  | "failed"
+  | "stale";
+export type GraphNodeType =
+  | "document"
+  | "person"
+  | "organization"
+  | "location"
+  | "event"
+  | "artifact"
+  | "natural"
+  | "process"
+  | "concept"
+  | "attribute"
+  | "entity";
 
 export interface GraphNode {
   id: string;
@@ -225,11 +282,11 @@ export interface AssistantSession {
   turnCount: number;
 }
 
-export type AssistantStage = 'planning' | 'grounding' | 'response';
+export type AssistantStage = "planning" | "grounding" | "response";
 
 export interface AssistantMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   timestamp: string;
   attachments?: FileAttachment[];
@@ -287,7 +344,13 @@ export interface RelationReference {
   weight: number;
 }
 
-export type VerificationState = 'passed' | 'partially_supported' | 'conflicting' | 'insufficient_evidence' | 'failed';
+export type VerificationState =
+  | "passed"
+  | "partially_supported"
+  | "conflicting"
+  | "insufficient_evidence"
+  | "failed"
+  | "not_run";
 
 export interface RuntimeSummary {
   totalSegments: number;
@@ -305,7 +368,7 @@ export interface RuntimeStageSummary {
 }
 
 export interface PolicyIntervention {
-  kind: 'rejected' | 'terminated' | 'blocked';
+  kind: "rejected" | "terminated" | "blocked";
   reason: string;
   timestamp: string;
 }
@@ -315,7 +378,7 @@ export interface APIToken {
   id: string;
   label: string;
   tokenPrefix: string;
-  status: 'active' | 'expired' | 'revoked';
+  status: "active" | "expired" | "revoked";
   expiresAt?: string;
   revokedAt?: string;
   issuedBy: string;
@@ -326,18 +389,18 @@ export interface APIToken {
 }
 
 export interface TokenGrant {
-  scope: 'workspace' | 'library';
+  scope: "workspace" | "library";
   permission: string;
 }
 
-export type AIScopeKind = 'instance' | 'workspace' | 'library';
+export type AIScopeKind = "instance" | "workspace" | "library";
 
 export interface AIProvider {
   id: string;
   displayName: string;
   kind: string;
   apiStyle: string;
-  lifecycleState: 'active' | 'deprecated' | 'preview';
+  lifecycleState: "active" | "deprecated" | "preview";
   defaultBaseUrl?: string;
   apiKeyRequired: boolean;
   baseUrlRequired: boolean;
@@ -354,14 +417,14 @@ export interface AICredential {
   providerName: string;
   providerKind: string;
   label: string;
-  state: 'active' | 'invalid' | 'revoked' | 'unchecked';
+  state: "active" | "invalid" | "revoked" | "unchecked";
   createdAt: string;
   updatedAt: string;
   baseUrl?: string;
   apiKeySummary: string;
 }
 
-export type AIModelAvailabilityState = 'available' | 'unavailable' | 'unknown';
+export type AIModelAvailabilityState = "available" | "unavailable" | "unknown";
 
 export interface AIModelOption {
   id: string;
@@ -405,11 +468,11 @@ export interface AIBindingAssignment {
   purpose: AIPurpose;
   credentialId: string;
   presetId: string;
-  state: 'configured' | 'inactive' | 'invalid';
+  state: "configured" | "inactive" | "invalid";
 }
 
 export interface BindingValidation {
-  state: 'valid' | 'invalid' | 'unchecked';
+  state: "valid" | "invalid" | "unchecked";
   checkedAt?: string;
   failureCode?: string;
   message?: string;
@@ -435,7 +498,7 @@ export interface OperationsSnapshot {
   runningAttempts: number;
   readableDocCount: number;
   failedDocCount: number;
-  status: 'healthy' | 'processing' | 'rebuilding' | 'degraded';
+  status: "healthy" | "processing" | "rebuilding" | "degraded";
   knowledgeGenerationState: string;
   lastRecomputedAt: string;
   warnings: OperationsWarning[];
@@ -452,7 +515,7 @@ export interface OperationsWarning {
 export interface AuditEvent {
   id: string;
   action: string;
-  resultKind: 'succeeded' | 'rejected' | 'failed';
+  resultKind: "succeeded" | "rejected" | "failed";
   surfaceKind: string;
   timestamp: string;
   message: string;
@@ -467,6 +530,39 @@ export interface AuditEventPage {
   offset: number;
 }
 
+export interface DocumentLifecycle {
+  totalCost?: number | string | null;
+  currencyCode?: string | null;
+  attempts: DocumentAttempt[];
+}
+
+export interface DocumentAttempt {
+  jobId: string;
+  attemptNo: number;
+  attemptKind: string;
+  status: string;
+  queueStartedAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  totalElapsedMs?: number | null;
+  stageEvents: DocumentStageEvent[];
+}
+
+export interface DocumentStageEvent {
+  stage: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  elapsedMs?: number | null;
+  providerKind?: string | null;
+  modelName?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
+  estimatedCost?: number | null;
+  currencyCode?: string | null;
+}
+
 export type Locale = string;
 
 export interface LocaleOption {
@@ -476,6 +572,6 @@ export interface LocaleOption {
 }
 
 export const AVAILABLE_LOCALES: LocaleOption[] = [
-  { code: 'en', label: 'English', nativeLabel: 'English' },
-  { code: 'ru', label: 'Russian', nativeLabel: 'Русский' },
+  { code: "en", label: "English", nativeLabel: "English" },
+  { code: "ru", label: "Russian", nativeLabel: "Русский" },
 ];

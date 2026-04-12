@@ -118,7 +118,7 @@ impl CatalogService {
     ) -> Result<Vec<CatalogWorkspace>, ApiError> {
         let rows = catalog_repository::list_workspaces(&state.persistence.postgres)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         rows.into_iter()
             .filter(|row| workspace_filter.is_none_or(|workspace_id| row.id == workspace_id))
@@ -140,7 +140,7 @@ impl CatalogService {
         let row =
             catalog_repository::get_workspace_by_id(&state.persistence.postgres, workspace_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("workspace", workspace_id))?;
         map_workspace_row(row)
     }
@@ -191,7 +191,7 @@ impl CatalogService {
                 .map_err(CatalogLifecycleError::into_request_error)?,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("workspace", command.workspace_id))?;
         map_workspace_row(row)
     }
@@ -257,7 +257,7 @@ impl CatalogService {
         let rows =
             catalog_repository::list_libraries(&state.persistence.postgres, Some(workspace_id))
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let readiness_by_library = self
             .list_library_ingestion_readiness(
                 state,
@@ -291,7 +291,7 @@ impl CatalogService {
     ) -> Result<CatalogLibrary, ApiError> {
         let row = catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
         let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
         map_library_row(row, readiness)
@@ -352,7 +352,7 @@ impl CatalogService {
                 .map_err(CatalogLifecycleError::into_request_error)?,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
         let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
         map_library_row(row, readiness)
@@ -444,7 +444,7 @@ impl CatalogService {
             library_ids,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         let mut purposes_by_library = HashMap::<Uuid, HashSet<String>>::new();
         for row in rows {
@@ -486,7 +486,7 @@ impl CatalogService {
         let rows =
             catalog_repository::list_connectors_by_library(&state.persistence.postgres, library_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_connector_row).collect())
     }
 
@@ -503,7 +503,7 @@ impl CatalogService {
         let row =
             catalog_repository::get_connector_by_id(&state.persistence.postgres, connector_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("connector", connector_id))?;
         Ok(map_connector_row(row))
     }

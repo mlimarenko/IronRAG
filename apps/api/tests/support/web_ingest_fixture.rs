@@ -5,7 +5,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::time;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     domains::{content::ContentDocumentSummary, ingest::WebIngestRun},
     infra::{

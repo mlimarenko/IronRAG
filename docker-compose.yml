@@ -1,64 +1,64 @@
-x-rustrag-runtime-env: &rustrag-runtime-env
-  RUSTRAG_BIND_ADDR: 0.0.0.0:8080
-  RUSTRAG_ENVIRONMENT: ${RUSTRAG_ENVIRONMENT:-production}
-  RUSTRAG_DATABASE_URL: postgres://${RUSTRAG_POSTGRES_USER:-postgres}:${RUSTRAG_POSTGRES_PASSWORD:-postgres}@${RUSTRAG_POSTGRES_HOST:-postgres}:5432/${RUSTRAG_POSTGRES_DB:-rustrag}
-  RUSTRAG_DATABASE_MAX_CONNECTIONS: ${RUSTRAG_DATABASE_MAX_CONNECTIONS:-20}
-  RUSTRAG_REDIS_URL: ${RUSTRAG_REDIS_URL:-redis://redis:6379}
-  RUSTRAG_ARANGODB_URL: ${RUSTRAG_ARANGODB_URL:-http://arangodb:8529}
-  RUSTRAG_ARANGODB_DATABASE: ${RUSTRAG_ARANGODB_DATABASE:-rustrag}
-  RUSTRAG_ARANGODB_USERNAME: ${RUSTRAG_ARANGODB_USERNAME:-root}
-  RUSTRAG_ARANGODB_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
-  RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS: ${RUSTRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
-  RUSTRAG_LOG_FILTER: ${RUSTRAG_LOG_FILTER:-info}
-  RUSTRAG_FRONTEND_ORIGIN: ${RUSTRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
-  RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
-  RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
-  RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${RUSTRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
-  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-openai}
-  RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-5.4-mini}
-  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
-  RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
-  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
-  RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4-mini}
-  RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: ${RUSTRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND:-openai}
-  RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: ${RUSTRAG_UI_BOOTSTRAP_VISION_MODEL_NAME:-gpt-5.4-mini}
-  RUSTRAG_OPENAI_API_KEY: ${RUSTRAG_OPENAI_API_KEY:-}
-  RUSTRAG_DEEPSEEK_API_KEY: ${RUSTRAG_DEEPSEEK_API_KEY:-}
-  RUSTRAG_QWEN_API_KEY: ${RUSTRAG_QWEN_API_KEY:-}
-  RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
-  RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${RUSTRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
-  RUSTRAG_UI_DEFAULT_LOCALE: ${RUSTRAG_UI_DEFAULT_LOCALE:-ru}
-  RUSTRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
-  RUSTRAG_DEPENDENCY_POSTGRES_MODE: bundled
-  RUSTRAG_DEPENDENCY_REDIS_MODE: bundled
-  RUSTRAG_DEPENDENCY_ARANGODB_MODE: bundled
-  RUSTRAG_DEPENDENCY_OBJECT_STORAGE_MODE: disabled
-  RUSTRAG_CONTENT_STORAGE_PROVIDER: filesystem
-  RUSTRAG_CONTENT_STORAGE_TOPOLOGY: single_node
-  RUSTRAG_CONTENT_STORAGE_KEY_PREFIX: ${RUSTRAG_CONTENT_STORAGE_KEY_PREFIX:-}
-  RUSTRAG_CONTENT_STORAGE_ROOT: /var/lib/rustrag/content-storage
+x-ironrag-runtime-env: &ironrag-runtime-env
+  IRONRAG_BIND_ADDR: 0.0.0.0:8080
+  IRONRAG_ENVIRONMENT: ${IRONRAG_ENVIRONMENT:-production}
+  IRONRAG_DATABASE_URL: postgres://${IRONRAG_POSTGRES_USER:-postgres}:${IRONRAG_POSTGRES_PASSWORD:-postgres}@${IRONRAG_POSTGRES_HOST:-postgres}:5432/${IRONRAG_POSTGRES_DB:-ironrag}
+  IRONRAG_DATABASE_MAX_CONNECTIONS: ${IRONRAG_DATABASE_MAX_CONNECTIONS:-20}
+  IRONRAG_REDIS_URL: ${IRONRAG_REDIS_URL:-redis://redis:6379}
+  IRONRAG_ARANGODB_URL: ${IRONRAG_ARANGODB_URL:-http://arangodb:8529}
+  IRONRAG_ARANGODB_DATABASE: ${IRONRAG_ARANGODB_DATABASE:-ironrag}
+  IRONRAG_ARANGODB_USERNAME: ${IRONRAG_ARANGODB_USERNAME:-root}
+  IRONRAG_ARANGODB_PASSWORD: ${IRONRAG_ARANGODB_PASSWORD:-ironrag-dev}
+  IRONRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS: ${IRONRAG_ARANGODB_REQUEST_TIMEOUT_SECONDS:-15}
+  IRONRAG_LOG_FILTER: ${IRONRAG_LOG_FILTER:-info}
+  IRONRAG_FRONTEND_ORIGIN: ${IRONRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
+  IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+  IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
+  IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-openai}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
+  IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
+  IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
+  IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND:-openai}
+  IRONRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_VISION_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_OPENAI_API_KEY: ${IRONRAG_OPENAI_API_KEY:-}
+  IRONRAG_DEEPSEEK_API_KEY: ${IRONRAG_DEEPSEEK_API_KEY:-}
+  IRONRAG_QWEN_API_KEY: ${IRONRAG_QWEN_API_KEY:-}
+  IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
+  IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
+  IRONRAG_UI_DEFAULT_LOCALE: ${IRONRAG_UI_DEFAULT_LOCALE:-ru}
+  IRONRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
+  IRONRAG_DEPENDENCY_POSTGRES_MODE: bundled
+  IRONRAG_DEPENDENCY_REDIS_MODE: bundled
+  IRONRAG_DEPENDENCY_ARANGODB_MODE: bundled
+  IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE: disabled
+  IRONRAG_CONTENT_STORAGE_PROVIDER: filesystem
+  IRONRAG_CONTENT_STORAGE_TOPOLOGY: single_node
+  IRONRAG_CONTENT_STORAGE_KEY_PREFIX: ${IRONRAG_CONTENT_STORAGE_KEY_PREFIX:-}
+  IRONRAG_CONTENT_STORAGE_ROOT: /var/lib/ironrag/content-storage
   RUST_BACKTRACE: full
 
-x-rustrag-app-env: &rustrag-app-env
-  <<: *rustrag-runtime-env
-  RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: ${RUSTRAG_ARANGODB_BOOTSTRAP_COLLECTIONS:-true}
-  RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS: ${RUSTRAG_ARANGODB_BOOTSTRAP_VIEWS:-true}
-  RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH: ${RUSTRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
-  RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${RUSTRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
+x-ironrag-app-env: &ironrag-app-env
+  <<: *ironrag-runtime-env
+  IRONRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: ${IRONRAG_ARANGODB_BOOTSTRAP_COLLECTIONS:-true}
+  IRONRAG_ARANGODB_BOOTSTRAP_VIEWS: ${IRONRAG_ARANGODB_BOOTSTRAP_VIEWS:-true}
+  IRONRAG_ARANGODB_BOOTSTRAP_GRAPH: ${IRONRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
+  IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
 
 services:
   postgres:
-    image: ${RUSTRAG_POSTGRES_IMAGE:-postgres:18-alpine}
+    image: ${IRONRAG_POSTGRES_IMAGE:-postgres:18-alpine}
     restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: ${RUSTRAG_POSTGRES_PASSWORD:-postgres}
-      POSTGRES_USER: ${RUSTRAG_POSTGRES_USER:-postgres}
-      POSTGRES_DB: ${RUSTRAG_POSTGRES_DB:-rustrag}
+      POSTGRES_PASSWORD: ${IRONRAG_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${IRONRAG_POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${IRONRAG_POSTGRES_DB:-ironrag}
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${RUSTRAG_POSTGRES_USER:-postgres} -d ${RUSTRAG_POSTGRES_DB:-rustrag}",
+          "pg_isready -U ${IRONRAG_POSTGRES_USER:-postgres} -d ${IRONRAG_POSTGRES_DB:-ironrag}",
         ]
       interval: 5s
       timeout: 5s
@@ -67,7 +67,7 @@ services:
       - postgres_data:/var/lib/postgresql
 
   redis:
-    image: ${RUSTRAG_REDIS_IMAGE:-redis:8.6}
+    image: ${IRONRAG_REDIS_IMAGE:-redis:8.6}
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
@@ -77,10 +77,10 @@ services:
       retries: 20
 
   arangodb:
-    image: ${RUSTRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
+    image: ${IRONRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
     restart: unless-stopped
     environment:
-      ARANGO_ROOT_PASSWORD: ${RUSTRAG_ARANGODB_PASSWORD:-rustrag-dev}
+      ARANGO_ROOT_PASSWORD: ${IRONRAG_ARANGODB_PASSWORD:-ironrag-dev}
     command:
       - arangod
       - --server.authentication=true
@@ -101,7 +101,7 @@ services:
       - arangodb_data:/var/lib/arangodb3
 
   startup:
-    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
+    image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
     restart: on-failure
     depends_on:
       postgres:
@@ -113,14 +113,14 @@ services:
     stop_signal: SIGTERM
     stop_grace_period: 10m
     environment:
-      <<: *rustrag-app-env
-      RUSTRAG_SERVICE_ROLE: startup
-      RUSTRAG_SERVICE_NAME: rustrag-startup
+      <<: *ironrag-app-env
+      IRONRAG_SERVICE_ROLE: startup
+      IRONRAG_SERVICE_NAME: ironrag-startup
     volumes:
-      - content_storage_data:/var/lib/rustrag/content-storage
+      - content_storage_data:/var/lib/ironrag/content-storage
 
   backend:
-    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
+    image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -128,13 +128,13 @@ services:
       startup:
         condition: service_completed_successfully
     environment:
-      <<: *rustrag-app-env
-      RUSTRAG_SERVICE_ROLE: api
-      RUSTRAG_SERVICE_NAME: rustrag-backend
+      <<: *ironrag-app-env
+      IRONRAG_SERVICE_ROLE: api
+      IRONRAG_SERVICE_NAME: ironrag-backend
     expose:
       - "8080"
     volumes:
-      - content_storage_data:/var/lib/rustrag/content-storage
+      - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
       interval: 10s
@@ -149,7 +149,7 @@ services:
           memory: 512M
 
   worker:
-    image: ${RUSTRAG_BACKEND_IMAGE:-pipingspace/rustrag-backend:latest}
+    image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -157,13 +157,13 @@ services:
       startup:
         condition: service_completed_successfully
     environment:
-      <<: *rustrag-app-env
-      RUSTRAG_SERVICE_ROLE: worker
-      RUSTRAG_SERVICE_NAME: rustrag-worker
+      <<: *ironrag-app-env
+      IRONRAG_SERVICE_ROLE: worker
+      IRONRAG_SERVICE_NAME: ironrag-worker
     expose:
       - "8080"
     volumes:
-      - content_storage_data:/var/lib/rustrag/content-storage
+      - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
       interval: 10s
@@ -178,15 +178,15 @@ services:
           memory: 512M
 
   frontend:
-    image: ${RUSTRAG_FRONTEND_IMAGE:-pipingspace/rustrag-frontend:latest}
+    image: ${IRONRAG_FRONTEND_IMAGE:-pipingspace/ironrag-frontend:latest}
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
     environment:
-      RUSTRAG_API_UPSTREAM: http://backend:8080
+      IRONRAG_API_UPSTREAM: http://backend:8080
     ports:
-      - "${RUSTRAG_PORT:-19000}:80"
+      - "${IRONRAG_PORT:-19000}:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
       interval: 10s

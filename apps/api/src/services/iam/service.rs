@@ -129,7 +129,7 @@ impl IamService {
                     runtime_execution.owner_id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| {
                     ApiError::resource_not_found("query_execution", runtime_execution.owner_id)
                 })?;
@@ -146,7 +146,7 @@ impl IamService {
                         runtime_execution.owner_id,
                     )
                     .await
-                    .map_err(|_| ApiError::Internal)?
+                    .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                     .ok_or_else(|| {
                         ApiError::resource_not_found(
                             "runtime_graph_extraction",
@@ -158,7 +158,7 @@ impl IamService {
                     extraction.library_id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("library", extraction.library_id))?;
                 Ok(RuntimeExecutionAccessScope {
                     workspace_id: library.workspace_id,
@@ -172,7 +172,7 @@ impl IamService {
                     .arango_document_store
                     .get_revision(runtime_execution.owner_id)
                     .await
-                    .map_err(|_| ApiError::Internal)?
+                    .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                     .ok_or_else(|| {
                         ApiError::resource_not_found(
                             "knowledge_revision",
@@ -195,7 +195,7 @@ impl IamService {
         let active_users =
             iam_repository::count_active_user_principals(&state.persistence.postgres)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let setup_required = active_users == 0 && !state.settings.has_explicit_ui_bootstrap_admin();
         let ai_setup = if setup_required {
             Some(state.canonical_services.ai_catalog.describe_bootstrap_ai_setup(state).await?)
@@ -333,7 +333,7 @@ impl IamService {
         let principal =
             iam_repository::get_principal_by_id(&state.persistence.postgres, principal_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("principal", principal_id))?;
         Ok(map_principal(principal)?)
     }
@@ -358,14 +358,14 @@ impl IamService {
             command.expires_at,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         iam_repository::create_api_token_secret(
             &state.persistence.postgres,
             token_row.principal_id,
             &hash_api_token(&plaintext),
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         Ok(MintApiTokenOutcome { token: plaintext, api_token: map_api_token(token_row) })
     }
@@ -380,11 +380,11 @@ impl IamService {
             token_principal_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let token_row =
             iam_repository::revoke_api_token(&state.persistence.postgres, token_principal_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
         Ok(map_api_token(token_row))
     }
@@ -396,7 +396,7 @@ impl IamService {
     ) -> Result<Vec<ApiToken>, ApiError> {
         let rows = iam_repository::list_api_tokens(&state.persistence.postgres, workspace_id)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_api_token).collect())
     }
 
@@ -410,14 +410,14 @@ impl IamService {
             token_principal_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
         let revoked = iam_repository::revoke_active_api_token_secrets(
             &state.persistence.postgres,
             token_principal_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let plaintext = mint_plaintext_api_token();
         iam_repository::create_api_token_secret(
             &state.persistence.postgres,
@@ -425,7 +425,7 @@ impl IamService {
             &hash_api_token(&plaintext),
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(RotateApiTokenOutcome {
             token: plaintext,
             api_token: map_api_token(token_row),
@@ -441,18 +441,18 @@ impl IamService {
         let principal =
             iam_repository::get_principal_by_id(&state.persistence.postgres, principal_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("principal", principal_id))?;
         let grants =
             iam_repository::list_grants_by_principal(&state.persistence.postgres, principal_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let memberships = iam_repository::list_workspace_memberships_by_principal(
             &state.persistence.postgres,
             principal_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         Ok(EffectiveGrantResolution {
             principal: map_principal(principal)?,
@@ -476,13 +476,13 @@ impl IamService {
 
         let user = iam_repository::get_user_by_login(&state.persistence.postgres, &login)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or(ApiError::Unauthorized)?;
         verify_password(&command.password, &user.password_hash)?;
         let principal =
             iam_repository::get_principal_by_id(&state.persistence.postgres, user.principal_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or(ApiError::Unauthorized)?;
         if principal.status != "active" {
             return Err(ApiError::Unauthorized);
@@ -502,7 +502,7 @@ impl IamService {
     pub async fn revoke_session(&self, state: &AppState, session_id: Uuid) -> Result<(), ApiError> {
         iam_repository::revoke_session(&state.persistence.postgres, session_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("session", session_id))?;
         Ok(())
     }
@@ -522,14 +522,14 @@ impl IamService {
             command.expires_at,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_grant(row)?)
     }
 
     pub async fn revoke_grant(&self, state: &AppState, grant_id: Uuid) -> Result<Grant, ApiError> {
         let row = iam_repository::delete_grant(&state.persistence.postgres, grant_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))?;
         Ok(map_grant(row)?)
     }
@@ -586,11 +586,12 @@ fn hash_password(password: &str) -> Result<String, ApiError> {
     Argon2::default()
         .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
         .map(|hash| hash.to_string())
-        .map_err(|_| ApiError::Internal)
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))
 }
 
 fn verify_password(password: &str, password_hash: &str) -> Result<(), ApiError> {
-    let parsed_hash = PasswordHash::new(password_hash).map_err(|_| ApiError::Internal)?;
+    let parsed_hash =
+        PasswordHash::new(password_hash).map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .map_err(|_| ApiError::Unauthorized)
@@ -610,7 +611,7 @@ fn normalize_bootstrap_login(value: &str) -> Result<String, ApiError> {
 }
 
 fn default_bootstrap_email(login: &str) -> String {
-    format!("{login}@rustrag.local")
+    format!("{login}@ironrag.local")
 }
 
 async fn issue_session_for_user(
@@ -630,7 +631,7 @@ async fn issue_session_for_user(
         expires_at,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
     Ok(AuthenticateSessionOutcome {
         session_id: session.id,

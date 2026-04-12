@@ -107,7 +107,7 @@ impl AuditService {
                 .collect::<Vec<_>>(),
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_internal_event(event))
     }
 
@@ -126,7 +126,7 @@ impl AuditService {
             &map_list_query(query),
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(AuditEventPage {
             items: page.items.into_iter().map(map_redacted_event).collect(),
             total: page.total,
@@ -150,7 +150,7 @@ impl AuditService {
             &map_list_query(query),
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(AuditEventPage {
             items: page.items.into_iter().map(map_internal_event).collect(),
             total: page.total,
@@ -174,7 +174,7 @@ impl AuditService {
             audit_event_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_event_subject).collect())
     }
 
@@ -193,7 +193,7 @@ impl AuditService {
             &map_list_query(query),
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(AuditEventPage {
             items: page.items.into_iter().map(map_event).collect(),
             total: page.total,

@@ -2,14 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CHART_DIR="${ROOT_DIR}/charts/rustrag"
+CHART_DIR="${ROOT_DIR}/charts/ironrag"
 VALUES_FILE="${CHART_DIR}/values/examples/bundled-s3.yaml"
 BENCHMARK_SCRIPT="${ROOT_DIR}/apps/api/benchmarks/grounded_query/run_live_benchmark.py"
 SMOKE_SUITE="${ROOT_DIR}/scripts/minikube/smoke-suite.json"
-RELEASE="${RELEASE:-rustrag}"
-NAMESPACE="${NAMESPACE:-rustrag}"
-BACKEND_IMAGE="${BACKEND_IMAGE:-rustrag-backend:dev}"
-FRONTEND_IMAGE="${FRONTEND_IMAGE:-rustrag-frontend:dev}"
+RELEASE="${RELEASE:-ironrag}"
+NAMESPACE="${NAMESPACE:-ironrag}"
+BACKEND_IMAGE="${BACKEND_IMAGE:-ironrag-backend:dev}"
+FRONTEND_IMAGE="${FRONTEND_IMAGE:-ironrag-frontend:dev}"
 START_MINIKUBE="${START_MINIKUBE:-1}"
 SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-0}"
 RUN_CONTENT_SMOKE="${RUN_CONTENT_SMOKE:-1}"
@@ -23,8 +23,8 @@ WEB_LOCAL_PORT="${WEB_LOCAL_PORT:-}"
 . "${ROOT_DIR}/scripts/minikube/common.sh"
 
 read_openai_key() {
-  if [ -n "${RUSTRAG_OPENAI_API_KEY:-}" ]; then
-    printf '%s' "${RUSTRAG_OPENAI_API_KEY}"
+  if [ -n "${IRONRAG_OPENAI_API_KEY:-}" ]; then
+    printf '%s' "${IRONRAG_OPENAI_API_KEY}"
     return
   fi
 
@@ -34,7 +34,7 @@ from pathlib import Path
 import sys
 
 for line in Path(sys.argv[1]).read_text().splitlines():
-    if line.startswith("RUSTRAG_OPENAI_API_KEY="):
+    if line.startswith("IRONRAG_OPENAI_API_KEY="):
         print(line.split("=", 1)[1], end="")
         break
 PY
@@ -44,7 +44,7 @@ PY
 MINIKUBE_BIN="$(resolve_bin minikube "${ROOT_DIR}")"
 KUBECTL_BIN="$(resolve_bin kubectl "${ROOT_DIR}")"
 HELM_BIN="$(resolve_bin helm "${ROOT_DIR}")"
-FULLNAME="${RELEASE}-rustrag"
+FULLNAME="${RELEASE}-ironrag"
 COOKIE_JAR="$(mktemp)"
 READY_JSON="$(mktemp)"
 BOOTSTRAP_JSON="$(mktemp)"
@@ -223,9 +223,9 @@ PY
   fi
 
   if [ "${CONTENT_SMOKE_READY}" = "1" ]; then
-    SESSION_COOKIE="$(awk '$6=="rustrag_ui_session" {print $7}' "${COOKIE_JAR}" | tail -n1)"
+    SESSION_COOKIE="$(awk '$6=="ironrag_ui_session" {print $7}' "${COOKIE_JAR}" | tail -n1)"
     if [ -z "${SESSION_COOKIE}" ]; then
-      echo "failed to capture rustrag_ui_session cookie" >&2
+      echo "failed to capture ironrag_ui_session cookie" >&2
       exit 1
     fi
 
@@ -243,7 +243,7 @@ PY
       --strict
   fi
 else
-  echo "content smoke skipped: RUSTRAG_OPENAI_API_KEY not available or RUN_CONTENT_SMOKE=0"
+  echo "content smoke skipped: IRONRAG_OPENAI_API_KEY not available or RUN_CONTENT_SMOKE=0"
 fi
 
 "${KUBECTL_BIN}" -n "${NAMESPACE}" get deploy,pods,jobs

@@ -1,0 +1,245 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+commonLabels: {}
+podAnnotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+runtimeSecret:
+  existingSecret: ""
+
+app:
+  environment: production
+  bindAddr: 0.0.0.0:8080
+  frontendOrigin: https://ironrag.example.com
+  logFilter: info
+  databaseMaxConnections: 20
+  queryAnswerSourceLinksEnabled: false
+  uiDefaultLocale: ru
+  bootstrapToken: bootstrap-local
+  bootstrapAdmin:
+    login: ""
+    password: ""
+    apiToken: ""
+  modelDefaults:
+    extractGraphProviderKind: openai
+    extractGraphModelName: gpt-5.4-nano
+    embedChunkProviderKind: openai
+    embedChunkModelName: text-embedding-3-large
+    queryAnswerProviderKind: openai
+    queryAnswerModelName: gpt-5.4-mini
+    visionProviderKind: openai
+    visionModelName: gpt-5.4-mini
+  providerSecrets:
+    openaiApiKey: ""
+    deepseekApiKey: ""
+    qwenApiKey: ""
+  runtimePolicy:
+    rejectTaskKinds: ""
+    rejectTargetKinds: ""
+  arangodbBootstrap:
+    collections: true
+    views: true
+    graph: true
+    vectorIndexes: true
+
+startup:
+  mode: startup_job
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  wait:
+    image:
+      repository: registry.k8s.io/kubectl
+      tag: v1.35.1
+      pullPolicy: IfNotPresent
+    timeoutSeconds: 900
+
+security:
+  runAsUser: 1000
+
+api:
+  replicaCount: 2
+  image:
+    repository: pipingspace/ironrag-backend
+    tag: 0.2.0
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+      ephemeral-storage: 4Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+worker:
+  replicaCount: 2
+  image:
+    repository: pipingspace/ironrag-backend
+    tag: 0.2.0
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+      ephemeral-storage: 4Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+web:
+  replicaCount: 2
+  image:
+    repository: pipingspace/ironrag-frontend
+    tag: 0.2.0
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: ironrag.local
+        paths:
+          - /
+    tls: []
+
+storage:
+  provider: s3
+  topology: shared_cluster
+  keyPrefix: ""
+  rootPath: /var/lib/ironrag/content-storage
+  filesystem:
+    size: 20Gi
+    storageClassName: ""
+  s3:
+    mode: bundled
+    bucket: ironrag
+    endpoint: ""
+    region: us-east-1
+    accessKeyId: ironrag
+    secretAccessKey: ironrag-dev-secret
+    sessionToken: ""
+    forcePathStyle: true
+    image:
+      repository: s4core/s4core
+      # For production deployments, prefer pinning via digest below.
+      # `tag` is used only when `digest` is empty.
+      tag: latest
+      # Set to a sha256 digest like "sha256:abc..." for reproducible deploys.
+      # Example: digest: "sha256:e68547d747f34e4d23a2c28da35ffdc70e747b7f5b256cd6c44807dffe619e6e"
+      digest: ""
+      pullPolicy: IfNotPresent
+    persistence:
+      size: 20Gi
+      storageClassName: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+dependencies:
+  postgres:
+    mode: bundled
+    url: ""
+    host: ""
+    port: 5432
+    database: ironrag
+    username: postgres
+    password: postgres
+    image:
+      repository: postgres
+      tag: 18-alpine
+      pullPolicy: IfNotPresent
+    persistence:
+      size: 20Gi
+      storageClassName: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 4Gi
+  redis:
+    mode: bundled
+    url: ""
+    host: ""
+    port: 6379
+    image:
+      repository: redis
+      tag: "8.6"
+      pullPolicy: IfNotPresent
+    persistence:
+      enabled: false
+      size: 8Gi
+      storageClassName: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+  arangodb:
+    mode: bundled
+    url: ""
+    host: ""
+    port: 8529
+    database: ironrag
+    username: root
+    password: ironrag-dev
+    image:
+      repository: arangodb
+      tag: 3.12.4
+      pullPolicy: IfNotPresent
+    persistence:
+      size: 20Gi
+      storageClassName: ""
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi

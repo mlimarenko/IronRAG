@@ -1,3 +1,5 @@
+mod identifiers;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
@@ -8,11 +10,19 @@ use crate::{
     domains::knowledge::TypedTechnicalFact,
     shared::extraction::{
         structured_document::{StructuredBlockData, StructuredBlockKind},
+        table_summary::is_table_summary_text,
         technical_facts::{
             TechnicalFactConflict, TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue,
             collapse_literal_whitespace, normalize_technical_fact_value,
         },
     },
+};
+
+use self::identifiers::{
+    extract_branded_identifier_candidates, extract_catalog_link_identifier_candidates,
+    extract_code_identifier_candidates, extract_config_key_candidates,
+    extract_environment_variable_candidates, extract_error_code_candidates,
+    extract_version_candidates, has_ascii_camel_case, is_ascii_titlecase_word,
 };
 
 const TECHNICAL_FACT_NAMESPACE: Uuid = Uuid::from_u128(0x8c79_60e4_40fd_4ad8_b5d3_4d93_d93d_4021);
@@ -155,11 +165,98 @@ impl TechnicalFactService {
 }
 
 fn preferred_block_text(block: &StructuredBlockData) -> String {
+    if block.block_kind == StructuredBlockKind::Table {
+        return String::new();
+    }
+    if block.block_kind == StructuredBlockKind::TableRow {
+        return preferred_table_row_text(block);
+    }
+    if block.block_kind == StructuredBlockKind::MetadataBlock
+        && is_table_summary_text(&block.normalized_text)
+    {
+        return String::new();
+    }
     if block.normalized_text.trim().is_empty() {
         block.text.clone()
     } else {
         block.normalized_text.clone()
     }
+}
+
+fn preferred_table_row_text(block: &StructuredBlockData) -> String {
+    let normalized_text = block.normalized_text.trim();
+    if normalized_text.is_empty() {
+        return block.text.clone();
+    }
+    if !normalized_text.starts_with("Sheet: ") && !normalized_text.contains(" | Row ") {
+        return block.text.clone();
+    }
+    let segments = normalized_text
+        .split(" | ")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| {
+            !segment.starts_with("Sheet: ")
+                && !segment.starts_with("Table: ")
+                && !segment.starts_with("Row ")
+        })
+        .filter(|segment| {
+            !segment.split_once(": ").is_some_and(|(key, value)| {
+                normalize_table_row_key(key) == "index"
+                    && value.trim().chars().all(|character| character.is_ascii_digit())
+            })
+        })
+        .collect::<Vec<_>>();
+    if !table_row_has_technical_signal(&segments) {
+        return String::new();
+    }
+    segments.join(" | ")
+}
+
+fn table_row_has_technical_signal(segments: &[&str]) -> bool {
+    let mut strong_key_hits = 0usize;
+    for segment in segments {
+        let Some((key, value)) = segment.split_once(": ") else {
+            continue;
+        };
+        let normalized_key = normalize_table_row_key(key);
+        if is_strong_technical_table_key(&normalized_key) {
+            strong_key_hits += 1;
+        }
+        let _ = value;
+    }
+    strong_key_hits > 0
+}
+
+fn normalize_table_row_key(key: &str) -> String {
+    key.to_ascii_lowercase()
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() { character } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_strong_technical_table_key(normalized_key: &str) -> bool {
+    normalized_key.contains("method")
+        || normalized_key.contains("endpoint")
+        || normalized_key == "path"
+        || normalized_key.ends_with(" path")
+        || normalized_key.contains("route")
+        || normalized_key.contains("status")
+        || normalized_key.contains("port")
+        || normalized_key.contains("parameter")
+        || normalized_key.contains("query")
+        || normalized_key.contains("header")
+        || normalized_key.contains("auth")
+        || normalized_key.contains("token")
+        || normalized_key.contains("request")
+        || normalized_key.contains("response")
+        || normalized_key.contains("payload")
+        || normalized_key.contains("env")
+        || normalized_key.contains("variable")
+        || normalized_key.contains("config")
 }
 
 fn logical_lines(block_text: &str) -> Vec<String> {
@@ -414,484 +511,6 @@ fn extract_auth_rule_candidates(block: &StructuredBlockData, line: &str) -> Vec<
             )
         })
         .into_iter()
-        .collect()
-}
-
-fn extract_catalog_link_identifier_candidates(
-    block: &StructuredBlockData,
-    line: &str,
-) -> Vec<FactCandidate> {
-    if !matches!(block.block_kind, StructuredBlockKind::ListItem) {
-        return Vec::new();
-    }
-
-    let Some(brand_prefix) = infer_catalog_brand_prefix(block) else {
-        return Vec::new();
-    };
-
-    extract_markdown_link_labels(line)
-        .into_iter()
-        .filter_map(|label| normalize_catalog_link_label(&label))
-        .filter_map(|label| {
-            let display = if label
-                .split_whitespace()
-                .next()
-                .is_some_and(|word| word.eq_ignore_ascii_case(&brand_prefix))
-            {
-                label
-            } else {
-                format!("{brand_prefix} {label}")
-            };
-            build_candidate(
-                block,
-                TechnicalFactKind::Identifier,
-                &display,
-                Vec::new(),
-                line,
-                "catalog_link_identifier",
-            )
-        })
-        .collect()
-}
-
-fn extract_branded_identifier_candidates(
-    block: &StructuredBlockData,
-    line: &str,
-) -> Vec<FactCandidate> {
-    if !matches!(
-        block.block_kind,
-        StructuredBlockKind::Heading | StructuredBlockKind::MetadataBlock
-    ) {
-        return Vec::new();
-    }
-
-    let mut identifiers = BTreeSet::<String>::new();
-    if let Some(identifier) = extract_namespace_style_identifier(line) {
-        identifiers.insert(identifier);
-    }
-    if let Some(identifier) = extract_branded_phrase_identifier(line) {
-        identifiers.insert(identifier);
-    }
-
-    identifiers
-        .into_iter()
-        .filter_map(|identifier| {
-            build_candidate(
-                block,
-                TechnicalFactKind::Identifier,
-                &identifier,
-                Vec::new(),
-                line,
-                "branded_identifier",
-            )
-        })
-        .collect()
-}
-
-fn extract_environment_variable_candidates(
-    block: &StructuredBlockData,
-    line: &str,
-) -> Vec<FactCandidate> {
-    let mut env_vars = BTreeSet::<String>::new();
-
-    let tokens = technical_tokens(line);
-    let lower = line.to_ascii_lowercase();
-    let has_env_context = matches_any_substring(
-        &lower,
-        &["environment", "env", "variable", "export", "getenv", "environ"],
-    );
-
-    for token in &tokens {
-        // $VARIABLE_NAME
-        if token.starts_with('$') {
-            let name = token.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}');
-            if is_env_var_name(name) {
-                env_vars.insert(name.to_string());
-            }
-        }
-
-        // process.env.VARIABLE_NAME (Node.js)
-        if let Some(rest) = token.strip_prefix("process.env.") {
-            let name = trim_technical_token(rest);
-            if is_env_var_name(name) {
-                env_vars.insert(name.to_string());
-            }
-        }
-    }
-
-    // os.getenv("VAR") / os.environ["VAR"] (Python)
-    for pattern in &["os.getenv(", "os.environ["] {
-        if let Some(pos) = lower.find(pattern) {
-            let after = &line[pos + pattern.len()..];
-            if let Some(name) = extract_quoted_argument(after) {
-                if is_env_var_name(&name) {
-                    env_vars.insert(name);
-                }
-            }
-        }
-    }
-
-    // env::var("VAR") / std::env::var("VAR") (Rust)
-    for pattern in &["env::var(", "std::env::var("] {
-        if let Some(pos) = line.find(pattern) {
-            let after = &line[pos + pattern.len()..];
-            if let Some(name) = extract_quoted_argument(after) {
-                if is_env_var_name(&name) {
-                    env_vars.insert(name);
-                }
-            }
-        }
-    }
-
-    // ENV["VAR"] (Ruby)
-    if let Some(pos) = line.find("ENV[") {
-        let after = &line[pos + 4..];
-        if let Some(name) = extract_quoted_argument(after) {
-            if is_env_var_name(&name) {
-                env_vars.insert(name);
-            }
-        }
-    }
-
-    // Tokens matching ^[A-Z][A-Z0-9_]{2,}$ near env keywords
-    if has_env_context {
-        for token in &tokens {
-            let candidate = trim_technical_token(token);
-            if is_env_var_name(candidate) {
-                env_vars.insert(candidate.to_string());
-            }
-        }
-    }
-
-    env_vars
-        .into_iter()
-        .filter_map(|var| {
-            build_candidate(
-                block,
-                TechnicalFactKind::EnvironmentVariable,
-                &var,
-                Vec::new(),
-                line,
-                "environment_variable",
-            )
-        })
-        .collect()
-}
-
-fn is_env_var_name(candidate: &str) -> bool {
-    if candidate.len() < 3 {
-        return false;
-    }
-    let mut chars = candidate.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_uppercase()
-        && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-}
-
-fn extract_quoted_argument(after: &str) -> Option<String> {
-    let trimmed = after.trim_start();
-    let quote = trimmed.chars().next()?;
-    if !matches!(quote, '"' | '\'') {
-        return None;
-    }
-    let rest = &trimmed[1..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_string())
-}
-
-fn extract_version_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let lower = line.to_ascii_lowercase();
-    let has_version_context = matches_any_substring(&lower, &["version", "release", " v.", " v "]);
-
-    let mut versions = BTreeSet::<String>::new();
-    let tokens = technical_tokens(line);
-
-    for token in &tokens {
-        let candidate = trim_technical_token(token);
-
-        // Prefixed: v1.2.3 or v1.2
-        if let Some(rest) = candidate.strip_prefix('v').or_else(|| candidate.strip_prefix('V')) {
-            if is_semver_like(rest) {
-                versions.insert(candidate.to_string());
-            }
-        }
-
-        // Bare semver near version keywords
-        if has_version_context && is_semver_like(candidate) {
-            versions.insert(candidate.to_string());
-        }
-
-        // Date-based versions near version context: 2024.1.0
-        if has_version_context && is_date_version(candidate) {
-            versions.insert(candidate.to_string());
-        }
-    }
-
-    versions
-        .into_iter()
-        .filter_map(|version| {
-            build_candidate(
-                block,
-                TechnicalFactKind::VersionNumber,
-                &version,
-                Vec::new(),
-                line,
-                "version_number",
-            )
-        })
-        .collect()
-}
-
-fn is_semver_like(candidate: &str) -> bool {
-    let parts: Vec<&str> = candidate.splitn(2, |ch: char| ch == '-' || ch == '+').collect();
-    let core = parts[0];
-    let segments: Vec<&str> = core.split('.').collect();
-    if segments.len() < 2 || segments.len() > 3 {
-        return false;
-    }
-    segments.iter().all(|seg| !seg.is_empty() && seg.chars().all(|ch| ch.is_ascii_digit()))
-}
-
-fn is_date_version(candidate: &str) -> bool {
-    let segments: Vec<&str> = candidate.split('.').collect();
-    if segments.len() < 2 || segments.len() > 3 {
-        return false;
-    }
-    let Some(year) = segments[0].parse::<u32>().ok() else {
-        return false;
-    };
-    if !(2000..=2099).contains(&year) {
-        return false;
-    }
-    segments[1..]
-        .iter()
-        .all(|seg| !seg.is_empty() && seg.len() <= 2 && seg.chars().all(|ch| ch.is_ascii_digit()))
-}
-
-fn extract_code_identifier_candidates(
-    block: &StructuredBlockData,
-    line: &str,
-) -> Vec<FactCandidate> {
-    if !matches!(block.block_kind, StructuredBlockKind::CodeBlock) {
-        return Vec::new();
-    }
-
-    let mut identifiers = BTreeSet::<String>::new();
-
-    // Rust patterns
-    for keyword in &["fn ", "struct ", "enum ", "impl ", "trait ", "mod "] {
-        if let Some(name) = extract_keyword_identifier(line, keyword) {
-            identifiers.insert(name);
-        }
-    }
-
-    // Python patterns
-    for keyword in &["def ", "class "] {
-        if let Some(name) = extract_keyword_identifier(line, keyword) {
-            identifiers.insert(name);
-        }
-    }
-    // async def
-    if let Some(pos) = line.find("async def ") {
-        let after = &line[pos + "async def ".len()..];
-        if let Some(name) = extract_word_identifier(after) {
-            identifiers.insert(name);
-        }
-    }
-
-    // JS/TS patterns
-    if let Some(name) = extract_keyword_identifier(line, "function ") {
-        identifiers.insert(name);
-    }
-
-    // const NAME = (only in code blocks)
-    if let Some(pos) = line.find("const ") {
-        let after = &line[pos + "const ".len()..];
-        if let Some(name) = extract_word_identifier(after) {
-            // Verify followed by `=` (possibly with spaces)
-            let rest = line[pos + "const ".len() + name.len()..].trim_start();
-            if rest.starts_with('=') {
-                identifiers.insert(name);
-            }
-        }
-    }
-
-    // export (default)? (function|class|const) NAME
-    if let Some(pos) = line.find("export ") {
-        let after = &line[pos + "export ".len()..];
-        let after = after.strip_prefix("default ").unwrap_or(after);
-        for keyword in &["function ", "class ", "const "] {
-            if let Some(rest) = after.strip_prefix(keyword) {
-                if let Some(name) = extract_word_identifier(rest) {
-                    identifiers.insert(name);
-                }
-            }
-        }
-    }
-
-    identifiers
-        .into_iter()
-        .filter_map(|ident| {
-            build_candidate(
-                block,
-                TechnicalFactKind::CodeIdentifier,
-                &ident,
-                Vec::new(),
-                line,
-                "code_identifier",
-            )
-        })
-        .collect()
-}
-
-fn extract_keyword_identifier(line: &str, keyword: &str) -> Option<String> {
-    let pos = line.find(keyword)?;
-    let after = &line[pos + keyword.len()..];
-    extract_word_identifier(after)
-}
-
-fn extract_word_identifier(text: &str) -> Option<String> {
-    let trimmed = text.trim_start();
-    let name: String =
-        trimmed.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
-    if name.is_empty() || name.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    Some(name)
-}
-
-fn extract_config_key_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let mut keys = BTreeSet::<String>::new();
-
-    let trimmed = line.trim();
-
-    // TOML section headers: [section.name]
-    if trimmed.starts_with('[') && trimmed.ends_with(']') && !trimmed.starts_with("[[") {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        if is_config_key_name(inner) {
-            keys.insert(inner.to_string());
-        }
-    }
-
-    // YAML-style: key: value (at line start)
-    if let Some((left, _right)) = trimmed.split_once(':') {
-        let key = left.trim();
-        if is_config_key_name(key) && !key.contains(' ') {
-            keys.insert(key.to_string());
-        }
-    }
-
-    // TOML-style key = value (at line start)
-    if let Some((left, _right)) = trimmed.split_once('=') {
-        let key = left.trim();
-        if is_config_key_name(key) && !key.contains(' ') {
-            keys.insert(key.to_string());
-        }
-    }
-
-    // JSON-style: "key": value
-    if let Some(pos) = trimmed.find("\":") {
-        // Walk backwards from pos to find the opening quote
-        let before = &trimmed[..pos];
-        if let Some(quote_start) = before.rfind('"') {
-            let key = &before[quote_start + 1..];
-            if is_config_key_name(key) {
-                keys.insert(key.to_string());
-            }
-        }
-    }
-
-    // Only emit if the block looks like configuration context
-    if keys.is_empty() {
-        return Vec::new();
-    }
-
-    let is_config_block = matches!(
-        block.block_kind,
-        StructuredBlockKind::CodeBlock | StructuredBlockKind::MetadataBlock
-    ) || has_config_context(block);
-
-    if !is_config_block {
-        return Vec::new();
-    }
-
-    keys.into_iter()
-        .filter_map(|key| {
-            build_candidate(
-                block,
-                TechnicalFactKind::ConfigurationKey,
-                &key,
-                Vec::new(),
-                line,
-                "config_key",
-            )
-        })
-        .collect()
-}
-
-fn is_config_key_name(candidate: &str) -> bool {
-    if candidate.is_empty() || candidate.len() > 64 {
-        return false;
-    }
-    candidate.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-        && candidate.chars().any(|ch| ch.is_ascii_alphabetic())
-}
-
-fn has_config_context(block: &StructuredBlockData) -> bool {
-    let lower_heading = block.heading_trail.join(" ").to_ascii_lowercase();
-    matches_any_substring(&lower_heading, &["config", "setting", "параметр", "настройк", "конфиг"])
-        || block.code_language.as_deref().is_some_and(|lang| {
-            matches!(lang, "yaml" | "yml" | "toml" | "json" | "ini" | "properties")
-        })
-}
-
-fn extract_error_code_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let lower = line.to_ascii_lowercase();
-    if !matches_any_substring(&lower, &["error", "code", "exception", "ошибк"]) {
-        return Vec::new();
-    }
-
-    let mut codes = BTreeSet::<String>::new();
-
-    for token in technical_tokens(line) {
-        let candidate = trim_technical_token(&token);
-
-        // E001 .. E99999
-        if candidate.starts_with('E')
-            && candidate.len() >= 4
-            && candidate.len() <= 6
-            && candidate[1..].chars().all(|ch| ch.is_ascii_digit())
-        {
-            codes.insert(candidate.to_string());
-            continue;
-        }
-
-        // ERR_SOMETHING or ERROR_SOMETHING
-        if (candidate.starts_with("ERR_") || candidate.starts_with("ERROR_"))
-            && candidate.len() > 4
-            && candidate
-                .chars()
-                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-        {
-            // Exclude HTTP status codes (already handled)
-            codes.insert(candidate.to_string());
-        }
-    }
-
-    codes
-        .into_iter()
-        .filter_map(|code| {
-            build_candidate(
-                block,
-                TechnicalFactKind::ErrorCode,
-                &code,
-                Vec::new(),
-                line,
-                "error_code",
-            )
-        })
         .collect()
 }
 
@@ -1239,209 +858,6 @@ fn normalize_http_method(value: &str) -> Option<&'static str> {
     HTTP_METHODS.into_iter().find(|method| method == &upper)
 }
 
-fn infer_catalog_brand_prefix(block: &StructuredBlockData) -> Option<String> {
-    let words = block
-        .heading_trail
-        .iter()
-        .flat_map(|heading| heading.split(|character: char| !character.is_ascii_alphanumeric()))
-        .filter(|word| !word.is_empty())
-        .filter(|word| looks_like_brand_context_word(word))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if words.is_empty() {
-        return None;
-    }
-
-    let mut counts = BTreeMap::<String, usize>::new();
-    for word in &words {
-        *counts.entry(word.clone()).or_default() += 1;
-    }
-    let max_count = counts.values().copied().max().unwrap_or(0);
-    words.into_iter().find(|word| counts.get(word).copied().unwrap_or(0) == max_count)
-}
-
-fn extract_markdown_link_labels(line: &str) -> Vec<String> {
-    let mut labels = Vec::new();
-    let mut remainder = line;
-    while let Some(start) = remainder.find('[') {
-        let after_start = &remainder[start + 1..];
-        let Some(end) = after_start.find(']') else {
-            break;
-        };
-        let label = after_start[..end].trim();
-        let after_label = &after_start[end + 1..];
-        if after_label.starts_with('(') && !label.is_empty() {
-            labels.push(label.to_string());
-        }
-        remainder = after_label;
-    }
-    labels
-}
-
-fn normalize_catalog_link_label(label: &str) -> Option<String> {
-    let collapsed = collapse_literal_whitespace(label);
-    let normalized = collapsed
-        .split_whitespace()
-        .map(trim_technical_token)
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if normalized.is_empty() || normalized.len() > 64 || is_generic_ascii_heading(&normalized) {
-        return None;
-    }
-    let words = normalized.split_whitespace().collect::<Vec<_>>();
-    if words.is_empty() || words.len() > 4 {
-        return None;
-    }
-    words
-        .iter()
-        .all(|word| {
-            word.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '+' | '.')
-            }) && (is_ascii_titlecase_word(word)
-                || is_ascii_uppercase_acronym(word)
-                || has_ascii_camel_case(word))
-        })
-        .then_some(normalized)
-}
-
-fn extract_namespace_style_identifier(line: &str) -> Option<String> {
-    let cleaned = strip_leading_marker(&collapse_literal_whitespace(line));
-    let primary = split_primary_phrase(&cleaned);
-    let (left, right) = primary.split_once(':')?;
-    let left = trim_technical_token(left);
-    let right = trim_technical_token(right);
-    if branded_identifier_part(left) && branded_identifier_part(right) {
-        Some(format!("{left}:{right}"))
-    } else {
-        None
-    }
-}
-
-fn extract_branded_phrase_identifier(line: &str) -> Option<String> {
-    let cleaned = strip_leading_marker(&collapse_literal_whitespace(line));
-    let primary = split_primary_phrase(&cleaned);
-    if primary.is_empty()
-        || is_generic_ascii_heading(primary)
-        || !looks_like_branded_product_phrase(primary)
-    {
-        return None;
-    }
-    Some(primary.to_string())
-}
-
-fn split_primary_phrase(value: &str) -> &str {
-    [" - ", " — ", " – "]
-        .into_iter()
-        .find_map(|separator| value.split_once(separator).map(|(left, _)| left.trim()))
-        .unwrap_or(value)
-        .trim()
-}
-
-fn looks_like_branded_product_phrase(candidate: &str) -> bool {
-    let words = candidate
-        .split_whitespace()
-        .map(trim_technical_token)
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    if words.is_empty() || words.len() > 6 {
-        return false;
-    }
-    if !words.iter().all(|word| {
-        word.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, ':' | '_' | '-' | '+' | '.')
-        })
-    }) {
-        return false;
-    }
-    words.iter().filter(|word| looks_like_brand_context_word(word)).count() >= 1
-        && words.iter().any(|word| {
-            is_ascii_titlecase_word(word)
-                || is_ascii_uppercase_acronym(word)
-                || has_ascii_camel_case(word)
-        })
-}
-
-fn branded_identifier_part(candidate: &str) -> bool {
-    is_ascii_titlecase_word(candidate)
-        || is_ascii_uppercase_acronym(candidate)
-        || has_ascii_camel_case(candidate)
-}
-
-fn is_ascii_titlecase_word(word: &str) -> bool {
-    let compact = trim_technical_token(word);
-    let mut characters = compact.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    first.is_ascii_uppercase()
-        && characters.all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
-}
-
-fn is_ascii_uppercase_acronym(word: &str) -> bool {
-    let compact = trim_technical_token(word);
-    compact.len() >= 2
-        && compact.len() <= 8
-        && compact.chars().any(|character| character.is_ascii_uppercase())
-        && compact
-            .chars()
-            .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
-}
-
-fn has_ascii_camel_case(word: &str) -> bool {
-    word.chars()
-        .zip(word.chars().skip(1))
-        .any(|(left, right)| left.is_ascii_lowercase() && right.is_ascii_uppercase())
-}
-
-fn looks_like_brand_context_word(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "available"
-            | "applications"
-            | "catalog"
-            | "catalogue"
-            | "description"
-            | "documentation"
-            | "example"
-            | "guide"
-            | "manual"
-            | "module"
-            | "modules"
-            | "overview"
-            | "product"
-            | "products"
-            | "program"
-            | "programs"
-            | "service"
-            | "services"
-            | "solution"
-            | "solutions"
-            | "system"
-            | "systems"
-    ) {
-        return false;
-    }
-    is_ascii_titlecase_word(word) || has_ascii_camel_case(word)
-}
-
-fn is_generic_ascii_heading(candidate: &str) -> bool {
-    matches!(
-        candidate.trim().to_ascii_lowercase().as_str(),
-        "description"
-            | "overview"
-            | "how to"
-            | "history"
-            | "licensing"
-            | "user manual"
-            | "administrator guide"
-            | "service engineers"
-            | "administrators"
-            | "example"
-    )
-}
-
 fn leading_identifier(value: &str) -> Option<String> {
     let trimmed = strip_leading_marker(value);
     let candidate = trim_technical_token(trimmed.split_whitespace().next().unwrap_or_default());
@@ -1491,8 +907,9 @@ fn trim_technical_token(token: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{ExtractTechnicalFactsCommand, TechnicalFactService};
-    use crate::shared::extraction::structured_document::{
-        StructuredBlockData, StructuredBlockKind,
+    use crate::shared::extraction::{
+        structured_document::{StructuredBlockData, StructuredBlockKind},
+        table_markdown::parse_markdown_table_row,
     };
     use uuid::Uuid;
 
@@ -1618,6 +1035,97 @@ mod tests {
         assert!(fact_kinds.contains(&("endpoint_path".to_string(), "/orders".to_string())));
         assert!(fact_kinds.contains(&("parameter_name".to_string(), "pageNumber".to_string())));
         assert!(fact_kinds.contains(&("parameter_name".to_string(), "pageSize".to_string())));
+    }
+
+    #[test]
+    fn table_rows_skip_business_table_url_noise_for_fact_extraction() {
+        let service = TechnicalFactService::new();
+        let raw_row = "| 1 | FAB0d41d5b5d22c | Ferrell LLC | https://price.net/ | Papua New Guinea | Plastics |";
+        assert_eq!(parse_markdown_table_row(raw_row).len(), 6);
+        let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
+            revision_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            blocks: vec![
+                StructuredBlockData {
+                    block_id: Uuid::now_v7(),
+                    ordinal: 0,
+                    block_kind: StructuredBlockKind::Table,
+                    text: "| Index | Organization Id | Name | Website | Country | Industry |\n| --- | --- | --- | --- | --- | --- |\n| 1 | FAB0d41d5b5d22c | Ferrell LLC | https://price.net/ | Papua New Guinea | Plastics |".to_string(),
+                    normalized_text: "| Index | Organization Id | Name | Website | Country | Industry |\n| --- | --- | --- | --- | --- | --- |\n| 1 | FAB0d41d5b5d22c | Ferrell LLC | https://price.net/ | Papua New Guinea | Plastics |".to_string(),
+                    heading_trail: vec!["organizations-100".to_string()],
+                    section_path: vec!["organizations_100".to_string()],
+                    page_number: None,
+                    source_span: None,
+                    parent_block_id: None,
+                    table_coordinates: None,
+                    code_language: None,
+                    is_boilerplate: false,
+                },
+                StructuredBlockData {
+                    block_id: Uuid::now_v7(),
+                    ordinal: 1,
+                    block_kind: StructuredBlockKind::TableRow,
+                    text: raw_row.to_string(),
+                    normalized_text: "Sheet: organizations-100 | Row 1 | Index: 1 | Organization Id: FAB0d41d5b5d22c | Name: Ferrell LLC | Website: https://price.net/ | Country: Papua New Guinea | Industry: Plastics".to_string(),
+                    heading_trail: vec!["organizations-100".to_string()],
+                    section_path: vec!["organizations_100".to_string()],
+                    page_number: None,
+                    source_span: None,
+                    parent_block_id: None,
+                    table_coordinates: None,
+                    code_language: None,
+                    is_boilerplate: false,
+                },
+            ],
+        });
+
+        assert!(!result.facts.iter().any(|fact| {
+            fact.fact_kind.as_str() == "parameter_name" && fact.display_value == "Sheet"
+        }));
+        assert!(!result.facts.iter().any(|fact| {
+            fact.fact_kind.as_str() == "parameter_name" && fact.display_value == "Index"
+        }));
+        assert!(result.facts.is_empty());
+    }
+
+    #[test]
+    fn table_rows_keep_technical_endpoint_facts_when_headers_are_technical() {
+        let service = TechnicalFactService::new();
+        let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
+            revision_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            blocks: vec![StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 0,
+                block_kind: StructuredBlockKind::TableRow,
+                text: "| GET | /orders | https://api.example.test/orders | 200 |".to_string(),
+                normalized_text: "Sheet: API | Row 1 | Method: GET | Endpoint: /orders | Base URL: https://api.example.test/orders | Status Code: 200".to_string(),
+                heading_trail: vec!["api".to_string()],
+                section_path: vec!["api".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: None,
+                table_coordinates: None,
+                code_language: None,
+                is_boilerplate: false,
+            }],
+        });
+
+        let fact_kinds = result
+            .facts
+            .iter()
+            .map(|fact| (fact.fact_kind.as_str().to_string(), fact.display_value.clone()))
+            .collect::<Vec<_>>();
+        assert!(fact_kinds.contains(&("http_method".to_string(), "GET".to_string())));
+        assert!(fact_kinds.contains(&("endpoint_path".to_string(), "/orders".to_string())));
+        assert!(
+            fact_kinds
+                .contains(&("url".to_string(), "https://api.example.test/orders".to_string()))
+        );
     }
 
     fn make_test_block(

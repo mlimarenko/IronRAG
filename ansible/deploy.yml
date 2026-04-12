@@ -1,23 +1,23 @@
 ---
 # Target: docker + compose v2 + curl. Runs install.sh from GitHub; rerun upgrades.
-# Common -e: rustrag_install_dir, rustrag_release, rustrag_public_host, rustrag_publish_port, rustrag_become, rustrag_install_script_url (override URL, e.g. file://…/install.sh).
-- name: RustRAG — install or update via official GitHub script
+# Common -e: ironrag_install_dir, ironrag_release, ironrag_public_host, ironrag_publish_port, ironrag_become, ironrag_install_script_url (override URL, e.g. file://…/install.sh).
+- name: IronRAG — install or update via official GitHub script
   hosts: all
   gather_facts: false
 
   vars:
-    rustrag_install_dir: /opt/rustrag
-    rustrag_github_repo: mlimarenko/RustRAG
-    rustrag_install_script_ref: master
-    rustrag_release: latest
-    rustrag_public_host: ""
-    rustrag_publish_port: ""
-    rustrag_install_script_url: >-
-      https://raw.githubusercontent.com/{{ rustrag_github_repo }}/{{ rustrag_install_script_ref }}/install.sh
-    rustrag_access_host: >-
-      {{ rustrag_public_host | default(ansible_host | default(inventory_hostname), true) }}
+    ironrag_install_dir: /opt/ironrag
+    ironrag_github_repo: mlimarenko/IronRAG
+    ironrag_install_script_ref: master
+    ironrag_release: latest
+    ironrag_public_host: ""
+    ironrag_publish_port: ""
+    ironrag_install_script_url: >-
+      https://raw.githubusercontent.com/{{ ironrag_github_repo }}/{{ ironrag_install_script_ref }}/install.sh
+    ironrag_access_host: >-
+      {{ ironrag_public_host | default(ansible_host | default(inventory_hostname), true) }}
 
-  become: "{{ rustrag_become | default(true) | bool }}"
+  become: "{{ ironrag_become | default(true) | bool }}"
 
   tasks:
     - name: Fail fast — Docker must be installed and usable
@@ -36,45 +36,45 @@
       ansible.builtin.shell:
         cmd: |
           set -euo pipefail
-          curl -fsSL "{{ rustrag_install_script_url }}" | bash -s -- "{{ rustrag_release }}" "{{ rustrag_install_dir }}"
+          curl -fsSL "{{ ironrag_install_script_url }}" | bash -s -- "{{ ironrag_release }}" "{{ ironrag_install_dir }}"
         executable: /bin/bash
       environment:
-        RUSTRAG_GITHUB_REPOSITORY: "{{ rustrag_github_repo }}"
-        RUSTRAG_PORT: "{{ rustrag_publish_port }}"
-      register: rustrag_install
+        IRONRAG_GITHUB_REPOSITORY: "{{ ironrag_github_repo }}"
+        IRONRAG_PORT: "{{ ironrag_publish_port }}"
+      register: ironrag_install
 
     - name: Read .env for access hints
       ansible.builtin.slurp:
-        src: "{{ rustrag_install_dir }}/.env"
-      register: rustrag_env_slurp
+        src: "{{ ironrag_install_dir }}/.env"
+      register: ironrag_env_slurp
 
     - name: Parse .env lines for hints
       ansible.builtin.set_fact:
-        rustrag_env_lines: "{{ (rustrag_env_slurp.content | b64decode).splitlines() }}"
+        ironrag_env_lines: "{{ (ironrag_env_slurp.content | b64decode).splitlines() }}"
 
     - name: Resolve published HTTP port
       ansible.builtin.set_fact:
-        rustrag_ui_port: >-
+        ironrag_ui_port: >-
           {{
             (
-              rustrag_env_lines
-              | select('match', '^RUSTRAG_PORT=')
+              ironrag_env_lines
+              | select('match', '^IRONRAG_PORT=')
               | list
               | first
-              | default('RUSTRAG_PORT=19000', true)
+              | default('IRONRAG_PORT=19000', true)
             )
-            | regex_replace('^RUSTRAG_PORT=', '')
+            | regex_replace('^IRONRAG_PORT=', '')
             | trim
             | default('19000', true)
           }}
 
     - name: Detect non-empty pre-provisioned admin password in .env
       ansible.builtin.set_fact:
-        rustrag_bootstrap_password_configured: >-
+        ironrag_bootstrap_password_configured: >-
           {{
-            rustrag_env_lines
-            | select('match', '^RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD=')
-            | map('regex_replace', '^RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD=', '')
+            ironrag_env_lines
+            | select('match', '^IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD=')
+            | map('regex_replace', '^IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD=', '')
             | map('trim')
             | reject('equalto', '')
             | list
@@ -83,12 +83,12 @@
 
     - name: Detect any LLM API key in .env
       ansible.builtin.set_fact:
-        rustrag_llm_key_configured: >-
+        ironrag_llm_key_configured: >-
           {{
             (
-              rustrag_env_lines
-              | select('match', '^(RUSTRAG_OPENAI_API_KEY|RUSTRAG_DEEPSEEK_API_KEY|RUSTRAG_QWEN_API_KEY)=')
-              | map('regex_replace', '^(RUSTRAG_OPENAI_API_KEY|RUSTRAG_DEEPSEEK_API_KEY|RUSTRAG_QWEN_API_KEY)=', '')
+              ironrag_env_lines
+              | select('match', '^(IRONRAG_OPENAI_API_KEY|IRONRAG_DEEPSEEK_API_KEY|IRONRAG_QWEN_API_KEY)=')
+              | map('regex_replace', '^(IRONRAG_OPENAI_API_KEY|IRONRAG_DEEPSEEK_API_KEY|IRONRAG_QWEN_API_KEY)=', '')
               | map('trim')
               | reject('equalto', '')
               | list
@@ -98,43 +98,43 @@
 
     - name: Detect fresh .env secrets from this install.sh run
       ansible.builtin.set_fact:
-        rustrag_fresh_stack_secrets: "{{ 'New .env:' in (rustrag_install.stdout | default('')) }}"
+        ironrag_fresh_stack_secrets: "{{ 'New .env:' in (ironrag_install.stdout | default('')) }}"
 
     - name: Build post-deploy summary (Ansible)
       ansible.builtin.set_fact:
-        rustrag_post_deploy_lines: >-
+        ironrag_post_deploy_lines: >-
           {{
             [
               '---',
-              'UI: http://' ~ rustrag_access_host ~ ':' ~ rustrag_ui_port ~ '/',
-              'MCP: http://' ~ rustrag_access_host ~ ':' ~ rustrag_ui_port ~ '/v1/mcp',
-              'Dir: ' ~ rustrag_install_dir ~ '/',
+              'UI: http://' ~ ironrag_access_host ~ ':' ~ ironrag_ui_port ~ '/',
+              'MCP: http://' ~ ironrag_access_host ~ ':' ~ ironrag_ui_port ~ '/v1/mcp',
+              'Dir: ' ~ ironrag_install_dir ~ '/',
               'Stack secrets:',
             ]
             + (
               [ '  New .env (random DB/bootstrap token in .env).' ]
-              if rustrag_fresh_stack_secrets | bool
+              if ironrag_fresh_stack_secrets | bool
               else [ '  Existing .env unchanged.' ]
             )
             + [ 'Admin:', ]
             + (
-              [ '  In .env: RUSTRAG_UI_BOOTSTRAP_ADMIN_*.' ]
-              if rustrag_bootstrap_password_configured | bool
+              [ '  In .env: IRONRAG_UI_BOOTSTRAP_ADMIN_*.' ]
+              if ironrag_bootstrap_password_configured | bool
               else [ '  Not in .env: UI on first visit.' ]
             )
             + [ 'LLM:', ]
             + (
               [ '  Provider key(s) in .env.' ]
-              if rustrag_llm_key_configured | bool
-              else [ '  Add RUSTRAG_*_API_KEY or UI.' ]
+              if ironrag_llm_key_configured | bool
+              else [ '  Add IRONRAG_*_API_KEY or UI.' ]
             )
             + [ '---' ]
           }}
 
     - name: Show install.sh stdout
       ansible.builtin.debug:
-        msg: "{{ rustrag_install.stdout_lines | default([]) }}"
+        msg: "{{ ironrag_install.stdout_lines | default([]) }}"
 
     - name: Show Ansible summary
       ansible.builtin.debug:
-        msg: "{{ rustrag_post_deploy_lines }}"
+        msg: "{{ ironrag_post_deploy_lines }}"

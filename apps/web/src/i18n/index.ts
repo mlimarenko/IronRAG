@@ -5,7 +5,7 @@ import ru from "./ru.json";
 
 i18n.use(initReactI18next).init({
   resources: { en: { translation: en }, ru: { translation: ru } },
-  lng: localStorage.getItem("rustrag_locale") || "en",
+  lng: localStorage.getItem("ironrag_locale") || "en",
   fallbackLng: "en",
   interpolation: { escapeValue: false },
 });

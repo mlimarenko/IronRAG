@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 use tokio::{sync::broadcast, time};
 
-use rustrag_backend::services::ingest::worker;
+use ironrag_backend::services::ingest::worker;
 
 use web_ingest_fixture::WebIngestFixture;
 

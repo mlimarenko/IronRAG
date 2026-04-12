@@ -18,7 +18,7 @@ use tokio::time::{Instant, sleep};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::arangodb::{
         bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
@@ -277,8 +277,8 @@ struct FakeEmbeddingGateway {
 impl LlmGateway for FakeEmbeddingGateway {
     async fn generate(
         &self,
-        request: rustrag_backend::integrations::llm::ChatRequest,
-    ) -> anyhow::Result<rustrag_backend::integrations::llm::ChatResponse> {
+        request: ironrag_backend::integrations::llm::ChatRequest,
+    ) -> anyhow::Result<ironrag_backend::integrations::llm::ChatResponse> {
         Err(anyhow!("generate not used in knowledge search test: {}", request.provider_kind))
     }
 
@@ -294,11 +294,11 @@ impl LlmGateway for FakeEmbeddingGateway {
 
     async fn embed_many(
         &self,
-        request: rustrag_backend::integrations::llm::EmbeddingBatchRequest,
-    ) -> anyhow::Result<rustrag_backend::integrations::llm::EmbeddingBatchResponse> {
+        request: ironrag_backend::integrations::llm::EmbeddingBatchRequest,
+    ) -> anyhow::Result<ironrag_backend::integrations::llm::EmbeddingBatchResponse> {
         let embeddings =
             request.inputs.into_iter().map(|_| self.embedding.clone()).collect::<Vec<_>>();
-        Ok(rustrag_backend::integrations::llm::EmbeddingBatchResponse {
+        Ok(ironrag_backend::integrations::llm::EmbeddingBatchResponse {
             provider_kind: request.provider_kind,
             model_name: request.model_name,
             dimensions: self.embedding.len(),
@@ -309,8 +309,8 @@ impl LlmGateway for FakeEmbeddingGateway {
 
     async fn vision_extract(
         &self,
-        request: rustrag_backend::integrations::llm::VisionRequest,
-    ) -> anyhow::Result<rustrag_backend::integrations::llm::VisionResponse> {
+        request: ironrag_backend::integrations::llm::VisionRequest,
+    ) -> anyhow::Result<ironrag_backend::integrations::llm::VisionResponse> {
         Err(anyhow!("vision_extract not used in knowledge search test: {}", request.provider_kind))
     }
 }
@@ -797,7 +797,7 @@ impl KnowledgeSearchHttpFixture {
         &self,
         query: &str,
         expected_fact_id: Uuid,
-    ) -> Result<rustrag_backend::services::query::search::QueryEvidenceSearchResult> {
+    ) -> Result<ironrag_backend::services::query::search::QueryEvidenceSearchResult> {
         let deadline = Instant::now() + SEARCH_WAIT_TIMEOUT;
         loop {
             let result = SearchService::new()

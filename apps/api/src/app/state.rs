@@ -49,7 +49,7 @@ use crate::{
     },
 };
 
-pub const UI_SESSION_COOKIE_NAME: &str = "rustrag_ui_session";
+pub const UI_SESSION_COOKIE_NAME: &str = "ironrag_ui_session";
 
 #[derive(Clone)]
 pub struct UiRuntimeSettings {

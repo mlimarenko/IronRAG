@@ -1,253 +1,43 @@
+mod session;
+mod types;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    http::StatusCode,
     routing::{delete, get, post},
 };
-use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use self::{
+    session::{
+        get_bootstrap_status, get_session, login_session, logout_session, resolve_session,
+        setup_bootstrap_admin,
+    },
+    types::{
+        CreateGrantRequest, GrantResponse, IamGrantResourceKind, IamPermissionKind,
+        IamPrincipalKind, ListGrantsQuery, ListTokensQuery, MeResponse, MintTokenRequest,
+        MintTokenResponse, PrincipalResponse, TokenResponse, UserResponse,
+        WorkspaceMembershipResponse,
+    },
+};
 use crate::{
     app::state::AppState,
-    domains::ai::AiBindingPurpose,
     domains::iam::{Grant, GrantResourceKind, WorkspaceMembership},
     infra::repositories::{
         ai_repository, catalog_repository, iam_repository, ops_repository, query_repository,
     },
     interfaces::http::{
-        auth::{AuthContext, build_session_cookie_value},
+        auth::AuthContext,
         authorization::POLICY_IAM_ADMIN,
         router_support::{ApiError, RequestId},
-        ui_support::{build_cleared_session_cookie, build_session_cookie},
     },
-    interfaces::shell::{build_shell_bootstrap, parse_ui_locale, to_bootstrap_contract},
-    services::ai_catalog_service::{BootstrapAiCredentialSource, BootstrapAiSetupDescriptor},
-    services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
-    services::iam::service::{
-        AuthenticateSessionCommand, BootstrapSetupAiCommand, BootstrapSetupCommand,
-        CreateGrantCommand,
+    services::iam::{
+        audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
+        service::CreateGrantCommand,
     },
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IamGrantResourceKind {
-    System,
-    Workspace,
-    Library,
-    Document,
-    QuerySession,
-    AsyncOperation,
-    Connector,
-    ProviderCredential,
-    LibraryBinding,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IamPermissionKind {
-    WorkspaceAdmin,
-    WorkspaceRead,
-    LibraryRead,
-    LibraryWrite,
-    DocumentRead,
-    DocumentWrite,
-    ConnectorAdmin,
-    CredentialAdmin,
-    BindingAdmin,
-    QueryRun,
-    OpsRead,
-    AuditRead,
-    IamAdmin,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListTokensQuery {
-    pub workspace_id: Option<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListGrantsQuery {
-    pub principal_id: Option<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MintTokenRequest {
-    pub workspace_id: Option<Uuid>,
-    pub label: String,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateGrantRequest {
-    pub principal_id: Uuid,
-    pub resource_kind: IamGrantResourceKind,
-    pub resource_id: Uuid,
-    pub permission_kind: IamPermissionKind,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrincipalResponse {
-    pub id: Uuid,
-    pub principal_kind: IamPrincipalKind,
-    pub status: String,
-    pub display_label: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserResponse {
-    pub principal_id: Uuid,
-    pub login: String,
-    pub email: String,
-    pub display_name: String,
-    pub auth_provider_kind: String,
-    pub external_subject: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceMembershipResponse {
-    pub workspace_id: Uuid,
-    pub principal_id: Uuid,
-    pub membership_state: String,
-    pub joined_at: chrono::DateTime<chrono::Utc>,
-    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenResponse {
-    pub principal_id: Uuid,
-    pub workspace_id: Option<Uuid>,
-    pub label: String,
-    pub token_prefix: String,
-    pub status: String,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub issued_by_principal_id: Option<Uuid>,
-    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MintTokenResponse {
-    pub token: String,
-    pub api_token: TokenResponse,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GrantResponse {
-    pub id: Uuid,
-    pub principal_id: Uuid,
-    pub resource_kind: IamGrantResourceKind,
-    pub resource_id: Uuid,
-    pub permission_kind: IamPermissionKind,
-    pub granted_by_principal_id: Option<Uuid>,
-    pub granted_at: chrono::DateTime<chrono::Utc>,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeResponse {
-    pub principal: PrincipalResponse,
-    pub user: Option<UserResponse>,
-    pub workspace_memberships: Vec<WorkspaceMembershipResponse>,
-    pub effective_grants: Vec<GrantResponse>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapStatusResponse {
-    pub setup_required: bool,
-    pub ai_setup: Option<BootstrapAiSetupResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoginSessionRequest {
-    pub login: String,
-    pub password: String,
-    pub remember_me: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapSetupRequest {
-    pub login: String,
-    pub display_name: Option<String>,
-    pub password: String,
-    pub ai_setup: Option<BootstrapSetupAiRequest>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderPresetResponse {
-    pub binding_purpose: AiBindingPurpose,
-    pub model_catalog_id: Uuid,
-    pub model_name: String,
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderPresetBundleResponse {
-    pub id: Uuid,
-    pub provider_kind: String,
-    pub display_name: String,
-    pub credential_source: String,
-    pub default_base_url: Option<String>,
-    pub api_key_required: bool,
-    pub base_url_required: bool,
-    pub presets: Vec<BootstrapProviderPresetResponse>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapAiSetupResponse {
-    pub preset_bundles: Vec<BootstrapProviderPresetBundleResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapSetupAiRequest {
-    pub provider_kind: String,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionUserResponse {
-    pub principal_id: Uuid,
-    pub login: String,
-    pub email: String,
-    pub display_name: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionResponse {
-    pub session_id: Uuid,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub user: SessionUserResponse,
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -262,316 +52,6 @@ pub fn router() -> Router<AppState> {
         .route("/iam/tokens/{token_principal_id}/revoke", post(revoke_token))
         .route("/iam/grants", get(list_grants).post(create_grant))
         .route("/iam/grants/{grant_id}", delete(revoke_grant))
-}
-
-async fn resolve_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<rustrag_contracts::auth::SessionResolveResponse>, ApiError> {
-    let bootstrap_status_outcome =
-        state.canonical_services.iam.get_bootstrap_status(&state).await?;
-    let bootstrap_status = to_bootstrap_contract(&bootstrap_status_outcome);
-    let locale = parse_ui_locale(&state.ui_runtime.default_locale);
-
-    match crate::interfaces::http::auth::resolve_optional_auth_context_from_headers(&state, &headers)
-        .await
-    {
-        Ok(Some(auth)) if auth.token_kind.is_session() => {
-            let session = load_contract_session(&state, &auth).await?;
-            let me = load_contract_me(&state, &auth).await?;
-            let shell_bootstrap = build_shell_bootstrap(&state, &auth).await?;
-
-            Ok(Json(rustrag_contracts::auth::SessionResolveResponse {
-                mode: rustrag_contracts::auth::SessionMode::Authenticated,
-                locale,
-                session: Some(session),
-                me: Some(me),
-                shell_bootstrap: Some(shell_bootstrap),
-                bootstrap_status,
-                message: None,
-            }))
-        }
-        Ok(Some(_)) => Ok(Json(rustrag_contracts::auth::SessionResolveResponse {
-            mode: session_mode_from_bootstrap(&bootstrap_status),
-            locale,
-            session: None,
-            me: None,
-            shell_bootstrap: None,
-            bootstrap_status,
-            message: Some(
-                "Browser shell requires the canonical UI session cookie and does not accept bearer tokens."
-                    .to_string(),
-            ),
-        })),
-        Ok(None) | Err(ApiError::Unauthorized) => {
-            Ok(Json(rustrag_contracts::auth::SessionResolveResponse {
-                mode: session_mode_from_bootstrap(&bootstrap_status),
-                locale,
-                session: None,
-                me: None,
-                shell_bootstrap: None,
-                bootstrap_status,
-                message: None,
-            }))
-        }
-        Err(error) => {
-            warn!(?error, "failed to resolve optional auth context for session restore");
-            Ok(Json(rustrag_contracts::auth::SessionResolveResponse {
-                mode: session_mode_from_bootstrap(&bootstrap_status),
-                locale,
-                session: None,
-                me: None,
-                shell_bootstrap: None,
-                bootstrap_status,
-                message: Some(
-                    "Session restore could not validate the current browser credentials.".to_string(),
-                ),
-            }))
-        }
-    }
-}
-
-async fn get_bootstrap_status(
-    State(state): State<AppState>,
-) -> Result<Json<BootstrapStatusResponse>, ApiError> {
-    let outcome = state.canonical_services.iam.get_bootstrap_status(&state).await?;
-    Ok(Json(BootstrapStatusResponse {
-        setup_required: outcome.setup_required,
-        ai_setup: outcome.ai_setup.map(map_bootstrap_ai_setup),
-    }))
-}
-
-async fn setup_bootstrap_admin(
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<BootstrapSetupRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let request_id = request_id.map_or_else(|| uuid::Uuid::now_v7().to_string(), |value| value.0.0);
-    let outcome = state
-        .canonical_services
-        .iam
-        .setup_bootstrap_admin(
-            &state,
-            BootstrapSetupCommand {
-                login: payload.login,
-                display_name: payload.display_name,
-                password: payload.password,
-                ai_setup: payload.ai_setup.map(|ai_setup| BootstrapSetupAiCommand {
-                    provider_kind: ai_setup.provider_kind,
-                    api_key: ai_setup.api_key,
-                    base_url: ai_setup.base_url,
-                }),
-                ttl_hours: state.ui_session_cookie.ttl_hours,
-                request_id: request_id.clone(),
-            },
-        )
-        .await?;
-
-    let mut headers = HeaderMap::new();
-    let cookie = build_session_cookie(
-        state.ui_session_cookie.name,
-        &build_session_cookie_value(outcome.session_id, &outcome.session_secret),
-        state.ui_session_cookie.ttl_hours,
-    );
-    headers.insert(header::SET_COOKIE, cookie.parse().map_err(|_| ApiError::Internal)?);
-
-    if let Err(error) = state
-        .canonical_services
-        .audit
-        .append_event(
-            &state,
-            AppendAuditEventCommand {
-                actor_principal_id: Some(outcome.principal_id),
-                surface_kind: "rest".to_string(),
-                action_kind: "iam.bootstrap.setup".to_string(),
-                request_id: Some(request_id),
-                trace_id: None,
-                result_kind: "succeeded".to_string(),
-                redacted_message: Some("bootstrap setup succeeded".to_string()),
-                internal_message: Some(format!(
-                    "principal {} configured bootstrap session {}",
-                    outcome.principal_id, outcome.session_id
-                )),
-                subjects: vec![
-                    AppendAuditEventSubjectCommand {
-                        subject_kind: "principal".to_string(),
-                        subject_id: outcome.principal_id,
-                        workspace_id: None,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    AppendAuditEventSubjectCommand {
-                        subject_kind: "session".to_string(),
-                        subject_id: outcome.session_id,
-                        workspace_id: None,
-                        library_id: None,
-                        document_id: None,
-                    },
-                ],
-            },
-        )
-        .await
-    {
-        tracing::warn!(stage = "audit", error = %error, "audit append failed");
-    }
-
-    Ok((
-        headers,
-        Json(SessionResponse {
-            session_id: outcome.session_id,
-            expires_at: outcome.expires_at,
-            user: SessionUserResponse {
-                principal_id: outcome.principal_id,
-                login: outcome.login,
-                email: outcome.email,
-                display_name: outcome.display_name,
-            },
-        }),
-    ))
-}
-
-async fn login_session(
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<LoginSessionRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let ttl_hours =
-        if payload.remember_me.unwrap_or(false) { state.ui_session_cookie.ttl_hours } else { 24 };
-    let outcome = state
-        .canonical_services
-        .iam
-        .authenticate_session(
-            &state,
-            AuthenticateSessionCommand {
-                login: payload.login,
-                password: payload.password,
-                ttl_hours,
-            },
-        )
-        .await?;
-
-    let mut headers = HeaderMap::new();
-    let cookie = build_session_cookie(
-        state.ui_session_cookie.name,
-        &build_session_cookie_value(outcome.session_id, &outcome.session_secret),
-        ttl_hours,
-    );
-    headers.insert(header::SET_COOKIE, cookie.parse().map_err(|_| ApiError::Internal)?);
-
-    let audit_state = state.clone();
-    let audit_request_id = request_id.map(|value| value.0.0);
-    let audit_principal_id = outcome.principal_id;
-    let audit_session_id = outcome.session_id;
-    tokio::spawn(async move {
-        if let Err(error) = audit_state
-            .canonical_services
-            .audit
-            .append_event(
-                &audit_state,
-                AppendAuditEventCommand {
-                    actor_principal_id: Some(audit_principal_id),
-                    surface_kind: "rest".to_string(),
-                    action_kind: "iam.session.login".to_string(),
-                    request_id: audit_request_id,
-                    trace_id: None,
-                    result_kind: "succeeded".to_string(),
-                    redacted_message: Some("session login succeeded".to_string()),
-                    internal_message: Some(format!(
-                        "principal {} created session {}",
-                        audit_principal_id, audit_session_id
-                    )),
-                    subjects: vec![AppendAuditEventSubjectCommand {
-                        subject_kind: "session".to_string(),
-                        subject_id: audit_session_id,
-                        workspace_id: None,
-                        library_id: None,
-                        document_id: None,
-                    }],
-                },
-            )
-            .await
-        {
-            warn!(
-                principal_id = %audit_principal_id,
-                session_id = %audit_session_id,
-                ?error,
-                "failed to append iam session login audit event",
-            );
-        }
-    });
-
-    Ok((
-        headers,
-        Json(SessionResponse {
-            session_id: outcome.session_id,
-            expires_at: outcome.expires_at,
-            user: SessionUserResponse {
-                principal_id: outcome.principal_id,
-                login: outcome.login,
-                email: outcome.email,
-                display_name: outcome.display_name,
-            },
-        }),
-    ))
-}
-
-async fn get_session(
-    auth: AuthContext,
-    State(state): State<AppState>,
-) -> Result<Json<SessionResponse>, ApiError> {
-    let session = load_contract_session(&state, &auth).await?;
-    Ok(Json(map_contract_session_response(session)))
-}
-
-async fn logout_session(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-) -> Result<impl IntoResponse, ApiError> {
-    auth.require_session_token()?;
-
-    state.canonical_services.iam.revoke_session(&state, auth.token_id).await?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::SET_COOKIE,
-        build_cleared_session_cookie(state.ui_session_cookie.name)
-            .parse()
-            .map_err(|_| ApiError::Internal)?,
-    );
-
-    if let Err(error) = state
-        .canonical_services
-        .audit
-        .append_event(
-            &state,
-            AppendAuditEventCommand {
-                actor_principal_id: Some(auth.principal_id),
-                surface_kind: "rest".to_string(),
-                action_kind: "iam.session.logout".to_string(),
-                request_id: request_id.map(|value| value.0.0),
-                trace_id: None,
-                result_kind: "succeeded".to_string(),
-                redacted_message: Some("session logout succeeded".to_string()),
-                internal_message: Some(format!(
-                    "principal {} revoked session {}",
-                    auth.principal_id, auth.token_id
-                )),
-                subjects: vec![AppendAuditEventSubjectCommand {
-                    subject_kind: "session".to_string(),
-                    subject_id: auth.token_id,
-                    workspace_id: None,
-                    library_id: None,
-                    document_id: None,
-                }],
-            },
-        )
-        .await
-    {
-        tracing::warn!(stage = "audit", error = %error, "audit append failed");
-    }
-
-    Ok((headers, StatusCode::NO_CONTENT))
 }
 
 async fn get_me(
@@ -1216,98 +696,10 @@ fn validate_permission_kind_for_resource(
     }
 }
 
-fn map_bootstrap_ai_setup(descriptor: BootstrapAiSetupDescriptor) -> BootstrapAiSetupResponse {
-    BootstrapAiSetupResponse {
-        preset_bundles: descriptor
-            .preset_bundles
-            .into_iter()
-            .map(|bundle| BootstrapProviderPresetBundleResponse {
-                id: bundle.provider_catalog_id,
-                provider_kind: bundle.provider_kind,
-                display_name: bundle.display_name,
-                credential_source: match bundle.credential_source {
-                    BootstrapAiCredentialSource::Missing => "missing".to_string(),
-                    BootstrapAiCredentialSource::Env => "env".to_string(),
-                },
-                default_base_url: bundle.default_base_url,
-                api_key_required: bundle.api_key_required,
-                base_url_required: bundle.base_url_required,
-                presets: bundle
-                    .presets
-                    .into_iter()
-                    .map(|preset| BootstrapProviderPresetResponse {
-                        binding_purpose: preset.binding_purpose,
-                        model_catalog_id: preset.model_catalog_id,
-                        model_name: preset.model_name,
-                        preset_name: preset.preset_name,
-                        system_prompt: preset.system_prompt,
-                        temperature: preset.temperature,
-                        top_p: preset.top_p,
-                        max_output_tokens_override: preset.max_output_tokens_override,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
-}
-
-fn session_mode_from_bootstrap(
-    bootstrap_status: &rustrag_contracts::auth::BootstrapStatus,
-) -> rustrag_contracts::auth::SessionMode {
-    if bootstrap_status.setup_required {
-        rustrag_contracts::auth::SessionMode::BootstrapRequired
-    } else {
-        rustrag_contracts::auth::SessionMode::Guest
-    }
-}
-
-async fn load_contract_session(
-    state: &AppState,
-    auth: &AuthContext,
-) -> Result<rustrag_contracts::auth::AuthenticatedSession, ApiError> {
-    auth.require_session_token()?;
-
-    let session_row = iam_repository::get_session_by_id(&state.persistence.postgres, auth.token_id)
-        .await
-        .map_err(|error| {
-            error!(
-                auth_principal_id = %auth.principal_id,
-                session_id = %auth.token_id,
-                ?error,
-                "failed to load canonical session",
-            );
-            ApiError::Internal
-        })?
-        .ok_or_else(|| ApiError::resource_not_found("session", auth.token_id))?;
-    let user_row =
-        iam_repository::get_user_by_principal_id(&state.persistence.postgres, auth.principal_id)
-            .await
-            .map_err(|error| {
-                error!(
-                    auth_principal_id = %auth.principal_id,
-                    ?error,
-                    "failed to load canonical session user",
-                );
-                ApiError::Internal
-            })?
-            .ok_or(ApiError::Unauthorized)?;
-
-    Ok(rustrag_contracts::auth::AuthenticatedSession {
-        session_id: session_row.id,
-        expires_at: session_row.expires_at,
-        user: rustrag_contracts::auth::SessionUser {
-            principal_id: user_row.principal_id,
-            login: user_row.login,
-            email: user_row.email,
-            display_name: user_row.display_name,
-        },
-    })
-}
-
 pub(crate) async fn load_contract_me(
     state: &AppState,
     auth: &AuthContext,
-) -> Result<rustrag_contracts::auth::IamMe, ApiError> {
+) -> Result<ironrag_contracts::auth::IamMe, ApiError> {
     let principal_row =
         iam_repository::get_principal_by_id(&state.persistence.postgres, auth.principal_id)
             .await
@@ -1336,7 +728,7 @@ pub(crate) async fn load_contract_me(
     let resolution =
         state.canonical_services.iam.resolve_effective_grants(state, auth.principal_id).await?;
 
-    Ok(rustrag_contracts::auth::IamMe {
+    Ok(ironrag_contracts::auth::IamMe {
         principal: map_principal_row_contract(principal_row)?,
         user: user_row.map(map_user_row_contract),
         workspace_memberships: resolution
@@ -1350,21 +742,6 @@ pub(crate) async fn load_contract_me(
             .map(map_grant_domain_contract)
             .collect::<Result<Vec<_>, _>>()?,
     })
-}
-
-fn map_contract_session_response(
-    session: rustrag_contracts::auth::AuthenticatedSession,
-) -> SessionResponse {
-    SessionResponse {
-        session_id: session.session_id,
-        expires_at: session.expires_at,
-        user: SessionUserResponse {
-            principal_id: session.user.principal_id,
-            login: session.user.login,
-            email: session.user.email,
-            display_name: session.user.display_name,
-        },
-    }
 }
 
 fn map_principal_row(row: iam_repository::IamPrincipalRow) -> Result<PrincipalResponse, ApiError> {
@@ -1401,8 +778,8 @@ fn map_membership_row(row: WorkspaceMembership) -> WorkspaceMembershipResponse {
 
 fn map_principal_row_contract(
     row: iam_repository::IamPrincipalRow,
-) -> Result<rustrag_contracts::auth::PrincipalProfile, ApiError> {
-    Ok(rustrag_contracts::auth::PrincipalProfile {
+) -> Result<ironrag_contracts::auth::PrincipalProfile, ApiError> {
+    Ok(ironrag_contracts::auth::PrincipalProfile {
         id: row.id,
         principal_kind: match map_principal_kind(&row.principal_kind)? {
             IamPrincipalKind::User => "user".to_string(),
@@ -1415,8 +792,8 @@ fn map_principal_row_contract(
     })
 }
 
-fn map_user_row_contract(row: iam_repository::IamUserRow) -> rustrag_contracts::auth::UserProfile {
-    rustrag_contracts::auth::UserProfile {
+fn map_user_row_contract(row: iam_repository::IamUserRow) -> ironrag_contracts::auth::UserProfile {
+    ironrag_contracts::auth::UserProfile {
         principal_id: row.principal_id,
         login: Some(row.login),
         email: Some(row.email),
@@ -1426,8 +803,8 @@ fn map_user_row_contract(row: iam_repository::IamUserRow) -> rustrag_contracts::
 
 fn map_membership_row_contract(
     row: WorkspaceMembership,
-) -> rustrag_contracts::auth::WorkspaceMembership {
-    rustrag_contracts::auth::WorkspaceMembership {
+) -> ironrag_contracts::auth::WorkspaceMembership {
+    ironrag_contracts::auth::WorkspaceMembership {
         workspace_id: row.workspace_id,
         principal_id: row.principal_id,
         membership_state: row.membership_state,
@@ -1463,8 +840,8 @@ fn map_grant_domain(row: Grant) -> Result<GrantResponse, ApiError> {
     })
 }
 
-fn map_grant_domain_contract(row: Grant) -> Result<rustrag_contracts::auth::TokenGrant, ApiError> {
-    Ok(rustrag_contracts::auth::TokenGrant {
+fn map_grant_domain_contract(row: Grant) -> Result<ironrag_contracts::auth::TokenGrant, ApiError> {
+    Ok(ironrag_contracts::auth::TokenGrant {
         id: row.id,
         principal_id: row.principal_id,
         resource_kind: map_domain_grant_resource_kind_contract(row.resource_kind),
@@ -1523,43 +900,43 @@ fn map_grant_resource_kind(value: &str) -> Result<IamGrantResourceKind, ApiError
 
 fn map_domain_grant_resource_kind_contract(
     value: GrantResourceKind,
-) -> rustrag_contracts::auth::GrantResourceKind {
+) -> ironrag_contracts::auth::GrantResourceKind {
     match value {
-        GrantResourceKind::System => rustrag_contracts::auth::GrantResourceKind::System,
-        GrantResourceKind::Workspace => rustrag_contracts::auth::GrantResourceKind::Workspace,
-        GrantResourceKind::Library => rustrag_contracts::auth::GrantResourceKind::Library,
-        GrantResourceKind::Document => rustrag_contracts::auth::GrantResourceKind::Document,
-        GrantResourceKind::QuerySession => rustrag_contracts::auth::GrantResourceKind::QuerySession,
+        GrantResourceKind::System => ironrag_contracts::auth::GrantResourceKind::System,
+        GrantResourceKind::Workspace => ironrag_contracts::auth::GrantResourceKind::Workspace,
+        GrantResourceKind::Library => ironrag_contracts::auth::GrantResourceKind::Library,
+        GrantResourceKind::Document => ironrag_contracts::auth::GrantResourceKind::Document,
+        GrantResourceKind::QuerySession => ironrag_contracts::auth::GrantResourceKind::QuerySession,
         GrantResourceKind::AsyncOperation => {
-            rustrag_contracts::auth::GrantResourceKind::AsyncOperation
+            ironrag_contracts::auth::GrantResourceKind::AsyncOperation
         }
-        GrantResourceKind::Connector => rustrag_contracts::auth::GrantResourceKind::Connector,
+        GrantResourceKind::Connector => ironrag_contracts::auth::GrantResourceKind::Connector,
         GrantResourceKind::ProviderCredential => {
-            rustrag_contracts::auth::GrantResourceKind::ProviderCredential
+            ironrag_contracts::auth::GrantResourceKind::ProviderCredential
         }
         GrantResourceKind::LibraryBinding => {
-            rustrag_contracts::auth::GrantResourceKind::LibraryBinding
+            ironrag_contracts::auth::GrantResourceKind::LibraryBinding
         }
     }
 }
 
 fn map_permission_kind_contract(
     value: &str,
-) -> Result<rustrag_contracts::auth::PermissionKind, ApiError> {
+) -> Result<ironrag_contracts::auth::PermissionKind, ApiError> {
     Ok(match value {
-        "workspace_admin" => rustrag_contracts::auth::PermissionKind::WorkspaceAdmin,
-        "workspace_read" => rustrag_contracts::auth::PermissionKind::WorkspaceRead,
-        "library_read" => rustrag_contracts::auth::PermissionKind::LibraryRead,
-        "library_write" => rustrag_contracts::auth::PermissionKind::LibraryWrite,
-        "document_read" => rustrag_contracts::auth::PermissionKind::DocumentRead,
-        "document_write" => rustrag_contracts::auth::PermissionKind::DocumentWrite,
-        "connector_admin" => rustrag_contracts::auth::PermissionKind::ConnectorAdmin,
-        "credential_admin" => rustrag_contracts::auth::PermissionKind::CredentialAdmin,
-        "binding_admin" => rustrag_contracts::auth::PermissionKind::BindingAdmin,
-        "query_run" => rustrag_contracts::auth::PermissionKind::QueryRun,
-        "ops_read" => rustrag_contracts::auth::PermissionKind::OpsRead,
-        "audit_read" => rustrag_contracts::auth::PermissionKind::AuditRead,
-        "iam_admin" => rustrag_contracts::auth::PermissionKind::IamAdmin,
+        "workspace_admin" => ironrag_contracts::auth::PermissionKind::WorkspaceAdmin,
+        "workspace_read" => ironrag_contracts::auth::PermissionKind::WorkspaceRead,
+        "library_read" => ironrag_contracts::auth::PermissionKind::LibraryRead,
+        "library_write" => ironrag_contracts::auth::PermissionKind::LibraryWrite,
+        "document_read" => ironrag_contracts::auth::PermissionKind::DocumentRead,
+        "document_write" => ironrag_contracts::auth::PermissionKind::DocumentWrite,
+        "connector_admin" => ironrag_contracts::auth::PermissionKind::ConnectorAdmin,
+        "credential_admin" => ironrag_contracts::auth::PermissionKind::CredentialAdmin,
+        "binding_admin" => ironrag_contracts::auth::PermissionKind::BindingAdmin,
+        "query_run" => ironrag_contracts::auth::PermissionKind::QueryRun,
+        "ops_read" => ironrag_contracts::auth::PermissionKind::OpsRead,
+        "audit_read" => ironrag_contracts::auth::PermissionKind::AuditRead,
+        "iam_admin" => ironrag_contracts::auth::PermissionKind::IamAdmin,
         other => {
             warn!(permission_kind = %other, "encountered unknown permission kind");
             return Err(ApiError::Internal);
@@ -1605,23 +982,6 @@ fn map_permission_kind(value: &str) -> Result<IamPermissionKind, ApiError> {
     }
 }
 
-impl IamGrantResourceKind {
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::Workspace => "workspace",
-            Self::Library => "library",
-            Self::Document => "document",
-            Self::QuerySession => "query_session",
-            Self::AsyncOperation => "async_operation",
-            Self::Connector => "connector",
-            Self::ProviderCredential => "provider_credential",
-            Self::LibraryBinding => "library_binding",
-        }
-    }
-}
-
 fn map_route_grant_resource_kind(value: IamGrantResourceKind) -> GrantResourceKind {
     match value {
         IamGrantResourceKind::System => GrantResourceKind::System,
@@ -1634,36 +994,6 @@ fn map_route_grant_resource_kind(value: IamGrantResourceKind) -> GrantResourceKi
         IamGrantResourceKind::ProviderCredential => GrantResourceKind::ProviderCredential,
         IamGrantResourceKind::LibraryBinding => GrantResourceKind::LibraryBinding,
     }
-}
-
-impl IamPermissionKind {
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::WorkspaceAdmin => "workspace_admin",
-            Self::WorkspaceRead => "workspace_read",
-            Self::LibraryRead => "library_read",
-            Self::LibraryWrite => "library_write",
-            Self::DocumentRead => "document_read",
-            Self::DocumentWrite => "document_write",
-            Self::ConnectorAdmin => "connector_admin",
-            Self::CredentialAdmin => "credential_admin",
-            Self::BindingAdmin => "binding_admin",
-            Self::QueryRun => "query_run",
-            Self::OpsRead => "ops_read",
-            Self::AuditRead => "audit_read",
-            Self::IamAdmin => "iam_admin",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IamPrincipalKind {
-    User,
-    ApiToken,
-    Worker,
-    Bootstrap,
 }
 
 #[cfg(test)]

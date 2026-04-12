@@ -118,7 +118,7 @@ async fn get_runtime_execution(
         execution_id,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     Ok(Json(map_runtime_execution_response(
         map_runtime_execution_row(execution)?,
         build_policy_summary(
@@ -141,17 +141,17 @@ async fn get_runtime_execution_trace(
     let stages =
         runtime_repository::list_runtime_stage_records(&state.persistence.postgres, execution_id)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let actions =
         runtime_repository::list_runtime_action_records(&state.persistence.postgres, execution_id)
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let policy_decisions = runtime_repository::list_runtime_policy_decisions(
         &state.persistence.postgres,
         execution_id,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let trace = map_runtime_trace_view(execution, stages, actions, policy_decisions)?;
     Ok(Json(map_runtime_trace_response(trace)))
 }

@@ -1,0 +1,124 @@
+{{- if eq .Values.dependencies.arangodb.mode "bundled" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ironrag.fullname" . }}-arangodb
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.dependencies.arangodb.persistence.size }}
+  {{- with .Values.dependencies.arangodb.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ironrag.fullname" . }}-arangodb
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: arangodb
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  selector:
+    matchLabels:
+      {{- include "ironrag.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: arangodb
+  template:
+    metadata:
+      labels:
+        {{- include "ironrag.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: arangodb
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: prepare-data
+          image: "{{ .Values.dependencies.arangodb.image.repository }}:{{ .Values.dependencies.arangodb.image.tag }}"
+          imagePullPolicy: {{ .Values.dependencies.arangodb.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /var/lib/arangodb3 /var/lib/arangodb3-apps
+              chown -R 1000:1000 /var/lib/arangodb3 /var/lib/arangodb3-apps
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/arangodb3
+            - name: apps
+              mountPath: /var/lib/arangodb3-apps
+      containers:
+        - name: arangodb
+          image: "{{ .Values.dependencies.arangodb.image.repository }}:{{ .Values.dependencies.arangodb.image.tag }}"
+          imagePullPolicy: {{ .Values.dependencies.arangodb.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+          env:
+            - name: ARANGO_ROOT_PASSWORD
+              value: {{ .Values.dependencies.arangodb.password | quote }}
+          args:
+            - arangod
+            - --server.authentication=true
+            - --experimental-vector-index=true
+            - --database.directory=/var/lib/arangodb3
+            - --javascript.app-path=/var/lib/arangodb3-apps
+          ports:
+            - containerPort: 8529
+              name: http
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/arangodb3
+            - name: apps
+              mountPath: /var/lib/arangodb3-apps
+          resources:
+            {{- toYaml .Values.dependencies.arangodb.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "ironrag.fullname" . }}-arangodb
+        - name: apps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ironrag.fullname" . }}-arangodb
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: arangodb
+spec:
+  selector:
+    {{- include "ironrag.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: arangodb
+  ports:
+    - name: http
+      port: {{ .Values.dependencies.arangodb.port }}
+      targetPort: http
+{{- end }}

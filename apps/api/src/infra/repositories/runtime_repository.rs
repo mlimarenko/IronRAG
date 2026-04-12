@@ -220,7 +220,7 @@ pub async fn create_runtime_execution(
             failure_code, failure_summary_redacted, accepted_at, completed_at
          ) values (
             $1, $2::runtime_execution_owner_kind, $3, $4::runtime_task_kind,
-            $5::runtime_surface_kind, $6, $7, $8::runtime_lifecycle_state,
+            $5::surface_kind, $6, $7, $8::runtime_lifecycle_state,
             $9::runtime_stage_kind, $10, $11, $12, $13, $14, now(), null
          )
          returning

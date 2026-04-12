@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CONTENT_STORAGE_ROOT="${RUSTRAG_CONTENT_STORAGE_ROOT:-/var/lib/rustrag/content-storage}"
+CONTENT_STORAGE_ROOT="${IRONRAG_CONTENT_STORAGE_ROOT:-/var/lib/ironrag/content-storage}"
 
 if [ "$(id -u)" -eq 0 ]; then
   # Docker / Compose path: image started as root, normalise ownership and
@@ -14,7 +14,7 @@ fi
 
 # Kubernetes / Helm path: pod runs with runAsUser already non-root.
 # Best-effort directory creation; PVC permissions and the Dockerfile-baked
-# /var/lib/rustrag/content-storage are responsible for making this writable.
+# /var/lib/ironrag/content-storage are responsible for making this writable.
 mkdir -p "$CONTENT_STORAGE_ROOT" 2>/dev/null || true
 
 exec "$@"

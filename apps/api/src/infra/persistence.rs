@@ -14,7 +14,7 @@ use crate::infra::arangodb::{
 };
 
 // Forces the crate to rebuild whenever the migration set changes, including file deletions.
-const _SQLX_MIGRATIONS_FINGERPRINT: &str = env!("RUSTRAG_MIGRATIONS_FINGERPRINT");
+const _SQLX_MIGRATIONS_FINGERPRINT: &str = env!("IRONRAG_MIGRATIONS_FINGERPRINT");
 
 const SEEDED_PROVIDER_KINDS: [&str; 3] = ["openai", "deepseek", "qwen"];
 const CANONICAL_BASELINE_TABLES: [&str; 9] = [

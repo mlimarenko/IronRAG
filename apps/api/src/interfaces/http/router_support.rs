@@ -105,6 +105,11 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    pub fn internal_with_log(error: impl std::fmt::Debug, context: &str) -> Self {
+        tracing::error!(?error, "{context}");
+        Self::Internal
+    }
+
     #[must_use]
     pub fn invalid_mcp_tool_call(message: impl Into<String>) -> Self {
         Self::InvalidMcpToolCall(message.into())

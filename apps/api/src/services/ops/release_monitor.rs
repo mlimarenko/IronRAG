@@ -118,7 +118,7 @@ async fn fetch_release_update(
     let tags = client
         .get(release_tags_api_url(repository))
         .header(ACCEPT, "application/vnd.github+json")
-        .header(USER_AGENT, format!("RustRAG/{current_version}"))
+        .header(USER_AGENT, format!("IronRAG/{current_version}"))
         .send()
         .await?
         .error_for_status()?

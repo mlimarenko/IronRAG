@@ -30,15 +30,15 @@ jobs:
       matrix:
         include:
           - name: backend
-            image: pipingspace/rustrag-backend
+            image: pipingspace/ironrag-backend
             context: .
             file: apps/api/Dockerfile
-            gha_scope: rustrag-backend
+            gha_scope: ironrag-backend
           - name: frontend
-            image: pipingspace/rustrag-frontend
+            image: pipingspace/ironrag-frontend
             context: apps/web
             file: apps/web/Dockerfile
-            gha_scope: rustrag-frontend
+            gha_scope: ironrag-frontend
 
     steps:
       - name: Check out repository

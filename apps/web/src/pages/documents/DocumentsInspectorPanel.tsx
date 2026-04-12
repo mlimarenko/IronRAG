@@ -1,10 +1,10 @@
 import type { TFunction } from 'i18next';
 import {
+  FilePenLine,
   Download,
   ExternalLink,
   Globe,
   Loader2,
-  Plus,
   RotateCw,
   Trash2,
   Upload,
@@ -13,20 +13,22 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import type { DocumentItem, DocumentReadiness } from '@/types';
+import type { DocumentItem, DocumentLifecycle, DocumentReadiness } from '@/types';
 
 import { formatDate, formatSize } from './mappers';
 
 type DocumentsInspectorPanelProps = {
+  canEdit: boolean;
+  editDisabledReason?: string | null;
   locale: string;
   t: TFunction;
   inspectorFacts: number | null;
   inspectorSegments: number | null;
+  lifecycle: DocumentLifecycle | null;
   readinessConfig: Record<DocumentReadiness, { label: string; cls: string }>;
   selectedDoc: DocumentItem;
   selectionMode: boolean;
   setAddLinkOpen: (open: boolean) => void;
-  setAppendTextOpen: (open: boolean) => void;
   setCrawlMode: (value: string) => void;
   setDeleteDocOpen: (open: boolean) => void;
   setMaxDepth: (value: string) => void;
@@ -34,20 +36,22 @@ type DocumentsInspectorPanelProps = {
   setReplaceFileOpen: (open: boolean) => void;
   setSeedUrl: (value: string) => void;
   updateSearchParamState: (updates: Record<string, string | null>) => void;
-  onDownloadText: () => void;
+  onEdit: () => void;
   onRetry: () => void;
 };
 
 export function DocumentsInspectorPanel({
+  canEdit,
+  editDisabledReason,
   locale,
   t,
   inspectorFacts,
   inspectorSegments,
+  lifecycle,
   readinessConfig,
   selectedDoc,
   selectionMode,
   setAddLinkOpen,
-  setAppendTextOpen,
   setCrawlMode,
   setDeleteDocOpen,
   setMaxDepth,
@@ -55,7 +59,7 @@ export function DocumentsInspectorPanel({
   setReplaceFileOpen,
   setSeedUrl,
   updateSearchParamState,
-  onDownloadText,
+  onEdit,
   onRetry,
 }: DocumentsInspectorPanelProps) {
   const openSource = () => {
@@ -88,7 +92,7 @@ export function DocumentsInspectorPanel({
           <span className={`status-badge ${readinessConfig[selectedDoc.readiness].cls}`}>
             {readinessConfig[selectedDoc.readiness].label}
           </span>
-          {selectedDoc.stage && (
+          {selectedDoc.stage && selectedDoc.readiness === 'processing' && (
             <span className="text-xs text-muted-foreground ml-2">{selectedDoc.stage}</span>
           )}
         </div>
@@ -123,29 +127,7 @@ export function DocumentsInspectorPanel({
           </div>
         )}
 
-        {(selectedDoc.sourceAccess?.href || selectedDoc.sourceUri) && (
-          <div className="space-y-2.5">
-            <div className="section-label flex items-center gap-1.5">
-              {selectedDoc.sourceKind === 'web_page' ? (
-                <>
-                  <Globe className="h-3 w-3" /> {t('documents.webSource')}
-                </>
-              ) : (
-                <>
-                  <ExternalLink className="h-3 w-3" /> {t('documents.source')}
-                </>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={openSource}
-              className="text-xs text-primary hover:underline flex items-center gap-1 truncate"
-            >
-              {(selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri) || ''}
-              <ExternalLink className="h-3 w-3 shrink-0" />
-            </button>
-          </div>
-        )}
+        {/* Source link is available via the download button in actions */}
 
         <div className="space-y-2.5">
           <div className="section-label">
@@ -155,7 +137,6 @@ export function DocumentsInspectorPanel({
             [t('documents.type'), selectedDoc.fileType.toUpperCase()],
             [t('documents.size'), formatSize(selectedDoc.fileSize)],
             [t('documents.uploaded'), formatDate(selectedDoc.uploadedAt, locale)],
-            [t('documents.cost'), selectedDoc.cost != null ? `$${selectedDoc.cost.toFixed(3)}` : '—'],
             [t('documents.documentId'), selectedDoc.id],
           ].map(([label, value]) => (
             <div key={label} className="flex justify-between text-sm">
@@ -164,6 +145,58 @@ export function DocumentsInspectorPanel({
             </div>
           ))}
         </div>
+
+        {lifecycle?.attempts?.[0]?.stageEvents?.length != null && lifecycle.attempts[0].stageEvents.length > 0 && (
+          <div className="space-y-2">
+            <div className="section-label">{t('documents.pipeline')}</div>
+            <table className="w-full text-[11px] table-fixed">
+              <colgroup>
+                <col className="w-[35%]" />
+                <col className="w-[15%]" />
+                <col className="w-[30%]" />
+                <col className="w-[20%]" />
+              </colgroup>
+              <thead>
+                <tr className="text-left text-muted-foreground border-b">
+                  <th className="pb-1 font-medium">{t('documents.pipelineStage')}</th>
+                  <th className="pb-1 text-right font-medium">{t('documents.pipelineTime')}</th>
+                  <th className="pb-1 text-right font-medium">{t('documents.pipelineModel')}</th>
+                  <th className="pb-1 text-right font-medium">{t('documents.pipelineCost')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lifecycle.attempts[0].stageEvents.map((se) => (
+                  <tr key={se.stage} className="border-b border-border/30">
+                    <td className="py-1 capitalize truncate">{se.stage.replace(/_/g, ' ')}</td>
+                    <td className="py-1 text-right text-muted-foreground tabular-nums">
+                      {se.elapsedMs != null ? `${(se.elapsedMs / 1000).toFixed(1)}s` : '\u2014'}
+                    </td>
+                    <td className="py-1 text-right text-muted-foreground truncate" title={se.modelName || undefined}>
+                      {se.modelName ? se.modelName.replace('text-embedding-', 'embed-') : '\u2014'}
+                    </td>
+                    <td className="py-1 text-right text-muted-foreground tabular-nums">
+                      {se.estimatedCost != null ? `$${Number(se.estimatedCost).toFixed(4)}` : '\u2014'}
+                    </td>
+                  </tr>
+                ))}
+                <tr className="font-semibold border-t">
+                  <td className="py-1">{t('documents.pipelineTotal')}</td>
+                  <td className="py-1 text-right tabular-nums">
+                    {lifecycle.attempts[0].totalElapsedMs != null
+                      ? `${(lifecycle.attempts[0].totalElapsedMs / 1000).toFixed(1)}s`
+                      : '\u2014'}
+                  </td>
+                  <td />
+                  <td className="py-1 text-right tabular-nums">
+                    {lifecycle.totalCost != null
+                      ? `$${Number(lifecycle.totalCost).toFixed(4)}`
+                      : '\u2014'}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
 
         <div className="space-y-2.5">
           <div className="section-label">{t('documents.preparation')}</div>
@@ -199,17 +232,32 @@ export function DocumentsInspectorPanel({
 
         <div className="space-y-1.5">
           <div className="section-label">{t('documents.actions')}</div>
+          <div
+            className={`grid gap-2 ${
+              (selectedDoc.sourceAccess?.href || selectedDoc.sourceUri) ? 'grid-cols-2' : 'grid-cols-1'
+            }`}
+          >
+            <Button
+              size="sm"
+              className="w-full justify-start"
+              onClick={onEdit}
+              disabled={!canEdit}
+              title={canEdit ? undefined : editDisabledReason ?? undefined}
+            >
+              <FilePenLine className="h-3.5 w-3.5 mr-2" /> {t('documents.edit')}
+            </Button>
+            {(selectedDoc.sourceAccess?.href || selectedDoc.sourceUri) && (
+              <Button variant="outline" size="sm" className="w-full justify-start" onClick={openSource}>
+                <Download className="h-3.5 w-3.5 mr-2" />
+                {selectedDoc.sourceAccess?.kind === 'stored_document'
+                  ? t('documents.downloadDocument')
+                  : t('documents.openSourceUrl')}
+              </Button>
+            )}
+          </div>
           {selectedDoc.canRetry && (
             <Button variant="outline" size="sm" className="w-full justify-start" onClick={onRetry}>
               <RotateCw className="h-3.5 w-3.5 mr-2" /> {t('documents.retryProcessing')}
-            </Button>
-          )}
-          {(selectedDoc.sourceAccess?.href || selectedDoc.sourceUri) && (
-            <Button variant="outline" size="sm" className="w-full justify-start" onClick={openSource}>
-              <ExternalLink className="h-3.5 w-3.5 mr-2" />
-              {selectedDoc.sourceAccess?.kind === 'stored_document'
-                ? t('documents.downloadOriginal')
-                : t('documents.openSourceUrl')}
             </Button>
           )}
           {selectedDoc.sourceKind === 'web_page' && selectedDoc.sourceUri && (
@@ -228,18 +276,12 @@ export function DocumentsInspectorPanel({
               <Globe className="h-3.5 w-3.5 mr-2" /> {t('documents.reIngest')}
             </Button>
           )}
-          <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setAppendTextOpen(true)}>
-            <Plus className="h-3.5 w-3.5 mr-2" /> {t('documents.appendText')}
-          </Button>
           <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setReplaceFileOpen(true)}>
             <Upload className="h-3.5 w-3.5 mr-2" /> {t('documents.replaceFile')}
           </Button>
-          <Button variant="outline" size="sm" className="w-full justify-start" onClick={onDownloadText}>
-            <Download className="h-3.5 w-3.5 mr-2" /> {t('documents.downloadText')}
-          </Button>
           <Button
-            variant="outline"
             size="sm"
+            variant="outline"
             className="w-full justify-start text-destructive hover:text-destructive"
             onClick={() => setDeleteDocOpen(true)}
           >

@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::repositories::{self, catalog_repository, content_repository},
+    infra::repositories::{catalog_repository, content_repository},
     interfaces::http::router,
 };
 
@@ -240,68 +240,7 @@ impl McpSearchFixture {
             start_offset = end_offset;
         }
 
-        let runtime_run = repositories::create_runtime_ingestion_run(
-            &self.state.persistence.postgres,
-            library_id,
-            Some(document.id),
-            Some(revision.id),
-            None,
-            &format!("search-track-{external_key}-{}", Uuid::now_v7()),
-            &format!("{external_key}.txt"),
-            "txt",
-            Some("text/plain"),
-            Some(512),
-            status,
-            match status {
-                "ready" | "ready_no_graph" => "completed",
-                "failed" => "failed",
-                _ => "extracting",
-            },
-            "mcp_search_fixture",
-            json!({}),
-        )
-        .await
-        .with_context(|| format!("failed to create runtime run for {external_key}"))?;
-
-        if matches!(status, "ready" | "ready_no_graph" | "failed") || error_message.is_some() {
-            repositories::update_runtime_ingestion_run_status(
-                &self.state.persistence.postgres,
-                runtime_run.id,
-                status,
-                match status {
-                    "ready" | "ready_no_graph" => "completed",
-                    "failed" => "failed",
-                    _ => "extracting",
-                },
-                Some(if matches!(status, "ready" | "ready_no_graph" | "failed") {
-                    100
-                } else {
-                    50
-                }),
-                error_message,
-            )
-            .await
-            .with_context(|| format!("failed to update runtime run status for {external_key}"))?;
-        }
-
-        if let Some(extracted_text) = extracted_text {
-            repositories::upsert_runtime_extracted_content(
-                &self.state.persistence.postgres,
-                runtime_run.id,
-                Some(document.id),
-                "normalized_text",
-                Some(extracted_text),
-                None,
-                Some(i32::try_from(extracted_text.chars().count()).unwrap_or(i32::MAX)),
-                json!([]),
-                json!({}),
-                None,
-                None,
-                None,
-            )
-            .await
-            .with_context(|| format!("failed to upsert extracted content for {external_key}"))?;
-        }
+        let _ = (status, extracted_text, error_message);
 
         Ok((document.id, revision.id))
     }

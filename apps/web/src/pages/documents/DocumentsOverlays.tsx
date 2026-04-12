@@ -17,18 +17,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import type { DocumentItem } from '@/types';
 
 import { formatSize } from './mappers';
+import { DOCUMENT_FILE_INPUT_ACCEPT } from './uploadAccept';
 
 type DocumentsOverlaysProps = {
   activeTab: 'documents' | 'web';
   addLinkOpen: boolean;
-  appendContent: string;
-  appendLoading: boolean;
-  appendTextOpen: boolean;
   boundaryPolicy: string;
   clearSelection: () => void;
   crawlMode: string;
   deleteDocOpen: boolean;
-  handleAppendText: () => void;
   handleBulkCancel: () => void;
   handleBulkDelete: () => void;
   handleBulkReprocess: () => void;
@@ -45,8 +42,6 @@ type DocumentsOverlaysProps = {
   selectedCount: number;
   selectedDoc: DocumentItem | null;
   setAddLinkOpen: (open: boolean) => void;
-  setAppendContent: (value: string) => void;
-  setAppendTextOpen: (open: boolean) => void;
   setBoundaryPolicy: (value: string) => void;
   setCrawlMode: (value: string) => void;
   setDeleteDocOpen: (open: boolean) => void;
@@ -62,14 +57,10 @@ type DocumentsOverlaysProps = {
 export function DocumentsOverlays({
   activeTab,
   addLinkOpen,
-  appendContent,
-  appendLoading,
-  appendTextOpen,
   boundaryPolicy,
   clearSelection,
   crawlMode,
   deleteDocOpen,
-  handleAppendText,
   handleBulkCancel,
   handleBulkDelete,
   handleBulkReprocess,
@@ -86,8 +77,6 @@ export function DocumentsOverlays({
   selectedCount,
   selectedDoc,
   setAddLinkOpen,
-  setAppendContent,
-  setAppendTextOpen,
   setBoundaryPolicy,
   setCrawlMode,
   setDeleteDocOpen,
@@ -195,30 +184,6 @@ export function DocumentsOverlays({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={appendTextOpen} onOpenChange={open => { setAppendTextOpen(open); if (!open) setAppendContent(''); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('documents.appendTextTitle')}</DialogTitle>
-            <DialogDescription>{t('documents.appendTextDesc', { name: selectedDoc?.fileName })}</DialogDescription>
-          </DialogHeader>
-          <div>
-            <Label>{t('documents.textContent')}</Label>
-            <textarea
-              className="w-full h-32 border rounded-xl p-3.5 text-sm mt-2 resize-none bg-card focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all"
-              placeholder={t('documents.appendTextPlaceholder')}
-              value={appendContent}
-              onChange={event => setAppendContent(event.target.value)}
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setAppendTextOpen(false); setAppendContent(''); }}>{t('documents.cancel')}</Button>
-            <Button disabled={!appendContent.trim() || appendLoading} onClick={handleAppendText}>
-              {appendLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {t('documents.append')}...</> : t('documents.append')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={replaceFileOpen} onOpenChange={open => { setReplaceFileOpen(open); if (!open) setReplaceFile(null); }}>
         <DialogContent>
           <DialogHeader>
@@ -240,6 +205,7 @@ export function DocumentsOverlays({
             <input
               ref={replaceFileInputRef}
               type="file"
+              accept={DOCUMENT_FILE_INPUT_ACCEPT}
               className="hidden"
               onChange={event => {
                 const file = event.target.files?.[0];

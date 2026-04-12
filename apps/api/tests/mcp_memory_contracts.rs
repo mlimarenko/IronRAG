@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::repositories::catalog_repository,
     interfaces::http::router,
@@ -461,8 +461,7 @@ async fn initialized_notifications_are_accepted_without_jsonrpc_error_bodies() -
 
 #[tokio::test]
 #[ignore = "requires local postgres, redis, and arango services"]
-async fn resource_discovery_methods_return_empty_lists_instead_of_method_errors()
--> anyhow::Result<()> {
+async fn resource_discovery_methods_are_not_supported() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for mcp resource contracts test")?;
     let fixture = McpDiscoveryContractFixture::create(settings).await?;
@@ -470,11 +469,21 @@ async fn resource_discovery_methods_return_empty_lists_instead_of_method_errors(
     let result = async {
         let token = fixture.token(&["documents:read"], "resource-discovery").await?;
 
+        let initialize = fixture.rpc_call(&token, "initialize", json!({})).await?;
+        assert_eq!(initialize["result"]["protocolVersion"], json!("2025-06-18"));
+        assert_eq!(initialize["result"]["capabilities"]["tools"], json!({ "listChanged": false }));
+        assert!(
+            initialize["result"]["capabilities"].get("resources").is_none(),
+            "initialize must not advertise an empty resources surface"
+        );
+
         let resources = fixture.rpc_call(&token, "resources/list", json!({})).await?;
-        assert_eq!(resources["result"]["resources"], json!([]));
+        assert_eq!(resources["error"]["code"], json!(-32601));
+        assert_eq!(resources["error"]["data"]["errorKind"], json!("unsupported_method"));
 
         let templates = fixture.rpc_call(&token, "resources/templates/list", json!({})).await?;
-        assert_eq!(templates["result"]["resourceTemplates"], json!([]));
+        assert_eq!(templates["error"]["code"], json!(-32601));
+        assert_eq!(templates["error"]["data"]["errorKind"], json!("unsupported_method"));
 
         Ok(())
     }

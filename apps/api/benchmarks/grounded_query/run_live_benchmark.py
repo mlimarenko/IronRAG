@@ -56,12 +56,12 @@ def contains_any(haystack: str | None, needles: list[str]) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run live grounded QA benchmarks against a RustRAG deployment."
+        description="Run live grounded QA benchmarks against a IronRAG deployment."
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("RUSTRAG_BASE_URL"),
-        help="RustRAG API base URL including /v1.",
+        default=os.environ.get("IRONRAG_BENCHMARK_BASE_URL"),
+        help="IronRAG API base URL including /v1.",
     )
     parser.add_argument(
         "--suite",
@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--workspace-id",
-        required=True,
+        default=os.environ.get("IRONRAG_BENCHMARK_WORKSPACE_ID"),
         help="Workspace UUID where the benchmark library should live.",
     )
     parser.add_argument(
@@ -83,8 +83,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--session-cookie",
-        default=os.environ.get("RUSTRAG_SESSION_COOKIE"),
-        help="Value of rustrag_ui_session cookie.",
+        default=os.environ.get("IRONRAG_SESSION_COOKIE"),
+        help="Value of ironrag_ui_session cookie.",
     )
     parser.add_argument(
         "--wait-timeout-seconds",
@@ -157,7 +157,7 @@ class BenchmarkClient:
     def __init__(self, base_url: str, session_cookie: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.http = requests.Session()
-        self.http.cookies.set("rustrag_ui_session", session_cookie, path="/")
+        self.http.cookies.set("ironrag_ui_session", session_cookie, path="/")
 
     def get_json(self, path: str, **kwargs: Any) -> Any:
         response = self.http.get(f"{self.base_url}{path}", timeout=120, **kwargs)
@@ -530,11 +530,20 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 def main() -> int:
     args = parse_args()
     if not args.base_url:
-        print("RustRAG base URL is required via --base-url or RUSTRAG_BASE_URL.", file=sys.stderr)
+        print(
+            "IronRAG base URL is required via --base-url or IRONRAG_BENCHMARK_BASE_URL.",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.workspace_id:
+        print(
+            "IronRAG workspace id is required via --workspace-id or IRONRAG_BENCHMARK_WORKSPACE_ID.",
+            file=sys.stderr,
+        )
         return 2
     if not args.session_cookie:
         print(
-            "RUSTRAG session cookie is required via --session-cookie or RUSTRAG_SESSION_COOKIE.",
+            "IRONRAG session cookie is required via --session-cookie or IRONRAG_SESSION_COOKIE.",
             file=sys.stderr,
         )
         return 2

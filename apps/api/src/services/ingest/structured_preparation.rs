@@ -11,6 +11,10 @@ use crate::shared::extraction::{
         StructuredDocumentRevisionData, StructuredDocumentValidationError, StructuredOutlineEntry,
         StructuredSourceSpan, StructuredTableCoordinates,
     },
+    table_markdown::{
+        build_semantic_table_row_text, is_markdown_separator_row, parse_markdown_table_row,
+    },
+    table_summary::{build_table_column_summaries, render_table_column_summary},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +179,7 @@ fn build_structured_blocks(
                     None,
                     (!language.is_empty()).then_some(language.to_string()),
                     None,
+                    None,
                 ));
                 ordinal += 1;
             } else if start == index.saturating_sub(1) {
@@ -194,6 +199,7 @@ fn build_structured_blocks(
                 None,
                 None,
                 None,
+                None,
             ));
             ordinal += 1;
             index += 1;
@@ -206,18 +212,32 @@ fn build_structured_blocks(
                 index += 1;
             }
             let row_lines = &lines[start..index];
-            let table_block_id = Uuid::now_v7();
-            blocks.push(build_block(
+            let table_block = build_block(
                 ordinal,
                 StructuredBlockKind::Table,
                 row_lines,
                 &heading_stack,
-                Some(table_block_id),
                 None,
                 None,
-            ));
+                None,
+                None,
+            );
+            let table_block_id = table_block.block_id;
+            blocks.push(table_block);
             ordinal += 1;
-            for (row_index, row_line) in row_lines.iter().enumerate() {
+            let header_cells = row_lines
+                .first()
+                .map(|row| parse_markdown_table_row(&row.text))
+                .unwrap_or_default();
+            let (sheet_name, table_name) = table_context_from_heading_stack(&heading_stack);
+            let mut data_row_index = 0usize;
+            let mut data_rows = Vec::<Vec<String>>::new();
+            for row_line in row_lines.iter().skip(1) {
+                let row_cells = parse_markdown_table_row(&row_line.text);
+                if row_cells.is_empty() || is_markdown_separator_row(&row_cells) {
+                    continue;
+                }
+                data_rows.push(row_cells.clone());
                 blocks.push(build_block(
                     ordinal,
                     StructuredBlockKind::TableRow,
@@ -226,11 +246,34 @@ fn build_structured_blocks(
                     Some(table_block_id),
                     None,
                     Some(StructuredTableCoordinates {
-                        row_index: i32::try_from(row_index).unwrap_or(i32::MAX),
+                        row_index: i32::try_from(data_row_index).unwrap_or(i32::MAX),
                         column_index: 0,
                         row_span: 1,
                         column_span: 1,
                     }),
+                    Some(build_semantic_table_row_text(
+                        sheet_name,
+                        table_name,
+                        data_row_index,
+                        &header_cells,
+                        &row_cells,
+                    )),
+                ));
+                ordinal += 1;
+                data_row_index += 1;
+            }
+            for summary in
+                build_table_column_summaries(sheet_name, table_name, &header_cells, &data_rows)
+            {
+                blocks.push(build_block(
+                    ordinal,
+                    StructuredBlockKind::MetadataBlock,
+                    &[],
+                    &heading_stack,
+                    Some(table_block_id),
+                    None,
+                    None,
+                    Some(render_table_column_summary(&summary)),
                 ));
                 ordinal += 1;
             }
@@ -243,6 +286,7 @@ fn build_structured_blocks(
             block_kind,
             std::slice::from_ref(line),
             &heading_stack,
+            None,
             None,
             None,
             None,
@@ -355,17 +399,16 @@ fn build_block(
     parent_block_id: Option<Uuid>,
     code_language: Option<String>,
     table_coordinates: Option<StructuredTableCoordinates>,
+    normalized_text_override: Option<String>,
 ) -> StructuredBlockData {
-    let block_id = parent_block_id
-        .filter(|_| matches!(block_kind, StructuredBlockKind::Table))
-        .unwrap_or_else(Uuid::now_v7);
+    let block_id = Uuid::now_v7();
     let raw_text = lines.iter().map(|line| line.text.trim_end()).collect::<Vec<_>>().join("\n");
-    let normalized_text = match block_kind {
+    let normalized_text = normalized_text_override.unwrap_or_else(|| match block_kind {
         StructuredBlockKind::Heading => {
             heading_stack.last().cloned().unwrap_or_else(|| raw_text.trim().to_string())
         }
         _ => raw_text.trim().to_string(),
-    };
+    });
     let heading_trail = heading_stack.to_vec();
     let section_path = heading_stack
         .iter()
@@ -387,14 +430,13 @@ fn build_block(
         block_id,
         ordinal,
         block_kind,
-        text: normalized_text.clone(),
+        text: raw_text.trim().to_string(),
         normalized_text,
         heading_trail,
         section_path,
         page_number,
         source_span,
-        parent_block_id: matches!(block_kind, StructuredBlockKind::TableRow)
-            .then_some(parent_block_id.unwrap_or_else(Uuid::nil)),
+        parent_block_id,
         table_coordinates,
         code_language,
         is_boilerplate: false,
@@ -409,11 +451,22 @@ fn build_outline(blocks: &[StructuredBlockData]) -> Vec<StructuredOutlineEntry> 
             block_id: block.block_id,
             block_ordinal: block.ordinal,
             depth: i32::try_from(block.heading_trail.len().saturating_sub(1)).unwrap_or(i32::MAX),
-            heading: block.text.clone(),
+            heading: block.normalized_text.clone(),
             heading_trail: block.heading_trail.clone(),
             section_path: block.section_path.clone(),
         })
         .collect()
+}
+
+fn table_context_from_heading_stack(heading_stack: &[String]) -> (Option<&str>, Option<&str>) {
+    match heading_stack {
+        [] => (None, None),
+        [sheet] => (Some(sheet.as_str()), None),
+        [rest @ .., last] => {
+            let sheet = rest.first().map(String::as_str).or(Some(last.as_str()));
+            (sheet, Some(last.as_str()))
+        }
+    }
 }
 
 fn is_code_fence(line: &ExtractionLineHint) -> bool {
@@ -511,8 +564,9 @@ mod tests {
 
     #[test]
     fn prepare_revision_classifies_lists_tables_and_endpoints() {
-        let text =
-            "# Products\n\n- Control Center\n\nMethod | Path\nGET | /v1/status\n\nGET /v1/status\n";
+        // Tables must use canonical markdown table syntax with header separator;
+        // informal pipe-delimited text is no longer auto-classified as a table.
+        let text = "# Products\n\n- Control Center\n\n| Method | Path |\n| --- | --- |\n| GET | /v1/status |\n\nGET /v1/status\n";
         let prepared = StructuredPreparationService::new()
             .prepare_revision(PrepareStructuredRevisionCommand {
                 revision_id: Uuid::now_v7(),
@@ -555,6 +609,121 @@ mod tests {
                 .iter()
                 .any(|block| matches!(block.block_kind, StructuredBlockKind::EndpointBlock))
         );
+    }
+
+    #[test]
+    fn prepare_revision_builds_semantic_table_row_text_and_preserves_raw_row_text() {
+        let text = "## people\n\n| Name | Email |\n| --- | --- |\n| Alice | alice@example.com |\n";
+        let prepared = StructuredPreparationService::new()
+            .prepare_revision(PrepareStructuredRevisionCommand {
+                revision_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                preparation_state: "prepared".to_string(),
+                normalization_profile: "default".to_string(),
+                source_format: "csv".to_string(),
+                language_code: Some("en".to_string()),
+                source_text: text.to_string(),
+                normalized_text: text.to_string(),
+                structure_hints: build_text_layout_from_content(text).structure_hints,
+                typed_fact_count: 0,
+                prepared_at: Utc::now(),
+            })
+            .expect("prepared revision");
+
+        let row_block = prepared
+            .ordered_blocks
+            .iter()
+            .find(|block| matches!(block.block_kind, StructuredBlockKind::TableRow))
+            .expect("table row block");
+
+        assert_eq!(row_block.text, "| Alice | alice@example.com |");
+        assert_eq!(
+            row_block.normalized_text,
+            "Sheet: people | Row 1 | Name: Alice | Email: alice@example.com"
+        );
+    }
+
+    #[test]
+    fn prepare_revision_keeps_single_column_markdown_tables_as_table_blocks() {
+        let text = "## test1\n\n| col_1 |\n| --- |\n| test1 |\n";
+        let prepared = StructuredPreparationService::new()
+            .prepare_revision(PrepareStructuredRevisionCommand {
+                revision_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                preparation_state: "prepared".to_string(),
+                normalization_profile: "default".to_string(),
+                source_format: "xls".to_string(),
+                language_code: Some("en".to_string()),
+                source_text: text.to_string(),
+                normalized_text: text.to_string(),
+                structure_hints: build_text_layout_from_content(text).structure_hints,
+                typed_fact_count: 0,
+                prepared_at: Utc::now(),
+            })
+            .expect("prepared revision");
+
+        let block_kinds =
+            prepared.ordered_blocks.iter().map(|block| block.block_kind).collect::<Vec<_>>();
+        assert_eq!(
+            block_kinds,
+            vec![
+                StructuredBlockKind::Heading,
+                StructuredBlockKind::Table,
+                StructuredBlockKind::TableRow,
+            ]
+        );
+
+        let row_block = prepared
+            .ordered_blocks
+            .iter()
+            .find(|block| block.block_kind == StructuredBlockKind::TableRow)
+            .expect("table row block");
+        assert_eq!(row_block.text, "| test1 |");
+        assert_eq!(row_block.normalized_text, "Sheet: test1 | Row 1 | col_1: test1");
+    }
+
+    #[test]
+    fn prepare_revision_builds_table_summary_metadata_blocks() {
+        let text = "## organizations\n\n| Country | Employees |\n| --- | --- |\n| Sweden | 10 |\n| Benin | 20 |\n| Sweden | 30 |\n";
+        let prepared = StructuredPreparationService::new()
+            .prepare_revision(PrepareStructuredRevisionCommand {
+                revision_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                preparation_state: "prepared".to_string(),
+                normalization_profile: "default".to_string(),
+                source_format: "csv".to_string(),
+                language_code: Some("en".to_string()),
+                source_text: text.to_string(),
+                normalized_text: text.to_string(),
+                structure_hints: build_text_layout_from_content(text).structure_hints,
+                typed_fact_count: 0,
+                prepared_at: Utc::now(),
+            })
+            .expect("prepared revision");
+
+        let summary_blocks = prepared
+            .ordered_blocks
+            .iter()
+            .filter(|block| block.block_kind == StructuredBlockKind::MetadataBlock)
+            .collect::<Vec<_>>();
+
+        assert_eq!(summary_blocks.len(), 2);
+        assert!(summary_blocks.iter().any(|block| {
+            block.normalized_text.contains("Table Summary")
+                && block.normalized_text.contains("Column: Country")
+                && block.parent_block_id.is_some()
+        }));
+        assert!(summary_blocks.iter().any(|block| {
+            block.normalized_text.contains("Table Summary")
+                && block.normalized_text.contains("Column: Employees")
+                && block.parent_block_id.is_some()
+        }));
     }
 
     #[test]

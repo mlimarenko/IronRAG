@@ -3,7 +3,7 @@
 #[path = "support/structured_document_fixtures.rs"]
 mod structured_document_fixtures;
 
-use rustrag_backend::{
+use ironrag_backend::{
     services::ingest::structured_preparation::StructuredPreparationService,
     shared::extraction::structured_document::StructuredBlockKind,
 };

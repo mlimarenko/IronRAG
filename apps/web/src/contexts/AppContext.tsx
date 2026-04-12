@@ -36,7 +36,7 @@ interface AppContextValue extends AppState {
 const AppContext = createContext<AppContextValue | null>(null);
 
 function preferredLocale(sessionLocale: Locale): Locale {
-  const savedLocale = localStorage.getItem('rustrag_locale');
+  const savedLocale = localStorage.getItem('ironrag_locale');
   return savedLocale || sessionLocale;
 }
 
@@ -88,6 +88,31 @@ function mapSessionToState(session: SessionResolveResponse, locale: Locale) {
   return { user, workspaces, libraries, isBootstrapRequired, locale };
 }
 
+function resolveWorkspaceSelection(
+  workspaces: Workspace[],
+  savedWorkspaceId: string | null,
+): Workspace | null {
+  if (workspaces.length === 0) return null;
+  const savedWorkspace = savedWorkspaceId
+    ? workspaces.find((workspace) => workspace.id === savedWorkspaceId)
+    : null;
+  return savedWorkspace ?? workspaces[0];
+}
+
+function resolveLibrarySelection(
+  libraries: Library[],
+  activeWorkspaceId: string | null,
+  savedLibraryId: string | null,
+): Library | null {
+  if (!activeWorkspaceId) return null;
+  const scopedLibraries = libraries.filter((library) => library.workspaceId === activeWorkspaceId);
+  if (scopedLibraries.length === 0) return null;
+  const savedLibrary = savedLibraryId
+    ? scopedLibraries.find((library) => library.id === savedLibraryId)
+    : null;
+  return savedLibrary ?? scopedLibraries[0];
+}
+
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -98,7 +123,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setLocale = useCallback((l: Locale) => {
     setLocaleRaw(l);
     i18n.changeLanguage(l);
-    localStorage.setItem('rustrag_locale', l);
+    localStorage.setItem('ironrag_locale', l);
   }, []);
   const [isBootstrapMode, setIsBootstrapMode] = useState(false);
   const [isBootstrapRequired, setIsBootstrapRequired] = useState(false);
@@ -114,30 +139,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsBootstrapRequired(state.isBootstrapRequired);
     setLocale(state.locale);
 
-    const savedWsId = localStorage.getItem('rustrag_active_workspace');
-    const savedLibId = localStorage.getItem('rustrag_active_library');
+    const savedWsId = localStorage.getItem('ironrag_active_workspace');
+    const savedLibId = localStorage.getItem('ironrag_active_library');
+    const nextWorkspace = resolveWorkspaceSelection(state.workspaces, savedWsId);
+    const nextLibrary = resolveLibrarySelection(state.libraries, nextWorkspace?.id ?? null, savedLibId);
 
-    if (state.workspaces.length > 0) {
-      setActiveWorkspace(prev => {
-        const match = prev && state.workspaces.find(w => w.id === prev.id);
-        if (match) return prev;
-        const saved = savedWsId ? state.workspaces.find(w => w.id === savedWsId) : null;
-        return saved ?? state.workspaces[0];
-      });
-    } else {
-      setActiveWorkspace(null);
-    }
+    setActiveWorkspace(nextWorkspace);
+    setActiveLibrary(nextLibrary);
 
-    if (state.libraries.length > 0) {
-      setActiveLibrary(prev => {
-        const match = prev && state.libraries.find(l => l.id === prev.id);
-        if (match) return prev;
-        const saved = savedLibId ? state.libraries.find(l => l.id === savedLibId) : null;
-        return saved ?? state.libraries[0];
-      });
-    } else {
-      setActiveLibrary(null);
-    }
+    if (nextWorkspace) localStorage.setItem('ironrag_active_workspace', nextWorkspace.id);
+    else localStorage.removeItem('ironrag_active_workspace');
+
+    if (nextLibrary) localStorage.setItem('ironrag_active_library', nextLibrary.id);
+    else localStorage.removeItem('ironrag_active_library');
   }, []);
 
   // Resolve session on mount
@@ -202,14 +216,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const persistedSetActiveWorkspace = useCallback((ws: Workspace | null) => {
     setActiveWorkspace(ws);
-    if (ws) localStorage.setItem('rustrag_active_workspace', ws.id);
-    else localStorage.removeItem('rustrag_active_workspace');
+    if (ws) localStorage.setItem('ironrag_active_workspace', ws.id);
+    else localStorage.removeItem('ironrag_active_workspace');
+    setActiveLibrary(prev => {
+      const nextLibrary = prev && ws && prev.workspaceId === ws.id ? prev : null;
+      if (nextLibrary) localStorage.setItem('ironrag_active_library', nextLibrary.id);
+      else localStorage.removeItem('ironrag_active_library');
+      return nextLibrary;
+    });
   }, []);
 
   const persistedSetActiveLibrary = useCallback((lib: Library | null) => {
     setActiveLibrary(lib);
-    if (lib) localStorage.setItem('rustrag_active_library', lib.id);
-    else localStorage.removeItem('rustrag_active_library');
+    if (lib) localStorage.setItem('ironrag_active_library', lib.id);
+    else localStorage.removeItem('ironrag_active_library');
   }, []);
 
   const value: AppContextValue = {

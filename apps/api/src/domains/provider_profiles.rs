@@ -63,6 +63,7 @@ impl EffectiveProviderProfile {
         }
     }
 
+    #[allow(dead_code)]
     #[must_use]
     pub fn selection_for_runtime_task_kind(
         &self,

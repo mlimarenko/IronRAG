@@ -15,7 +15,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{
         config::{
             Settings, UiBootstrapAiBindingDefault, UiBootstrapAiProviderSecret, UiBootstrapAiSetup,
@@ -361,7 +361,7 @@ async fn fresh_bootstrap_starts_without_default_catalog_side_effect_rows() -> Re
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/openapi/rustrag.openapi.yaml")
+                    .uri("/v1/openapi/ironrag.openapi.yaml")
                     .body(Body::empty())
                     .expect("build openapi discovery request"),
             )

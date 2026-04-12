@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ironrag
+description: IronRAG Helm chart with API, Worker, Web, Startup Authority, and optional bundled dependencies.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"

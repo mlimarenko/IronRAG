@@ -2,7 +2,7 @@ use anyhow::Context;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::config::Settings,
     infra::repositories::{
         self,

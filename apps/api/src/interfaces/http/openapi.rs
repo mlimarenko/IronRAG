@@ -7,7 +7,7 @@ use axum::{
 
 use crate::app::state::AppState;
 
-const OPENAPI_SPEC: &str = include_str!("../../../contracts/rustrag.openapi.yaml");
+const OPENAPI_SPEC: &str = include_str!("../../../contracts/ironrag.openapi.yaml");
 /// `OpenAPI` `paths` in the contract are absolute from the host (`/v1/...`). The server URL must be
 /// the API origin **without** a `/v1` suffix, otherwise Swagger UI concatenates `/v1` + `/v1/...`.
 const RELATIVE_SERVER_URL: &str = "/";
@@ -15,7 +15,7 @@ const CONFIGURED_SERVER_DESCRIPTION: &str = "Public API origin";
 const RELATIVE_SERVER_DESCRIPTION: &str = "Same origin (paths include /v1)";
 
 pub fn router() -> Router<crate::app::state::AppState> {
-    Router::new().route("/openapi/rustrag.openapi.yaml", get(get_openapi_spec))
+    Router::new().route("/openapi/ironrag.openapi.yaml", get(get_openapi_spec))
 }
 
 async fn get_openapi_spec(State(state): State<AppState>) -> (HeaderMap, String) {
@@ -47,7 +47,7 @@ fn public_origin_to_server_url(origin: &str) -> String {
     if base.is_empty() {
         return RELATIVE_SERVER_URL.to_string();
     }
-    // Paths in `rustrag.openapi.yaml` already start with `/v1/`; strip a redundant `/v1` suffix.
+    // Paths in `ironrag.openapi.yaml` already start with `/v1/`; strip a redundant `/v1` suffix.
     base.strip_suffix("/v1").map_or_else(
         || base.to_string(),
         |stripped| {

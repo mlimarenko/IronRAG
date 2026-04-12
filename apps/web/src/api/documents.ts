@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { ApiError, type ApiErrorBody, apiFetch } from "./client";
 
 interface BatchMutationErrorResult {
   documentId: string;
@@ -47,8 +47,41 @@ export interface RawDocumentResponse {
 }
 
 export interface RawPreparedSegmentItem {
+  segment?: {
+    ordinal?: number;
+    blockKind?: string;
+    block_kind?: string;
+    headingTrail?: string[];
+    heading_trail?: string[];
+    sectionPath?: string[];
+    section_path?: string[];
+    pageNumber?: number | null;
+    page_number?: number | null;
+  };
   text?: string;
   content?: string;
+  normalizedText?: string;
+  normalized_text?: string;
+  parentBlockId?: string | null;
+  parent_block_id?: string | null;
+  tableCoordinates?: {
+    rowIndex?: number;
+    row_index?: number;
+    columnIndex?: number;
+    column_index?: number;
+    rowSpan?: number;
+    row_span?: number;
+    columnSpan?: number;
+    column_span?: number;
+  } | null;
+  table_coordinates?: {
+    row_index?: number;
+    column_index?: number;
+    row_span?: number;
+    column_span?: number;
+  } | null;
+  codeLanguage?: string | null;
+  code_language?: string | null;
   [key: string]: unknown;
 }
 
@@ -63,6 +96,16 @@ export interface RawDocumentRevisionItem {
 export interface RawWebIngestRunResponse {
   id?: string;
   state?: string;
+  [key: string]: unknown;
+}
+
+export interface PreparedSegmentsPageResponse {
+  items?: RawPreparedSegmentItem[];
+  [key: string]: unknown;
+}
+
+export interface TechnicalFactsPageResponse {
+  items?: RawTechnicalFactItem[];
   [key: string]: unknown;
 }
 
@@ -122,10 +165,10 @@ export const documentsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  append: (documentId: string, text: string) =>
-    apiFetch<DocumentMutationResponse>(`/content/documents/${documentId}/append`, {
+  edit: (documentId: string, markdown: string) =>
+    apiFetch<DocumentMutationResponse>(`/content/documents/${documentId}/edit`, {
       method: "POST",
-      body: JSON.stringify({ appendedText: text }),
+      body: JSON.stringify({ markdown }),
     }),
   replace: (documentId: string, file: File): Promise<DocumentMutationResponse> => {
     const form = new FormData();
@@ -137,10 +180,26 @@ export const documentsApi = {
   },
   getHead: (documentId: string) =>
     apiFetch<RawDocumentResponse>(`/content/documents/${documentId}/head`),
-  getPreparedSegments: (documentId: string) =>
-    apiFetch<RawPreparedSegmentItem[]>(`/content/documents/${documentId}/prepared-segments`),
-  getTechnicalFacts: (documentId: string) =>
-    apiFetch<RawTechnicalFactItem[]>(`/content/documents/${documentId}/technical-facts`),
+  getPreparedSegments: async (documentId: string) => {
+    const response = await apiFetch<PreparedSegmentsPageResponse>(
+      `/content/documents/${documentId}/prepared-segments`,
+    );
+    return response.items ?? [];
+  },
+  getSourceText: async (sourceHref: string) => {
+    const response = await fetch(sourceHref, { credentials: "include" });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as ApiErrorBody;
+      throw new ApiError(response.status, body);
+    }
+    return response.text();
+  },
+  getTechnicalFacts: async (documentId: string) => {
+    const response = await apiFetch<TechnicalFactsPageResponse>(
+      `/content/documents/${documentId}/technical-facts`,
+    );
+    return response.items ?? [];
+  },
   getRevisions: (documentId: string) =>
     apiFetch<RawDocumentRevisionItem[]>(`/content/documents/${documentId}/revisions`),
   batchDelete: (documentIds: string[]) =>

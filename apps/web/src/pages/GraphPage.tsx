@@ -7,9 +7,16 @@ import { documentsApi, knowledgeApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
+  GRAPH_LAYOUT_OPTIONS,
+  GRAPH_NODE_COLORS,
+  isGraphLayoutType,
+  type GraphLayoutType,
+} from '@/components/graph/config';
+import {
   Search, X, Loader2,
   FileText, Share2, AlertTriangle,
   Eye, EyeOff, RotateCcw, Layers,
+  PieChart, Rows3, Network, CircleDashed, Orbit,
 } from 'lucide-react';
 import type { GraphNode, GraphNodeType, GraphMetadata, GraphStatus } from '@/types';
 import type {
@@ -29,25 +36,26 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+function resolveDocumentSummary(raw: Record<string, unknown>): string | undefined {
+  const head = typeof raw.head === 'object' && raw.head !== null
+    ? (raw.head as Record<string, unknown>)
+    : null;
+  const summary = head?.documentSummary ?? head?.document_summary;
+  return typeof summary === 'string' && summary.trim().length > 0 ? summary : undefined;
+}
+
 
 const SigmaGraph = lazy(() => import('@/components/SigmaGraph'));
+const SUBTYPE_PREVIEW_LIMIT = 12;
+const NO_SUBTYPE_KEY = '__no_subtype__';
 
-const LAYOUTS = ['cloud', 'circle', 'rings', 'lanes', 'clusters', 'islands', 'spiral'] as const;
-type LayoutType = typeof LAYOUTS[number];
-
-const NODE_COLORS: Record<string, string> = {
-  document: '#3b82f6',      // blue
-  person: '#ec4899',        // pink
-  organization: '#64748b',  // slate
-  location: '#84cc16',      // lime
-  event: '#f43f5e',         // rose
-  artifact: '#06b6d4',      // cyan
-  natural: '#22c55e',       // green
-  process: '#a855f7',       // purple
-  concept: '#f59e0b',       // amber
-  attribute: '#0ea5e9',     // sky
-  entity: '#78716c',        // stone
-};
+const GRAPH_LAYOUT_ICONS = {
+  sectors: PieChart,
+  bands: Rows3,
+  components: Network,
+  rings: CircleDashed,
+  clusters: Orbit,
+} as const;
 
 function mapNodeType(t: string | undefined): GraphNodeType {
   if (t === 'document') return 'document';
@@ -72,6 +80,75 @@ function mapNodeType(t: string | undefined): GraphNodeType {
   return 'entity';
 }
 
+function subtypeFilterKey(type: string, subType?: string | null): string {
+  return `${type}:${subType && subType.trim().length > 0 ? subType : NO_SUBTYPE_KEY}`;
+}
+
+function subtypeLegendLabel(t: (key: string, options?: Record<string, unknown>) => string, subType: string): string {
+  return subType === NO_SUBTYPE_KEY ? t('graph.noSubType') : subType;
+}
+
+type GraphEdgeData = { id: string; sourceId: string; targetId: string; label: string; weight: number };
+
+function countConnectedComponents(nodes: GraphNode[], edges: GraphEdgeData[]): number {
+  if (nodes.length === 0) return 0;
+
+  const adjacency = new Map<string, string[]>();
+  for (const node of nodes) {
+    adjacency.set(node.id, []);
+  }
+
+  for (const edge of edges) {
+    if (edge.sourceId === edge.targetId) continue;
+    const sourceNeighbors = adjacency.get(edge.sourceId);
+    const targetNeighbors = adjacency.get(edge.targetId);
+    if (!sourceNeighbors || !targetNeighbors) continue;
+    sourceNeighbors.push(edge.targetId);
+    targetNeighbors.push(edge.sourceId);
+  }
+
+  let componentCount = 0;
+  const visited = new Set<string>();
+
+  for (const node of nodes) {
+    if (visited.has(node.id)) continue;
+    componentCount += 1;
+
+    const queue = [node.id];
+    visited.add(node.id);
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) continue;
+
+      for (const neighbor of adjacency.get(current) ?? []) {
+        if (visited.has(neighbor)) continue;
+        visited.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+  }
+
+  return componentCount;
+}
+
+function recommendGraphLayout(nodes: GraphNode[], edges: GraphEdgeData[]): GraphLayoutType {
+  if (nodes.length === 0) return 'bands';
+
+  const typeCount = new Set(nodes.map((node) => node.type)).size;
+  const componentCount = countConnectedComponents(nodes, edges);
+
+  if (componentCount >= 6 && edges.length < nodes.length * 2.2) {
+    return 'components';
+  }
+
+  if (nodes.length > 320 || edges.length > nodes.length * 2.8 || typeCount >= 6) {
+    return 'bands';
+  }
+
+  return 'sectors';
+}
+
 
 export default function GraphPage() {
   const { t } = useTranslation();
@@ -79,7 +156,7 @@ export default function GraphPage() {
   const navigate = useNavigate();
 
   // Edges from entities/relations fallback
-  const edgesRef = useRef<{ id: string; sourceId: string; targetId: string; label: string; weight: number }[]>([]);
+  const edgesRef = useRef<GraphEdgeData[]>([]);
 
   // API state
   const [allNodes, setAllNodes] = useState<GraphNode[]>([]);
@@ -96,8 +173,20 @@ export default function GraphPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [hiddenSubTypes, setHiddenSubTypes] = useState<Set<string>>(new Set());
-  const [layout, setLayout] = useState<LayoutType>('cloud');
+  const [layout, setLayout] = useState<GraphLayoutType>('bands');
   const [legendOpen, setLegendOpen] = useState(true);
+  const [expandedSubtypeGroups, setExpandedSubtypeGroups] = useState<Set<string>>(new Set());
+  const hasActiveGraphFilters = searchQuery.trim().length > 0 || hiddenTypes.size > 0 || hiddenSubTypes.size > 0;
+  const hasActiveGraphState = hasActiveGraphFilters || selectedNode !== null;
+
+  const resetGraphView = () => {
+    setSelectedNode(null);
+    setSelectedDetail(null);
+    setSearchQuery('');
+    setHiddenTypes(new Set());
+    setHiddenSubTypes(new Set());
+    setExpandedSubtypeGroups(new Set());
+  };
 
   // Fetch graph workbench data, falling back to entities+relations endpoints
   useEffect(() => {
@@ -109,6 +198,9 @@ export default function GraphPage() {
     setGraphMeta(null);
     setSelectedNode(null);
     setSelectedDetail(null);
+    setSearchQuery('');
+    setHiddenTypes(new Set());
+    setHiddenSubTypes(new Set());
 
     // Load graph data from fast individual endpoints (not slow graph-workbench)
     Promise.all([
@@ -161,7 +253,7 @@ export default function GraphPage() {
               id: docId,
               label: d.title ?? d.fileName ?? d.external_key ?? 'untitled',
               type: 'document' as GraphNodeType,
-              summary: d.document_state ?? undefined,
+              summary: undefined,
               edgeCount: docEdgeCounts.get(docId) ?? 0,
               properties: {},
               sourceDocumentIds: [],
@@ -190,6 +282,7 @@ export default function GraphPage() {
 
           // Store edges on the module level so GraphCanvas can use them
           edgesRef.current = fallbackEdges;
+          const recommendedLayout = recommendGraphLayout(fallbackNodes, fallbackEdges);
 
           const fallbackMeta: GraphMetadata = {
             nodeCount: fallbackNodes.length,
@@ -197,12 +290,13 @@ export default function GraphPage() {
             hiddenDisconnectedCount: 0,
             status: fallbackNodes.length > 0 ? 'ready' : 'empty',
             convergenceStatus: 'current',
-            recommendedLayout: undefined,
+            recommendedLayout,
           };
 
           setAllNodes(fallbackNodes);
           setGraphMeta(fallbackMeta);
           setGraphStatus(fallbackMeta.status);
+          setLayout(recommendedLayout);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -234,7 +328,7 @@ export default function GraphPage() {
             id: selectedNode,
             label: (typeof doc.fileName === 'string' ? doc.fileName : undefined) ?? basic.label,
             type: 'document',
-            summary: doc.readinessSummary?.readinessKind ?? basic.summary,
+            summary: resolveDocumentSummary(doc as Record<string, unknown>) ?? basic.summary,
             edgeCount: basic.edgeCount,
             properties: {},
             sourceDocumentIds: [],
@@ -266,11 +360,15 @@ export default function GraphPage() {
         const entity: RawKnowledgeEntity = detail.entity ?? (detail as RawKnowledgeEntity);
         const canonicalType = mapNodeType(entity.entityType ?? entity.nodeType);
         const rawType = (entity.entityType ?? '').toLowerCase();
+        const resolvedSubType =
+          entity.entitySubType ??
+          basic?.subType ??
+          (rawType !== canonicalType ? rawType : undefined);
         const enriched: GraphNode = {
           id: entity.entityId ?? entity.id ?? selectedNode,
           label: entity.canonicalLabel ?? entity.label ?? basic?.label ?? '',
           type: canonicalType,
-          subType: rawType !== canonicalType ? rawType : undefined,
+          subType: resolvedSubType,
           summary: entity.summary ?? basic?.summary ?? undefined,
           edgeCount: entity.supportCount ?? basic?.edgeCount ?? 0,
           properties: {},
@@ -299,22 +397,29 @@ export default function GraphPage() {
 
   const filteredNodes = useMemo(() => allNodes.filter(n => {
     if (hiddenTypes.has(n.type)) return false;
-    if (n.subType && hiddenSubTypes.has(`${n.type}:${n.subType}`)) return false;
+    if (hiddenSubTypes.has(subtypeFilterKey(n.type, n.subType))) return false;
     if (searchQuery && !n.label.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
   }), [allNodes, hiddenTypes, hiddenSubTypes, searchQuery]);
 
   const effectiveLayout = layout;
+  const activeLayoutOption = GRAPH_LAYOUT_OPTIONS.find((option) => option.id === layout) ?? GRAPH_LAYOUT_OPTIONS[0];
+  const recommendedLayout =
+    graphMeta?.recommendedLayout && isGraphLayoutType(graphMeta.recommendedLayout)
+      ? graphMeta.recommendedLayout
+      : null;
 
-  // Compute type → { count, subTypes: { name, count }[] } for legend
+  // Compute type → subtype breakdown for legend.
   const typeLegend = useMemo(() => {
-    const map = new Map<string, { count: number; subs: Map<string, number> }>();
+    const map = new Map<string, { count: number; subs: Map<string, number>; noSubtypeCount: number }>();
     for (const n of allNodes) {
       let entry = map.get(n.type);
-      if (!entry) { entry = { count: 0, subs: new Map() }; map.set(n.type, entry); }
+      if (!entry) { entry = { count: 0, subs: new Map(), noSubtypeCount: 0 }; map.set(n.type, entry); }
       entry.count++;
-      if (n.subType) {
+      if (n.subType && n.subType.trim().length > 0) {
         entry.subs.set(n.subType, (entry.subs.get(n.subType) ?? 0) + 1);
+      } else {
+        entry.noSubtypeCount += 1;
       }
     }
     return map;
@@ -350,27 +455,49 @@ export default function GraphPage() {
 
         {/* Type filter moved to clickable legend below */}
 
-        <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
-          {LAYOUTS.map(l => {
-            const icons: Record<string, string> = { cloud: '⬡', circle: '○', rings: '◎', lanes: '≡', clusters: '⬢', islands: '◇', spiral: '✺' };
-            const isActive = layout === l;
+        <div className="flex items-center gap-1 rounded-xl border border-border/60 bg-card/80 p-1 shadow-soft">
+          {GRAPH_LAYOUT_OPTIONS.map((option) => {
+            const isActive = layout === option.id;
+            const Icon = GRAPH_LAYOUT_ICONS[option.iconKey];
             return (
               <button
-                key={l}
-                onClick={() => setLayout(l)}
-                className={`px-2 py-1 text-sm rounded-md transition-all font-mono ${isActive ? 'bg-primary text-primary-foreground shadow-sm font-bold' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}
-                title={t(`graph.layouts.${l}`)}
+                key={option.id}
+                onClick={() => setLayout(option.id)}
+                className={`flex h-8 w-8 items-center justify-center rounded-lg transition-all ${
+                  isActive
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                }`}
+                title={t(option.labelKey)}
+                aria-label={t(option.labelKey)}
               >
-                {icons[l] || l}
+                <Icon className="h-4 w-4" />
               </button>
             );
           })}
         </div>
 
+        <div className="hidden xl:flex xl:min-w-[240px] xl:flex-col">
+          <span className="text-xs font-semibold text-foreground">{t(activeLayoutOption.labelKey)}</span>
+          <span className="text-xs text-muted-foreground">{t(activeLayoutOption.descriptionKey)}</span>
+        </div>
+
+        {recommendedLayout && layout !== recommendedLayout && (
+          <button
+            type="button"
+            onClick={() => setLayout(recommendedLayout)}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-amber-300/70 bg-amber-50/90 px-3 text-xs font-medium text-amber-950 shadow-sm transition-colors hover:bg-amber-100"
+          >
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+            <span className="text-muted-foreground">{t('graph.recommended')}</span>
+            <span className="font-semibold text-primary">{t(`graph.layouts.${recommendedLayout}`)}</span>
+          </button>
+        )}
+
         {/* Sigma.js handles zoom via mouse wheel / pinch */}
 
-        {selectedNode && (
-          <button className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold" onClick={() => setSelectedNode(null)}>
+        {hasActiveGraphState && (
+          <button className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold" onClick={resetGraphView}>
             <X className="h-3.5 w-3.5" /> {t('graph.clear')}
           </button>
         )}
@@ -457,7 +584,7 @@ export default function GraphPage() {
                 <button
                   onClick={() => {
                     setHiddenTypes(prev => {
-                      const allTypes = Object.keys(NODE_COLORS);
+                      const allTypes = Object.keys(GRAPH_NODE_COLORS);
                       const next = new Set<string>();
                       for (const tp of allTypes) {
                         if (!prev.has(tp)) next.add(tp);
@@ -481,23 +608,43 @@ export default function GraphPage() {
 
               {/* Type list */}
               <div className="px-2 py-1.5 flex-1 overflow-y-auto">
-                {Object.entries(NODE_COLORS).map(([type, color]) => {
+                {Object.entries(GRAPH_NODE_COLORS).map(([type, color]) => {
                   const isHidden = hiddenTypes.has(type);
                   const stats = typeLegend.get(type);
                   const count = stats?.count ?? 0;
                   if (count === 0 && type !== 'document') return null;
-                  const subs = stats?.subs ? Array.from(stats.subs.entries()).sort((a, b) => b[1] - a[1]) : [];
+                  const realSubs = stats?.subs ? Array.from(stats.subs.entries()).sort((a, b) => b[1] - a[1]) : [];
+                  const subs = stats && stats.noSubtypeCount > 0 && realSubs.length > 0
+                    ? [...realSubs, [NO_SUBTYPE_KEY, stats.noSubtypeCount] as const]
+                    : realSubs;
+                  const isSubtypeGroupExpanded = expandedSubtypeGroups.has(type);
+                  const visibleSubs = isSubtypeGroupExpanded ? subs : subs.slice(0, SUBTYPE_PREVIEW_LIMIT);
+                  const hiddenSubtypeCount = Math.max(0, subs.length - SUBTYPE_PREVIEW_LIMIT);
                   return (
                     <div key={type} className={`mb-0.5 ${isHidden ? 'opacity-35' : ''}`}>
                       <button
                         className={`flex items-center gap-1.5 w-full px-2 py-1 rounded-md transition-all cursor-pointer ${isHidden ? 'line-through' : 'hover:bg-white/10'}`}
-                        onClick={() => {
-                          setHiddenTypes(prev => {
-                            const next = new Set(prev);
-                            if (next.has(type)) next.delete(type);
-                            else next.add(type);
-                            return next;
-                          });
+                        onClick={(e) => {
+                          if (e.ctrlKey || e.metaKey) {
+                            // Ctrl/Cmd+Click: toggle single type
+                            setHiddenTypes(prev => {
+                              const next = new Set(prev);
+                              if (next.has(type)) next.delete(type);
+                              else next.add(type);
+                              return next;
+                            });
+                          } else {
+                            // Click: isolate (show only this) or reset
+                            const allTypes = Object.keys(GRAPH_NODE_COLORS);
+                            const othersHidden = allTypes.filter(t => t !== type).every(t => hiddenTypes.has(t));
+                            if (othersHidden && !hiddenTypes.has(type)) {
+                              setHiddenTypes(new Set());
+                              setHiddenSubTypes(new Set());
+                            } else {
+                              setHiddenTypes(new Set(allTypes.filter(t => t !== type)));
+                              setHiddenSubTypes(new Set());
+                            }
+                          }
                         }}
                         title={t(`graph.nodeTypes.${type}`)}
                       >
@@ -506,8 +653,9 @@ export default function GraphPage() {
                         <span className="ml-auto tabular-nums text-muted-foreground">{count}</span>
                       </button>
                       {subs.length > 0 && !isHidden && (
-                        <div className="flex flex-wrap gap-x-1.5 gap-y-0.5 pl-6 pr-1 mt-0.5 mb-1">
-                          {subs.slice(0, 12).map(([sub, subCount]) => {
+                        <div className="pl-6 pr-1 mt-0.5 mb-1">
+                          <div className="flex flex-wrap gap-x-1.5 gap-y-0.5">
+                          {visibleSubs.map(([sub, subCount]) => {
                             const subKey = `${type}:${sub}`;
                             const isSubHidden = hiddenSubTypes.has(subKey);
                             return (
@@ -516,22 +664,71 @@ export default function GraphPage() {
                                 className={`text-[10px] whitespace-nowrap cursor-pointer rounded px-1 py-0.5 transition-colors ${isSubHidden ? 'opacity-35 line-through text-muted-foreground' : 'text-muted-foreground hover:bg-white/10'}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setHiddenSubTypes(prev => {
-                                    const next = new Set(prev);
-                                    if (next.has(subKey)) next.delete(subKey);
-                                    else next.add(subKey);
-                                    return next;
-                                  });
+                                  if (e.ctrlKey || e.metaKey) {
+                                    // Ctrl/Cmd+Click: toggle single sub-type
+                                    setHiddenSubTypes(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(subKey)) next.delete(subKey);
+                                      else next.add(subKey);
+                                      return next;
+                                    });
+                                  } else {
+                                    // Click: isolate sub-type or reset
+                                    const siblingKeys = subs.map(([s]) => `${type}:${s}`);
+                                    if (siblingKeys.length === 1) {
+                                      setHiddenSubTypes(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(subKey)) next.delete(subKey);
+                                        else next.add(subKey);
+                                        return next;
+                                      });
+                                      return;
+                                    }
+                                    const othersHidden = siblingKeys.filter(k => k !== subKey).every(k => hiddenSubTypes.has(k));
+                                    if (othersHidden && !hiddenSubTypes.has(subKey)) {
+                                      setHiddenSubTypes(prev => {
+                                        const next = new Set(prev);
+                                        for (const k of siblingKeys) next.delete(k);
+                                        return next;
+                                      });
+                                    } else {
+                                      setHiddenSubTypes(prev => {
+                                        const next = new Set(prev);
+                                        for (const k of siblingKeys) {
+                                          if (k === subKey) next.delete(k);
+                                          else next.add(k);
+                                        }
+                                        return next;
+                                      });
+                                    }
+                                  }
                                 }}
-                                title={sub}
+                                title={subtypeLegendLabel(t, sub)}
                               >
                                 <span className="inline-block w-1.5 h-1.5 rounded-full mr-0.5 align-middle" style={{ background: color, opacity: 0.6 }} />
-                                {sub} <span className="tabular-nums">{subCount}</span>
+                                {subtypeLegendLabel(t, sub)} <span className="tabular-nums">{subCount}</span>
                               </button>
                             );
                           })}
-                          {subs.length > 12 && (
-                            <span className="text-[10px] text-muted-foreground px-1">+{subs.length - 12}</span>
+                          </div>
+                          {subs.length > SUBTYPE_PREVIEW_LIMIT && (
+                            <button
+                              type="button"
+                              className="mt-1 inline-flex h-6 items-center rounded-md px-1.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedSubtypeGroups((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(type)) next.delete(type);
+                                  else next.add(type);
+                                  return next;
+                                });
+                              }}
+                            >
+                              {isSubtypeGroupExpanded
+                                ? t('graph.hideSubTypes')
+                                : t('graph.showAllSubTypes', { count: hiddenSubtypeCount })}
+                            </button>
                           )}
                         </div>
                       )}
@@ -539,13 +736,6 @@ export default function GraphPage() {
                   );
                 })}
               </div>
-            </div>
-          )}
-
-          {graphMeta?.recommendedLayout && layout !== graphMeta.recommendedLayout && (
-            <div className="absolute top-3 left-3 text-xs glass-panel rounded-xl px-4 py-2.5 shadow-lifted flex items-center gap-1.5">
-              <AlertTriangle className="h-3 w-3 text-status-warning" />
-              {t('graph.recommended')} <button className="font-bold text-primary hover:underline" onClick={() => setLayout(graphMeta.recommendedLayout as LayoutType)}>{graphMeta.recommendedLayout}</button>
             </div>
           )}
         </div>
@@ -575,7 +765,7 @@ export default function GraphPage() {
               <div className="p-4 space-y-4">
                 {/* Type & connections header */}
                 <div className="flex items-center gap-2.5">
-                  <span className="w-3 h-3 rounded-full" style={{ background: NODE_COLORS[selected.type] }} />
+                  <span className="w-3 h-3 rounded-full" style={{ background: GRAPH_NODE_COLORS[selected.type] }} />
                   <div className="flex flex-col">
                     <span className="text-sm font-semibold capitalize">{t(`graph.nodeTypes.${selected.type}`)}</span>
                     {selected.subType && (
@@ -584,6 +774,13 @@ export default function GraphPage() {
                   </div>
                   <span className="text-xs text-muted-foreground ml-auto tabular-nums font-medium">{connectedIds.length} {t('graph.connections')}</span>
                 </div>
+
+                {selected.type !== 'document' && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground">{t('graph.subType')}</span>
+                    <span className="font-medium text-foreground">{selected.subType ?? '—'}</span>
+                  </div>
+                )}
 
                 {/* Summary */}
                 {selected.summary && (
@@ -596,9 +793,11 @@ export default function GraphPage() {
                     <div className="section-label mb-1.5">{t('graph.properties')}</div>
                     <div className="space-y-1">
                       {Object.entries(selected.properties).map(([k, v]) => (
-                        <div key={k} className="flex justify-between text-xs">
-                          <span className="text-muted-foreground capitalize">{k}</span>
-                          <span className="font-semibold text-foreground">{v}</span>
+                        <div key={k} className="grid grid-cols-[80px_minmax(0,1fr)] items-start gap-x-3 text-xs">
+                          <span className="pt-0.5 text-muted-foreground capitalize">{k}</span>
+                          <span className="min-w-0 text-right font-semibold leading-tight text-foreground [overflow-wrap:anywhere]">
+                            {v}
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -608,22 +807,13 @@ export default function GraphPage() {
                 {/* Actions */}
                 <div className="flex gap-2">
                   {selected.type === 'document' && (
-                    <Button variant="outline" size="sm" className="text-xs h-7" onClick={() => navigate(`/documents?highlight=${selected.id}`)}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-xs h-7"
+                      onClick={() => navigate(`/documents?documentId=${encodeURIComponent(selected.id)}`)}
+                    >
                       <FileText className="h-3 w-3 mr-1" /> {t('graph.viewDocument')}
-                    </Button>
-                  )}
-                  <Button variant="outline" size="sm" className="text-xs h-7" onClick={() => {
-                    setSearchQuery(selected.label);
-                  }}>
-                    <Search className="h-3 w-3 mr-1" /> {t('graph.findSimilar')}
-                  </Button>
-                  {searchQuery && (
-                    <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => {
-                      setSearchQuery('');
-                      setHiddenTypes(new Set());
-                      setHiddenSubTypes(new Set());
-                    }}>
-                      <X className="h-3 w-3 mr-1" /> {t('graph.resetFilter')}
                     </Button>
                   )}
                 </div>
@@ -635,7 +825,7 @@ export default function GraphPage() {
                     <div className="space-y-0.5">
                       {connectedDocs.map(n => (
                         <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: NODE_COLORS.document }} />
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.document }} />
                           <span className="truncate font-medium">{n.label}</span>
                         </button>
                       ))}
@@ -650,7 +840,7 @@ export default function GraphPage() {
                     <div className="space-y-0.5">
                       {connectedEntities.slice(0, 15).map(n => (
                         <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: NODE_COLORS.entity }} />
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.entity }} />
                           <span className="truncate">{n.label}</span>
                           {n.edgeCount > 0 && <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{n.edgeCount}</span>}
                         </button>
@@ -667,7 +857,7 @@ export default function GraphPage() {
                     <div className="space-y-0.5">
                       {connectedConcepts.slice(0, 10).map(n => (
                         <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: NODE_COLORS.concept }} />
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.concept }} />
                           <span className="truncate">{n.label}</span>
                         </button>
                       ))}

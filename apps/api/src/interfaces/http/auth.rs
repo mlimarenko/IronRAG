@@ -111,12 +111,16 @@ impl AuthContext {
 
     #[must_use]
     pub fn can_access_workspace(&self, workspace_id: Uuid) -> bool {
-        self.is_system_admin || self.visible_workspace_ids.contains(&workspace_id)
+        self.is_system_admin
+            || self.visible_workspace_ids.contains(&workspace_id)
+            || self.grants.iter().any(|g| g.resource_kind == "system")
     }
 
     #[must_use]
     pub fn can_access_any_workspace(&self) -> bool {
-        self.is_system_admin || !self.visible_workspace_ids.is_empty()
+        self.is_system_admin
+            || !self.visible_workspace_ids.is_empty()
+            || self.grants.iter().any(|g| g.resource_kind == "system")
     }
 
     #[must_use]
@@ -165,8 +169,9 @@ impl AuthContext {
     pub fn has_workspace_permission(&self, workspace_id: Uuid, accepted: &[&str]) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                grant.resource_kind == "workspace"
-                    && grant.workspace_id == Some(workspace_id)
+                (grant.resource_kind == "system"
+                    || (grant.resource_kind == "workspace"
+                        && grant.workspace_id == Some(workspace_id)))
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -180,8 +185,10 @@ impl AuthContext {
     ) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                ((grant.resource_kind == "workspace" && grant.workspace_id == Some(workspace_id))
-                    || grant.resource_kind == "library" && grant.library_id == Some(library_id))
+                (grant.resource_kind == "system"
+                    || (grant.resource_kind == "workspace"
+                        && grant.workspace_id == Some(workspace_id))
+                    || (grant.resource_kind == "library" && grant.library_id == Some(library_id)))
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -196,7 +203,9 @@ impl AuthContext {
     ) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                ((grant.resource_kind == "workspace" && grant.workspace_id == Some(workspace_id))
+                (grant.resource_kind == "system"
+                    || (grant.resource_kind == "workspace"
+                        && grant.workspace_id == Some(workspace_id))
                     || (grant.resource_kind == "library" && grant.library_id == Some(library_id))
                     || (grant.resource_kind == "document"
                         && grant.document_id == Some(document_id)))
@@ -209,7 +218,7 @@ impl AuthContext {
         self.is_system_admin
             || self.can_access_workspace(workspace_id)
             || self.grants.iter().any(|grant| {
-                grant.workspace_id == Some(workspace_id)
+                (grant.resource_kind == "system" || grant.workspace_id == Some(workspace_id))
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -224,7 +233,9 @@ impl AuthContext {
         self.is_system_admin
             || self.can_access_workspace(workspace_id)
             || self.grants.iter().any(|grant| {
-                (grant.workspace_id == Some(workspace_id) || grant.library_id == Some(library_id))
+                (grant.resource_kind == "system"
+                    || grant.workspace_id == Some(workspace_id)
+                    || grant.library_id == Some(library_id))
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -233,7 +244,7 @@ impl AuthContext {
     pub fn can_admin_any_workspace(&self, accepted: &[&str]) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                grant.resource_kind == "workspace"
+                matches!(grant.resource_kind.as_str(), "system" | "workspace")
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -242,7 +253,7 @@ impl AuthContext {
     pub fn can_read_any_library_memory(&self, accepted: &[&str]) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                matches!(grant.resource_kind.as_str(), "workspace" | "library")
+                matches!(grant.resource_kind.as_str(), "system" | "workspace" | "library")
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -251,8 +262,10 @@ impl AuthContext {
     pub fn can_read_any_document_memory(&self, accepted: &[&str]) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                matches!(grant.resource_kind.as_str(), "workspace" | "library" | "document")
-                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+                matches!(
+                    grant.resource_kind.as_str(),
+                    "system" | "workspace" | "library" | "document"
+                ) && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
 
@@ -260,7 +273,7 @@ impl AuthContext {
     pub fn can_write_any_library_memory(&self, accepted: &[&str]) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                matches!(grant.resource_kind.as_str(), "workspace" | "library")
+                matches!(grant.resource_kind.as_str(), "system" | "workspace" | "library")
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -269,8 +282,10 @@ impl AuthContext {
     pub fn can_write_any_document_memory(&self, accepted: &[&str]) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                matches!(grant.resource_kind.as_str(), "workspace" | "library" | "document")
-                    && accepted.iter().any(|permission| grant.permission_kind == *permission)
+                matches!(
+                    grant.resource_kind.as_str(),
+                    "system" | "workspace" | "library" | "document"
+                ) && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
 
@@ -283,7 +298,9 @@ impl AuthContext {
     ) -> bool {
         self.is_system_admin
             || self.grants.iter().any(|grant| {
-                ((grant.resource_kind == "workspace" && grant.workspace_id == Some(workspace_id))
+                (grant.resource_kind == "system"
+                    || (grant.resource_kind == "workspace"
+                        && grant.workspace_id == Some(workspace_id))
                     || (grant.resource_kind == "library" && grant.library_id == Some(library_id))
                     || (grant.resource_kind == "document" && grant.library_id == Some(library_id)))
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
@@ -336,7 +353,7 @@ pub async fn resolve_optional_auth_context_from_headers(
             &token_hash,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or(ApiError::Unauthorized)?;
 
         let now = Utc::now();
@@ -378,7 +395,7 @@ pub async fn resolve_optional_auth_context_from_headers(
         parse_session_cookie_value(&cookie_value).ok_or(ApiError::Unauthorized)?;
     let session_row = iam_repository::get_session_by_id(&state.persistence.postgres, session_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or(ApiError::Unauthorized)?;
     if session_row.revoked_at.is_some() || session_row.expires_at < Utc::now() {
         return Err(ApiError::Unauthorized);
@@ -456,13 +473,13 @@ async fn build_auth_context_for_principal(
         principal_id,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let mut memberships = iam_repository::list_workspace_memberships_by_principal(
         &state.persistence.postgres,
         principal_id,
     )
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
     if let Some(token_workspace_id) = workspace_id {
         grants.retain(|grant| {

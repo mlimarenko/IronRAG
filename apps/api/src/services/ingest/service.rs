@@ -85,6 +85,15 @@ pub struct RecordStageEventCommand {
     pub stage_state: String,
     pub message: Option<String>,
     pub details_json: serde_json::Value,
+    pub provider_kind: Option<String>,
+    pub model_name: Option<String>,
+    pub prompt_tokens: Option<i32>,
+    pub completion_tokens: Option<i32>,
+    pub total_tokens: Option<i32>,
+    pub cached_tokens: Option<i32>,
+    pub estimated_cost: Option<rust_decimal::Decimal>,
+    pub currency_code: Option<String>,
+    pub elapsed_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +133,7 @@ impl IngestService {
             None,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_job_row).collect())
     }
 
@@ -152,7 +161,7 @@ impl IngestService {
             mutation_ids,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let jobs = rows.into_iter().map(map_job_row).collect();
         self.build_job_handles(state, jobs).await
     }
@@ -160,7 +169,7 @@ impl IngestService {
     pub async fn get_job(&self, state: &AppState, job_id: Uuid) -> Result<IngestJob, ApiError> {
         let row = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
         Ok(map_job_row(row))
     }
@@ -184,7 +193,7 @@ impl IngestService {
             mutation_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         match row {
             Some(row) => Ok(Some(self.build_job_handle(state, map_job_row(row)).await?)),
             None => Ok(None),
@@ -201,7 +210,7 @@ impl IngestService {
             async_operation_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         match row {
             Some(row) => Ok(Some(self.build_job_handle(state, map_job_row(row)).await?)),
             None => Ok(None),
@@ -218,7 +227,7 @@ impl IngestService {
             knowledge_revision_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         match row {
             Some(row) => Ok(Some(self.build_job_handle(state, map_job_row(row)).await?)),
             None => Ok(None),
@@ -239,7 +248,7 @@ impl IngestService {
             knowledge_document_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let jobs = rows.into_iter().map(map_job_row).collect();
         self.build_job_handles(state, jobs).await
     }
@@ -258,7 +267,7 @@ impl IngestService {
                 dedupe_key,
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             {
                 return Ok(map_job_row(existing));
             }
@@ -284,7 +293,7 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_job_row(row))
     }
 
@@ -296,7 +305,7 @@ impl IngestService {
         let rows =
             ingest_repository::list_ingest_attempts_by_job(&state.persistence.postgres, job_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_attempt_row).collect())
     }
 
@@ -308,7 +317,7 @@ impl IngestService {
         let row =
             ingest_repository::get_ingest_attempt_by_id(&state.persistence.postgres, attempt_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", attempt_id))?;
         Ok(map_attempt_row(row))
     }
@@ -338,14 +347,14 @@ impl IngestService {
         let job =
             ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, command.job_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("ingest_job", command.job_id))?;
         let latest_attempt = ingest_repository::get_latest_ingest_attempt_by_job(
             &state.persistence.postgres,
             command.job_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let next_attempt_number = latest_attempt.as_ref().map_or(1, |row| row.attempt_number + 1);
 
         let attempt = ingest_repository::create_ingest_attempt(
@@ -367,7 +376,7 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         let _ = ingest_repository::update_ingest_job(
             &state.persistence.postgres,
@@ -387,7 +396,7 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         update_linked_async_operation(state, job.async_operation_id, "processing", None, None)
             .await?;
@@ -406,7 +415,7 @@ impl IngestService {
             command.attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
 
         let row = ingest_repository::update_ingest_attempt(
@@ -428,7 +437,7 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
         Ok(map_attempt_row(row))
     }
@@ -445,7 +454,7 @@ impl IngestService {
             command.attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
         let row = ingest_repository::update_ingest_attempt(
             &state.persistence.postgres,
@@ -466,13 +475,13 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
 
         let job =
             ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, attempt.job_id)
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("ingest_job", attempt.job_id))?;
         let next_queue_state = match command.attempt_state.as_str() {
             "succeeded" => "completed",
@@ -503,7 +512,7 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         let operation_status = match next_queue_state {
             "completed" => "ready",
@@ -535,7 +544,7 @@ impl IngestService {
     ) -> Result<IngestJob, ApiError> {
         let existing = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
         let row = ingest_repository::update_ingest_job(
             &state.persistence.postgres,
@@ -555,7 +564,7 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
         update_linked_async_operation(state, row.async_operation_id, "accepted", None, None)
             .await?;
@@ -573,14 +582,14 @@ impl IngestService {
             command.attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
         let existing_events = ingest_repository::list_ingest_stage_events_by_attempt(
             &state.persistence.postgres,
             command.attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let row = ingest_repository::create_ingest_stage_event(
             &state.persistence.postgres,
             &NewIngestStageEvent {
@@ -591,10 +600,19 @@ impl IngestService {
                 message: command.message,
                 details_json: command.details_json,
                 recorded_at: None,
+                provider_kind: command.provider_kind,
+                model_name: command.model_name,
+                prompt_tokens: command.prompt_tokens,
+                completion_tokens: command.completion_tokens,
+                total_tokens: command.total_tokens,
+                cached_tokens: command.cached_tokens,
+                estimated_cost: command.estimated_cost,
+                currency_code: command.currency_code,
+                elapsed_ms: command.elapsed_ms,
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let _ = ingest_repository::update_ingest_attempt(
             &state.persistence.postgres,
             command.attempt_id,
@@ -612,7 +630,7 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_stage_event_row(row))
     }
 
@@ -626,7 +644,7 @@ impl IngestService {
             attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_stage_event_row).collect())
     }
 
@@ -640,7 +658,7 @@ impl IngestService {
             job.id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .map(map_attempt_row);
         let async_operation = match job.async_operation_id {
             Some(operation_id) => {
@@ -669,7 +687,7 @@ impl IngestService {
             &job_ids,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .into_iter()
         .map(|row| (row.job_id, map_attempt_row(row)))
         .collect::<HashMap<_, _>>();
@@ -679,7 +697,7 @@ impl IngestService {
             &async_operation_ids,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .into_iter()
         .map(|row| (row.id, map_async_operation_row(row)))
         .collect::<HashMap<_, _>>();

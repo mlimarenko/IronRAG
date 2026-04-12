@@ -6,7 +6,7 @@ use anyhow::Context;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use rustrag_backend::{infra::repositories::iam_repository, interfaces::http::auth::hash_token};
+use ironrag_backend::{infra::repositories::iam_repository, interfaces::http::auth::hash_token};
 
 pub struct MintedApiToken {
     pub principal_id: Uuid,

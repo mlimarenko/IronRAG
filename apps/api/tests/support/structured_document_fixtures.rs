@@ -1,8 +1,8 @@
 use chrono::Utc;
 use uuid::Uuid;
 
-use rustrag_backend::services::ingest::structured_preparation::PrepareStructuredRevisionCommand;
-use rustrag_backend::shared::extraction::build_text_layout_from_content;
+use ironrag_backend::services::ingest::structured_preparation::PrepareStructuredRevisionCommand;
+use ironrag_backend::shared::extraction::build_text_layout_from_content;
 
 pub fn canonical_prepare_command() -> PrepareStructuredRevisionCommand {
     let text = concat!(

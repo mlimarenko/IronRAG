@@ -1,35 +1,77 @@
 # Changelog
 
+## 0.2.0 — 2026-04-12
+
+### Highlights
+
+- Rebranded the shipped product from `RustRAG` to `IronRAG` across env vars, packages, images, charts, OpenAPI, and release-facing docs.
+- Added a full-screen document editor for text, `docx`, and `xlsx` uploads with table-aware markdown editing and automatic reprocessing after save.
+- Unified `xlsx`, `docx`, `pdf`, and `csv` table handling on one canonical extraction path with grounded row and column-summary semantics.
+- Added a full document lifecycle inspector with per-stage duration, model/provider identity, token usage, and cost from the canonical billing path.
+- Rebuilt the in-app assistant on one canonical MCP-tool agent loop and added a DeepSeek bootstrap preset for first-run provider setup.
+- Added diff-aware ingest reuse so unchanged chunks can skip repeated graph extraction on document replacement and edit flows.
+
+### Breaking Changes
+
+- **Schema reset**: the database baseline was consolidated to one canonical `0001_init.sql`; legacy execution and accounting paths were removed.
+- **Assistant/MCP cutover**: the standalone `ask` shortcut and parallel special-case assistant flow were removed; assistant Q&A now runs only through the canonical MCP tool loop.
+- **IRONRAG rename**: release-facing configuration now uses `IRONRAG_*` naming instead of `RUSTRAG_*`.
+
+### Platform
+
+- Billing and pipeline cost rollups now come from one canonical source of truth, including vision and embedding calls.
+- System-level IAM grants now authorize correctly across workspaces, libraries, and documents.
+- Document delete and revision-head writes were hardened so canonical Postgres state can commit cleanly even when read-model cleanup degrades to warnings.
+- Grounding guardrails now refuse conflicting or insufficiently supported answers instead of shipping hallucinated output.
+- Added `ironrag-cli` for users, tokens, workspaces, libraries, and scoped permission management.
+- Deployment surfaces were aligned around the split `web` / `api` / `worker` / `startup` topology for Docker and Helm.
+
+### Refactor
+
+- Split major backend hotspots into focused graph-store, MCP, AI catalog, ingest, graph-service, and query submodules while deleting legacy release artifacts and dead code.
+- Trimmed the MCP protocol to the canonical tool surface only: no fake resources capability, no legacy aliases, and permission-filtered `tools/list`.
+- Removed silent error swallowing and cleaned up the release line to a zero-warning backend build.
+
+### Validation
+
+- Added release-gate coverage for end-to-end pipeline quality and graph mutation correctness.
+- Revalidated the Docker and Helm deployment paths for the `0.2.0` release line.
+
 ## 0.1.3 — 2026-04-10
 
 ### Performance — Ingestion Parallelism
-- **Parallel embedding batches** (`ingest/runtime.rs`): node and edge embedding now sends batches in parallel via `futures::stream::buffer_unordered`. New env var `RUSTRAG_INGESTION_EMBEDDING_PARALLELISM=4` (default) controls how many embed batches run concurrently per job. For a 200-chunk document this is ~4x faster end-to-end.
-- **Per-library job isolation** (`ingest_repository::claim_next_queued_ingest_job`): SQL claim now optionally caps the number of `leased` jobs per library. New env var `RUSTRAG_INGESTION_MAX_JOBS_PER_LIBRARY=0` (0 = unlimited) prevents one busy library from starving others when many docs are queued at once.
-- **Parallel web crawl fetches** (`ingest/web::discover_recursive_scope`): the BFS frontier is now drained in waves of N candidates and HTTP fetches run in parallel via `buffer_unordered`, while DB writes stay sequential per result for canonical/seen-set determinism. New env var `RUSTRAG_WEB_INGEST_CRAWL_CONCURRENCY=4`.
+
+- **Parallel embedding batches** (`ingest/runtime.rs`): node and edge embedding now sends batches in parallel via `futures::stream::buffer_unordered`. New env var `IRONRAG_INGESTION_EMBEDDING_PARALLELISM=4` (default) controls how many embed batches run concurrently per job. For a 200-chunk document this is ~4x faster end-to-end.
+- **Per-library job isolation** (`ingest_repository::claim_next_queued_ingest_job`): SQL claim now optionally caps the number of `leased` jobs per library. New env var `IRONRAG_INGESTION_MAX_JOBS_PER_LIBRARY=0` (0 = unlimited) prevents one busy library from starving others when many docs are queued at once.
+- **Parallel web crawl fetches** (`ingest/web::discover_recursive_scope`): the BFS frontier is now drained in waves of N candidates and HTTP fetches run in parallel via `buffer_unordered`, while DB writes stay sequential per result for canonical/seen-set determinism. New env var `IRONRAG_WEB_INGEST_CRAWL_CONCURRENCY=4`.
 - All three knobs are independent and tunable per deployment via env vars. Defaults are conservative (4) and tested against the local stack.
 
 ### Refactor — Bootstrap Flow Cleanup
-- **Removed legacy `/iam/bootstrap/claim` endpoint** entirely: route, handler, `BootstrapClaimRequest/Response`, `BootstrapClaimCommand/Outcome`, service method, OpenAPI paths and schemas, integration test, and the `bootstrap_token` / `bootstrap_claim_enabled` config fields with their `RUSTRAG_BOOTSTRAP_TOKEN` env var. Single canonical bootstrap surface is now `/iam/bootstrap/setup` only.
+
+- **Removed legacy `/iam/bootstrap/claim` endpoint** entirely: route, handler, `BootstrapClaimRequest/Response`, `BootstrapClaimCommand/Outcome`, service method, OpenAPI paths and schemas, integration test, and the `bootstrap_token` / `bootstrap_claim_enabled` config fields with their `IRONRAG_BOOTSTRAP_TOKEN` env var. Single canonical bootstrap surface is now `/iam/bootstrap/setup` only.
 - **Display name optional** in bootstrap setup: backend already accepted `Option<String>` and falls back to login; frontend no longer validates it as required and passes `undefined` when empty.
 - **Required field markers** in `LoginPage`: red `*` next to required labels (Admin login, Password) plus `(optional)` hint next to Display name; matching `login.optional` i18n key in en/ru locales.
 - **Cursor pointer everywhere**: added `cursor: pointer` to all `button:not(:disabled)`, `[role="button"]`, `a[href]`, `label[for]`, `summary`, `select` via `@layer base` global rule in `index.css`, plus baked into the `Button` cva so the shadcn variant gets it explicitly. Disabled controls get `cursor: not-allowed`.
 
 ### Refactor — Code Quality + Hierarchy
-- **`shared/` restructure**: 7 files moved into `shared/extraction/` (chunking, file_extract, structured_document, text_render, technical_facts) and `shared/web/` (ingest, url_identity). Root keeps only canonical primitives.
-- **`services/` restructure**: 43 flat files reorganized into 8 domain folders — `graph/`, `query/`, `content/`, `ingest/`, `mcp/`, `ops/`, `iam/`, `knowledge/`. ~80 import sites updated.
-- **`query/execution.rs` split started**: 7909-line megafile reduced to 6346 in `mod.rs` plus 5 extracted submodules — `embed`, `hyde_crag`, `technical_literals`, `verification`, `port_answer` (-20%, 1631 lines moved out).
-- **Dead `legacy_*` bootstrap flags removed**: `legacy_ui_bootstrap_enabled`, `legacy_bootstrap_token_endpoint_enabled`, `allow_legacy_startup_side_effects` deleted from config and 5 integration tests. `legacy_ui_bootstrap_admin` renamed to `ui_bootstrap_admin`.
+
+- `**shared/` restructure**: 7 files moved into `shared/extraction/` (chunking, file_extract, structured_document, text_render, technical_facts) and `shared/web/` (ingest, url_identity). Root keeps only canonical primitives.
+- `**services/` restructure**: 43 flat files reorganized into 8 domain folders — `graph/`, `query/`, `content/`, `ingest/`, `mcp/`, `ops/`, `iam/`, `knowledge/`. ~80 import sites updated.
+- `**query/execution.rs` split started**: 7909-line megafile reduced to 6346 in `mod.rs` plus 5 extracted submodules — `embed`, `hyde_crag`, `technical_literals`, `verification`, `port_answer` (-20%, 1631 lines moved out).
+- **Dead `legacy_`* bootstrap flags removed**: `legacy_ui_bootstrap_enabled`, `legacy_bootstrap_token_endpoint_enabled`, `allow_legacy_startup_side_effects` deleted from config and 5 integration tests. `legacy_ui_bootstrap_admin` renamed to `ui_bootstrap_admin`.
 - **Silent error swallowing fixed**: 14 `let _ = state...` audit/append sites converted to explicit `if let Err(e) = ... { warn!(stage=..., error=%e, ...); }` with structured logging. 31 cosmetic `let _ = HashSet::insert()` cleaned up.
-- **Frontend `any` elimination**: 52 `any` removed from `pages/{Documents,Graph,Assistant,Admin}.tsx`, all `apiFetch<any>` calls in `api/*.ts` typed against `Raw*` interfaces, `ApiError.body` typed as `ApiErrorBody`. Added 11 new typed interfaces.
+- **Frontend `any` elimination**: 52 `any` removed from `pages/{Documents,Graph,Assistant,Admin}.tsx`, all `apiFetch<any>` calls in `api/*.ts` typed against `Raw`* interfaces, `ApiError.body` typed as `ApiErrorBody`. Added 11 new typed interfaces.
 - **Observability**: HyDE/CRAG/multimodal extraction stages emit structured `stage=` tracing per the constitution severity convention.
 - **Backend test debt cleanup**: split `content_lifecycle.rs` into a reusable `tests/support/content_lifecycle_support.rs` fixture plus a dedicated lineage test file, bringing the main lifecycle test back under the 1000-line cap; removed stale unused worker imports in web-ingest integration tests.
 
 ### Deploy
+
 - Added the canonical Helm chart for `web`, `api`, `worker`, and one `startup` job.
 - Added `docker-compose-s4.yml` for the bundled stack with [s4core](https://github.com/s4core/s4core) and S3 storage.
 - Kept `docker-compose.yml` as the classic bundled stack with filesystem storage.
 
 ### Changed
+
 - Split runtime into `api`, `worker`, and `startup`.
 - Moved migrations and bootstrap out of serving pods into the startup authority.
 - Added the canonical storage contract: `filesystem` or S3-compatible object storage.
@@ -42,6 +84,7 @@
 - Split the documents page into smaller modules and added a staged 1000-line file limit in pre-commit.
 
 ### Validation
+
 - `docker compose config` for filesystem and `s4core` profiles — pass
 - `helm lint` and `helm template` — pass
 - live upload, query, source-download, and Swagger/OpenAPI checks on the Minikube Helm release — pass
@@ -49,6 +92,7 @@
 ## 0.1.2 — 2026-04-08
 
 ### Highlights
+
 - **Sigma.js WebGL graph renderer**: replaced Canvas2D with Sigma.js for rendering 11K+ nodes and 54K+ edges via WebGL. 7 layout algorithms (cloud, circle, rings, lanes, clusters, islands, spiral), node dragging, connected-edge overlay, pointer cursor on hover.
 - **Entity sub-type extraction**: LLM pipeline now extracts freeform `sub_type` for entities (e.g., person→engineer, artifact→framework). Flows through ArangoDB storage, API, and frontend legend.
 - **Vertical graph legend**: left-side collapsible legend with clickable types and sub-types, counts, show-all/invert/hide controls.
@@ -60,6 +104,7 @@
 - **Audit usability upgrade**: added server-backed audit pagination, result/surface filters, and free-text search in the admin panel.
 
 ### Graph
+
 - **Sigma.js WebGL renderer**: replaces Canvas2D. Handles 11K nodes / 54K edges at interactive frame rates via GPU-accelerated rendering.
 - **7 layout algorithms**: cloud (force-directed jitter), circle (scaled), rings (concentric by type), lanes (horizontal rows by type), clusters (Vogel-disc per type), islands (BFS connected components), spiral (golden-angle, degree-sorted).
 - **Connected-edge overlay**: selected node's edges render on a separate Canvas2D overlay on top of all other edges, with curved arrows and blue highlight.
@@ -70,11 +115,13 @@
 - **Layout toolbar**: monochrome icon buttons (⬡○◎≡⬢◇✺) with active state highlight using `bg-primary`.
 
 ### Pipeline
+
 - **Entity sub-type extraction**: added `sub_type: Option<String>` to `GraphEntityCandidate`. LLM prompt updated with sub_type in schema and few-shot examples (framework, database, microservice, http_status_code, etc.).
 - **Sub-type storage**: `candidate_sub_type` / `entity_sub_type` fields added to ArangoDB entity documents. Schema-less — no migration needed, `#[serde(default)]` handles old documents.
 - **Sub-type API**: `entitySubType` returned in entity list/detail HTTP responses via `metadata_json`.
 
 ### Frontend
+
 - **Documents page tabs**: split into Documents tab (table + filters + pagination + upload) and Web Ingest tab (run list + add link). Independent views, shared inspector panel.
 - **Filter bar redesign**: status filter buttons now include icons (⏱ processing, ✓ ready, ⚠ sparse, ✕ failed) and count badges. Total cost moved inline into the filter bar.
 - **Web ingest status fix**: `COMPLETED_PARTIAL` now treated as terminal state, no longer triggers "in progress" banner.
@@ -83,6 +130,7 @@
 - **i18n**: added 8 new keys (showLegend, hideLegend, showAll, invert, resetFilter, subType, tabs.documents, tabs.webIngest) in both en.json and ru.json.
 
 ### Dependencies
+
 - **React** 18.3 → 19.2, **TypeScript** 5.8 → 6.0, **Vite** 5.4 → 8.0
 - **Tailwind CSS** 3.4 → 4.2 (migrated from JS config to CSS-based `@theme`, PostCSS removed, `@tailwindcss/vite` plugin)
 - **Zod** 3.25 → 4.3, **ESLint** 9.32 → 10.2, **react-router-dom** 6.30 → 7.14
@@ -91,12 +139,14 @@
 - 50+ other npm packages updated to latest versions
 
 ### Backend
+
 - Batch document endpoints, audit pagination, URL-backed document pagination.
 - Dashboard totals and graph counters fixed to reflect full active library.
 
 ## 0.1.1 — 2026-04-07
 
 ### Highlights
+
 - **Universal entity taxonomy**: 10 domain-agnostic entity types (`person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`) designed to work across any domain — programming, medicine, law, finance, biology, engineering, and beyond. Domain-specific granularity via `sub_type` metadata.
 - **Pipeline intelligence upgrade**: graph extraction v6 with few-shot examples, relation catalog expanded from 49 to 88 canonical types, semantic chunking (2800 chars, 10% overlap, heading-aware), boilerplate detection, quality scoring, entity resolution, document summaries, and post-extraction type refinement.
 - **Hybrid search**: BM25 + vector cosine similarity merged via Reciprocal Rank Fusion (RRF) with field-weighted scoring (heading boost 1.5x, quality score multiplier).
@@ -105,6 +155,7 @@
 - **Bulk document actions**: batch delete, cancel processing, and reprocess via UI selection mode and REST endpoints.
 
 ### Pipeline
+
 - Graph extraction prompt v6 with comprehensive entity type guidance, coreference resolution rules, and 2 few-shot examples.
 - Relation catalog expanded from 49 to 88 canonical types: `calls`, `implements`, `extends`, `authenticates`, `contains`, `returns`, `validates`, `transforms`, `deployed_on`, `inherits_from`, `imports`, and 27 more.
 - Post-extraction type refinement: regex-based pass auto-reclassifies env vars, URL paths, HTTP methods, file paths, and status codes from generic `entity` to specific types.
@@ -123,6 +174,7 @@
 - Error handling: replaced silent `let _ =` patterns in ingestion worker with proper error logging for `promote_document_head`, entity resolution, and document summary generation.
 
 ### MCP
+
 - Added `ask` tool: grounded Q&A in a single call (replaces 3-call workflow of create_session + create_turn + get_execution).
 - Added `list_documents` tool: browse library contents with optional status filter.
 - Added `delete_document` tool: complete CRUD lifecycle for agents.
@@ -134,6 +186,7 @@
 - Updated MCP.md and MCP-RU.md with all 21 tools organized by category.
 
 ### Frontend
+
 - **Graph page**: Canvas2D renderer replaces SVG. Handles 10K+ nodes at interactive frame rates. Edge labels for selected node connections. 10 distinct entity type colors with updated legend and type filter dropdown. Level-of-detail label rendering. Adaptive edge budget scaling with zoom.
 - **Graph page**: all pan/zoom/hover interactions use refs instead of React state — zero re-renders during interaction.
 - **Documents page**: selection mode with checkboxes, select-all, and sticky bulk action toolbar (delete, cancel processing, retry). i18n translations for en/ru.
@@ -142,6 +195,7 @@
 - GraphNodeType contract: 10 universal entity types across contracts crate, API mapping, and frontend.
 
 ### Backend
+
 - Batch document endpoints: `POST /content/documents/batch-delete`, `batch-cancel`, `batch-reprocess` (max 100 per call).
 - Ingestion worker: skip-deleted document guard, skip-cancelled job guard.
 - ArangoDB relation type bug fix: `predicate` field now correctly maps to `relationType` in REST API responses.
@@ -151,6 +205,7 @@
 - RRF hybrid search fusion in `merge_chunks`.
 
 ### Benchmarks
+
 - Golden benchmark corpus: 72 files across 5 semantic directories (wikipedia, docs, code, documents, fixtures).
 - 10 benchmark suites with 102 test cases covering: Wikipedia recall, cross-document QA, noisy layouts, graph traversal, multiformat upload, programming docs, infrastructure docs, protocols, code comprehension, and PDF/DOCX/PPTX extraction.
 - Code-only dataset: 8 large real-world code files (Go, TypeScript, Python, Rust, Kubernetes operator, React, Terraform, Docker Compose) with 20 comprehension questions.
@@ -159,24 +214,28 @@
 - `make benchmark-golden` target runs all 5 golden suites.
 
 ### Documentation
+
 - README.md and README-RU.md: updated pipeline diagram, features list, roadmap (0.1.1 done items), MCP tool table.
 - MCP.md and MCP-RU.md: all 21 tools documented with descriptions and required parameters.
 - Benchmark README: restructured corpus description with directory layout table.
 - `.env.example`: added Redis URL, rerank flags, web crawl defaults, fixed model names.
 
 ### Schema
+
 - Migration `0002_document_summaries.sql`: added `content_document_head.document_summary` and `catalog_library.ai_summary` columns.
 
 ### Gates (all green)
+
 - `cargo fmt --all` — pass
-- `cargo clippy -p rustrag-backend --all-targets -- -D warnings` — pass
-- `cargo test -p rustrag-backend` — 381 tests, 0 failures
+- `cargo clippy -p ironrag-backend --all-targets -- -D warnings` — pass
+- `cargo test -p ironrag-backend` — 381 tests, 0 failures
 - `npx tsc --noEmit` (strict mode) — pass
 - `npx vite build` — pass
 
 ## 0.1.0 — 2026-04-06
 
 ### Highlights
+
 - **Full frontend rewrite**: replaced Leptos/Thaw Rust UI with React + shadcn/ui + Tailwind stack. Production-grade UI with i18n (en/ru), interactive knowledge graph, document management, AI assistant with evidence panel, and admin panel.
 - **Backend canonicalization**: eliminated all legacy `project_id` vocabulary, collapsed dual-head revision semantics, removed 63 clippy dead-code warnings, achieved green `make backend-lint` for the first time.
 - **Billing pipeline**: added cost tracking for graph extraction and query execution. Per-document and per-library cost summaries displayed in UI.
@@ -185,6 +244,7 @@
 - **Docker-first deployment**: separate frontend and backend images, nginx reverse proxy, one-command `docker compose up -d`.
 
 ### Architecture
+
 - Replaced `apps/web` Leptos crate with React SPA (Vite + TypeScript strict mode).
 - Removed `vendor/thaw-0.5.0-beta` patched UI library and all Leptos/leptos_axum dependencies.
 - Frontend served as separate nginx container; API proxied through nginx reverse proxy.
@@ -193,6 +253,7 @@
 - Shell bootstrap loads libraries from all visible workspaces.
 
 ### Backend
+
 - Renamed all `project_id` to `library_id` across 17 repository functions, 5 service files, all callers.
 - Replaced `DocumentRow`/`ChunkRow` shadow vocabulary: `current_revision_id` → `active_revision_id`, `active_status` → `document_state`, `active_mutation_kind/status` → `mutation_kind/status`.
 - Added `ContentDocumentHead::effective_revision_id()` and `latest_revision_id()` methods replacing ad-hoc fallback patterns.
@@ -203,6 +264,7 @@
 - Added `documentTitle` and `sourceUri` to `PreparedSegmentReference` in query responses.
 
 ### Frontend
+
 - 8 pages: Dashboard, Documents, Graph, AI Assistant, Admin, Swagger (live OpenAPI), Login, 404.
 - API layer with typed clients: `auth`, `documents`, `dashboard`, `query`, `knowledge`, `admin`, `billing`.
 - i18n with `react-i18next`: full English and Russian translations across all pages.
@@ -216,15 +278,17 @@
 - TypeScript strict mode enabled with zero errors.
 
 ### Deployment
+
 - `docker-compose-local.yml`: 7 services (postgres, redis, arangodb, backend, worker, frontend, nginx).
 - `docker-compose.yml`: production config with pre-built images.
 - `install.sh`: one-command installation from GitHub releases.
 - Nginx reverse proxy: `/v1/` → backend, `/` → frontend, `/mcp` redirect, SPA fallback.
 
 ### Gates (all green)
+
 - `cargo fmt --all` — pass
-- `cargo check -p rustrag-backend --tests` — pass
-- `cargo clippy -p rustrag-backend --all-targets -- -D warnings` — pass
+- `cargo check -p ironrag-backend --tests` — pass
+- `cargo clippy -p ironrag-backend --all-targets -- -D warnings` — pass
 - `cargo test --workspace` — pass
 - `make check` / `make check-strict` / `make enterprise-validate` — pass
 - Frontend `npx tsc --noEmit` (strict mode) — pass
@@ -233,31 +297,36 @@
 ## 0.0.4 - 2026-04-04
 
 ### Highlights
+
 - Added GitHub Release automation around the published Docker Hub release channel used by the Rust-only stack.
 - Split Compose surfaces into one default prebuilt deployment path, one manual local-build path, and one internal GitLab deployment path.
 - Added one-click `install.sh` installation without cloning the repository, with release-tag or `latest` resolution from GitHub.
 - Cut query and extraction orchestration over to one typed agent runtime with runtime-backed lifecycle, stage trace, and policy summaries across REST, MCP, and the assistant UI.
 
 ### Platform
-- Switched the default [`docker-compose.yml`](./docker-compose.yml) to published Docker Hub images so release installs no longer depend on local image builds.
-- Historical note: the legacy deployment surface `docker-compose-gitlab.yml` was removed (deleted); active compose files are now [`docker-compose.yml`](./docker-compose.yml) and [`docker-compose-local.yml`](./docker-compose-local.yml).
+
+- Switched the default `[docker-compose.yml](./docker-compose.yml)` to published Docker Hub images so release installs no longer depend on local image builds.
+- Historical note: the legacy deployment surface `docker-compose-gitlab.yml` was removed (deleted); active compose files are now `[docker-compose.yml](./docker-compose.yml)` and `[docker-compose-local.yml](./docker-compose-local.yml)`.
 - Updated root env documentation and release docs around the canonical `docker-compose.yml` and `docker-compose-local.yml` split.
-- Tracked the canonical workspace [`Cargo.lock`](./Cargo.lock) in release artifacts so clean GitHub checkouts can build the API Docker image without missing-file failures.
+- Tracked the canonical workspace `[Cargo.lock](./Cargo.lock)` in release artifacts so clean GitHub checkouts can build the API Docker image without missing-file failures.
 - Added the canonical `apps/api/src/agent_runtime/` subsystem with typed task contracts, staged execution, explicit policy decisions, and owner-linked runtime persistence.
 - Replaced full-library graph rebuilds during ingestion with targeted canonical graph reconciliation.
 - Reworked knowledge generation and operations read models around canonical revision readiness.
 
 ### Product
+
 - Assistant execution surfaces now render runtime lifecycle, stage summaries, policy interventions, and explicit policy-rejected or policy-terminated outcomes instead of generic failures.
 - Documents, Dashboard, Graph, and auth surfaces were rebalanced around the canonical workbench layout.
 
 ### Reliability And Performance
+
 - Fixed long-running document ingestion stalls by eliminating graph-persistence races in canonical merge/write paths.
 - Restored truthful operator state reporting so idle libraries now surface `healthy` plus `graph_ready`.
 
 ## 0.0.3 - 2026-04-03
 
 ### Highlights
+
 - Added the full structured preparation pipeline: semantic sections, structure-aware chunks, typed technical facts, grounded graph evidence, and answer verification.
 - Added canonical URL ingestion for `single_page` and `recursive_crawl`.
 - Completed the first-run bootstrap flow with canonical provider/model bindings.
@@ -265,6 +334,7 @@
 ## 0.0.2 - 2026-03-31
 
 ### Highlights
+
 - Added the dedicated Assistant surface with preserved chat history, attachments, grounded context, and responsive layouts.
 - Added the Admin `MCP` section with setup snippets for Codex, Cursor, Claude Code, VS Code, and generic HTTP clients.
 - Added the grounded-query benchmark harness.

@@ -1,0 +1,36 @@
+app:
+  environment: production
+  frontendOrigin: https://ironrag.example.com
+
+startup:
+  mode: startup_job
+
+storage:
+  provider: s3
+  topology: shared_cluster
+  s3:
+    mode: external
+    bucket: ironrag
+    endpoint: https://s3.example.com
+    region: us-east-1
+    accessKeyId: replace-me
+    secretAccessKey: replace-me
+
+dependencies:
+  postgres:
+    mode: external
+    host: postgres.example.internal
+    port: 5432
+    database: ironrag
+    username: ironrag
+    password: replace-me
+  redis:
+    mode: external
+    url: redis://redis.example.internal:6379
+  arangodb:
+    mode: external
+    host: arangodb.example.internal
+    port: 8529
+    database: ironrag
+    username: root
+    password: replace-me

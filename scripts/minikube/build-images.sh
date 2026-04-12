@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BACKEND_IMAGE="${BACKEND_IMAGE:-rustrag-backend:dev}"
-FRONTEND_IMAGE="${FRONTEND_IMAGE:-rustrag-frontend:dev}"
+BACKEND_IMAGE="${BACKEND_IMAGE:-ironrag-backend:dev}"
+FRONTEND_IMAGE="${FRONTEND_IMAGE:-ironrag-frontend:dev}"
 START_MINIKUBE="${START_MINIKUBE:-0}"
 MINIKUBE_RESET_ON_FAILURE="${MINIKUBE_RESET_ON_FAILURE:-1}"
 

@@ -7,6 +7,7 @@ use crate::{
         catalog_repository::{
             self, CatalogLibraryConnectorRow, CatalogLibraryRow, CatalogWorkspaceRow,
         },
+        content_repository,
         ops_repository::{self, OpsAsyncOperationRow},
         query_repository::{self, QueryConversationRow},
         runtime_repository,
@@ -293,7 +294,7 @@ pub async fn load_workspace_and_authorize(
     let workspace =
         catalog_repository::get_workspace_by_id(&state.persistence.postgres, workspace_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("workspace", workspace_id))?;
     authorize_workspace_permission(auth, workspace.id, accepted_permissions)?;
     Ok(workspace)
@@ -307,7 +308,7 @@ pub async fn load_library_and_authorize(
 ) -> Result<CatalogLibraryRow, ApiError> {
     let library = catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
     authorize_library_permission(auth, library.workspace_id, library.id, accepted_permissions)?;
     Ok(library)
@@ -322,7 +323,7 @@ pub async fn load_connector_and_authorize(
     let connector =
         catalog_repository::get_connector_by_id(&state.persistence.postgres, connector_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("connector", connector_id))?;
     authorize_connector_permission(
         auth,
@@ -343,7 +344,7 @@ pub async fn load_provider_credential_and_authorize(
     let credential =
         ai_repository::get_provider_credential_by_id(&state.persistence.postgres, credential_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("provider_credential", credential_id))?;
     if let Some(workspace_id) = credential.workspace_id {
         authorize_provider_credential_permission(
@@ -367,7 +368,7 @@ pub async fn load_library_binding_and_authorize(
     let binding =
         ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, binding_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
     match (binding.workspace_id, binding.library_id) {
         (Some(workspace_id), Some(library_id)) => authorize_library_binding_permission(
@@ -391,7 +392,7 @@ pub async fn load_query_session_and_authorize(
 ) -> Result<QueryConversationRow, ApiError> {
     let session = query_repository::get_conversation_by_id(&state.persistence.postgres, session_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("query_session", session_id))?;
     authorize_query_session_permission(
         auth,
@@ -411,7 +412,7 @@ pub async fn load_query_execution_and_authorize(
     let execution =
         query_repository::get_execution_by_id(&state.persistence.postgres, execution_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
     authorize_library_permission(
         auth,
@@ -431,7 +432,7 @@ pub async fn load_runtime_execution_and_authorize(
     let execution =
         runtime_repository::get_runtime_execution_by_id(&state.persistence.postgres, execution_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("runtime_execution", execution_id))?;
     let scope = state
         .canonical_services
@@ -465,7 +466,7 @@ pub async fn load_async_operation_and_authorize(
     let operation =
         ops_repository::get_async_operation_by_id(&state.persistence.postgres, operation_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("async_operation", operation_id))?;
     match operation.library_id {
         Some(library_id) => {
@@ -492,7 +493,7 @@ pub async fn load_content_document_and_authorize(
         .arango_document_store
         .get_document(document_id)
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
     authorize_document_permission(
         auth,
@@ -503,6 +504,30 @@ pub async fn load_content_document_and_authorize(
     )?;
     Ok(AuthorizedContentDocument {
         id: document.document_id,
+        workspace_id: document.workspace_id,
+        library_id: document.library_id,
+    })
+}
+
+pub async fn load_canonical_content_document_and_authorize(
+    auth: &AuthContext,
+    state: &AppState,
+    document_id: Uuid,
+    accepted_permissions: &[&str],
+) -> Result<AuthorizedContentDocument, ApiError> {
+    let document = content_repository::get_document_by_id(&state.persistence.postgres, document_id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+    authorize_document_permission(
+        auth,
+        document.workspace_id,
+        document.library_id,
+        document.id,
+        accepted_permissions,
+    )?;
+    Ok(AuthorizedContentDocument {
+        id: document.id,
         workspace_id: document.workspace_id,
         library_id: document.library_id,
     })

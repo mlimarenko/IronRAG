@@ -449,50 +449,34 @@ pub async fn list_document_costs_by_library(
     library_id: Uuid,
 ) -> Result<Vec<DocumentCostRow>, sqlx::Error> {
     sqlx::query_as::<_, DocumentCostRow>(
-        "with library_costs as (
+        "with document_rollup as (
             select
-                bpc.owning_execution_kind,
-                bpc.owning_execution_id,
-                bec.total_cost,
-                bec.currency_code,
-                bec.provider_call_count
-            from billing_execution_cost bec
-            join billing_provider_call bpc
-              on bpc.owning_execution_kind = bec.owning_execution_kind
-             and bpc.owning_execution_id = bec.owning_execution_id
+                coalesce(ij.knowledge_document_id, rge.document_id) as document_id,
+                coalesce(sum(bc.total_price), 0) as total_cost,
+                coalesce(max(bc.currency_code), 'USD') as currency_code,
+                count(distinct bpc.id)::bigint as provider_call_count
+            from billing_provider_call bpc
+            left join billing_usage bu on bu.provider_call_id = bpc.id
+            left join billing_charge bc on bc.usage_id = bu.id
+            left join ingest_attempt ia on ia.id = bpc.owning_execution_id
+              and bpc.owning_execution_kind = 'ingest_attempt'
+            left join ingest_job ij on ij.id = ia.job_id
+            left join runtime_graph_extraction rge on rge.id = bpc.owning_execution_id
+              and bpc.owning_execution_kind = 'graph_extraction_attempt'
             where bpc.library_id = $1
-         ),
-         -- Costs via ingest_attempt → ingest_job → document
-         ingest_costs as (
-            select ij.knowledge_document_id as document_id,
-                   lc.total_cost, lc.currency_code, lc.provider_call_count
-            from library_costs lc
-            join ingest_attempt ia on ia.id = lc.owning_execution_id
-            join ingest_job ij on ij.id = ia.job_id
-            where lc.owning_execution_kind = 'ingest_attempt'
-              and ij.knowledge_document_id is not null
-         ),
-         -- Costs via graph_extraction → runtime_graph_extraction → document
-         graph_costs as (
-            select rge.document_id,
-                   lc.total_cost, lc.currency_code, lc.provider_call_count
-            from library_costs lc
-            join runtime_graph_extraction rge on rge.id = lc.owning_execution_id
-            where lc.owning_execution_kind = 'graph_extraction_attempt'
-              and rge.document_id is not null
-         ),
-         all_costs as (
-            select * from ingest_costs
-            union all
-            select * from graph_costs
+              and (ij.knowledge_document_id is not null or rge.document_id is not null)
+            group by coalesce(ij.knowledge_document_id, rge.document_id)
          )
-         select document_id, sum(total_cost) as total_cost,
-                coalesce(max(currency_code), 'USD') as currency_code,
-                sum(provider_call_count)::bigint as provider_call_count
-         from all_costs
-         where document_id is not null
-         group by document_id
-         order by total_cost desc",
+         select
+            d.id as document_id,
+            coalesce(dr.total_cost, 0) as total_cost,
+            coalesce(dr.currency_code, 'USD') as currency_code,
+            coalesce(dr.provider_call_count, 0)::bigint as provider_call_count
+         from content_document d
+         left join document_rollup dr on dr.document_id = d.id
+         where d.library_id = $1
+           and d.deleted_at is null
+         order by coalesce(dr.total_cost, 0) desc, d.created_at desc",
     )
     .bind(library_id)
     .fetch_all(postgres)
@@ -504,16 +488,30 @@ pub async fn get_library_cost_summary(
     library_id: Uuid,
 ) -> Result<Option<LibraryCostSummaryRow>, sqlx::Error> {
     sqlx::query_as::<_, LibraryCostSummaryRow>(
-        "select
-            coalesce(sum(bec.total_cost), 0) as total_cost,
-            coalesce(max(bec.currency_code), 'USD') as currency_code,
-            count(distinct bpc.id)::bigint as document_count,
-            coalesce(sum(bec.provider_call_count), 0)::bigint as provider_call_count
-         from billing_execution_cost bec
-         join billing_provider_call bpc
-           on bpc.owning_execution_kind = bec.owning_execution_kind
-          and bpc.owning_execution_id = bec.owning_execution_id
-         where bpc.library_id = $1",
+        "with execution_rollup as (
+            select
+                coalesce(ij.knowledge_document_id, rge.document_id) as document_id,
+                bec.total_cost,
+                bec.currency_code,
+                bec.provider_call_count
+            from billing_execution_cost bec
+            join billing_provider_call bpc
+              on bpc.owning_execution_kind = bec.owning_execution_kind
+             and bpc.owning_execution_id = bec.owning_execution_id
+            left join ingest_attempt ia on ia.id = bpc.owning_execution_id
+              and bpc.owning_execution_kind = 'ingest_attempt'
+            left join ingest_job ij on ij.id = ia.job_id
+            left join runtime_graph_extraction rge on rge.id = bpc.owning_execution_id
+              and bpc.owning_execution_kind = 'graph_extraction_attempt'
+            where bpc.library_id = $1
+              and (ij.knowledge_document_id is not null or rge.document_id is not null)
+         )
+         select
+            coalesce(sum(execution_rollup.total_cost), 0) as total_cost,
+            coalesce(max(execution_rollup.currency_code), 'USD') as currency_code,
+            count(distinct execution_rollup.document_id)::bigint as document_count,
+            coalesce(sum(execution_rollup.provider_call_count), 0)::bigint as provider_call_count
+         from execution_rollup",
     )
     .bind(library_id)
     .fetch_optional(postgres)

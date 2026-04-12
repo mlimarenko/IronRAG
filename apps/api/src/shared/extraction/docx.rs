@@ -8,6 +8,7 @@ use zip::ZipArchive;
 use crate::shared::extraction::{
     ExtractedImage, ExtractionOutput, ExtractionSourceMetadata, RawExtractionPage,
     build_text_layout,
+    table_markdown::{render_markdown_table_from_rows, render_plain_table_rows},
 };
 
 pub fn extract_docx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
@@ -29,7 +30,7 @@ pub fn extract_docx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         match node.tag_name().name() {
             "tbl" => {
                 // Only handle top-level tables (not nested inside other tables)
-                if node.ancestors().any(|a| a.tag_name().name() == "tbl") {
+                if node.ancestors().skip(1).any(|a| a.tag_name().name() == "tbl") {
                     continue;
                 }
                 let table_md = extract_table_as_markdown(&node);
@@ -109,6 +110,7 @@ pub fn extract_docx(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         }),
         provider_kind: None,
         model_name: None,
+        usage_json: serde_json::json!({}),
         extracted_images,
     })
 }
@@ -131,26 +133,8 @@ fn extract_table_as_markdown(table_node: &roxmltree::Node<'_, '_>) -> String {
         }
     }
 
-    if rows.len() < 2 {
-        return rows.iter().map(|r| r.join(" ")).collect::<Vec<_>>().join("\n");
-    }
-
-    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    if max_cols == 0 {
-        return String::new();
-    }
-
-    let mut lines = Vec::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        let mut padded = row.clone();
-        padded.resize(max_cols, String::new());
-        lines.push(format!("| {} |", padded.join(" | ")));
-        if row_index == 0 {
-            let separator = (0..max_cols).map(|_| "---").collect::<Vec<_>>();
-            lines.push(format!("| {} |", separator.join(" | ")));
-        }
-    }
-    lines.join("\n")
+    render_markdown_table_from_rows(&rows)
+        .unwrap_or_else(|| render_plain_table_rows(&rows, " ").join("\n"))
 }
 
 fn extract_drawing_image_rel_id(drawing_node: &roxmltree::Node<'_, '_>) -> Option<String> {

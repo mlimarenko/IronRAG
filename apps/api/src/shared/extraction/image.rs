@@ -13,6 +13,18 @@ use crate::{
     },
 };
 
+const IMAGE_OCR_PROMPT: &str = "Return only the text visible in this image as plain UTF-8 text, one logical flow with newlines where line breaks are visible. Do not add headings, explanations, summaries, entity lists, markdown fences, or wrapping quotes. If no readable text is visible, return an empty string.";
+const IMAGE_DESCRIPTION_PROMPT: &str = "Describe this image in detail, including any text, data, tables, diagrams, charts, formulas, signage, and other visually meaningful content that is visible.";
+
+pub struct ImageVisionOutput {
+    pub text: String,
+    pub warnings: Vec<String>,
+    pub provider_kind: String,
+    pub model_name: String,
+    pub usage_json: serde_json::Value,
+    pub mime_type: String,
+}
+
 pub async fn extract_image_with_provider(
     gateway: &dyn LlmGateway,
     provider_kind: &str,
@@ -22,6 +34,73 @@ pub async fn extract_image_with_provider(
     mime_type: &str,
     file_bytes: &[u8],
 ) -> Result<ExtractionOutput> {
+    let response = run_vision_image_request(
+        gateway,
+        provider_kind,
+        model_name,
+        api_key,
+        base_url,
+        mime_type,
+        file_bytes,
+        IMAGE_OCR_PROMPT,
+    )
+    .await?;
+
+    let layout = build_text_layout_from_content(&response.text);
+
+    Ok(ExtractionOutput {
+        extraction_kind: "vision_image".into(),
+        content_text: layout.content_text,
+        page_count: Some(1),
+        warnings: response.warnings,
+        source_metadata: ExtractionSourceMetadata {
+            source_format: "image".to_string(),
+            page_count: Some(1),
+            line_count: i32::try_from(layout.structure_hints.lines.len()).unwrap_or(i32::MAX),
+        },
+        structure_hints: layout.structure_hints,
+        source_map: serde_json::json!({
+            "mime_type": response.mime_type,
+        }),
+        provider_kind: Some(response.provider_kind),
+        model_name: Some(response.model_name),
+        usage_json: response.usage_json,
+        extracted_images: Vec::new(),
+    })
+}
+
+pub async fn describe_image_with_provider(
+    gateway: &dyn LlmGateway,
+    provider_kind: &str,
+    model_name: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    mime_type: &str,
+    file_bytes: &[u8],
+) -> Result<ImageVisionOutput> {
+    run_vision_image_request(
+        gateway,
+        provider_kind,
+        model_name,
+        api_key,
+        base_url,
+        mime_type,
+        file_bytes,
+        IMAGE_DESCRIPTION_PROMPT,
+    )
+    .await
+}
+
+async fn run_vision_image_request(
+    gateway: &dyn LlmGateway,
+    provider_kind: &str,
+    model_name: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    mime_type: &str,
+    file_bytes: &[u8],
+    prompt: &str,
+) -> Result<ImageVisionOutput> {
     let normalized_payload = prepare_vision_image_payload(file_bytes, mime_type).context(
         "image payload could not be decoded and normalized for vision extraction; re-export as PNG/JPEG and retry",
     )?;
@@ -33,8 +112,7 @@ pub async fn extract_image_with_provider(
         .vision_extract(VisionRequest {
             provider_kind: provider_kind.to_string(),
             model_name: model_name.to_string(),
-            prompt: "Return only the text visible in this image as plain UTF-8 text, one logical flow with newlines where line breaks are visible. Do not add headings, explanations, summaries, entity lists, markdown fences, or wrapping quotes. If no readable text is visible, return an empty string."
-                .to_string(),
+            prompt: prompt.to_string(),
             image_bytes: request_image_bytes,
             mime_type: request_mime_type.clone(),
             api_key_override: Some(api_key.to_string()),
@@ -47,25 +125,13 @@ pub async fn extract_image_with_provider(
         })
         .await?;
 
-    let layout = build_text_layout_from_content(&response.output_text);
-
-    Ok(ExtractionOutput {
-        extraction_kind: "vision_image".into(),
-        content_text: layout.content_text,
-        page_count: Some(1),
+    Ok(ImageVisionOutput {
+        text: response.output_text,
         warnings,
-        source_metadata: ExtractionSourceMetadata {
-            source_format: "image".to_string(),
-            page_count: Some(1),
-            line_count: i32::try_from(layout.structure_hints.lines.len()).unwrap_or(i32::MAX),
-        },
-        structure_hints: layout.structure_hints,
-        source_map: serde_json::json!({
-            "mime_type": request_mime_type,
-        }),
-        provider_kind: Some(response.provider_kind),
-        model_name: Some(response.model_name),
-        extracted_images: Vec::new(),
+        provider_kind: response.provider_kind,
+        model_name: response.model_name,
+        usage_json: response.usage_json,
+        mime_type: request_mime_type,
     })
 }
 
@@ -289,6 +355,32 @@ mod tests {
         assert_eq!(output.source_map["mime_type"], serde_json::json!("image/png"));
         assert!(output.warnings.len() >= 1);
         assert!(output.content_text.contains("[image/png]"));
+    }
+
+    #[tokio::test]
+    async fn source_image_description_reuses_the_normalized_png_payload() {
+        let output = describe_image_with_provider(
+            &FakeGateway,
+            "openai",
+            "gpt-5.4-mini",
+            "test-key",
+            None,
+            "image/webp",
+            &valid_png_bytes(),
+        )
+        .await
+        .expect("image description");
+
+        assert_eq!(output.provider_kind, "openai");
+        assert_eq!(output.model_name, "gpt-5.4-mini");
+        assert_eq!(output.mime_type, "image/png");
+        assert!(output.text.contains("[image/png]"));
+        assert!(
+            output
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("normalized image payload from image/webp"))
+        );
     }
 
     #[test]

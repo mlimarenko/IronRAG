@@ -8,7 +8,7 @@ import 'swagger-ui-react/swagger-ui.css';
 export default function SwaggerPage() {
   const { t } = useTranslation();
   const [state, setState] = useState<'loading' | 'loaded' | 'error'>('loading');
-  const specUrl = `${window.location.origin}/v1/openapi/rustrag.openapi.yaml`;
+  const specUrl = `${window.location.origin}/v1/openapi/ironrag.openapi.yaml`;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">

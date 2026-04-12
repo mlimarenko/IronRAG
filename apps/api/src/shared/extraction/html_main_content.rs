@@ -65,6 +65,7 @@ pub fn extract_html_main_content(
         }),
         provider_kind: None,
         model_name: None,
+        usage_json: serde_json::json!({}),
         extracted_images: Vec::new(),
     })
 }
@@ -593,7 +594,7 @@ mod tests {
               <body>
                 <nav>Top navigation</nav>
                 <main>
-                  <h1>RustRAG Docs</h1>
+                  <h1>IronRAG Docs</h1>
                   <p>Ship one canonical ingestion path.</p>
                   <ul><li>Single page</li><li>Recursive crawl</li></ul>
                   <a href="/guide">Guide</a>
@@ -612,7 +613,7 @@ mod tests {
             output.source_map.get("title").and_then(serde_json::Value::as_str),
             Some("Docs Home")
         );
-        assert!(output.content_text.contains("# RustRAG Docs"));
+        assert!(output.content_text.contains("# IronRAG Docs"));
         assert!(output.content_text.contains("Ship one canonical ingestion path."));
         assert!(!output.content_text.contains("Top navigation"));
         assert!(!output.content_text.contains("Footer"));

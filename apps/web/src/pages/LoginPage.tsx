@@ -169,7 +169,7 @@ export default function LoginPage() {
                 aria-hidden="true"
                 className="h-9 w-auto shrink-0"
               />
-              <h1 className="text-2xl font-bold tracking-tight" style={{ color: 'hsl(var(--shell-foreground))' }}>RustRAG</h1>
+              <h1 className="text-2xl font-bold tracking-tight" style={{ color: 'hsl(var(--shell-foreground))' }}>IronRAG</h1>
             </div>
             <p className="text-sm leading-relaxed max-w-[320px]" style={{ color: 'hsl(224 14% 55%)' }}>
               {t('login.tagline')}
@@ -210,7 +210,7 @@ export default function LoginPage() {
                 aria-hidden="true"
                 className="h-8 w-auto shrink-0"
               />
-              <h1 className="text-xl font-bold tracking-tight">RustRAG</h1>
+              <h1 className="text-xl font-bold tracking-tight">IronRAG</h1>
             </div>
             <p className="text-sm text-muted-foreground">{t('login.knowledgeSystemLogin')}</p>
           </div>

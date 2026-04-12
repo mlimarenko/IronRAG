@@ -1,25 +1,17 @@
 #![allow(clippy::missing_errors_doc, clippy::too_many_arguments, clippy::too_many_lines)]
 
+mod coordination;
+mod snapshot;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use super::{RuntimeGraphConvergenceCountersRow, RuntimeGraphFilteredArtifactRow};
+use super::RuntimeGraphFilteredArtifactRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct RuntimeGraphSnapshotRow {
-    pub library_id: Uuid,
-    pub graph_status: String,
-    pub projection_version: i64,
-    pub node_count: i32,
-    pub edge_count: i32,
-    pub provenance_coverage_percent: Option<f64>,
-    pub last_built_at: Option<DateTime<Utc>>,
-    pub last_error_message: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
+pub use coordination::*;
+pub use snapshot::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RuntimeGraphNodeRow {
@@ -70,29 +62,6 @@ pub struct RuntimeGraphEvidenceRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[must_use]
-pub fn runtime_graph_evidence_identity_key(
-    target_kind: &str,
-    target_id: Uuid,
-    document_id: Option<Uuid>,
-    revision_id: Option<Uuid>,
-    activated_by_attempt_id: Option<Uuid>,
-    chunk_id: Option<Uuid>,
-    page_ref: Option<&str>,
-    source_file_name: Option<&str>,
-    evidence_context_key: &str,
-) -> String {
-    format!(
-        "{target_kind}|{target_id}|{}|{}|{}|{}|{}|{}|{evidence_context_key}",
-        document_id.map_or_else(|| "-".to_string(), |value| value.to_string()),
-        revision_id.map_or_else(|| "-".to_string(), |value| value.to_string()),
-        activated_by_attempt_id.map_or_else(|| "-".to_string(), |value| value.to_string()),
-        chunk_id.map_or_else(|| "-".to_string(), |value| value.to_string()),
-        page_ref.unwrap_or_default(),
-        source_file_name.unwrap_or_default(),
-    )
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RuntimeGraphEvidenceLifecycleRow {
     pub id: Uuid,
@@ -113,13 +82,6 @@ pub struct RuntimeGraphEvidenceLifecycleRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct RuntimeGraphContributionCountsRow {
-    pub node_count: i64,
-    pub edge_count: i64,
-    pub evidence_count: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RuntimeGraphProjectionCountsRow {
     pub node_count: i64,
     pub edge_count: i64,
@@ -134,65 +96,31 @@ pub struct RuntimeGraphDocumentLinkRow {
     pub support_count: i64,
 }
 
-/// Loads the active runtime graph snapshot for one library.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while querying the graph snapshot.
-pub async fn get_runtime_graph_snapshot(
-    pool: &PgPool,
-    library_id: Uuid,
-) -> Result<Option<RuntimeGraphSnapshotRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphSnapshotRow>(
-        "select library_id, graph_status, projection_version, node_count, edge_count,
-            provenance_coverage_percent, last_built_at, last_error_message, created_at, updated_at
-         from runtime_graph_snapshot
-         where library_id = $1",
+fn runtime_graph_evidence_identity_key(
+    target_kind: &str,
+    target_id: Uuid,
+    document_id: Option<Uuid>,
+    revision_id: Option<Uuid>,
+    activated_by_attempt_id: Option<Uuid>,
+    chunk_id: Option<Uuid>,
+    page_ref: Option<&str>,
+    source_file_name: Option<&str>,
+    evidence_context_key: &str,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        target_kind,
+        target_id,
+        document_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string()),
+        revision_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string()),
+        activated_by_attempt_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        chunk_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string()),
+        page_ref.unwrap_or("none"),
+        source_file_name.unwrap_or("none"),
+        evidence_context_key
     )
-    .bind(library_id)
-    .fetch_optional(pool)
-    .await
-}
-
-/// Upserts a runtime graph snapshot.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while inserting or updating the graph snapshot.
-pub async fn upsert_runtime_graph_snapshot(
-    pool: &PgPool,
-    library_id: Uuid,
-    graph_status: &str,
-    projection_version: i64,
-    node_count: i32,
-    edge_count: i32,
-    provenance_coverage_percent: Option<f64>,
-    last_error_message: Option<&str>,
-) -> Result<RuntimeGraphSnapshotRow, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphSnapshotRow>(
-        "insert into runtime_graph_snapshot (
-            library_id, graph_status, projection_version, node_count, edge_count,
-            provenance_coverage_percent, last_built_at, last_error_message
-         ) values ($1, $2, $3, $4, $5, $6, now(), $7)
-         on conflict (library_id) do update
-         set graph_status = excluded.graph_status,
-             projection_version = excluded.projection_version,
-             node_count = excluded.node_count,
-             edge_count = excluded.edge_count,
-             provenance_coverage_percent = excluded.provenance_coverage_percent,
-             last_built_at = now(),
-             last_error_message = excluded.last_error_message,
-             updated_at = now()
-         returning library_id, graph_status, projection_version, node_count, edge_count,
-            provenance_coverage_percent, last_built_at, last_error_message, created_at, updated_at",
-    )
-    .bind(library_id)
-    .bind(graph_status)
-    .bind(projection_version)
-    .bind(node_count)
-    .bind(edge_count)
-    .bind(provenance_coverage_percent)
-    .bind(last_error_message)
-    .fetch_one(pool)
-    .await
 }
 
 /// Persists one filtered graph artifact for later diagnostics.
@@ -233,133 +161,6 @@ pub async fn create_runtime_graph_filtered_artifact(
     .bind(filter_reason)
     .bind(summary)
     .bind(metadata_json)
-    .fetch_one(pool)
-    .await
-}
-
-/// Lists filtered graph artifacts for one library.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while querying filtered artifact rows.
-pub async fn list_runtime_graph_filtered_artifacts_by_library(
-    pool: &PgPool,
-    library_id: Uuid,
-) -> Result<Vec<RuntimeGraphFilteredArtifactRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphFilteredArtifactRow>(
-        "select id, library_id, ingestion_run_id, revision_id, target_kind, candidate_key,
-            source_node_key, target_node_key, relation_type, filter_reason, summary, metadata_json, created_at
-         from runtime_graph_filtered_artifact
-         where library_id = $1
-         order by created_at desc, id desc",
-    )
-    .bind(library_id)
-    .fetch_all(pool)
-    .await
-}
-
-/// Loads convergence and filtered-artifact counters for one library.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while querying convergence counters.
-pub async fn load_runtime_graph_convergence_counters(
-    pool: &PgPool,
-    library_id: Uuid,
-) -> Result<RuntimeGraphConvergenceCountersRow, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphConvergenceCountersRow>(
-        "with visible_runs as (
-            select run.status
-            from runtime_ingestion_run as run
-            where run.library_id = $1
-              and (
-                    run.document_id is null
-                    or not exists (
-                        select 1
-                        from content_document
-                        where content_document.id = run.document_id
-                          and content_document.deleted_at is not null
-                    )
-              )
-         ),
-         backlog as (
-            select
-                count(*) filter (where status = 'queued') as queued_document_count,
-                count(*) filter (where status = 'processing') as processing_document_count,
-                count(*) filter (where status = 'ready_no_graph') as ready_no_graph_count
-            from visible_runs
-         ),
-         mutation_backlog as (
-            select
-                count(*) filter (
-                    where operation_kind in ('append', 'replace')
-                      and mutation_state in ('accepted', 'running')
-                ) as pending_update_count,
-                count(*) filter (
-                    where operation_kind = 'delete'
-                      and mutation_state in ('accepted', 'running')
-                ) as pending_delete_count
-            from content_mutation
-            where library_id = $1
-         ),
-         latest_failed_mutation as (
-            select operation_kind
-            from content_mutation
-            where library_id = $1
-              and mutation_state = 'failed'
-            order by requested_at desc, id desc
-            limit 1
-         ),
-         filtered as (
-            select
-                count(distinct artifact_identity) as filtered_artifact_count,
-                count(distinct case when filter_reason = 'empty_relation' then artifact_identity end) as filtered_empty_relation_count,
-                count(distinct case when filter_reason = 'degenerate_self_loop' then artifact_identity end) as filtered_degenerate_loop_count
-            from (
-                select
-                    concat_ws(
-                        ':',
-                        coalesce(artifact.revision_id::text, 'none'),
-                        coalesce(artifact.ingestion_run_id::text, 'none'),
-                        artifact.target_kind,
-                        artifact.candidate_key,
-                        artifact.filter_reason
-                    ) as artifact_identity,
-                    artifact.filter_reason
-                from runtime_graph_filtered_artifact as artifact
-                left join content_revision as revision
-                    on revision.id = artifact.revision_id
-                left join content_document as document
-                    on document.id = revision.document_id
-                left join content_document_head as document_head
-                    on document_head.document_id = document.id
-                where artifact.library_id = $1
-                  and (
-                        artifact.revision_id is null
-                        or (
-                            document.deleted_at is null
-                            and (
-                                document_head.active_revision_id = revision.id
-                                or document_head.readable_revision_id = revision.id
-                            )
-                        )
-                  )
-            ) as active_filtered
-         )
-         select
-            coalesce(backlog.queued_document_count, 0) as queued_document_count,
-            coalesce(backlog.processing_document_count, 0) as processing_document_count,
-            coalesce(backlog.ready_no_graph_count, 0) as ready_no_graph_count,
-            coalesce(mutation_backlog.pending_update_count, 0) as pending_update_count,
-            coalesce(mutation_backlog.pending_delete_count, 0) as pending_delete_count,
-            coalesce(filtered.filtered_artifact_count, 0) as filtered_artifact_count,
-            coalesce(filtered.filtered_empty_relation_count, 0) as filtered_empty_relation_count,
-            coalesce(filtered.filtered_degenerate_loop_count, 0) as filtered_degenerate_loop_count,
-            latest_failed_mutation.operation_kind as latest_failed_mutation_kind
-         from backlog
-         cross join mutation_backlog
-         cross join filtered
-         left join latest_failed_mutation on true",
-    )
-    .bind(library_id)
     .fetch_one(pool)
     .await
 }
@@ -1248,57 +1049,6 @@ pub async fn delete_runtime_graph_nodes_without_support(
     .bind(library_id)
     .bind(projection_version)
     .fetch_all(pool)
-    .await
-}
-
-/// Counts graph contributions that are still linked to one document.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while querying the evidence rows.
-pub async fn count_runtime_graph_contributions_by_document(
-    pool: &PgPool,
-    library_id: Uuid,
-    document_id: Uuid,
-) -> Result<RuntimeGraphContributionCountsRow, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphContributionCountsRow>(
-        "select
-            count(distinct case when target_kind = 'node' then target_id end) as node_count,
-            count(distinct case when target_kind = 'edge' then target_id end) as edge_count,
-            count(*) as evidence_count
-         from runtime_graph_evidence
-         where library_id = $1 and document_id = $2 and is_active = true",
-    )
-    .bind(library_id)
-    .bind(document_id)
-    .fetch_one(pool)
-    .await
-}
-
-/// Counts active graph contributions linked to one logical content revision.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while querying revision-scoped evidence counts.
-pub async fn count_runtime_graph_contributions_by_content_revision(
-    pool: &PgPool,
-    library_id: Uuid,
-    document_id: Uuid,
-    revision_id: Uuid,
-) -> Result<RuntimeGraphContributionCountsRow, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphContributionCountsRow>(
-        "select
-            count(distinct case when target_kind = 'node' then target_id end) as node_count,
-            count(distinct case when target_kind = 'edge' then target_id end) as edge_count,
-            count(*) as evidence_count
-         from runtime_graph_evidence
-         where library_id = $1
-           and document_id = $2
-           and is_active = true
-           and (revision_id = $3 or revision_id is null)",
-    )
-    .bind(library_id)
-    .bind(document_id)
-    .bind(revision_id)
-    .fetch_one(pool)
     .await
 }
 

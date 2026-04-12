@@ -1,3 +1,8 @@
+mod extraction;
+mod failure;
+mod runtime;
+mod web_jobs;
+
 use std::{
     sync::{
         Arc,
@@ -11,15 +16,12 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{sync::broadcast, task::JoinHandle, time};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::{
-        arangodb::document_store::KnowledgeRevisionRow,
-        repositories::{content_repository, ingest_repository},
-    },
+    infra::repositories::{content_repository, ingest_repository},
     services::{
         content::service::{MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand},
         ingest::service::{
@@ -30,9 +32,14 @@ use crate::{
             INGEST_STAGE_WEB_MATERIALIZE_PAGE, LeaseAttemptCommand, RecordStageEventCommand,
         },
     },
-    shared::extraction::file_extract::{
-        FileExtractionPlan, UploadAdmissionError, build_inline_text_extraction_plan,
-    },
+    shared::extraction::file_extract::{FileExtractionPlan, UploadAdmissionError},
+};
+
+use self::{
+    extraction::{generate_document_summary_from_blocks, resolve_canonical_extract_content},
+    failure::fail_canonical_ingest_job,
+    runtime::run_ingestion_worker_pool,
+    web_jobs::{run_canonical_web_discovery_job, run_canonical_web_materialize_page_job},
 };
 
 const WORKER_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -57,7 +64,7 @@ impl Drop for AttemptHeartbeatGuard {
 }
 
 #[derive(Debug)]
-struct CanonicalExtractContentError {
+pub(super) struct CanonicalExtractContentError {
     failure_code: String,
     retryable: bool,
     message: String,
@@ -105,9 +112,12 @@ impl std::fmt::Display for CanonicalExtractContentError {
 
 impl std::error::Error for CanonicalExtractContentError {}
 
-struct CanonicalExtractedContent {
+pub(super) struct CanonicalExtractedContent {
     extraction_plan: FileExtractionPlan,
     stage_details: serde_json::Value,
+    provider_kind: Option<String>,
+    model_name: Option<String>,
+    usage_json: serde_json::Value,
 }
 
 pub fn spawn_ingestion_worker(
@@ -117,329 +127,6 @@ pub fn spawn_ingestion_worker(
     tokio::spawn(async move {
         run_ingestion_worker_pool(Arc::new(state), shutdown).await;
     })
-}
-
-async fn run_ingestion_worker_pool(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
-    let worker_concurrency = state.settings.ingestion_worker_concurrency.max(1);
-
-    let mut handles = Vec::new();
-
-    state.worker_runtime.mark_idle().await;
-    info!(worker_concurrency, "starting ingestion worker pool on the canonical queue only");
-
-    handles.push(tokio::spawn(run_canonical_lease_recovery_loop(
-        state.clone(),
-        shutdown.resubscribe(),
-    )));
-
-    for worker_index in 0..worker_concurrency {
-        let worker_id = canonical_worker_id(&state.settings.service_name, worker_index);
-        handles.push(tokio::spawn(run_canonical_ingest_worker_loop(
-            state.clone(),
-            shutdown.resubscribe(),
-            worker_id,
-        )));
-    }
-
-    if handles.is_empty() {
-        let _ = shutdown.recv().await;
-        return;
-    }
-
-    for handle in handles {
-        if let Err(error) = handle.await {
-            state
-                .worker_runtime
-                .mark_error(format!("ingestion worker task crashed: {error}"))
-                .await;
-            error!(?error, "ingestion worker task crashed");
-        }
-    }
-}
-
-fn canonical_worker_id(service_name: &str, worker_index: usize) -> String {
-    format!("{service_name}:canonical:{worker_index}:{}", Uuid::now_v7())
-}
-
-async fn run_canonical_ingest_worker_loop(
-    state: Arc<AppState>,
-    mut shutdown: broadcast::Receiver<()>,
-    worker_id: String,
-) {
-    info!(%worker_id, "starting canonical ingest worker loop");
-
-    loop {
-        tokio::select! {
-            _ = shutdown.recv() => {
-                info!(%worker_id, "stopping canonical ingest worker loop");
-                break;
-            }
-            _ = time::sleep(WORKER_POLL_INTERVAL) => {
-                state.worker_runtime.touch().await;
-                match ingest_repository::claim_next_queued_ingest_job(
-                    &state.persistence.postgres,
-                    state.settings.ingestion_max_jobs_per_library as i64,
-                ).await {
-                    Ok(Some(job)) => {
-                        let job_id = job.id;
-                        let started_at = Instant::now();
-                        state
-                            .worker_runtime
-                            .mark_active(format!("processing canonical ingest job {job_id}"))
-                            .await;
-                        info!(
-                            %worker_id,
-                            %job_id,
-                            job_kind = %job.job_kind,
-                            library_id = %job.library_id,
-                            "claimed canonical ingest job",
-                        );
-                        if let Err(error) = execute_canonical_ingest_job(
-                            state.clone(), &worker_id, job,
-                        ).await {
-                            state
-                                .worker_runtime
-                                .mark_error(format!("canonical ingest job {job_id} failed: {error}"))
-                                .await;
-                            let elapsed_ms = started_at.elapsed().as_millis();
-                            error!(
-                                %worker_id,
-                                %job_id,
-                                elapsed_ms,
-                                ?error,
-                                "canonical ingest job failed",
-                            );
-                            fail_canonical_ingest_job(&state, job_id, &worker_id, &error).await;
-                        } else {
-                            state.worker_runtime.mark_idle().await;
-                        }
-                    }
-                    Ok(None) => {
-                        state.worker_runtime.mark_idle().await;
-                    }
-                    Err(error) => {
-                        state
-                            .worker_runtime
-                            .mark_error(format!("failed to claim canonical ingest job: {error}"))
-                            .await;
-                        warn!(%worker_id, ?error, "failed to claim canonical ingest job");
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn run_canonical_lease_recovery_loop(
-    state: Arc<AppState>,
-    mut shutdown: broadcast::Receiver<()>,
-) {
-    info!("starting canonical lease recovery loop");
-    loop {
-        tokio::select! {
-            _ = shutdown.recv() => {
-                info!("stopping canonical lease recovery loop");
-                break;
-            }
-            _ = time::sleep(CANONICAL_LEASE_RECOVERY_INTERVAL) => {
-                let threshold = chrono::Duration::seconds(CANONICAL_STALE_LEASE_SECONDS);
-                match ingest_repository::recover_stale_canonical_leases(
-                    &state.persistence.postgres,
-                    threshold,
-                ).await {
-                    Ok(0) => {}
-                    Ok(recovered) => {
-                        warn!(recovered, "recovered stale canonical ingest job leases");
-                    }
-                    Err(error) => {
-                        warn!(?error, "failed to recover stale canonical leases");
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn latest_canonical_attempt_failure_code(state: &AppState, job_id: Uuid) -> Option<String> {
-    ingest_repository::get_latest_ingest_attempt_by_job(&state.persistence.postgres, job_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|attempt| attempt.failure_code)
-}
-
-fn canonical_revision_file_name(revision: &KnowledgeRevisionRow) -> String {
-    let source_name = revision
-        .source_uri
-        .as_deref()
-        .and_then(|value| value.split_once("://").map(|(_, rest)| rest).or(Some(value)))
-        .and_then(|value| value.rsplit('/').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "inline")
-        .map(str::to_string);
-    source_name
-        .or_else(|| {
-            revision
-                .title
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| format!("revision-{}", revision.revision_id))
-}
-
-async fn fail_canonical_ingest_job(
-    state: &AppState,
-    job_id: Uuid,
-    worker_id: &str,
-    error: &anyhow::Error,
-) {
-    let message = format!("{error:#}");
-    let existing = match ingest_repository::get_ingest_job_by_id(
-        &state.persistence.postgres,
-        job_id,
-    )
-    .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            error!(%worker_id, %job_id, "canonical ingest job vanished while trying to fail it");
-            return;
-        }
-        Err(db_error) => {
-            error!(%worker_id, %job_id, ?db_error, "failed to load canonical ingest job for failure");
-            return;
-        }
-    };
-
-    if existing.queue_state == "completed" {
-        return;
-    }
-
-    if existing.queue_state != "failed" {
-        let update_result = ingest_repository::update_ingest_job(
-            &state.persistence.postgres,
-            job_id,
-            &ingest_repository::UpdateIngestJob {
-                mutation_id: existing.mutation_id,
-                connector_id: existing.connector_id,
-                async_operation_id: existing.async_operation_id,
-                knowledge_document_id: existing.knowledge_document_id,
-                knowledge_revision_id: existing.knowledge_revision_id,
-                job_kind: existing.job_kind.clone(),
-                queue_state: "failed".to_string(),
-                priority: existing.priority,
-                dedupe_key: existing.dedupe_key.clone(),
-                available_at: existing.available_at,
-                completed_at: Some(Utc::now()),
-            },
-        )
-        .await;
-        if let Err(db_error) = update_result {
-            error!(
-                %worker_id,
-                %job_id,
-                ?db_error,
-                original_error = %message,
-                "failed to mark canonical ingest job as failed",
-            );
-        }
-    }
-
-    let failure_code = latest_canonical_attempt_failure_code(state, job_id).await.unwrap_or_else(
-        || match existing.job_kind.as_str() {
-            "web_discovery" => "web_discovery_failed".to_string(),
-            "web_materialize_page" => "web_materialize_page_failed".to_string(),
-            _ => "canonical_pipeline_failed".to_string(),
-        },
-    );
-    if existing.job_kind == "web_discovery" {
-        match resolve_canonical_job_subject_id(state, &existing, "content_web_ingest_run").await {
-            Ok(run_id) => {
-                if let Err(reconcile_error) = state
-                    .canonical_services
-                    .web_ingest
-                    .fail_recursive_discovery_job(state, run_id, &failure_code)
-                    .await
-                {
-                    error!(
-                        %worker_id,
-                        %job_id,
-                        %run_id,
-                        ?reconcile_error,
-                        original_error = %message,
-                        "failed to reconcile recursive discovery job failure",
-                    );
-                }
-            }
-            Err(resolve_error) => {
-                error!(
-                    %worker_id,
-                    %job_id,
-                    ?resolve_error,
-                    original_error = %message,
-                    "failed to resolve recursive discovery run subject",
-                );
-            }
-        }
-        return;
-    }
-    if existing.job_kind == "web_materialize_page" {
-        match resolve_canonical_job_subject_id(state, &existing, "content_web_discovered_page")
-            .await
-        {
-            Ok(candidate_id) => {
-                if let Err(reconcile_error) = state
-                    .canonical_services
-                    .web_ingest
-                    .fail_recursive_page_job(state, candidate_id, &failure_code)
-                    .await
-                {
-                    error!(
-                        %worker_id,
-                        %job_id,
-                        %candidate_id,
-                        ?reconcile_error,
-                        original_error = %message,
-                        "failed to reconcile recursive page job failure",
-                    );
-                }
-            }
-            Err(resolve_error) => {
-                error!(
-                    %worker_id,
-                    %job_id,
-                    ?resolve_error,
-                    original_error = %message,
-                    "failed to resolve recursive page subject",
-                );
-            }
-        }
-        return;
-    }
-    if let Some(mutation_id) = existing.mutation_id
-        && let Err(reconcile_error) = state
-            .canonical_services
-            .content
-            .reconcile_failed_ingest_mutation(
-                state,
-                crate::services::content::service::ReconcileFailedIngestMutationCommand {
-                    mutation_id,
-                    failure_code,
-                    failure_message: message.clone(),
-                },
-            )
-            .await
-    {
-        error!(
-            %worker_id,
-            %job_id,
-            ?reconcile_error,
-            original_error = %message,
-            "failed to reconcile canonical content mutation after ingest failure",
-        );
-    }
 }
 
 async fn execute_canonical_ingest_job(
@@ -650,169 +337,6 @@ async fn execute_canonical_ingest_job(
     }
 }
 
-async fn run_canonical_web_discovery_job(
-    state: &AppState,
-    job: &ingest_repository::IngestJobRow,
-    attempt_id: Uuid,
-) -> anyhow::Result<()> {
-    let run_id = resolve_canonical_job_subject_id(state, job, "content_web_ingest_run").await?;
-    state
-        .canonical_services
-        .ingest
-        .record_stage_event(
-            state,
-            RecordStageEventCommand {
-                attempt_id,
-                stage_name: INGEST_STAGE_WEB_DISCOVERY.to_string(),
-                stage_state: "started".to_string(),
-                message: Some("discovering recursive crawl scope".to_string()),
-                details_json: serde_json::json!({ "runId": run_id }),
-            },
-        )
-        .await
-        .context("failed to record web_discovery start stage event")?;
-    match state.canonical_services.web_ingest.execute_recursive_discovery_job(state, run_id).await {
-        Ok(()) => {
-            state
-                .canonical_services
-                .ingest
-                .record_stage_event(
-                    state,
-                    RecordStageEventCommand {
-                        attempt_id,
-                        stage_name: INGEST_STAGE_WEB_DISCOVERY.to_string(),
-                        stage_state: "completed".to_string(),
-                        message: Some(
-                            "recursive crawl scope closed and page jobs queued".to_string(),
-                        ),
-                        details_json: serde_json::json!({ "runId": run_id }),
-                    },
-                )
-                .await
-                .context("failed to record web_discovery stage event")?;
-            Ok(())
-        }
-        Err(error) => {
-            let error_message = error.to_string();
-            state
-                .canonical_services
-                .ingest
-                .record_stage_event(
-                    state,
-                    RecordStageEventCommand {
-                        attempt_id,
-                        stage_name: INGEST_STAGE_WEB_DISCOVERY.to_string(),
-                        stage_state: "failed".to_string(),
-                        message: Some("recursive crawl discovery failed".to_string()),
-                        details_json: serde_json::json!({
-                            "runId": run_id,
-                            "error": error_message,
-                        }),
-                    },
-                )
-                .await
-                .context("failed to record web_discovery failure stage event")?;
-            Err(anyhow::anyhow!("web discovery job failed: {}", error))
-        }
-    }
-}
-
-async fn run_canonical_web_materialize_page_job(
-    state: &AppState,
-    job: &ingest_repository::IngestJobRow,
-    attempt_id: Uuid,
-) -> anyhow::Result<()> {
-    let candidate_id =
-        resolve_canonical_job_subject_id(state, job, "content_web_discovered_page").await?;
-    state
-        .canonical_services
-        .ingest
-        .record_stage_event(
-            state,
-            RecordStageEventCommand {
-                attempt_id,
-                stage_name: INGEST_STAGE_WEB_MATERIALIZE_PAGE.to_string(),
-                stage_state: "started".to_string(),
-                message: Some("materializing discovered page from stored snapshot".to_string()),
-                details_json: serde_json::json!({ "candidateId": candidate_id }),
-            },
-        )
-        .await
-        .context("failed to record web_materialize_page start stage event")?;
-    match state.canonical_services.web_ingest.execute_recursive_page_job(state, candidate_id).await
-    {
-        Ok(()) => {
-            state
-                .canonical_services
-                .ingest
-                .record_stage_event(
-                    state,
-                    RecordStageEventCommand {
-                        attempt_id,
-                        stage_name: INGEST_STAGE_WEB_MATERIALIZE_PAGE.to_string(),
-                        stage_state: "completed".to_string(),
-                        message: Some("discovered page materialized".to_string()),
-                        details_json: serde_json::json!({ "candidateId": candidate_id }),
-                    },
-                )
-                .await
-                .context("failed to record web_materialize_page stage event")?;
-            Ok(())
-        }
-        Err(error) => {
-            let error_message = error.to_string();
-            state
-                .canonical_services
-                .ingest
-                .record_stage_event(
-                    state,
-                    RecordStageEventCommand {
-                        attempt_id,
-                        stage_name: INGEST_STAGE_WEB_MATERIALIZE_PAGE.to_string(),
-                        stage_state: "failed".to_string(),
-                        message: Some("discovered page materialization failed".to_string()),
-                        details_json: serde_json::json!({
-                            "candidateId": candidate_id,
-                            "error": error_message,
-                        }),
-                    },
-                )
-                .await
-                .context("failed to record web_materialize_page failure stage event")?;
-            Err(anyhow::anyhow!("web page materialization job failed: {}", error))
-        }
-    }
-}
-
-async fn resolve_canonical_job_subject_id(
-    state: &AppState,
-    job: &ingest_repository::IngestJobRow,
-    expected_subject_kind: &str,
-) -> anyhow::Result<Uuid> {
-    let operation_id =
-        job.async_operation_id.context("canonical web ingest job is missing async_operation_id")?;
-    let operation = state
-        .canonical_services
-        .ops
-        .get_async_operation(state, operation_id)
-        .await
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let subject_kind = operation
-        .subject_kind
-        .as_deref()
-        .context("canonical web ingest job subject_kind is missing")?;
-    let subject_id =
-        operation.subject_id.context("canonical web ingest job subject_id is missing")?;
-    if subject_kind != expected_subject_kind {
-        anyhow::bail!(
-            "canonical web ingest job subject kind mismatch: expected {}, found {}",
-            expected_subject_kind,
-            subject_kind
-        );
-    }
-    Ok(subject_id)
-}
-
 async fn run_canonical_ingest_pipeline(
     state: &AppState,
     worker_id: &str,
@@ -822,6 +346,33 @@ async fn run_canonical_ingest_pipeline(
     revision_id: Uuid,
 ) -> anyhow::Result<()> {
     // --- Stage: extract_content -----------------------------------------------
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
+                stage_state: "started".to_string(),
+                message: None,
+                details_json: serde_json::json!({}),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
+            },
+        )
+        .await
+        .context("failed to record extract_content started stage event")?;
+
+    let extract_content_start = Instant::now();
+
     let revision = state
         .arango_document_store
         .get_revision(revision_id)
@@ -834,6 +385,7 @@ async fn run_canonical_ingest_pipeline(
         Err(error) => {
             let failure_message = error.to_string();
             let failure_code = error.failure_code.clone();
+            let elapsed_ms = Some(extract_content_start.elapsed().as_millis() as i64);
             if let Err(e) = state
                 .canonical_services
                 .knowledge
@@ -855,6 +407,15 @@ async fn run_canonical_ingest_pipeline(
                         details_json: serde_json::json!({
                             "failureCode": failure_code,
                         }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms,
                     },
                 )
                 .await
@@ -886,6 +447,32 @@ async fn run_canonical_ingest_pipeline(
         .await
         .context("failed to persist extracted content")?;
 
+    let extract_content_elapsed_ms = Some(extract_content_start.elapsed().as_millis() as i64);
+
+    // Capture vision billing if LLM was used for content extraction
+    if extracted_content.provider_kind.is_some() {
+        if let Err(e) = state
+            .canonical_services
+            .billing
+            .capture_ingest_attempt(
+                state,
+                crate::services::ops::billing::CaptureIngestAttemptBillingCommand {
+                    workspace_id: job.workspace_id,
+                    library_id: job.library_id,
+                    attempt_id,
+                    binding_id: None,
+                    provider_kind: extracted_content.provider_kind.clone().unwrap_or_default(),
+                    model_name: extracted_content.model_name.clone().unwrap_or_default(),
+                    call_kind: "vision_extract".to_string(),
+                    usage_json: extracted_content.usage_json.clone(),
+                },
+            )
+            .await
+        {
+            warn!(%worker_id, job_id = %job.id, ?e, "vision billing capture failed");
+        }
+    }
+
     state
         .canonical_services
         .ingest
@@ -897,6 +484,27 @@ async fn run_canonical_ingest_pipeline(
                 stage_state: "completed".to_string(),
                 message: Some("content extracted".to_string()),
                 details_json: extracted_content.stage_details,
+                provider_kind: extracted_content.provider_kind.clone(),
+                model_name: extracted_content.model_name.clone(),
+                prompt_tokens: extracted_content
+                    .usage_json
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32),
+                completion_tokens: extracted_content
+                    .usage_json
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32),
+                total_tokens: extracted_content
+                    .usage_json
+                    .get("total_tokens")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32),
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: extract_content_elapsed_ms,
             },
         )
         .await
@@ -917,10 +525,20 @@ async fn run_canonical_ingest_pipeline(
                     "libraryId": revision.library_id,
                     "revisionId": revision_id,
                 }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
             },
         )
         .await
         .context("failed to record prepare_structure start stage event")?;
+
     let preparation = state
         .canonical_services
         .content
@@ -931,6 +549,11 @@ async fn run_canonical_ingest_pipeline(
         )
         .await
         .context("failed to prepare and persist structured revision")?;
+
+    let prepare_structure_elapsed_ms = Some(preparation.prepare_structure_elapsed_ms);
+    let chunk_content_elapsed_ms = Some(preparation.chunk_content_elapsed_ms);
+    let extract_technical_facts_elapsed_ms = Some(preparation.extract_technical_facts_elapsed_ms);
+
     state
         .canonical_services
         .ingest
@@ -947,10 +570,43 @@ async fn run_canonical_ingest_pipeline(
                     "blockCount": preparation.prepared_revision.block_count,
                     "chunkCount": preparation.chunk_count,
                 }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: prepare_structure_elapsed_ms,
             },
         )
         .await
         .context("failed to record prepare_structure stage event")?;
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_CHUNK_CONTENT.to_string(),
+                stage_state: "started".to_string(),
+                message: None,
+                details_json: serde_json::json!({}),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
+            },
+        )
+        .await
+        .context("failed to record chunk_content started stage event")?;
     state
         .canonical_services
         .ingest
@@ -964,10 +620,43 @@ async fn run_canonical_ingest_pipeline(
                 details_json: serde_json::json!({
                     "chunkCount": preparation.chunk_count,
                 }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: chunk_content_elapsed_ms,
             },
         )
         .await
         .context("failed to record chunk_content stage event")?;
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS.to_string(),
+                stage_state: "started".to_string(),
+                message: None,
+                details_json: serde_json::json!({}),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
+            },
+        )
+        .await
+        .context("failed to record extract_technical_facts started stage event")?;
     state
         .canonical_services
         .ingest
@@ -982,6 +671,15 @@ async fn run_canonical_ingest_pipeline(
                     "technicalFactCount": preparation.technical_fact_count,
                     "technicalConflictCount": preparation.technical_conflict_count,
                 }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: extract_technical_facts_elapsed_ms,
             },
         )
         .await
@@ -996,11 +694,44 @@ async fn run_canonical_ingest_pipeline(
             RecordStageEventCommand {
                 attempt_id,
                 stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                stage_state: "started".to_string(),
+                message: None,
+                details_json: serde_json::json!({}),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
+            },
+        )
+        .await
+        .context("failed to record embed_chunk started stage event")?;
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
                 stage_state: "completed".to_string(),
                 message: Some(
                     "vector stage deferred to keep background ingestion non-blocking".to_string(),
                 ),
                 details_json: serde_json::json!({ "strategy": "deferred_non_blocking" }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: Some(0i64),
             },
         )
         .await
@@ -1021,10 +752,22 @@ async fn run_canonical_ingest_pipeline(
                     "libraryId": revision.library_id,
                     "revisionId": revision_id,
                 }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
             },
         )
         .await
         .context("failed to record extract_graph start stage event")?;
+
+    let extract_graph_start = Instant::now();
+
     let graph_materialization = state
         .canonical_services
         .content
@@ -1057,6 +800,8 @@ async fn run_canonical_ingest_pipeline(
 
             match graph_outcome {
                 Ok(outcome) => {
+                    let extract_graph_elapsed_ms =
+                        Some(extract_graph_start.elapsed().as_millis() as i64);
                     state
                         .canonical_services
                         .ingest
@@ -1071,17 +816,91 @@ async fn run_canonical_ingest_pipeline(
                                     "chunksProcessed": graph_materialization.chunk_count,
                                     "extractedEntityCandidates": graph_materialization.extracted_entities,
                                     "extractedRelationCandidates": graph_materialization.extracted_relations,
+                                    "reusedChunks": graph_materialization.reused_chunks,
+                                    "reusedEntities": graph_materialization.reused_entities,
+                                    "reusedRelations": graph_materialization.reused_relations,
                                     "projectedNodes": outcome.projection.node_count,
                                     "projectedEdges": outcome.projection.edge_count,
                                     "projectionVersion": outcome.projection.projection_version,
                                     "graphStatus": outcome.projection.graph_status,
                                     "graphContributionCount": outcome.graph_contribution_count,
                                     "graphReady": graph_ready,
+                                    "providerKind": graph_materialization.provider_kind,
+                                    "modelName": graph_materialization.model_name,
                                 }),
+                                provider_kind: graph_materialization.provider_kind.clone(),
+                                model_name: graph_materialization.model_name.clone(),
+                                prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                cached_tokens: None,
+                                estimated_cost: None,
+                                currency_code: None,
+                                elapsed_ms: extract_graph_elapsed_ms,
                             },
                         )
                         .await
                         .context("failed to record extract_graph stage event")?;
+
+                    // Record embed_chunk with actual embedding usage + billing
+                    if let Some(embedding_usage) = outcome.embedding_usage {
+                        let embed_provider = embedding_usage.provider_kind.clone();
+                        let embed_model = embedding_usage.model_name.clone();
+                        let embed_prompt = embedding_usage.prompt_tokens;
+                        let embed_completion = embedding_usage.completion_tokens;
+                        let embed_total = embedding_usage.total_tokens;
+
+                        // Capture embedding billing
+                        if let Err(e) = state
+                            .canonical_services
+                            .billing
+                            .capture_ingest_attempt(
+                                state,
+                                crate::services::ops::billing::CaptureIngestAttemptBillingCommand {
+                                    workspace_id: job.workspace_id,
+                                    library_id: job.library_id,
+                                    attempt_id,
+                                    binding_id: None,
+                                    provider_kind: embed_provider.clone().unwrap_or_default(),
+                                    model_name: embed_model.clone().unwrap_or_default(),
+                                    call_kind: "embed_graph".to_string(),
+                                    usage_json: embedding_usage.into_usage_json(),
+                                },
+                            )
+                            .await
+                        {
+                            warn!(%worker_id, job_id = %job.id, ?e, "embedding billing capture failed");
+                        }
+
+                        let _ = state
+                            .canonical_services
+                            .ingest
+                            .record_stage_event(
+                                state,
+                                RecordStageEventCommand {
+                                    attempt_id,
+                                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                                    stage_state: "completed".to_string(),
+                                    message: Some(
+                                        "graph node/edge embeddings computed".to_string(),
+                                    ),
+                                    details_json: serde_json::json!({
+                                        "providerKind": embed_provider,
+                                        "modelName": embed_model,
+                                    }),
+                                    provider_kind: embed_provider,
+                                    model_name: embed_model,
+                                    prompt_tokens: embed_prompt,
+                                    completion_tokens: embed_completion,
+                                    total_tokens: embed_total,
+                                    cached_tokens: None,
+                                    estimated_cost: None,
+                                    currency_code: None,
+                                    elapsed_ms: None,
+                                },
+                            )
+                            .await;
+                    }
                 }
                 Err(graph_error) => {
                     warn!(
@@ -1091,6 +910,8 @@ async fn run_canonical_ingest_pipeline(
                         ?graph_error,
                         "canonical graph rebuild failed; preserving readable revision",
                     );
+                    let extract_graph_elapsed_ms =
+                        Some(extract_graph_start.elapsed().as_millis() as i64);
                     state
                         .canonical_services
                         .ingest
@@ -1110,7 +931,18 @@ async fn run_canonical_ingest_pipeline(
                                     "graphReady": false,
                                     "degradedToReadable": true,
                                     "error": format!("{graph_error:#}"),
+                                    "providerKind": graph_materialization.provider_kind,
+                                    "modelName": graph_materialization.model_name,
                                 }),
+                                provider_kind: graph_materialization.provider_kind.clone(),
+                                model_name: graph_materialization.model_name.clone(),
+                                prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                cached_tokens: None,
+                                estimated_cost: None,
+                                currency_code: None,
+                                elapsed_ms: extract_graph_elapsed_ms,
                             },
                         )
                         .await
@@ -1126,6 +958,7 @@ async fn run_canonical_ingest_pipeline(
                 ?error,
                 "graph candidate extraction failed; preserving readable revision",
             );
+            let extract_graph_elapsed_ms = Some(extract_graph_start.elapsed().as_millis() as i64);
             state
                 .canonical_services
                 .ingest
@@ -1144,6 +977,15 @@ async fn run_canonical_ingest_pipeline(
                             "degradedToReadable": true,
                             "error": error.to_string(),
                         }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: extract_graph_elapsed_ms,
                     },
                 )
                 .await
@@ -1206,6 +1048,33 @@ async fn run_canonical_ingest_pipeline(
     }
 
     // --- Stage: finalize readiness --------------------------------------------
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_FINALIZING.to_string(),
+                stage_state: "started".to_string(),
+                message: None,
+                details_json: serde_json::json!({}),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
+            },
+        )
+        .await
+        .context("failed to record finalizing started stage event")?;
+
+    let finalizing_start = Instant::now();
+
     let now = Utc::now();
     let _ = state
         .arango_document_store
@@ -1282,6 +1151,8 @@ async fn run_canonical_ingest_pipeline(
         .await
         .context("failed to converge typed technical facts for current revision")?;
 
+    let finalizing_elapsed_ms = Some(finalizing_start.elapsed().as_millis() as i64);
+
     state
         .canonical_services
         .ingest
@@ -1296,133 +1167,19 @@ async fn run_canonical_ingest_pipeline(
                     "revisionId": revision_id,
                     "documentId": document_id,
                 }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: finalizing_elapsed_ms,
             },
         )
         .await
         .context("failed to record finalizing stage event")?;
 
     Ok(())
-}
-
-async fn resolve_canonical_extract_content(
-    state: &AppState,
-    job: &ingest_repository::IngestJobRow,
-    revision: &KnowledgeRevisionRow,
-) -> Result<CanonicalExtractedContent, CanonicalExtractContentError> {
-    if let Some(text) = revision
-        .normalized_text
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-    {
-        let extraction_plan = build_inline_text_extraction_plan(&text);
-        return Ok(CanonicalExtractedContent {
-            extraction_plan,
-            stage_details: serde_json::json!({
-                "contentLength": text.chars().count(),
-                "source": "knowledge_revision",
-            }),
-        });
-    }
-
-    let storage_ref = match revision
-        .storage_ref
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(storage_ref) => storage_ref.to_string(),
-        None => state
-            .canonical_services
-            .content
-            .resolve_revision_storage_key(state, revision.revision_id)
-            .await
-            .map_err(|_| {
-                CanonicalExtractContentError::missing_stored_source(job.id, revision.revision_id)
-            })?
-            .ok_or_else(|| {
-                CanonicalExtractContentError::missing_stored_source(job.id, revision.revision_id)
-            })?,
-    };
-    let stored_bytes =
-        state.content_storage.read_revision_source(&storage_ref).await.map_err(|error| {
-            CanonicalExtractContentError::stored_source_read(&storage_ref, error)
-        })?;
-    let file_name = canonical_revision_file_name(revision);
-    let plan = state
-        .canonical_services
-        .content
-        .build_runtime_extraction_plan(
-            state,
-            revision.library_id,
-            &file_name,
-            Some(revision.mime_type.as_str()),
-            &stored_bytes,
-        )
-        .await
-        .map_err(|rejection| CanonicalExtractContentError::extraction_rejected(&rejection))?;
-    let text = plan.normalized_text.clone().unwrap_or_default();
-    Ok(CanonicalExtractedContent {
-        extraction_plan: plan.clone(),
-        stage_details: serde_json::json!({
-            "contentLength": text.chars().count(),
-            "fileKind": plan.file_kind.as_str(),
-            "warningCount": plan.extraction_warnings.len(),
-            "lineCount": plan.source_format_metadata.line_count,
-            "pageCount": plan.source_format_metadata.page_count,
-            "normalizationProfile": plan.normalization_profile,
-            "source": "content_storage",
-            "storageRef": storage_ref,
-        }),
-    })
-}
-
-/// Generates a document summary from structured blocks without LLM calls.
-/// Extracts the document title (first heading) and leading paragraphs to build
-/// a concise summary of what the document contains.
-async fn generate_document_summary_from_blocks(
-    state: &AppState,
-    revision_id: Uuid,
-) -> anyhow::Result<String> {
-    let blocks = state
-        .arango_document_store
-        .list_structured_blocks_by_revision(revision_id)
-        .await
-        .unwrap_or_default();
-
-    if blocks.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut parts = Vec::new();
-    let mut chars_used = 0_usize;
-    let max_summary_chars = 600;
-
-    for block in &blocks {
-        if chars_used >= max_summary_chars {
-            break;
-        }
-
-        let text = block.text.trim();
-        if text.is_empty() {
-            continue;
-        }
-
-        // Skip very short non-heading blocks
-        if text.len() < 10 && block.block_kind != "heading" {
-            continue;
-        }
-
-        let remaining = max_summary_chars.saturating_sub(chars_used);
-        let truncated = if text.len() > remaining {
-            &text[..text.floor_char_boundary(remaining)]
-        } else {
-            text
-        };
-
-        parts.push(truncated.to_string());
-        chars_used += truncated.len();
-    }
-
-    Ok(parts.join(" ").trim().to_string())
 }

@@ -1,0 +1,17 @@
+{{- if eq .Values.storage.provider "filesystem" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ironrag.fullname" . }}-content-storage
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.storage.filesystem.size }}
+  {{- with .Values.storage.filesystem.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

@@ -1,4 +1,4 @@
-use rustrag_backend::app::config::Settings;
+use ironrag_backend::app::config::Settings;
 
 #[must_use]
 pub fn sample_arango_base_url(settings: &Settings) -> String {

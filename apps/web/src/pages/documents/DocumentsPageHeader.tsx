@@ -4,6 +4,8 @@ import { CheckCircle2, Link as LinkIcon, Loader2, Upload, XCircle } from 'lucide
 
 import { Button } from '@/components/ui/button';
 
+import { DOCUMENT_FILE_INPUT_ACCEPT } from './uploadAccept';
+
 type UploadQueueItem = {
   name: string;
   state: 'uploading' | 'done' | 'error';
@@ -102,7 +104,14 @@ export function DocumentsPageHeader({
               <LinkIcon className="h-3.5 w-3.5 mr-1.5" /> {t('documents.addLink')}
             </Button>
           )}
-          <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={DOCUMENT_FILE_INPUT_ACCEPT}
+            className="hidden"
+            onChange={handleFileSelect}
+          />
         </div>
       </div>
 

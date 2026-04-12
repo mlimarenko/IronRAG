@@ -24,15 +24,6 @@ pub enum RuntimeDocumentActivityStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeQueueWaitingReason {
-    OrdinaryBacklog,
-    IsolatedCapacityWait,
-    Blocked,
-    Degraded,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum RuntimeProviderFailureClass {
     InternalRequestInvalid,
     UpstreamProtocolFailure,

@@ -1,6 +1,0 @@
-apiVersion: v2
-name: rustrag
-description: RustRAG Helm chart with API, Worker, Web, Startup Authority, and optional bundled dependencies.
-type: application
-version: 0.1.3
-appVersion: "0.1.3"

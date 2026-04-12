@@ -6,7 +6,7 @@ mod greenfield_contracts;
 use serde_json::json;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     interfaces::http::mcp::MCP_CANONICAL_TOOL_NAMES,
     mcp_types::{
         McpCancelWebIngestRunRequest, McpGetWebIngestRunRequest, McpListWebIngestRunPagesRequest,
@@ -91,7 +91,7 @@ fn web_ingest_contract_enums_cover_runtime_vocabulary_and_partial_count_grammar(
 }
 
 #[test]
-fn web_ingest_mcp_tool_vocabulary_and_request_aliases_stay_canonical() {
+fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
     for tool_name in [
         "submit_web_ingest_run",
         "get_web_ingest_run",
@@ -105,13 +105,13 @@ fn web_ingest_mcp_tool_vocabulary_and_request_aliases_stay_canonical() {
     }
 
     let submit_request: McpSubmitWebIngestRunRequest = serde_json::from_value(json!({
-        "library_id": Uuid::nil(),
-        "seed_url": "https://example.com/docs",
+        "libraryId": Uuid::nil(),
+        "seedUrl": "https://example.com/docs",
         "mode": "recursive_crawl",
-        "boundary_policy": "allow_external",
-        "max_depth": 4,
-        "max_pages": 80,
-        "idempotency_key": "crawl-1"
+        "boundaryPolicy": "allow_external",
+        "maxDepth": 4,
+        "maxPages": 80,
+        "idempotencyKey": "crawl-1"
     }))
     .expect("submit request should deserialize");
     assert_eq!(submit_request.library_id, Uuid::nil());
@@ -124,16 +124,25 @@ fn web_ingest_mcp_tool_vocabulary_and_request_aliases_stay_canonical() {
 
     let run_id = Uuid::now_v7();
     let get_request: McpGetWebIngestRunRequest =
-        serde_json::from_value(json!({ "run_id": run_id }))
-            .expect("get request should deserialize");
+        serde_json::from_value(json!({ "runId": run_id })).expect("get request should deserialize");
     let list_pages_request: McpListWebIngestRunPagesRequest =
-        serde_json::from_value(json!({ "run_id": run_id }))
+        serde_json::from_value(json!({ "runId": run_id }))
             .expect("list pages request should deserialize");
     let cancel_request: McpCancelWebIngestRunRequest =
-        serde_json::from_value(json!({ "run_id": run_id }))
+        serde_json::from_value(json!({ "runId": run_id }))
             .expect("cancel request should deserialize");
 
     assert_eq!(get_request.run_id, run_id);
     assert_eq!(list_pages_request.run_id, run_id);
     assert_eq!(cancel_request.run_id, run_id);
+
+    assert!(
+        serde_json::from_value::<McpSubmitWebIngestRunRequest>(json!({
+            "library_id": Uuid::nil(),
+            "seedUrl": "https://example.com/docs",
+            "mode": "recursive_crawl"
+        }))
+        .is_err(),
+        "legacy snake_case MCP request fields must be rejected"
+    );
 }

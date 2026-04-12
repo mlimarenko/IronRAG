@@ -35,8 +35,8 @@ corpus/
 ## Usage
 
 ```bash
-export RUSTRAG_SESSION_COOKIE="..."
-export RUSTRAG_BENCHMARK_WORKSPACE_ID="..."
+export IRONRAG_SESSION_COOKIE="..."
+export IRONRAG_BENCHMARK_WORKSPACE_ID="..."
 
 make benchmark-grounded-seed    # upload Wikipedia corpus
 make benchmark-grounded-all     # run Wikipedia QA matrix

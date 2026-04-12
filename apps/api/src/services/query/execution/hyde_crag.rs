@@ -1,12 +1,14 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState, domains::ai::AiBindingPurpose, integrations::llm::ChatRequestSeed,
 };
 
+use super::types::RuntimeMatchedChunk;
 use super::{
     CRAG_CONFIDENCE_THRESHOLD, CRAG_REWRITE_TEMPERATURE, CRAG_REWRITE_TIMEOUT, HYDE_TEMPERATURE,
-    HYDE_TIMEOUT, RuntimeMatchedChunk,
+    HYDE_TIMEOUT,
 };
 
 pub(super) struct RetrievalConfidence {

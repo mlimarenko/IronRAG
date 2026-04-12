@@ -67,7 +67,7 @@ impl ExtractService {
             .arango_document_store
             .get_revision(revision_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
         Ok(ExtractContent {
             revision_id,
@@ -89,7 +89,7 @@ impl ExtractService {
             command.attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         let chunk_result = if let Some(existing) = existing {
             extract_repository::update_extract_chunk_result(
@@ -101,7 +101,7 @@ impl ExtractService {
                 command.failure_code.as_deref(),
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("extract_chunk_result", existing.id))?
         } else {
             extract_repository::create_extract_chunk_result(
@@ -115,7 +115,7 @@ impl ExtractService {
                 command.failure_code.as_deref(),
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         };
 
         let prepared_nodes = prepare_materialized_node_candidates(&command.node_candidates);
@@ -184,7 +184,7 @@ impl ExtractService {
             attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_extract_chunk_result_row).collect())
     }
 
@@ -198,14 +198,14 @@ impl ExtractService {
             chunk_result_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("extract_chunk_result", chunk_result_id))?;
         let rows = extract_repository::list_extract_node_candidates_by_chunk_result(
             &state.persistence.postgres,
             chunk_result_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let mut mapped = rows
             .into_iter()
             .map(|row| ExtractNodeCandidate {
@@ -231,14 +231,14 @@ impl ExtractService {
             chunk_result_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("extract_chunk_result", chunk_result_id))?;
         let rows = extract_repository::list_extract_edge_candidates_by_chunk_result(
             &state.persistence.postgres,
             chunk_result_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let mut mapped = rows
             .into_iter()
             .map(|row| ExtractEdgeCandidate {
@@ -265,7 +265,7 @@ impl ExtractService {
             attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(row.map(map_resume_cursor_row))
     }
 
@@ -280,7 +280,7 @@ impl ExtractService {
             command.last_completed_chunk_index,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_resume_cursor_row(row))
     }
 
@@ -294,7 +294,7 @@ impl ExtractService {
             attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_resume_cursor_row(row))
     }
 
@@ -308,7 +308,7 @@ impl ExtractService {
             attempt_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_resume_cursor_row(row))
     }
 }

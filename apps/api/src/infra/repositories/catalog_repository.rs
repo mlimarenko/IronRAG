@@ -228,6 +228,38 @@ pub async fn create_library(
     .await
 }
 
+pub async fn touch_library_source_truth_version(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "update catalog_library
+         set source_truth_version = greatest(
+                coalesce(source_truth_version, 0) + 1,
+                (extract(epoch from clock_timestamp()) * 1000000)::bigint
+             )
+         where id = $1
+         returning source_truth_version",
+    )
+    .bind(library_id)
+    .fetch_one(postgres)
+    .await
+    .map(|version| version.max(1))
+}
+
+pub async fn get_library_source_truth_version(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select coalesce(source_truth_version, 1) from catalog_library where id = $1",
+    )
+    .bind(library_id)
+    .fetch_optional(postgres)
+    .await
+    .map(|version| version.map_or(1, |value| value.max(1)))
+}
+
 pub async fn update_library(
     postgres: &PgPool,
     library_id: Uuid,

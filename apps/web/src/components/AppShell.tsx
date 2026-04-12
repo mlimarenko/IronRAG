@@ -130,7 +130,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             aria-hidden="true"
             className="h-6 w-auto shrink-0 transition-transform duration-200 group-hover:scale-110"
           />
-          <span className="hidden sm:inline">RustRAG</span>
+          <span className="hidden sm:inline">IronRAG</span>
         </Link>
 
         {/* Desktop nav */}
@@ -181,7 +181,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[180px]">
               {workspaces.map(ws => (
-                <DropdownMenuItem key={ws.id} onClick={() => { setActiveWorkspace(ws); setActiveLibrary(null); }}>
+                <DropdownMenuItem key={ws.id} onClick={() => setActiveWorkspace(ws)}>
                   {ws.name}
                 </DropdownMenuItem>
               ))}
@@ -281,7 +281,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="min-w-[180px]">
                 {workspaces.map(ws => (
-                  <DropdownMenuItem key={ws.id} onClick={() => { setActiveWorkspace(ws); setActiveLibrary(null); }}>
+                  <DropdownMenuItem key={ws.id} onClick={() => setActiveWorkspace(ws)}>
                     {ws.name}
                   </DropdownMenuItem>
                 ))}

@@ -115,7 +115,7 @@ impl BillingService {
             execution_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         rows.into_iter()
             .map(map_provider_call_row)
             .collect::<Result<Vec<_>, _>>()
@@ -141,7 +141,7 @@ impl BillingService {
             execution_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_charge_row).collect())
     }
 
@@ -165,7 +165,7 @@ impl BillingService {
             execution_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         if let Some(row) = row {
             return map_execution_cost_row(row).map_err(ApiError::BadRequest);
         }
@@ -178,7 +178,7 @@ impl BillingService {
             execution_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         if provider_call_count == 0 {
             return Ok(BillingExecutionCost {
                 id: Uuid::now_v7(),
@@ -209,7 +209,7 @@ impl BillingService {
             library_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows
             .into_iter()
             .map(|r| DocumentCostSummary {
@@ -234,7 +234,7 @@ impl BillingService {
         let row =
             billing_repository::get_library_cost_summary(&state.persistence.postgres, library_id)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         match row {
             Some(r) => Ok(LibraryCostSummary {
                 total_cost: r.total_cost,
@@ -402,7 +402,7 @@ impl BillingService {
             &command.provider_kind,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         else {
             return Ok(None);
         };
@@ -412,7 +412,7 @@ impl BillingService {
             &command.model_name,
         )
         .await
-        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         else {
             return Ok(None);
         };
@@ -435,7 +435,7 @@ impl BillingService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         let request_input_tokens =
             parse_usage_quantity(&command.usage_json, &["prompt_tokens", "input_tokens"])
@@ -445,7 +445,7 @@ impl BillingService {
         for usage in usages {
             let usage_row = billing_repository::create_usage(&state.persistence.postgres, &usage)
                 .await
-                .map_err(|_| ApiError::Internal)?;
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
             let Some(price) = ai_repository::get_effective_price_catalog_entry(
                 &state.persistence.postgres,
                 model_catalog.id,
@@ -456,7 +456,7 @@ impl BillingService {
                 request_input_tokens,
             )
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             else {
                 continue;
             };
@@ -474,7 +474,7 @@ impl BillingService {
                 },
             )
             .await
-            .map_err(|_| ApiError::Internal)?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         }
 
         self.roll_up_execution_cost(
@@ -504,14 +504,14 @@ impl BillingService {
             execution_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let rollups = billing_repository::list_execution_cost_rollups(
             &state.persistence.postgres,
             execution_owner_kind_key(execution_kind),
             execution_id,
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         if rollups.is_empty() {
             return Ok(None);
@@ -536,7 +536,7 @@ impl BillingService {
             },
         )
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(Some(map_execution_cost_row(row).map_err(ApiError::BadRequest)?))
     }
 }
@@ -569,7 +569,7 @@ impl BillingService {
                         runtime_execution_id,
                     )
                     .await
-                    .map_err(|_| ApiError::Internal)?
+                    .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| {
                         ApiError::resource_not_found("runtime_execution", runtime_execution_id)
                     })?;
@@ -615,7 +615,7 @@ impl BillingService {
                     execution_id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
                 Ok(BillingExecutionScope {
                     workspace_id: execution.workspace_id,
@@ -628,7 +628,7 @@ impl BillingService {
                     execution_id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| {
                     ApiError::resource_not_found("runtime_graph_extraction", execution_id)
                 })?;
@@ -637,7 +637,7 @@ impl BillingService {
                     extraction.library_id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("library", extraction.library_id))?;
                 Ok(BillingExecutionScope {
                     workspace_id: library.workspace_id,
@@ -650,14 +650,14 @@ impl BillingService {
                     execution_id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", execution_id))?;
                 let job = ingest_repository::get_ingest_job_by_id(
                     &state.persistence.postgres,
                     attempt.job_id,
                 )
                 .await
-                .map_err(|_| ApiError::Internal)?
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("ingest_job", attempt.job_id))?;
                 Ok(BillingExecutionScope {
                     workspace_id: job.workspace_id,

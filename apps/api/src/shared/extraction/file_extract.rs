@@ -1,14 +1,25 @@
-use std::{fmt, path::Path, str::FromStr};
+use std::str::FromStr;
+
+mod errors;
+mod mime_detection;
+mod normalization;
 
 use crate::{
     domains::provider_profiles::ProviderModelSelection,
     integrations::llm::{LlmGateway, VisionRequest},
     shared::extraction::{
         self, ExtractedImage, ExtractionOutput, ExtractionSourceMetadata, ExtractionStructureHints,
-        text_render::normalize_for_structured_preparation,
     },
 };
-use serde::Serialize;
+
+use self::normalization::{normalize_extracted_content, with_extraction_quality_markers};
+pub use self::{
+    errors::{
+        FileExtractError, UploadAdmissionError, UploadRejectionDetails,
+        classify_multipart_file_body_error,
+    },
+    mime_detection::{detect_upload_file_kind, validate_upload_file_admission},
+};
 
 pub const MULTIPART_UPLOAD_MODE: &str = "multipart_upload_v2";
 pub const EXTRACTED_CONTENT_PREVIEW_LIMIT: usize = 1_600;
@@ -19,7 +30,6 @@ const TEXT_LIKE_EXTENSIONS: &[&str] = &[
     "txt",
     "md",
     "markdown",
-    "csv",
     "json",
     "yaml",
     "yml",
@@ -120,11 +130,21 @@ const HTML_EXTENSIONS: &[&str] = &["html", "htm"];
 const IMAGE_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "tif", "tiff", "heic", "heif"];
 const DOCX_EXTENSIONS: &[&str] = &["docx"];
+const SPREADSHEET_EXTENSIONS: &[&str] = &["csv", "tsv", "xls", "xlsx", "xlsb", "ods"];
 const PPTX_EXTENSIONS: &[&str] = &["pptx"];
 const HTML_MIME_TYPES: &[&str] = &["text/html", "application/xhtml+xml"];
 const TEXT_LIKE_MIME_TYPES: &[&str] = &["application/json", "application/xml", "text/xml"];
 const DOCX_MIME_TYPES: &[&str] =
     &["application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
+const SPREADSHEET_MIME_TYPES: &[&str] = &[
+    "text/csv",
+    "application/csv",
+    "text/tab-separated-values",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+    "application/vnd.oasis.opendocument.spreadsheet",
+];
 const PPTX_MIME_TYPES: &[&str] =
     &["application/vnd.openxmlformats-officedocument.presentationml.presentation"];
 const GENERIC_BINARY_MIME_TYPES: &[&str] = &["application/octet-stream", "binary/octet-stream"];
@@ -135,6 +155,7 @@ pub enum UploadFileKind {
     Pdf,
     Image,
     Docx,
+    Spreadsheet,
     Pptx,
     Binary,
 }
@@ -147,6 +168,7 @@ impl UploadFileKind {
             Self::Pdf => "pdf",
             Self::Image => "image",
             Self::Docx => "docx",
+            Self::Spreadsheet => "spreadsheet",
             Self::Pptx => "pptx",
             Self::Binary => "binary",
         }
@@ -159,6 +181,7 @@ impl UploadFileKind {
             Self::Pdf => "PDF",
             Self::Image => "Image",
             Self::Docx => "DOCX",
+            Self::Spreadsheet => "Spreadsheet",
             Self::Pptx => "PPTX",
             Self::Binary => "Binary",
         }
@@ -174,6 +197,7 @@ impl FromStr for UploadFileKind {
             "pdf" => Ok(Self::Pdf),
             "image" => Ok(Self::Image),
             "docx" => Ok(Self::Docx),
+            "spreadsheet" => Ok(Self::Spreadsheet),
             "pptx" => Ok(Self::Pptx),
             "binary" => Ok(Self::Binary),
             _ => Err(()),
@@ -233,624 +257,10 @@ pub struct FileExtractionPlan {
     pub source_map: serde_json::Value,
     pub provider_kind: Option<String>,
     pub model_name: Option<String>,
+    pub usage_json: serde_json::Value,
     pub normalization_profile: String,
     pub extraction_version: Option<String>,
     pub ingest_mode: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UploadRejectionDetails {
-    pub file_name: Option<String>,
-    pub rejection_kind: Option<String>,
-    pub detected_format: Option<String>,
-    pub mime_type: Option<String>,
-    pub file_size_bytes: Option<u64>,
-    pub upload_limit_mb: Option<u64>,
-    pub rejection_cause: String,
-    pub operator_action: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct UploadAdmissionError {
-    error_kind: &'static str,
-    message: String,
-    details: UploadRejectionDetails,
-}
-
-impl UploadAdmissionError {
-    #[must_use]
-    pub fn invalid_multipart_payload() -> Self {
-        Self {
-            error_kind: "multipart_stream_failure",
-            message: "multipart upload stream failed".to_string(),
-            details: UploadRejectionDetails {
-                file_name: None,
-                rejection_kind: Some("multipart_stream_failure".to_string()),
-                detected_format: None,
-                mime_type: None,
-                file_size_bytes: None,
-                upload_limit_mb: None,
-                rejection_cause:
-                    "The multipart upload stream could not be parsed into complete fields."
-                        .to_string(),
-                operator_action:
-                    "Retry the upload using a standard multipart/form-data request body."
-                        .to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn invalid_file_body(file_name: Option<&str>, mime_type: Option<&str>) -> Self {
-        Self::invalid_file_body_with_cause(
-            file_name,
-            mime_type,
-            "The upload stream could not be read into a complete file body.".to_string(),
-        )
-    }
-
-    #[must_use]
-    pub fn invalid_file_body_with_cause(
-        file_name: Option<&str>,
-        mime_type: Option<&str>,
-        rejection_cause: String,
-    ) -> Self {
-        let detected_format = detect_declared_upload_file_kind(file_name, mime_type)
-            .map(|kind| kind.display_name().to_string());
-        let message = file_name.map_or_else(
-            || "invalid file body".to_string(),
-            |name| format!("invalid file body for {name}"),
-        );
-        Self {
-            error_kind: "invalid_file_body",
-            message,
-            details: UploadRejectionDetails {
-                file_name: file_name.map(str::to_string),
-                rejection_kind: Some("invalid_file_body".to_string()),
-                detected_format,
-                mime_type: mime_type.map(str::to_string),
-                file_size_bytes: None,
-                upload_limit_mb: None,
-                rejection_cause,
-                operator_action:
-                    "Retry the upload; if it keeps failing, upload the file individually to isolate the broken part."
-                        .to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn multipart_stream_failure(
-        file_name: Option<&str>,
-        mime_type: Option<&str>,
-        rejection_cause: impl Into<String>,
-    ) -> Self {
-        let detected_format = detect_declared_upload_file_kind(file_name, mime_type)
-            .map(|kind| kind.display_name().to_string());
-        let message = file_name.map_or_else(
-            || "multipart upload stream failed".to_string(),
-            |name| format!("multipart upload stream failed for {name}"),
-        );
-        Self {
-            error_kind: "multipart_stream_failure",
-            message,
-            details: UploadRejectionDetails {
-                file_name: file_name.map(str::to_string),
-                rejection_kind: Some("multipart_stream_failure".to_string()),
-                detected_format,
-                mime_type: mime_type.map(str::to_string),
-                file_size_bytes: None,
-                upload_limit_mb: None,
-                rejection_cause: rejection_cause.into(),
-                operator_action:
-                    "Retry the upload; if it keeps failing, re-export the file and upload it individually."
-                        .to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn file_too_large(
-        file_name: &str,
-        mime_type: Option<&str>,
-        file_size_bytes: u64,
-        upload_limit_mb: u64,
-    ) -> Self {
-        let detected_format = detect_declared_upload_file_kind(Some(file_name), mime_type)
-            .map(|kind| kind.display_name().to_string());
-        Self {
-            error_kind: "upload_limit_exceeded",
-            message: format!("file {file_name} exceeds the {upload_limit_mb} MB upload limit"),
-            details: UploadRejectionDetails {
-                file_name: Some(file_name.to_string()),
-                rejection_kind: Some("upload_limit_exceeded".to_string()),
-                detected_format,
-                mime_type: mime_type.map(str::to_string),
-                file_size_bytes: Some(file_size_bytes),
-                upload_limit_mb: Some(upload_limit_mb),
-                rejection_cause: "The file is larger than the configured upload size limit."
-                    .to_string(),
-                operator_action:
-                    "Upload a smaller file, split the document, or raise the configured upload limit."
-                        .to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn upload_batch_too_large(total_size_bytes: u64, upload_limit_mb: u64) -> Self {
-        Self {
-            error_kind: "upload_limit_exceeded",
-            message: format!(
-                "upload batch exceeds the {upload_limit_mb} MB upload limit"
-            ),
-            details: UploadRejectionDetails {
-                file_name: None,
-                rejection_kind: Some("upload_limit_exceeded".to_string()),
-                detected_format: None,
-                mime_type: None,
-                file_size_bytes: Some(total_size_bytes),
-                upload_limit_mb: Some(upload_limit_mb),
-                rejection_cause:
-                    "The total decoded upload batch is larger than the configured upload size limit."
-                        .to_string(),
-                operator_action:
-                    "Split the batch into smaller uploads, reduce document size, or raise the configured upload limit."
-                        .to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn request_body_too_large(upload_limit_mb: u64) -> Self {
-        Self {
-            error_kind: "upload_limit_exceeded",
-            message: format!("request body exceeded the {upload_limit_mb} MB upload limit"),
-            details: UploadRejectionDetails {
-                file_name: None,
-                rejection_kind: Some("upload_limit_exceeded".to_string()),
-                detected_format: None,
-                mime_type: None,
-                file_size_bytes: None,
-                upload_limit_mb: Some(upload_limit_mb),
-                rejection_cause:
-                    "The MCP request body exceeded the configured upload size limit before it could be fully buffered."
-                        .to_string(),
-                operator_action:
-                    "Split the upload into smaller calls, reduce document size, or raise the configured upload limit."
-                        .to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn streaming_size_limit_exceeded(
-        file_name: Option<&str>,
-        mime_type: Option<&str>,
-        upload_limit_mb: u64,
-    ) -> Self {
-        let detected_format = detect_declared_upload_file_kind(file_name, mime_type)
-            .map(|kind| kind.display_name().to_string());
-        let message = file_name.map_or_else(
-            || format!("upload exceeded the {upload_limit_mb} MB size limit"),
-            |name| format!("file {name} exceeded the {upload_limit_mb} MB upload limit"),
-        );
-        Self {
-            error_kind: "upload_limit_exceeded",
-            message,
-            details: UploadRejectionDetails {
-                file_name: file_name.map(str::to_string),
-                rejection_kind: Some("upload_limit_exceeded".to_string()),
-                detected_format,
-                mime_type: mime_type.map(str::to_string),
-                file_size_bytes: None,
-                upload_limit_mb: Some(upload_limit_mb),
-                rejection_cause:
-                    "The upload stream exceeded the configured upload size limit before the file body was fully read."
-                        .to_string(),
-                operator_action:
-                    "Upload a smaller file, split the document, or raise the configured upload limit."
-                        .to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn missing_upload_file(message: impl Into<String>) -> Self {
-        let message = message.into();
-        Self {
-            error_kind: "missing_upload_file",
-            message: message.clone(),
-            details: UploadRejectionDetails {
-                file_name: None,
-                rejection_kind: Some("missing_upload_file".to_string()),
-                detected_format: None,
-                mime_type: None,
-                file_size_bytes: None,
-                upload_limit_mb: None,
-                rejection_cause: message,
-                operator_action: "Attach a file field named `file` and retry.".to_string(),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn from_file_extract_error(
-        file_name: &str,
-        mime_type: Option<&str>,
-        file_size_bytes: u64,
-        error: &FileExtractError,
-    ) -> Self {
-        let error_kind = error.error_kind();
-        let message = error.to_string();
-        Self {
-            error_kind,
-            details: UploadRejectionDetails {
-                file_name: Some(file_name.to_string()),
-                rejection_kind: Some(error_kind.to_string()),
-                detected_format: Some(error.detected_kind().display_name().to_string()),
-                mime_type: mime_type.map(str::to_string),
-                file_size_bytes: Some(file_size_bytes),
-                upload_limit_mb: None,
-                rejection_cause: error.rejection_cause(),
-                operator_action: error.operator_action().to_string(),
-            },
-            message,
-        }
-    }
-
-    #[must_use]
-    pub const fn error_kind(&self) -> &'static str {
-        self.error_kind
-    }
-
-    #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    #[must_use]
-    pub const fn details(&self) -> &UploadRejectionDetails {
-        &self.details
-    }
-}
-
-impl fmt::Display for UploadAdmissionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for UploadAdmissionError {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileExtractError {
-    UnsupportedBinary,
-    InvalidUtf8,
-    ExtractionFailed { file_kind: UploadFileKind, message: String },
-}
-
-impl fmt::Display for FileExtractError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnsupportedBinary => write!(
-                f,
-                "unsupported file type; only text, pdf, docx, pptx, and image uploads are accepted"
-            ),
-            Self::InvalidUtf8 => {
-                write!(f, "selected file is treated as text-like but could not be decoded as utf-8")
-            }
-            Self::ExtractionFailed { message, .. } => write!(f, "{message}"),
-        }
-    }
-}
-
-impl std::error::Error for FileExtractError {}
-
-impl FileExtractError {
-    #[must_use]
-    pub const fn detected_kind(&self) -> UploadFileKind {
-        match self {
-            Self::UnsupportedBinary => UploadFileKind::Binary,
-            Self::InvalidUtf8 => UploadFileKind::TextLike,
-            Self::ExtractionFailed { file_kind, .. } => *file_kind,
-        }
-    }
-
-    #[must_use]
-    pub const fn error_kind(&self) -> &'static str {
-        match self {
-            Self::UnsupportedBinary => "unsupported_upload_type",
-            Self::InvalidUtf8 => "invalid_text_encoding",
-            Self::ExtractionFailed { .. } => "upload_extraction_failed",
-        }
-    }
-
-    #[must_use]
-    pub fn rejection_cause(&self) -> String {
-        match self {
-            Self::UnsupportedBinary => {
-                "The file type is not supported for upload ingestion.".to_string()
-            }
-            Self::InvalidUtf8 => {
-                "The file was detected as text-like but could not be decoded as UTF-8.".to_string()
-            }
-            Self::ExtractionFailed { message, .. } => message.clone(),
-        }
-    }
-
-    #[must_use]
-    pub const fn operator_action(&self) -> &'static str {
-        match self {
-            Self::UnsupportedBinary => {
-                "Upload a TXT, MD, PDF, DOCX, PPTX, or supported image file instead."
-            }
-            Self::InvalidUtf8 => {
-                "Re-save the file as UTF-8 text or upload a format with a dedicated parser."
-            }
-            Self::ExtractionFailed { .. } => {
-                "Retry the upload; if it keeps failing, inspect the file parser path for this format."
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MultipartFileReadFailure {
-    StreamFailure,
-    InvalidBody,
-    SizeLimit,
-}
-
-fn classify_multipart_file_read_failure(message: &str) -> MultipartFileReadFailure {
-    let normalized = message.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return MultipartFileReadFailure::InvalidBody;
-    }
-
-    if [
-        "size limit",
-        "field exceeded",
-        "stream size exceeded",
-        "field size exceeded",
-        "body too large",
-        "larger than the limit",
-    ]
-    .iter()
-    .any(|pattern| normalized.contains(pattern))
-    {
-        return MultipartFileReadFailure::SizeLimit;
-    }
-
-    if [
-        "multipart",
-        "stream",
-        "boundary",
-        "connection",
-        "incomplete field data",
-        "failed to read field data",
-        "failed to read stream",
-    ]
-    .iter()
-    .any(|pattern| normalized.contains(pattern))
-    {
-        return MultipartFileReadFailure::StreamFailure;
-    }
-
-    MultipartFileReadFailure::InvalidBody
-}
-
-fn normalize_upload_rejection_cause(message: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        "The upload stream could not be decoded into a complete file body.".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Classifies multipart file-body failures into canonical upload admission errors.
-#[must_use]
-pub fn classify_multipart_file_body_error(
-    file_name: Option<&str>,
-    mime_type: Option<&str>,
-    upload_limit_mb: u64,
-    error_message: &str,
-) -> UploadAdmissionError {
-    match classify_multipart_file_read_failure(error_message) {
-        MultipartFileReadFailure::SizeLimit => UploadAdmissionError::streaming_size_limit_exceeded(
-            file_name,
-            mime_type,
-            upload_limit_mb,
-        ),
-        MultipartFileReadFailure::StreamFailure => UploadAdmissionError::multipart_stream_failure(
-            file_name,
-            mime_type,
-            normalize_upload_rejection_cause(error_message),
-        ),
-        MultipartFileReadFailure::InvalidBody => {
-            UploadAdmissionError::invalid_file_body_with_cause(
-                file_name,
-                mime_type,
-                normalize_upload_rejection_cause(error_message),
-            )
-        }
-    }
-}
-
-fn detect_declared_upload_file_kind(
-    file_name: Option<&str>,
-    mime_type: Option<&str>,
-) -> Option<UploadFileKind> {
-    let normalized_mime = normalized_upload_mime_essence(mime_type);
-    let extension = normalized_upload_extension(file_name);
-
-    if normalized_mime.as_deref() == Some("application/pdf") || extension.as_deref() == Some("pdf")
-    {
-        return Some(UploadFileKind::Pdf);
-    }
-    if normalized_mime.as_deref().is_some_and(|value| value.starts_with("image/"))
-        || extension.as_deref().is_some_and(|value| IMAGE_EXTENSIONS.contains(&value))
-    {
-        return Some(UploadFileKind::Image);
-    }
-    if normalized_mime.as_deref().is_some_and(|value| DOCX_MIME_TYPES.contains(&value))
-        || extension.as_deref().is_some_and(|value| DOCX_EXTENSIONS.contains(&value))
-    {
-        return Some(UploadFileKind::Docx);
-    }
-    if normalized_mime.as_deref().is_some_and(|value| PPTX_MIME_TYPES.contains(&value))
-        || extension.as_deref().is_some_and(|value| PPTX_EXTENSIONS.contains(&value))
-    {
-        return Some(UploadFileKind::Pptx);
-    }
-    if normalized_mime
-        .as_deref()
-        .is_some_and(|value| value.starts_with("text/") || TEXT_LIKE_MIME_TYPES.contains(&value))
-        || extension.as_deref().is_some_and(|value| {
-            TEXT_LIKE_EXTENSIONS.contains(&value) || HTML_EXTENSIONS.contains(&value)
-        })
-    {
-        return Some(UploadFileKind::TextLike);
-    }
-
-    None
-}
-
-fn normalized_upload_extension(file_name: Option<&str>) -> Option<String> {
-    file_name
-        .and_then(|value| Path::new(value).extension().and_then(|ext| ext.to_str()))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
-fn normalized_upload_mime_type(mime_type: Option<&str>) -> Option<String> {
-    mime_type.map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase)
-}
-
-fn normalized_upload_mime_essence(mime_type: Option<&str>) -> Option<String> {
-    normalized_upload_mime_type(mime_type)
-        .and_then(|value| value.split(';').next().map(str::trim).map(str::to_string))
-}
-
-fn is_supported_upload_extension(extension: &str) -> bool {
-    extension == "pdf"
-        || TEXT_LIKE_EXTENSIONS.contains(&extension)
-        || HTML_EXTENSIONS.contains(&extension)
-        || IMAGE_EXTENSIONS.contains(&extension)
-        || DOCX_EXTENSIONS.contains(&extension)
-        || PPTX_EXTENSIONS.contains(&extension)
-}
-
-fn is_supported_upload_mime_type(mime_type: &str) -> bool {
-    mime_type == "application/pdf"
-        || mime_type.starts_with("image/")
-        || HTML_MIME_TYPES.contains(&mime_type)
-        || TEXT_LIKE_MIME_TYPES.contains(&mime_type)
-        || mime_type.starts_with("text/")
-        || DOCX_MIME_TYPES.contains(&mime_type)
-        || PPTX_MIME_TYPES.contains(&mime_type)
-}
-
-fn mime_type_is_generic_binary(mime_type: &str) -> bool {
-    GENERIC_BINARY_MIME_TYPES.contains(&mime_type)
-}
-
-fn declared_payload_is_html(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
-    let normalized_mime = normalized_upload_mime_essence(mime_type);
-    let extension = normalized_upload_extension(file_name);
-    normalized_mime.as_deref().is_some_and(|value| HTML_MIME_TYPES.contains(&value))
-        || extension.as_deref().is_some_and(|value| HTML_EXTENSIONS.contains(&value))
-}
-
-fn payload_looks_like_html(file_bytes: &[u8]) -> bool {
-    std::str::from_utf8(file_bytes)
-        .is_ok_and(extraction::html_main_content::payload_looks_like_html_document)
-}
-
-fn declares_unsupported_upload_format(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
-    if let Some(extension) = normalized_upload_extension(file_name)
-        && !is_supported_upload_extension(&extension)
-    {
-        return true;
-    }
-
-    if let Some(mime_type) = normalized_upload_mime_essence(mime_type)
-        && !mime_type_is_generic_binary(&mime_type)
-        && !is_supported_upload_mime_type(&mime_type)
-    {
-        return true;
-    }
-
-    false
-}
-
-/// Detects the canonical upload file kind from filename, MIME type, and bytes.
-#[must_use]
-pub fn detect_upload_file_kind(
-    file_name: Option<&str>,
-    mime_type: Option<&str>,
-    file_bytes: &[u8],
-) -> UploadFileKind {
-    if let Some(file_kind) = detect_declared_upload_file_kind(file_name, mime_type) {
-        return file_kind;
-    }
-    if declares_unsupported_upload_format(file_name, mime_type) {
-        return UploadFileKind::Binary;
-    }
-    if let Ok(decoded_text) = std::str::from_utf8(file_bytes)
-        && !utf8_payload_looks_binary(decoded_text)
-    {
-        return UploadFileKind::TextLike;
-    }
-
-    UploadFileKind::Binary
-}
-
-/// Validates that an upload is admissible for extraction and returns its file kind.
-///
-/// # Errors
-///
-/// Returns a [`FileExtractError`] when the upload is binary-only or text-like data
-/// cannot be decoded as UTF-8.
-pub fn validate_upload_file_admission(
-    file_name: Option<&str>,
-    mime_type: Option<&str>,
-    file_bytes: &[u8],
-) -> Result<UploadFileKind, FileExtractError> {
-    let file_kind = detect_upload_file_kind(file_name, mime_type, file_bytes);
-    match file_kind {
-        UploadFileKind::Binary => Err(FileExtractError::UnsupportedBinary),
-        UploadFileKind::TextLike => {
-            if !declared_payload_is_html(file_name, mime_type) {
-                std::str::from_utf8(file_bytes).map_err(|_| FileExtractError::InvalidUtf8)?;
-            }
-            Ok(file_kind)
-        }
-        UploadFileKind::Pdf
-        | UploadFileKind::Image
-        | UploadFileKind::Docx
-        | UploadFileKind::Pptx => Ok(file_kind),
-    }
-}
-
-fn utf8_payload_looks_binary(decoded_text: &str) -> bool {
-    if decoded_text.chars().any(|ch| ch == '\0') {
-        return true;
-    }
-
-    let non_whitespace_control_count = decoded_text
-        .chars()
-        .filter(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\u{000C}'))
-        .count();
-    let total_char_count = decoded_text.chars().count();
-    if total_char_count == 0 {
-        return false;
-    }
-
-    non_whitespace_control_count.saturating_mul(5) >= total_char_count
 }
 
 /// Builds a truncated preview of extracted content for operator-facing surfaces.
@@ -925,8 +335,8 @@ pub fn build_local_file_extraction_plan(
 
     match file_kind {
         UploadFileKind::TextLike => {
-            let output = if declared_payload_is_html(file_name, mime_type)
-                || payload_looks_like_html(file_bytes)
+            let output = if mime_detection::declared_payload_is_html(file_name, mime_type)
+                || mime_detection::payload_looks_like_html(file_bytes)
             {
                 extraction::html_main_content::extract_html_main_content(file_bytes, mime_type)
                     .map_err(|error| FileExtractError::ExtractionFailed {
@@ -950,6 +360,15 @@ pub fn build_local_file_extraction_plan(
             extraction::docx::extract_docx(file_bytes).map_err(|error| {
                 FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
             })?,
+        )),
+        UploadFileKind::Spreadsheet => Ok(build_plan_from_extraction(
+            file_kind,
+            extraction::tabular::extract_tabular(file_name, mime_type, file_bytes).map_err(
+                |error| FileExtractError::ExtractionFailed {
+                    file_kind,
+                    message: error.to_string(),
+                },
+            )?,
         )),
         UploadFileKind::Pptx => Ok(build_plan_from_extraction(
             file_kind,
@@ -1024,7 +443,7 @@ pub async fn build_runtime_file_extraction_plan(
 
             if let Some(vision_provider) = vision_provider {
                 if !output.extracted_images.is_empty() {
-                    let descriptions = describe_extracted_images(
+                    let result = describe_extracted_images(
                         gateway,
                         vision_provider.provider_kind.as_str(),
                         &vision_provider.model_name,
@@ -1033,7 +452,10 @@ pub async fn build_runtime_file_extraction_plan(
                         &output.extracted_images,
                     )
                     .await;
-                    append_image_descriptions_to_output(&mut output, &descriptions);
+                    append_image_descriptions_to_output(&mut output, &result.descriptions);
+                    output.provider_kind = result.provider_kind;
+                    output.model_name = result.model_name;
+                    output.usage_json = result.usage_json;
                 }
             }
 
@@ -1061,6 +483,7 @@ pub fn build_inline_text_extraction_plan(text: &str) -> FileExtractionPlan {
         source_map: serde_json::json!({}),
         provider_kind: None,
         model_name: None,
+        usage_json: serde_json::json!({}),
         extracted_images: Vec::new(),
     };
     build_plan_from_extraction(UploadFileKind::TextLike, output)
@@ -1076,6 +499,14 @@ pub struct ImageDescriptionBlock {
 const IMAGE_DESCRIPTION_PROMPT: &str = "Describe this image in detail, including any text, data, tables, diagrams, charts, or formulas visible.";
 const MIN_IMAGE_DIMENSION: u32 = 50;
 
+/// Result of describing extracted images with vision LLM, including aggregated usage.
+pub struct ImageDescriptionResult {
+    pub descriptions: Vec<ImageDescriptionBlock>,
+    pub provider_kind: Option<String>,
+    pub model_name: Option<String>,
+    pub usage_json: serde_json::Value,
+}
+
 /// Sends extracted images to a Vision LLM for description.
 /// Images smaller than 50x50 pixels are skipped (icons/bullets).
 pub async fn describe_extracted_images(
@@ -1085,14 +516,19 @@ pub async fn describe_extracted_images(
     api_key: &str,
     base_url: Option<&str>,
     images: &[ExtractedImage],
-) -> Vec<ImageDescriptionBlock> {
+) -> ImageDescriptionResult {
     let eligible: Vec<&ExtractedImage> = images
         .iter()
         .filter(|img| img.width >= MIN_IMAGE_DIMENSION && img.height >= MIN_IMAGE_DIMENSION)
         .collect();
 
     if eligible.is_empty() {
-        return Vec::new();
+        return ImageDescriptionResult {
+            descriptions: Vec::new(),
+            provider_kind: None,
+            model_name: None,
+            usage_json: serde_json::json!({}),
+        };
     }
 
     tracing::info!(
@@ -1102,6 +538,9 @@ pub async fn describe_extracted_images(
     );
 
     let mut results = Vec::new();
+    let mut prompt_tokens_sum: i64 = 0;
+    let mut completion_tokens_sum: i64 = 0;
+    let mut total_tokens_sum: i64 = 0;
     for (idx, image) in eligible.iter().enumerate() {
         let request = VisionRequest {
             provider_kind: provider_kind.to_string(),
@@ -1120,6 +559,17 @@ pub async fn describe_extracted_images(
 
         match gateway.vision_extract(request).await {
             Ok(response) => {
+                if let Some(v) = response.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                    prompt_tokens_sum += v;
+                }
+                if let Some(v) =
+                    response.usage_json.get("completion_tokens").and_then(|v| v.as_i64())
+                {
+                    completion_tokens_sum += v;
+                }
+                if let Some(v) = response.usage_json.get("total_tokens").and_then(|v| v.as_i64()) {
+                    total_tokens_sum += v;
+                }
                 if !response.output_text.trim().is_empty() {
                     results.push(ImageDescriptionBlock {
                         page: image.page,
@@ -1142,7 +592,16 @@ pub async fn describe_extracted_images(
         "Vision LLM descriptions complete"
     );
 
-    results
+    ImageDescriptionResult {
+        descriptions: results,
+        provider_kind: Some(provider_kind.to_string()),
+        model_name: Some(model_name.to_string()),
+        usage_json: serde_json::json!({
+            "prompt_tokens": prompt_tokens_sum,
+            "completion_tokens": completion_tokens_sum,
+            "total_tokens": total_tokens_sum,
+        }),
+    }
 }
 
 /// Appends image description blocks to the extraction content text.
@@ -1184,6 +643,7 @@ fn build_plan_from_extraction(
         source_map,
         provider_kind,
         model_name,
+        usage_json,
         extracted_images: _,
     } = output;
     let normalized = normalize_extracted_content(file_kind, &content_text, &structure_hints);
@@ -1215,156 +675,16 @@ fn build_plan_from_extraction(
         source_map,
         provider_kind,
         model_name,
+        usage_json,
         normalization_profile: normalized.normalization_profile,
         extraction_version: Some("runtime_extraction_v1".to_string()),
         ingest_mode: MULTIPART_UPLOAD_MODE.to_string(),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NormalizedExtractedContent {
-    source_text: String,
-    normalized_text: String,
-    normalization_status: ExtractionNormalizationStatus,
-    normalization_profile: String,
-    ocr_source: Option<String>,
-    structure_hints: ExtractionStructureHints,
-}
-
-fn normalize_extracted_content(
-    file_kind: UploadFileKind,
-    content_text: &str,
-    structure_hints: &ExtractionStructureHints,
-) -> NormalizedExtractedContent {
-    let source_text = match file_kind {
-        UploadFileKind::Image => normalize_image_ocr_text(content_text),
-        _ => content_text.to_string(),
-    };
-    let pre_structuring = normalize_for_structured_preparation(&source_text, Some(structure_hints));
-    let normalized_text = pre_structuring.normalized_text;
-    let normalization_status = if normalized_text.trim() == content_text.trim() {
-        ExtractionNormalizationStatus::Verbatim
-    } else {
-        ExtractionNormalizationStatus::Normalized
-    };
-    let normalization_profile = if normalization_status == ExtractionNormalizationStatus::Verbatim {
-        "verbatim_v1".to_string()
-    } else if file_kind == UploadFileKind::Image {
-        "image_ocr_pre_structuring_v1".to_string()
-    } else {
-        pre_structuring.normalization_profile
-    };
-    NormalizedExtractedContent {
-        source_text,
-        normalized_text,
-        normalization_status,
-        normalization_profile,
-        ocr_source: (file_kind == UploadFileKind::Image).then_some("vision_llm".to_string()),
-        structure_hints: pre_structuring.structure_hints,
-    }
-}
-
-fn normalize_image_ocr_text(content_text: &str) -> String {
-    let normalized_newlines = content_text.replace("\r\n", "\n").replace('\r', "\n");
-    let lines = normalized_newlines.lines().map(str::trim).collect::<Vec<_>>();
-    if lines.is_empty() {
-        return String::new();
-    }
-
-    let mut start = 0usize;
-    while start < lines.len() {
-        let line = lines[start];
-        if line.is_empty() {
-            start += 1;
-            continue;
-        }
-        if is_ocr_wrapper_line(line) {
-            start += 1;
-            continue;
-        }
-        break;
-    }
-
-    let cleaned = lines[start..]
-        .iter()
-        .map(|line| strip_wrapper_label_prefix(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let cleaned = cleaned.trim().trim_matches('`').trim().to_string();
-    if cleaned.is_empty() { content_text.trim().to_string() } else { cleaned }
-}
-
-fn is_ocr_wrapper_line(line: &str) -> bool {
-    let normalized = line.trim().trim_matches(':').to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "transcription"
-            | "ocr"
-            | "ocr text"
-            | "recognized text"
-            | "recognized text from the image"
-            | "extracted text"
-            | "extracted text from the image"
-            | "text from the image"
-            | "visible text"
-    ) || (normalized.contains("image")
-        && (normalized.contains("extracted")
-            || normalized.contains("transcription")
-            || normalized.contains("recognized")
-            || normalized.contains("visible text")
-            || normalized.contains("readable text")
-            || normalized.contains("ocr")))
-}
-
-fn strip_wrapper_label_prefix(line: &str) -> String {
-    let trimmed = line.trim();
-    let lowercase = trimmed.to_ascii_lowercase();
-    for prefix in [
-        "transcription:",
-        "ocr:",
-        "ocr text:",
-        "recognized text:",
-        "recognized text from the image:",
-        "extracted text:",
-        "extracted text from the image:",
-        "text from the image:",
-        "visible text:",
-    ] {
-        if lowercase.starts_with(prefix) {
-            return trimmed[prefix.len()..].trim().to_string();
-        }
-    }
-    trimmed.to_string()
-}
-
-fn with_extraction_quality_markers(
-    source_map: serde_json::Value,
-    normalized: &NormalizedExtractedContent,
-    warning_count: usize,
-    provider_kind: Option<&str>,
-) -> serde_json::Value {
-    let mut source_map = match source_map {
-        serde_json::Value::Object(map) => map,
-        _ => serde_json::Map::new(),
-    };
-    source_map.insert(
-        EXTRACTION_QUALITY_KEY.to_string(),
-        serde_json::json!({
-            "normalization_status": normalized.normalization_status.as_str(),
-            "normalization_profile": normalized.normalization_profile,
-            "ocr_source": normalized
-                .ocr_source
-                .as_deref()
-                .or_else(|| provider_kind.map(|_| "vision_llm")),
-            "warning_count": warning_count,
-        }),
-    );
-    serde_json::Value::Object(source_map)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
 
     use anyhow::Result;
     use async_trait::async_trait;
@@ -1374,6 +694,7 @@ mod tests {
         content::{Content, Operation},
         dictionary,
     };
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
     use super::*;
     use crate::integrations::llm::{
@@ -1479,6 +800,86 @@ mod tests {
         bytes
     }
 
+    fn build_minimal_xlsx_bytes() -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        write_xlsx_fixture(
+            &mut writer,
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+              <Default Extension="xml" ContentType="application/xml"/>
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+              <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+            </Types>"#,
+            options,
+        );
+        write_xlsx_fixture(
+            &mut writer,
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+            </Relationships>"#,
+            options,
+        );
+        write_xlsx_fixture(
+            &mut writer,
+            "xl/workbook.xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets>
+                <sheet name="Inventory" sheetId="1" r:id="rId1"/>
+              </sheets>
+            </workbook>"#,
+            options,
+        );
+        write_xlsx_fixture(
+            &mut writer,
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+            </Relationships>"#,
+            options,
+        );
+        write_xlsx_fixture(
+            &mut writer,
+            "xl/worksheets/sheet1.xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <dimension ref="A1:B2"/>
+              <sheetData>
+                <row r="1">
+                  <c r="A1" t="inlineStr"><is><t>Name</t></is></c>
+                  <c r="B1" t="inlineStr"><is><t>Value</t></is></c>
+                </row>
+                <row r="2">
+                  <c r="A2" t="inlineStr"><is><t>Alpha</t></is></c>
+                  <c r="B2"><v>42</v></c>
+                </row>
+              </sheetData>
+            </worksheet>"#,
+            options,
+        );
+
+        writer.finish().expect("finish xlsx").into_inner()
+    }
+
+    fn write_xlsx_fixture(
+        writer: &mut ZipWriter<Cursor<Vec<u8>>>,
+        path: &str,
+        body: &str,
+        options: SimpleFileOptions,
+    ) {
+        writer.start_file(path, options).expect("start xlsx fixture file");
+        writer.write_all(body.as_bytes()).expect("write xlsx fixture file");
+    }
+
     #[test]
     fn detects_pdf_by_extension() {
         assert_eq!(
@@ -1492,6 +893,38 @@ mod tests {
         assert_eq!(
             detect_upload_file_kind(Some("notes.docx"), None, b"binary"),
             UploadFileKind::Docx
+        );
+    }
+
+    #[test]
+    fn detects_spreadsheet_by_xlsx_extension() {
+        assert_eq!(
+            detect_upload_file_kind(Some("sheet.xlsx"), None, b"binary"),
+            UploadFileKind::Spreadsheet
+        );
+    }
+
+    #[test]
+    fn detects_spreadsheet_by_xls_extension() {
+        assert_eq!(
+            detect_upload_file_kind(Some("sheet.xls"), None, b"binary"),
+            UploadFileKind::Spreadsheet
+        );
+    }
+
+    #[test]
+    fn detects_tabular_csv_by_extension() {
+        assert_eq!(
+            detect_upload_file_kind(Some("sheet.csv"), None, b"name,value\nacme,42\n"),
+            UploadFileKind::Spreadsheet
+        );
+    }
+
+    #[test]
+    fn detects_spreadsheet_by_ods_extension() {
+        assert_eq!(
+            detect_upload_file_kind(Some("sheet.ods"), None, b"binary"),
+            UploadFileKind::Spreadsheet
         );
     }
 
@@ -1520,22 +953,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_utf8_payloads_with_unsupported_declared_extension() {
+    fn accepts_spreadsheet_declared_extension_before_utf8_sniffing() {
         assert_eq!(
             detect_upload_file_kind(Some("sheet.xlsx"), None, br"name,value\nacme,42"),
-            UploadFileKind::Binary
+            UploadFileKind::Spreadsheet
         );
     }
 
     #[test]
-    fn rejects_utf8_payloads_with_unsupported_declared_mime_type() {
+    fn accepts_spreadsheet_declared_mime_type_before_utf8_sniffing() {
         assert_eq!(
             detect_upload_file_kind(
                 Some("spreadsheet"),
                 Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 br"name,value\nacme,42",
             ),
-            UploadFileKind::Binary
+            UploadFileKind::Spreadsheet
         );
     }
 
@@ -1611,7 +1044,7 @@ mod tests {
 
     #[test]
     fn accepts_large_utf8_text_upload_plan() {
-        let large_text = "RustRAG bulk ingest line.\n".repeat(32 * 1024);
+        let large_text = "IronRAG bulk ingest line.\n".repeat(32 * 1024);
         let plan = match build_file_extraction_plan(
             Some("large-notes.txt"),
             Some("text/plain"),
@@ -1674,6 +1107,47 @@ mod tests {
     }
 
     #[test]
+    fn builds_spreadsheet_extraction_plan_for_minimal_xlsx_upload() {
+        let plan = match build_file_extraction_plan(
+            Some("inventory.xlsx"),
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            build_minimal_xlsx_bytes(),
+        ) {
+            Ok(plan) => plan,
+            Err(error) => panic!("spreadsheet extraction plan: {error}"),
+        };
+
+        assert_eq!(plan.file_kind, UploadFileKind::Spreadsheet);
+        assert_eq!(plan.extraction_kind, "tabular_text");
+        assert_eq!(plan.source_format_metadata.source_format, "xlsx");
+        assert!(plan.normalized_text.as_deref().is_some_and(|text| text.contains("# Inventory")));
+        assert!(
+            plan.normalized_text.as_deref().is_some_and(|text| text.contains("| Alpha | 42 |"))
+        );
+    }
+
+    #[test]
+    fn builds_tabular_extraction_plan_for_csv_upload() {
+        let plan = match build_file_extraction_plan(
+            Some("people.csv"),
+            Some("text/csv"),
+            b"Name,Email\nAlice,alice@example.com\n".to_vec(),
+        ) {
+            Ok(plan) => plan,
+            Err(error) => panic!("csv extraction plan: {error}"),
+        };
+
+        assert_eq!(plan.file_kind, UploadFileKind::Spreadsheet);
+        assert_eq!(plan.extraction_kind, "tabular_text");
+        assert_eq!(plan.source_format_metadata.source_format, "csv");
+        assert!(
+            plan.normalized_text
+                .as_deref()
+                .is_some_and(|text| text.contains("| Alice | alice@example.com |"))
+        );
+    }
+
+    #[test]
     fn rejects_binary_like_utf8_payloads_with_structured_unsupported_type() {
         let extraction_error = match build_file_extraction_plan(
             Some("unsupported.bin"),
@@ -1696,14 +1170,17 @@ mod tests {
     }
 
     #[test]
-    fn upload_admission_rejects_unsupported_declared_extension_before_persistence() {
+    fn upload_admission_accepts_spreadsheet_before_persistence() {
         let result = validate_upload_file_admission(
             Some("sheet.xlsx"),
             Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            br"name,value\nacme,42",
+            &build_minimal_xlsx_bytes(),
         );
 
-        assert!(matches!(result, Err(FileExtractError::UnsupportedBinary)));
+        assert_eq!(
+            result.expect("spreadsheet upload should be admitted"),
+            UploadFileKind::Spreadsheet
+        );
     }
 
     #[tokio::test]

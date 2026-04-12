@@ -304,7 +304,7 @@ pub async fn embed_runtime_graph_nodes(
     );
 
     // Send embedding batches in parallel to overlap latency with the provider.
-    // The concurrency knob is `RUSTRAG_INGESTION_EMBEDDING_PARALLELISM`.
+    // The concurrency knob is `IRONRAG_INGESTION_EMBEDDING_PARALLELISM`.
     let parallelism = state.settings.ingestion_embedding_parallelism.max(1);
 
     // Build owned (input_text, node_index) batches up front so each parallel

@@ -8,7 +8,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{sync::broadcast, time};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     domains::content::ContentDocumentSummary,
     infra::{
@@ -231,7 +231,7 @@ impl WebIngestSinglePageFixture {
     async fn submit_single_page_run(
         &self,
         seed_url: String,
-    ) -> Result<rustrag_backend::domains::ingest::WebIngestRun> {
+    ) -> Result<ironrag_backend::domains::ingest::WebIngestRun> {
         self.state
             .canonical_services
             .web_ingest

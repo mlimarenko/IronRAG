@@ -6,6 +6,7 @@ use lopdf::{Document, Object, ObjectId};
 use crate::shared::extraction::{
     ExtractedImage, ExtractionOutput, ExtractionSourceMetadata, RawExtractionPage,
     build_text_layout,
+    table_markdown::{render_markdown_table_from_rows, render_plain_table_rows},
 };
 
 /// Minimum consecutive spaces to consider as a column separator in table detection.
@@ -94,6 +95,7 @@ pub fn extract_pdf(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         }),
         provider_kind: None,
         model_name: None,
+        usage_json: serde_json::json!({}),
         extracted_images,
     })
 }
@@ -520,28 +522,18 @@ fn split_tabular_columns(line: &str) -> Vec<String> {
 
 fn flush_table_buffer(rows: &[Vec<String>], output: &mut Vec<String>) {
     if rows.len() < TABLE_MIN_ROWS {
-        for row in rows {
-            output.push(row.join("   "));
-        }
+        output.extend(render_plain_table_rows(rows, "   "));
         return;
     }
 
     let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     if max_cols < TABLE_MIN_COLUMNS {
-        for row in rows {
-            output.push(row.join("   "));
-        }
+        output.extend(render_plain_table_rows(rows, "   "));
         return;
     }
 
-    for (row_index, row) in rows.iter().enumerate() {
-        let mut padded = row.clone();
-        padded.resize(max_cols, String::new());
-        output.push(format!("| {} |", padded.join(" | ")));
-        if row_index == 0 {
-            let separator = (0..max_cols).map(|_| "---").collect::<Vec<_>>();
-            output.push(format!("| {} |", separator.join(" | ")));
-        }
+    if let Some(markdown) = render_markdown_table_from_rows(rows) {
+        output.extend(markdown.lines().map(ToString::to_string));
     }
 }
 

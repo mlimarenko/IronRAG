@@ -19,9 +19,9 @@ COPY crates/contracts/src ./crates/contracts/src
 ENV RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 ENV APP_VERSION=${APP_VERSION}
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=rustrag-cargo-reg \
-    --mount=type=cache,target=/usr/local/cargo/git,id=rustrag-cargo-git \
-    cargo build --locked --release -p rustrag-backend --bin rustrag-backend --bin rebuild_runtime_graph
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg \
+    --mount=type=cache,target=/usr/local/cargo/git,id=ironrag-cargo-git \
+    cargo build --locked --release -p ironrag-backend --bin ironrag-backend --bin rebuild_runtime_graph --bin ironrag-cli
 
 FROM debian:trixie-slim AS runtime
 WORKDIR /app
@@ -30,15 +30,16 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates poppler-utils curl \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /workspace/target/release/rustrag-backend /usr/local/bin/rustrag-backend
+COPY --from=builder /workspace/target/release/ironrag-backend /usr/local/bin/ironrag-backend
 COPY --from=builder /workspace/target/release/rebuild_runtime_graph /usr/local/bin/rebuild_runtime_graph
+COPY --from=builder /workspace/target/release/ironrag-cli /usr/local/bin/ironrag-cli
 COPY apps/api/docker/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint.sh
 
 RUN adduser --disabled-password --gecos "" appuser \
-  && mkdir -p /var/lib/rustrag/content-storage \
-  && chown -R appuser:appuser /app /var/lib/rustrag \
+  && mkdir -p /var/lib/ironrag/content-storage \
+  && chown -R appuser:appuser /app /var/lib/ironrag \
   && chmod +x /usr/local/bin/runtime-entrypoint.sh
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/runtime-entrypoint.sh"]
-CMD ["rustrag-backend"]
+CMD ["ironrag-backend"]

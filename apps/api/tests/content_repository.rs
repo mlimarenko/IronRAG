@@ -5,7 +5,7 @@ use chrono::Utc;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::config::Settings,
     infra::repositories::{
         content_repository,

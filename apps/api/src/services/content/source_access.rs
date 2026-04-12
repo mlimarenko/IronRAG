@@ -20,7 +20,8 @@ pub fn describe_content_source(
     title: Option<&str>,
     external_key: &str,
 ) -> ContentSourceDescriptor {
-    let file_name = derive_content_source_file_name(source_uri, title, external_key);
+    let file_name =
+        derive_revision_source_file_name(content_source_kind, source_uri, title, external_key);
     let access = if content_source_kind.trim() == "web_page" {
         normalize_external_source_uri(source_uri)
             .map(|href| ContentSourceAccess { kind: ContentSourceAccessKind::ExternalUrl, href })
@@ -52,9 +53,11 @@ pub fn derive_storage_backed_content_file_name(
     source_uri: Option<&str>,
     title: Option<&str>,
 ) -> Option<String> {
-    matches!(content_source_kind.trim(), "upload" | "replace")
-        .then(|| preferred_content_source_file_name(source_uri, title))
-        .flatten()
+    match content_source_kind.trim() {
+        "upload" | "replace" => preferred_content_source_file_name(source_uri, title),
+        "edit" => preferred_edited_markdown_file_name(source_uri, title),
+        _ => None,
+    }
 }
 
 fn sanitize_download_file_name(value: &str, fallback: &str) -> String {
@@ -89,6 +92,32 @@ fn preferred_content_source_file_name(
     file_name_from_source_uri(source_uri)
         .or_else(|| normalized_non_empty(title))
         .and_then(|value| sanitized_candidate_file_name(&value))
+}
+
+fn derive_revision_source_file_name(
+    content_source_kind: &str,
+    source_uri: Option<&str>,
+    title: Option<&str>,
+    fallback: &str,
+) -> String {
+    derive_storage_backed_content_file_name(content_source_kind, source_uri, title)
+        .unwrap_or_else(|| derive_content_source_file_name(source_uri, title, fallback))
+}
+
+fn preferred_edited_markdown_file_name(
+    source_uri: Option<&str>,
+    title: Option<&str>,
+) -> Option<String> {
+    let base_name = file_name_from_source_uri(source_uri)
+        .or_else(|| normalized_non_empty(title))
+        .and_then(|value| sanitized_candidate_file_name(&value))?;
+    Some(ensure_markdown_extension(&base_name))
+}
+
+fn ensure_markdown_extension(file_name: &str) -> String {
+    let stem = file_name.rsplit_once('.').map_or(file_name, |(stem, _)| stem.trim());
+    let normalized_stem = if stem.is_empty() { "document" } else { stem };
+    format!("{normalized_stem}.md")
 }
 
 fn sanitized_candidate_file_name(value: &str) -> Option<String> {
@@ -129,7 +158,7 @@ fn normalized_non_empty(value: Option<&str>) -> Option<String> {
 
 fn has_stored_document_source(content_source_kind: &str, storage_key: Option<&str>) -> bool {
     storage_key.map(str::trim).is_some_and(|value| !value.is_empty())
-        || matches!(content_source_kind.trim(), "upload" | "replace")
+        || matches!(content_source_kind.trim(), "upload" | "replace" | "edit")
 }
 
 fn normalize_external_source_uri(source_uri: Option<&str>) -> Option<String> {
@@ -238,5 +267,35 @@ mod tests {
         );
 
         assert_eq!(file_name.as_deref(), Some("quarterly-report.pdf"));
+    }
+
+    #[test]
+    fn edited_documents_keep_download_access() {
+        let descriptor = describe_content_source(
+            Uuid::now_v7(),
+            Some(Uuid::now_v7()),
+            "edit",
+            Some("edit://Quarterly report.md"),
+            Some("content/demo"),
+            Some("Quarterly report"),
+            "fallback.bin",
+        );
+
+        assert_eq!(descriptor.file_name, "Quarterly report.md");
+        assert_eq!(
+            descriptor.access.expect("edited documents should expose stored download access").kind,
+            ContentSourceAccessKind::StoredDocument
+        );
+    }
+
+    #[test]
+    fn edited_documents_rebuild_markdown_storage_file_name_from_original_title() {
+        let file_name = derive_storage_backed_content_file_name(
+            "edit",
+            Some("edit://inline"),
+            Some("Inventory.xlsx"),
+        );
+
+        assert_eq!(file_name.as_deref(), Some("Inventory.md"));
     }
 }

@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::config::Settings,
     infra::repositories::{catalog_repository, ingest_repository},
 };
@@ -385,6 +385,15 @@ async fn ingest_attempts_and_stage_events_round_trip_with_ordered_queries() -> R
                 message: Some("graph extraction complete".to_string()),
                 details_json: serde_json::json!({ "chunks": 3 }),
                 recorded_at: Some(Utc::now() + Duration::seconds(90)),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
             },
         )
         .await
@@ -399,6 +408,15 @@ async fn ingest_attempts_and_stage_events_round_trip_with_ordered_queries() -> R
                 message: Some("text extraction started".to_string()),
                 details_json: serde_json::json!({ "chunks": 3 }),
                 recorded_at: Some(Utc::now() + Duration::seconds(80)),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
             },
         )
         .await
@@ -413,6 +431,15 @@ async fn ingest_attempts_and_stage_events_round_trip_with_ordered_queries() -> R
                 message: Some("first attempt failed".to_string()),
                 details_json: serde_json::json!({ "reason": "timeout" }),
                 recorded_at: Some(Utc::now() + Duration::seconds(40)),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
             },
         )
         .await

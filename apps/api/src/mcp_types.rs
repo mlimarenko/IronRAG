@@ -66,54 +66,37 @@ pub struct McpLibraryDescriptor {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListLibrariesRequest {
-    #[serde(default, alias = "workspace_id")]
     pub workspace_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSearchDocumentsRequest {
     pub query: String,
-    #[serde(default, alias = "library_ids")]
     pub library_ids: Option<Vec<Uuid>>,
-    #[serde(default, alias = "library_id")]
-    pub library_id: Option<Uuid>,
     pub limit: Option<usize>,
-    #[serde(default, alias = "include_references")]
     pub include_references: Option<bool>,
 }
 
 impl McpSearchDocumentsRequest {
     #[must_use]
     pub fn requested_library_ids(&self) -> Option<Vec<Uuid>> {
-        match (&self.library_ids, self.library_id) {
-            (Some(library_ids), Some(library_id)) => {
-                let mut requested = library_ids.clone();
-                if !requested.contains(&library_id) {
-                    requested.push(library_id);
-                }
-                Some(requested)
-            }
-            (Some(library_ids), None) => Some(library_ids.clone()),
-            (None, Some(library_id)) => Some(vec![library_id]),
-            (None, None) => None,
-        }
+        self.library_ids.clone()
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCreateWorkspaceRequest {
     pub slug: Option<String>,
     pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCreateLibraryRequest {
-    #[serde(alias = "workspace_id")]
     pub workspace_id: Uuid,
     pub slug: Option<String>,
     pub name: String,
@@ -163,6 +146,13 @@ pub struct McpEvidenceReference {
     pub rank: i32,
     pub score: f64,
     pub inclusion_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpContentSourceAccess {
+    pub kind: String,
+    pub href: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,44 +208,33 @@ pub enum McpReadMode {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpReadDocumentRequest {
-    #[serde(default, alias = "document_id")]
     pub document_id: Option<Uuid>,
     pub mode: Option<McpReadMode>,
-    #[serde(default, alias = "start_offset")]
     pub start_offset: Option<usize>,
     pub length: Option<usize>,
-    #[serde(default, alias = "continuation_token")]
     pub continuation_token: Option<String>,
-    #[serde(default, alias = "include_references")]
     pub include_references: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUploadDocumentInput {
-    #[serde(default, alias = "file_name")]
     pub file_name: Option<String>,
-    #[serde(default, alias = "content_base64")]
     pub content_base64: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
-    #[serde(default, alias = "source_type")]
     pub source_type: Option<String>,
-    #[serde(default, alias = "source_uri")]
     pub source_uri: Option<String>,
-    #[serde(default, alias = "mime_type")]
     pub mime_type: Option<String>,
     pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUploadDocumentsRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
-    #[serde(default, alias = "idempotency_key")]
     pub idempotency_key: Option<String>,
     pub documents: Vec<McpUploadDocumentInput>,
 }
@@ -268,153 +247,105 @@ pub enum McpDocumentMutationKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUpdateDocumentRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
-    #[serde(alias = "document_id")]
     pub document_id: Uuid,
-    #[serde(alias = "operation_kind")]
     pub operation_kind: McpDocumentMutationKind,
-    #[serde(default, alias = "idempotency_key")]
     pub idempotency_key: Option<String>,
-    #[serde(default, alias = "appended_text")]
     pub appended_text: Option<String>,
-    #[serde(default, alias = "replacement_file_name")]
     pub replacement_file_name: Option<String>,
-    #[serde(default, alias = "replacement_content_base64")]
     pub replacement_content_base64: Option<String>,
-    #[serde(default, alias = "replacement_mime_type")]
     pub replacement_mime_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetMutationStatusRequest {
-    #[serde(alias = "receipt_id")]
     pub receipt_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetRuntimeExecutionRequest {
-    #[serde(alias = "execution_id")]
     pub execution_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetRuntimeExecutionTraceRequest {
-    #[serde(alias = "execution_id")]
     pub execution_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSubmitWebIngestRunRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
-    #[serde(alias = "seed_url")]
     pub seed_url: String,
     pub mode: String,
-    #[serde(default, alias = "boundary_policy")]
     pub boundary_policy: Option<String>,
-    #[serde(default, alias = "max_depth")]
     pub max_depth: Option<i32>,
-    #[serde(default, alias = "max_pages")]
     pub max_pages: Option<i32>,
-    #[serde(default, alias = "idempotency_key")]
     pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetWebIngestRunRequest {
-    #[serde(alias = "run_id")]
     pub run_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListWebIngestRunPagesRequest {
-    #[serde(alias = "run_id")]
     pub run_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCancelWebIngestRunRequest {
-    #[serde(alias = "run_id")]
     pub run_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAskRequest {
-    #[serde(alias = "library_id")]
-    pub library_id: Uuid,
-    pub question: String,
-    #[serde(default, alias = "top_k")]
-    pub top_k: Option<usize>,
-    #[serde(default, alias = "include_evidence")]
-    pub include_evidence: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAskResponse {
-    pub answer: String,
-    pub verification_state: Option<String>,
-    pub source_count: usize,
-    pub entity_count: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSearchEntitiesRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
     pub query: String,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListDocumentsRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
     pub limit: Option<usize>,
-    #[serde(default, alias = "status_filter")]
     pub status_filter: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpDeleteDocumentRequest {
-    #[serde(alias = "document_id")]
     pub document_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetGraphTopologyRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListRelationsRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetCommunitiesRequest {
-    #[serde(alias = "library_id")]
     pub library_id: Uuid,
     pub limit: Option<usize>,
 }
@@ -447,7 +378,6 @@ pub enum McpAuditActionKind {
     ReadDocument,
     ListDocuments,
     DeleteDocument,
-    Ask,
     CreateWorkspace,
     CreateLibrary,
     UploadDocuments,
@@ -493,6 +423,10 @@ pub struct McpReadDocumentResponse {
     pub readiness_kind: String,
     pub graph_coverage_kind: String,
     pub status_reason: Option<String>,
+    pub mime_type: Option<String>,
+    pub source_uri: Option<String>,
+    pub source_access: Option<McpContentSourceAccess>,
+    pub visual_description: Option<String>,
     pub content: Option<String>,
     pub slice_start_offset: usize,
     pub slice_end_offset: usize,
@@ -594,10 +528,10 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn search_documents_request_accepts_snake_case_library_id() {
+    fn search_documents_request_accepts_canonical_library_ids() {
         let request: McpSearchDocumentsRequest = serde_json::from_value(json!({
             "query": "alpha",
-            "library_id": Uuid::nil(),
+            "libraryIds": [Uuid::nil()],
             "limit": 3
         }))
         .expect("request should deserialize");
@@ -606,12 +540,12 @@ mod tests {
     }
 
     #[test]
-    fn read_document_request_accepts_snake_case_fields() {
+    fn read_document_request_accepts_canonical_fields() {
         let document_id = Uuid::now_v7();
         let request: McpReadDocumentRequest = serde_json::from_value(json!({
-            "document_id": document_id,
-            "start_offset": 12,
-            "continuation_token": "token"
+            "documentId": document_id,
+            "startOffset": 12,
+            "continuationToken": "token"
         }))
         .expect("request should deserialize");
 
@@ -621,15 +555,15 @@ mod tests {
     }
 
     #[test]
-    fn upload_documents_request_accepts_snake_case_fields() {
+    fn upload_documents_request_accepts_canonical_fields() {
         let library_id = Uuid::now_v7();
         let request: McpUploadDocumentsRequest = serde_json::from_value(json!({
-            "library_id": library_id,
-            "idempotency_key": "idem",
+            "libraryId": library_id,
+            "idempotencyKey": "idem",
             "documents": [{
-                "file_name": "demo.txt",
-                "content_base64": "ZGVtbw==",
-                "mime_type": "text/plain"
+                "fileName": "demo.txt",
+                "contentBase64": "ZGVtbw==",
+                "mimeType": "text/plain"
             }]
         }))
         .expect("request should deserialize");
@@ -643,10 +577,10 @@ mod tests {
     fn upload_documents_request_accepts_inline_body_fields() {
         let library_id = Uuid::now_v7();
         let request: McpUploadDocumentsRequest = serde_json::from_value(json!({
-            "library_id": library_id,
+            "libraryId": library_id,
             "documents": [{
                 "body": "hello world",
-                "source_type": "inline",
+                "sourceType": "inline",
                 "title": "Inline note"
             }]
         }))
@@ -659,12 +593,12 @@ mod tests {
     }
 
     #[test]
-    fn update_document_request_accepts_snake_case_fields() {
+    fn update_document_request_accepts_canonical_fields() {
         let request: McpUpdateDocumentRequest = serde_json::from_value(json!({
-            "library_id": Uuid::nil(),
-            "document_id": Uuid::now_v7(),
-            "operation_kind": "append",
-            "appended_text": "hello"
+            "libraryId": Uuid::nil(),
+            "documentId": Uuid::now_v7(),
+            "operationKind": "append",
+            "appendedText": "hello"
         }))
         .expect("request should deserialize");
 
@@ -672,10 +606,10 @@ mod tests {
     }
 
     #[test]
-    fn mutation_status_request_accepts_snake_case_field() {
+    fn mutation_status_request_accepts_canonical_field() {
         let receipt_id = Uuid::now_v7();
         let request: McpGetMutationStatusRequest = serde_json::from_value(json!({
-            "receipt_id": receipt_id
+            "receiptId": receipt_id
         }))
         .expect("request should deserialize");
 
@@ -683,10 +617,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_execution_request_accepts_snake_case_field() {
+    fn runtime_execution_request_accepts_canonical_field() {
         let execution_id = Uuid::now_v7();
         let request: McpGetRuntimeExecutionRequest = serde_json::from_value(json!({
-            "execution_id": execution_id
+            "executionId": execution_id
         }))
         .expect("request should deserialize");
 
@@ -694,10 +628,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_execution_trace_request_accepts_snake_case_field() {
+    fn runtime_execution_trace_request_accepts_canonical_field() {
         let execution_id = Uuid::now_v7();
         let request: McpGetRuntimeExecutionTraceRequest = serde_json::from_value(json!({
-            "execution_id": execution_id
+            "executionId": execution_id
         }))
         .expect("request should deserialize");
 
@@ -705,16 +639,16 @@ mod tests {
     }
 
     #[test]
-    fn submit_web_ingest_run_request_accepts_snake_case_fields() {
+    fn submit_web_ingest_run_request_accepts_canonical_fields() {
         let library_id = Uuid::now_v7();
         let request: McpSubmitWebIngestRunRequest = serde_json::from_value(json!({
-            "library_id": library_id,
-            "seed_url": "https://example.com/docs",
+            "libraryId": library_id,
+            "seedUrl": "https://example.com/docs",
             "mode": "single_page",
-            "boundary_policy": "same_host",
-            "max_depth": 0,
-            "max_pages": 1,
-            "idempotency_key": "web-seed-1"
+            "boundaryPolicy": "same_host",
+            "maxDepth": 0,
+            "maxPages": 1,
+            "idempotencyKey": "web-seed-1"
         }))
         .expect("request should deserialize");
 
@@ -728,10 +662,10 @@ mod tests {
     }
 
     #[test]
-    fn get_web_ingest_run_request_accepts_snake_case_field() {
+    fn get_web_ingest_run_request_accepts_canonical_field() {
         let run_id = Uuid::now_v7();
         let request: McpGetWebIngestRunRequest = serde_json::from_value(json!({
-            "run_id": run_id
+            "runId": run_id
         }))
         .expect("request should deserialize");
 
@@ -739,10 +673,10 @@ mod tests {
     }
 
     #[test]
-    fn list_web_ingest_run_pages_request_accepts_snake_case_field() {
+    fn list_web_ingest_run_pages_request_accepts_canonical_field() {
         let run_id = Uuid::now_v7();
         let request: McpListWebIngestRunPagesRequest = serde_json::from_value(json!({
-            "run_id": run_id
+            "runId": run_id
         }))
         .expect("request should deserialize");
 
@@ -750,10 +684,10 @@ mod tests {
     }
 
     #[test]
-    fn cancel_web_ingest_run_request_accepts_snake_case_field() {
+    fn cancel_web_ingest_run_request_accepts_canonical_field() {
         let run_id = Uuid::now_v7();
         let request: McpCancelWebIngestRunRequest = serde_json::from_value(json!({
-            "run_id": run_id
+            "runId": run_id
         }))
         .expect("request should deserialize");
 
@@ -761,11 +695,11 @@ mod tests {
     }
 
     #[test]
-    fn upload_document_input_accepts_snake_case_fields() {
+    fn upload_document_input_accepts_canonical_fields() {
         let input: McpUploadDocumentInput = serde_json::from_value(json!({
-            "file_name": "demo.txt",
-            "content_base64": "ZGVtbw==",
-            "mime_type": "text/plain"
+            "fileName": "demo.txt",
+            "contentBase64": "ZGVtbw==",
+            "mimeType": "text/plain"
         }))
         .expect("input should deserialize");
 
@@ -778,14 +712,76 @@ mod tests {
     fn upload_document_input_accepts_inline_body_fields() {
         let input: McpUploadDocumentInput = serde_json::from_value(json!({
             "body": "demo",
-            "source_uri": "memory://demo.txt",
-            "mime_type": "text/plain"
+            "sourceUri": "memory://demo.txt",
+            "mimeType": "text/plain"
         }))
         .expect("input should deserialize");
 
         assert_eq!(input.body.as_deref(), Some("demo"));
         assert_eq!(input.source_uri.as_deref(), Some("memory://demo.txt"));
         assert_eq!(input.mime_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn search_documents_request_rejects_legacy_aliases() {
+        let error = serde_json::from_value::<McpSearchDocumentsRequest>(json!({
+            "query": "alpha",
+            "library_id": Uuid::nil()
+        }))
+        .expect_err("legacy alias must be rejected");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn read_document_request_rejects_legacy_aliases() {
+        let error = serde_json::from_value::<McpReadDocumentRequest>(json!({
+            "documentId": Uuid::now_v7(),
+            "start_offset": 12
+        }))
+        .expect_err("legacy alias must be rejected");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn upload_documents_request_rejects_legacy_aliases() {
+        let error = serde_json::from_value::<McpUploadDocumentsRequest>(json!({
+            "libraryId": Uuid::now_v7(),
+            "documents": [{
+                "file_name": "demo.txt",
+                "contentBase64": "ZGVtbw=="
+            }]
+        }))
+        .expect_err("legacy alias must be rejected");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn update_document_request_rejects_legacy_aliases() {
+        let error = serde_json::from_value::<McpUpdateDocumentRequest>(json!({
+            "libraryId": Uuid::nil(),
+            "documentId": Uuid::now_v7(),
+            "operationKind": "append",
+            "appended_text": "hello"
+        }))
+        .expect_err("legacy alias must be rejected");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn submit_web_ingest_run_request_rejects_legacy_aliases() {
+        let error = serde_json::from_value::<McpSubmitWebIngestRunRequest>(json!({
+            "libraryId": Uuid::now_v7(),
+            "seedUrl": "https://example.com/docs",
+            "mode": "single_page",
+            "max_depth": 0
+        }))
+        .expect_err("legacy alias must be rejected");
+
+        assert!(error.to_string().contains("unknown field"));
     }
 }
 

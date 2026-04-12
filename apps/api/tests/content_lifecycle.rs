@@ -6,13 +6,13 @@ mod web_ingest_support;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     infra::repositories::iam_repository,
     services::{
         content::service::{
             AcceptMutationCommand, AdmitMutationCommand, AppendInlineMutationCommand,
-            CreateDocumentCommand, PromoteHeadCommand, ReplaceInlineMutationCommand,
-            UploadInlineDocumentCommand,
+            CreateDocumentCommand, EditInlineMutationCommand, PromoteHeadCommand,
+            ReplaceInlineMutationCommand, RevisionAdmissionMetadata, UploadInlineDocumentCommand,
         },
         ingest::web::CreateWebIngestRunCommand,
     },
@@ -136,6 +136,228 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
 
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]
+async fn canonical_content_lifecycle_edit_mutation_persists_source_for_reprocess() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+
+    let result = async {
+        let edited_markdown =
+            "## Sheet1\n\n| Item | Quantity |\n| --- | --- |\n| Widget | 9 |".to_string();
+        let principal = iam_repository::create_principal(
+            &fixture.state.persistence.postgres,
+            "user",
+            "Content Lifecycle Edit Principal",
+            None,
+        )
+        .await
+        .context("failed to create content lifecycle edit principal")?;
+        let document = fixture
+            .state
+            .canonical_services
+            .content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("edit-doc-{}", Uuid::now_v7())),
+                    file_name: None,
+                    created_by_principal_id: None,
+                },
+            )
+            .await
+            .context("failed to create edit lifecycle document")?;
+        let base_revision = fixture
+            .state
+            .canonical_services
+            .content
+            .create_revision(
+                &fixture.state,
+                revision_command(
+                    document.id,
+                    "upload",
+                    "sha256:edit-base",
+                    "Inventory.xlsx",
+                    Some("upload://inventory.xlsx"),
+                ),
+            )
+            .await
+            .context("failed to create edit base revision")?;
+        fixture
+            .state
+            .canonical_services
+            .knowledge
+            .set_revision_extract_state(
+                &fixture.state,
+                base_revision.id,
+                "ready",
+                Some("| Item | Quantity |\n| --- | --- |\n| Widget | 7 |"),
+                Some("sha256:edit-base-text"),
+            )
+            .await
+            .context("failed to persist readable extract for edit base revision")?;
+        fixture
+            .state
+            .canonical_services
+            .content
+            .promote_document_head(
+                &fixture.state,
+                PromoteHeadCommand {
+                    document_id: document.id,
+                    active_revision_id: Some(base_revision.id),
+                    readable_revision_id: Some(base_revision.id),
+                    latest_mutation_id: None,
+                    latest_successful_attempt_id: None,
+                },
+            )
+            .await
+            .context("failed to promote edit base head")?;
+
+        let edit_admission = fixture
+            .state
+            .canonical_services
+            .content
+            .edit_inline_mutation(
+                &fixture.state,
+                EditInlineMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: document.id,
+                    idempotency_key: Some("canonical-edit".to_string()),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    markdown: edited_markdown.clone(),
+                },
+            )
+            .await
+            .context("failed to admit canonical edit mutation")?;
+
+        assert_eq!(edit_admission.mutation.mutation_state, "accepted");
+        let edit_revision_id = edit_admission
+            .items
+            .first()
+            .and_then(|item| item.result_revision_id)
+            .context("edit admission must create a revision")?;
+        let edit_revision = fixture
+            .state
+            .canonical_services
+            .content
+            .list_revisions(&fixture.state, document.id)
+            .await
+            .context("failed to list revisions after edit admission")?
+            .into_iter()
+            .find(|revision| revision.id == edit_revision_id)
+            .context("edited revision missing from revision list")?;
+        assert_eq!(edit_revision.content_source_kind, "edit");
+        assert_eq!(edit_revision.mime_type, "text/markdown");
+        let storage_key = edit_revision.storage_key.clone().context(
+            "edited revision must persist a stored markdown source for future reprocess",
+        )?;
+        let stored_bytes = fixture
+            .state
+            .content_storage
+            .read_revision_source(&storage_key)
+            .await
+            .context("failed to read stored edit markdown source")?;
+        assert_eq!(
+            String::from_utf8(stored_bytes).context("edited source must remain utf-8 markdown")?,
+            edited_markdown
+        );
+        let resolved_storage_key = fixture
+            .state
+            .canonical_services
+            .content
+            .resolve_revision_storage_key(&fixture.state, edit_revision.id)
+            .await
+            .context("failed to resolve stored key for edited revision")?;
+        assert_eq!(resolved_storage_key.as_deref(), Some(storage_key.as_str()));
+
+        let repeated_edit_admission = fixture
+            .state
+            .canonical_services
+            .content
+            .edit_inline_mutation(
+                &fixture.state,
+                EditInlineMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: document.id,
+                    idempotency_key: Some("canonical-edit".to_string()),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    markdown: edited_markdown.clone(),
+                },
+            )
+            .await
+            .context("failed to replay canonical edit mutation")?;
+        assert_eq!(repeated_edit_admission.mutation.id, edit_admission.mutation.id);
+        assert_eq!(repeated_edit_admission.job_id, edit_admission.job_id);
+        assert_eq!(
+            repeated_edit_admission.items.first().and_then(|item| item.result_revision_id),
+            Some(edit_revision.id)
+        );
+
+        fixture
+            .state
+            .canonical_services
+            .content
+            .promote_document_head(
+                &fixture.state,
+                PromoteHeadCommand {
+                    document_id: document.id,
+                    active_revision_id: Some(edit_revision.id),
+                    readable_revision_id: Some(base_revision.id),
+                    latest_mutation_id: Some(edit_admission.mutation.id),
+                    latest_successful_attempt_id: None,
+                },
+            )
+            .await
+            .context("failed to promote edited revision as active head")?;
+
+        let reprocess_admission = fixture
+            .state
+            .canonical_services
+            .content
+            .admit_mutation(
+                &fixture.state,
+                AdmitMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: document.id,
+                    operation_kind: "reprocess".to_string(),
+                    idempotency_key: Some("canonical-edit-reprocess".to_string()),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    revision: Some(RevisionAdmissionMetadata {
+                        content_source_kind: edit_revision.content_source_kind.clone(),
+                        checksum: edit_revision.checksum.clone(),
+                        mime_type: edit_revision.mime_type.clone(),
+                        byte_size: edit_revision.byte_size,
+                        title: edit_revision.title.clone(),
+                        language_code: edit_revision.language_code.clone(),
+                        source_uri: edit_revision.source_uri.clone(),
+                        storage_key: Some(storage_key),
+                    }),
+                },
+            )
+            .await
+            .context("failed to admit reprocess for edited revision")?;
+
+        assert_eq!(reprocess_admission.mutation.mutation_state, "accepted");
+        assert!(reprocess_admission.job_id.is_some());
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
 async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job() -> Result<()> {
     let fixture = ContentLifecycleFixture::create().await?;
 
@@ -178,7 +400,7 @@ async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job(
             .context("missing admitted inline upload revision")?;
 
         let postgres_chunks =
-            rustrag_backend::infra::repositories::content_repository::list_chunks_by_revision(
+            ironrag_backend::infra::repositories::content_repository::list_chunks_by_revision(
                 &fixture.state.persistence.postgres,
                 revision_id,
             )
@@ -190,7 +412,7 @@ async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job(
             .list_chunks_by_revision(revision_id)
             .await
             .context("failed to list Arango knowledge chunks for inline upload")?;
-        let ingest_jobs = rustrag_backend::infra::repositories::ingest_repository::list_ingest_jobs_by_mutation_ids(
+        let ingest_jobs = ironrag_backend::infra::repositories::ingest_repository::list_ingest_jobs_by_mutation_ids(
             &fixture.state.persistence.postgres,
             fixture.workspace_id,
             fixture.library_id,
@@ -882,6 +1104,135 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
         assert!(
             append_after_delete.is_err(),
             "deleted documents must reject subsequent append mutations"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn canonical_content_delete_succeeds_when_post_commit_cleanup_fails() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+
+    let result = async {
+        let principal = iam_repository::create_principal(
+            &fixture.state.persistence.postgres,
+            "user",
+            "Content Delete Cleanup Principal",
+            None,
+        )
+        .await
+        .context("failed to create delete cleanup principal")?;
+        let document = fixture
+            .state
+            .canonical_services
+            .content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("delete-cleanup-doc-{}", Uuid::now_v7())),
+                    file_name: None,
+                    created_by_principal_id: None,
+                },
+            )
+            .await
+            .context("failed to create delete cleanup document")?;
+        let base_revision = fixture
+            .state
+            .canonical_services
+            .content
+            .create_revision(
+                &fixture.state,
+                revision_command(
+                    document.id,
+                    "upload",
+                    "sha256:delete-cleanup-base",
+                    "Delete Cleanup Base Revision",
+                    Some("file:///delete-cleanup.txt"),
+                ),
+            )
+            .await
+            .context("failed to create delete cleanup revision")?;
+        fixture
+            .state
+            .canonical_services
+            .content
+            .promote_document_head(
+                &fixture.state,
+                PromoteHeadCommand {
+                    document_id: document.id,
+                    active_revision_id: Some(base_revision.id),
+                    readable_revision_id: Some(base_revision.id),
+                    latest_mutation_id: None,
+                    latest_successful_attempt_id: None,
+                },
+            )
+            .await
+            .context("failed to promote delete cleanup head")?;
+
+        sqlx::query("drop table query_chunk_reference")
+            .execute(&fixture.state.persistence.postgres)
+            .await
+            .context("failed to drop query_chunk_reference for delete cleanup regression")?;
+
+        let delete_admission = fixture
+            .state
+            .canonical_services
+            .content
+            .admit_mutation(
+                &fixture.state,
+                AdmitMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: document.id,
+                    operation_kind: "delete".to_string(),
+                    idempotency_key: Some("delete-post-commit-cleanup-failure".to_string()),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    revision: None,
+                },
+            )
+            .await
+            .context("delete must succeed even if post-commit cleanup fails")?;
+        assert_eq!(delete_admission.mutation.mutation_state, "applied");
+
+        let deleted_document = fixture
+            .state
+            .canonical_services
+            .content
+            .get_document(&fixture.state, document.id)
+            .await
+            .context("failed to load deleted document after cleanup failure")?;
+        assert_eq!(deleted_document.document.document_state, "deleted");
+        assert!(deleted_document.active_revision.is_none());
+
+        let knowledge_document = fixture
+            .state
+            .arango_document_store
+            .get_document(document.id)
+            .await
+            .context("failed to load knowledge document after cleanup failure")?
+            .context("knowledge document missing after cleanup failure")?;
+        assert_eq!(knowledge_document.document_state, "deleted");
+
+        let active_documents = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list active documents after cleanup failure")?;
+        assert!(
+            active_documents.iter().all(|summary| summary.document.id != document.id),
+            "deleted document must stay hidden even if post-commit cleanup fails"
         );
 
         Ok(())

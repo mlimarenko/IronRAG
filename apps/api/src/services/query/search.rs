@@ -322,7 +322,7 @@ impl SearchService {
                 .embed_many(EmbeddingBatchRequest {
                     provider_kind: embedding_binding.provider_kind.clone(),
                     model_name: embedding_binding.model_name.clone(),
-                    inputs: chunk_batch.iter().map(|chunk| chunk.content_text.clone()).collect(),
+                    inputs: chunk_batch.iter().map(|chunk| chunk.normalized_text.clone()).collect(),
                     api_key_override: embedding_binding.api_key.clone(),
                     base_url_override: embedding_binding.provider_base_url.clone(),
                 })

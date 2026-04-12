@@ -1,6 +1,41 @@
--- RustRAG baseline schema: Postgres (control plane, operations), Redis (queues, session cache),
+-- IronRAG v0.2.0 consolidated schema
+-- Postgres (control plane, operations), Redis (queues, session cache),
 -- ArangoDB (knowledge graph, retrieval traces).
+
+-- ============================================================================
+-- Extensions
+-- ============================================================================
+
 create extension if not exists pgcrypto;
+
+-- ============================================================================
+-- Functions
+-- ============================================================================
+
+create or replace function uuidv7() returns uuid as $$
+declare
+    unix_ts_ms bigint;
+    uuid_bytes bytea;
+begin
+    unix_ts_ms = (extract(epoch from clock_timestamp()) * 1000)::bigint;
+    uuid_bytes = set_byte(
+        set_byte(
+            overlay(
+                uuid_send(gen_random_uuid())
+                placing substring(int8send(unix_ts_ms) from 3)
+                from 1 for 6
+            ),
+            6, (get_byte(uuid_send(gen_random_uuid()), 6) & 15) | 112
+        ),
+        8, (get_byte(uuid_send(gen_random_uuid()), 8) & 63) | 128
+    );
+    return encode(uuid_bytes, 'hex')::uuid;
+end
+$$ language plpgsql volatile;
+
+-- ============================================================================
+-- Enums
+-- ============================================================================
 
 create type catalog_workspace_lifecycle_state as enum ('active', 'archived');
 create type catalog_library_lifecycle_state as enum ('active', 'archived');
@@ -55,15 +90,17 @@ create type ai_binding_purpose as enum (
 );
 create type ai_binding_state as enum ('active', 'invalid', 'disabled');
 create type ai_validation_state as enum ('pending', 'succeeded', 'failed');
+create type ai_scope_kind as enum ('instance', 'workspace', 'library');
 
-create type surface_kind as enum ('ui', 'rest', 'mcp', 'worker', 'bootstrap');
+create type surface_kind as enum ('ui', 'rest', 'mcp', 'worker', 'bootstrap', 'stream', 'internal');
 
 create type content_document_state as enum ('active', 'deleted');
-create type content_source_kind as enum ('upload', 'append', 'replace', 'connector_sync', 'import', 'web_page');
+create type content_source_kind as enum ('upload', 'append', 'replace', 'edit', 'connector_sync', 'import', 'web_page');
 create type content_mutation_operation_kind as enum (
     'upload',
     'append',
     'replace',
+    'edit',
     'reprocess',
     'delete',
     'connector_sync',
@@ -139,8 +176,6 @@ create type runtime_task_kind as enum (
     'structured_prepare',
     'technical_fact_extract'
 );
-
-create type runtime_surface_kind as enum ('rest', 'stream', 'mcp', 'worker', 'internal');
 
 create type runtime_lifecycle_state as enum (
     'accepted',
@@ -221,6 +256,10 @@ create type ops_warning_severity as enum ('info', 'warn', 'error');
 
 create type audit_result_kind as enum ('succeeded', 'rejected', 'failed');
 
+-- ============================================================================
+-- Tables
+-- ============================================================================
+
 create table iam_principal (
     id uuid primary key default uuidv7(),
     principal_kind iam_principal_kind not null,
@@ -250,6 +289,8 @@ create table catalog_library (
     description text,
     lifecycle_state catalog_library_lifecycle_state not null default 'active',
     source_truth_version bigint not null default 1,
+    extraction_prompt text,
+    ai_summary text,
     created_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
@@ -382,22 +423,32 @@ create table catalog_library_connector (
 
 create table ai_provider_credential (
     id uuid primary key default uuidv7(),
-    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
+    workspace_id uuid references catalog_workspace(id) on delete cascade,
     provider_catalog_id uuid not null references ai_provider_catalog(id) on delete restrict,
     label text not null,
     api_key text,
     base_url text,
     credential_state ai_credential_state not null default 'active',
+    scope_kind ai_scope_kind not null,
+    library_id uuid,
     created_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    unique (workspace_id, provider_catalog_id, label),
-    unique (id, workspace_id)
+    constraint ai_provider_credential_library_scope_fkey
+        foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade,
+    constraint ai_provider_credential_scope_check
+        check (
+            (scope_kind = 'instance' and workspace_id is null and library_id is null)
+            or (scope_kind = 'workspace' and workspace_id is not null and library_id is null)
+            or (scope_kind = 'library' and workspace_id is not null and library_id is not null)
+        )
 );
 
 create table ai_model_preset (
     id uuid primary key default uuidv7(),
-    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
+    workspace_id uuid references catalog_workspace(id) on delete cascade,
     model_catalog_id uuid not null references ai_model_catalog(id) on delete restrict,
     preset_name text not null,
     system_prompt text,
@@ -405,39 +456,58 @@ create table ai_model_preset (
     top_p double precision,
     max_output_tokens_override integer,
     extra_parameters_json jsonb not null default '{}'::jsonb,
+    scope_kind ai_scope_kind not null,
+    library_id uuid,
     created_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    unique (workspace_id, model_catalog_id, preset_name),
-    unique (id, workspace_id)
+    constraint ai_model_preset_library_scope_fkey
+        foreign key (library_id, workspace_id)
+        references catalog_library(id, workspace_id)
+        on delete cascade,
+    constraint ai_model_preset_scope_check
+        check (
+            (scope_kind = 'instance' and workspace_id is null and library_id is null)
+            or (scope_kind = 'workspace' and workspace_id is not null and library_id is null)
+            or (scope_kind = 'library' and workspace_id is not null and library_id is not null)
+        )
 );
 
-create table ai_library_model_binding (
+create table ai_binding_assignment (
     id uuid primary key default uuidv7(),
-    workspace_id uuid not null,
-    library_id uuid not null,
+    workspace_id uuid,
+    library_id uuid,
     binding_purpose ai_binding_purpose not null,
     provider_credential_id uuid not null,
     model_preset_id uuid not null,
     binding_state ai_binding_state not null default 'active',
+    scope_kind ai_scope_kind not null,
     updated_by_principal_id uuid references iam_principal(id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    unique (library_id, binding_purpose),
-    foreign key (library_id, workspace_id)
+    constraint ai_binding_assignment_library_scope_fkey
+        foreign key (library_id, workspace_id)
         references catalog_library(id, workspace_id)
         on delete cascade,
-    foreign key (provider_credential_id, workspace_id)
-        references ai_provider_credential(id, workspace_id)
+    constraint ai_binding_assignment_provider_credential_fkey
+        foreign key (provider_credential_id)
+        references ai_provider_credential(id)
         on delete restrict,
-    foreign key (model_preset_id, workspace_id)
-        references ai_model_preset(id, workspace_id)
-        on delete restrict
+    constraint ai_binding_assignment_model_preset_fkey
+        foreign key (model_preset_id)
+        references ai_model_preset(id)
+        on delete restrict,
+    constraint ai_binding_assignment_scope_check
+        check (
+            (scope_kind = 'instance' and workspace_id is null and library_id is null)
+            or (scope_kind = 'workspace' and workspace_id is not null and library_id is null)
+            or (scope_kind = 'library' and workspace_id is not null and library_id is not null)
+        )
 );
 
 create table ai_binding_validation (
     id uuid primary key default uuidv7(),
-    binding_id uuid not null references ai_library_model_binding(id) on delete cascade,
+    binding_id uuid not null references ai_binding_assignment(id) on delete cascade,
     validation_state ai_validation_state not null,
     checked_at timestamptz not null default now(),
     failure_code text,
@@ -448,7 +518,7 @@ create table billing_provider_call (
     id uuid primary key default uuidv7(),
     workspace_id uuid not null,
     library_id uuid not null,
-    binding_id uuid references ai_library_model_binding(id) on delete set null,
+    binding_id uuid references ai_binding_assignment(id) on delete set null,
     owning_execution_kind billing_owning_execution_kind not null,
     owning_execution_id uuid not null,
     provider_catalog_id uuid not null references ai_provider_catalog(id) on delete restrict,
@@ -457,9 +527,16 @@ create table billing_provider_call (
     started_at timestamptz not null default now(),
     completed_at timestamptz,
     call_state billing_call_state not null default 'started',
+    runtime_execution_id uuid, -- FK added after runtime_execution table
+    runtime_task_kind runtime_task_kind,
     foreign key (library_id, workspace_id)
         references catalog_library(id, workspace_id)
-        on delete cascade
+        on delete cascade,
+    constraint chk_billing_provider_call_runtime_attribution
+        check (
+            (runtime_execution_id is null and runtime_task_kind is null)
+            or (runtime_execution_id is not null and runtime_task_kind is not null)
+        )
 );
 
 create table billing_usage (
@@ -685,8 +762,36 @@ create table ingest_stage_event (
     ordinal integer not null,
     message text,
     details_json jsonb not null default '{}'::jsonb,
+    provider_kind text,
+    model_name text,
+    prompt_tokens integer,
+    completion_tokens integer,
+    total_tokens integer,
+    cached_tokens integer,
+    estimated_cost numeric(18,8),
+    currency_code text,
+    elapsed_ms bigint,
+    started_at timestamptz,
     recorded_at timestamptz not null default now(),
     unique (attempt_id, ordinal)
+);
+
+create table ingest_stage_provider_call (
+    id uuid primary key default uuidv7(),
+    stage_event_id uuid not null references ingest_stage_event(id) on delete cascade,
+    call_sequence integer not null,
+    provider_kind text not null,
+    model_name text not null,
+    prompt_tokens integer,
+    completion_tokens integer,
+    total_tokens integer,
+    cached_tokens integer,
+    estimated_cost numeric(18,8),
+    currency_code text,
+    elapsed_ms bigint,
+    started_at timestamptz not null default now(),
+    completed_at timestamptz,
+    unique (stage_event_id, call_sequence)
 );
 
 create table extract_chunk_result (
@@ -751,9 +856,10 @@ create table query_execution (
     context_bundle_id uuid not null,
     request_turn_id uuid,
     response_turn_id uuid,
-    binding_id uuid references ai_library_model_binding(id) on delete set null,
+    binding_id uuid references ai_binding_assignment(id) on delete set null,
     query_text text not null,
     failure_code text,
+    runtime_execution_id uuid, -- FK added after runtime_execution table
     started_at timestamptz not null default now(),
     completed_at timestamptz,
     foreign key (library_id, workspace_id)
@@ -784,7 +890,7 @@ create table runtime_execution (
     owner_kind runtime_execution_owner_kind not null,
     owner_id uuid not null,
     task_kind runtime_task_kind not null,
-    surface_kind runtime_surface_kind not null,
+    surface_kind surface_kind not null,
     contract_name text not null,
     contract_version text not null,
     lifecycle_state runtime_lifecycle_state not null,
@@ -797,6 +903,15 @@ create table runtime_execution (
     accepted_at timestamptz not null default now(),
     completed_at timestamptz
 );
+
+-- Add deferred FKs now that runtime_execution exists
+alter table query_execution
+    add constraint query_execution_runtime_execution_id_fkey
+        foreign key (runtime_execution_id) references runtime_execution(id) on delete restrict;
+
+alter table billing_provider_call
+    add constraint billing_provider_call_runtime_execution_id_fkey
+        foreign key (runtime_execution_id) references runtime_execution(id) on delete set null;
 
 create table runtime_stage_record (
     id uuid primary key default uuidv7(),
@@ -822,7 +937,7 @@ create table runtime_action_record (
     action_kind runtime_action_kind not null,
     action_ordinal integer not null,
     action_state runtime_action_state not null,
-    provider_binding_id uuid references ai_library_model_binding(id) on delete set null,
+    provider_binding_id uuid references ai_binding_assignment(id) on delete set null,
     tool_name text,
     usage_json jsonb,
     summary_json jsonb not null default '{}'::jsonb,
@@ -920,6 +1035,8 @@ create table runtime_graph_node (
     summary text,
     metadata_json jsonb not null default '{}'::jsonb,
     support_count integer not null default 0,
+    community_id integer,
+    community_level integer default 0,
     projection_version bigint not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
@@ -982,6 +1099,20 @@ create table runtime_graph_canonical_summary (
     unique (library_id, target_kind, target_id, source_truth_version)
 );
 
+create table runtime_graph_community (
+    id serial primary key,
+    library_id uuid not null,
+    community_id integer not null,
+    level integer not null default 0,
+    node_count integer not null default 0,
+    edge_count integer not null default 0,
+    summary text,
+    top_entities text[] not null default '{}',
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (library_id, community_id, level)
+);
+
 create table runtime_vector_target (
     id uuid primary key default uuidv7(),
     library_id uuid not null references catalog_library(id) on delete cascade,
@@ -1024,195 +1155,6 @@ create table runtime_provider_validation_log (
     created_at timestamptz not null default now()
 );
 
-create table runtime_ingestion_run (
-    id uuid primary key default uuidv7(),
-    library_id uuid not null references catalog_library(id) on delete cascade,
-    document_id uuid references content_document(id) on delete set null,
-    revision_id uuid references content_revision(id) on delete set null,
-    upload_batch_id uuid,
-    track_id text not null unique,
-    file_name text not null,
-    file_type text not null,
-    mime_type text,
-    file_size_bytes bigint,
-    status text not null default 'queued',
-    current_stage text not null default 'accepted',
-    progress_percent integer,
-    activity_status text not null default 'queued',
-    last_activity_at timestamptz,
-    last_heartbeat_at timestamptz,
-    provider_profile_snapshot_json jsonb not null default '{}'::jsonb,
-    latest_error_message text,
-    current_attempt_no integer not null default 1,
-    attempt_kind text not null default 'initial',
-    queue_started_at timestamptz not null default now(),
-    started_at timestamptz,
-    finished_at timestamptz,
-    queue_elapsed_ms bigint,
-    total_elapsed_ms bigint,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    check (status in ('queued', 'processing', 'ready', 'ready_no_graph', 'failed')),
-    check (activity_status in ('queued', 'active', 'blocked', 'retrying', 'stalled', 'ready', 'failed')),
-    check (progress_percent is null or (progress_percent >= 0 and progress_percent <= 100)),
-    check (current_attempt_no >= 1)
-);
-
-create table runtime_ingestion_stage_event (
-    id uuid primary key default uuidv7(),
-    ingestion_run_id uuid not null references runtime_ingestion_run(id) on delete cascade,
-    attempt_no integer not null,
-    stage text not null,
-    status text not null,
-    message text,
-    metadata_json jsonb not null default '{}'::jsonb,
-    provider_kind text,
-    model_name text,
-    started_at timestamptz not null default now(),
-    finished_at timestamptz,
-    elapsed_ms bigint,
-    created_at timestamptz not null default now(),
-    check (attempt_no >= 1),
-    check (status in ('started', 'completed', 'failed', 'skipped'))
-);
-
-create table runtime_attempt_stage_accounting (
-    id uuid primary key default uuidv7(),
-    ingestion_run_id uuid not null references runtime_ingestion_run(id) on delete cascade,
-    stage_event_id uuid not null references runtime_ingestion_stage_event(id) on delete cascade,
-    stage text not null,
-    accounting_scope text not null,
-    call_sequence_no integer not null,
-    workspace_id uuid references catalog_workspace(id) on delete set null,
-    library_id uuid references catalog_library(id) on delete set null,
-    provider_kind text,
-    model_name text,
-    capability text not null,
-    billing_unit text not null,
-    pricing_catalog_entry_id uuid references ai_price_catalog(id) on delete set null,
-    pricing_status text not null,
-    estimated_cost numeric(18,8),
-    currency text,
-    token_usage_json jsonb not null default '{}'::jsonb,
-    pricing_snapshot_json jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default now(),
-    unique (stage_event_id, accounting_scope, call_sequence_no),
-    check (accounting_scope in ('stage_rollup', 'provider_call')),
-    check (
-        (accounting_scope = 'stage_rollup' and call_sequence_no = 0)
-        or (accounting_scope = 'provider_call' and call_sequence_no > 0)
-    )
-);
-
-create table runtime_attempt_cost_summary (
-    ingestion_run_id uuid primary key references runtime_ingestion_run(id) on delete cascade,
-    total_estimated_cost numeric(18,8),
-    settled_estimated_cost numeric(18,8),
-    in_flight_estimated_cost numeric(18,8),
-    currency text,
-    priced_stage_count integer not null default 0,
-    unpriced_stage_count integer not null default 0,
-    in_flight_stage_count integer not null default 0,
-    missing_stage_count integer not null default 0,
-    accounting_status text not null,
-    computed_at timestamptz not null default now()
-);
-
-create table runtime_graph_progress_checkpoint (
-    ingestion_run_id uuid not null references runtime_ingestion_run(id) on delete cascade,
-    attempt_no integer not null,
-    processed_chunks bigint not null default 0,
-    total_chunks bigint not null default 0,
-    progress_percent integer,
-    provider_call_count bigint not null default 0,
-    avg_call_elapsed_ms bigint,
-    avg_chunk_elapsed_ms bigint,
-    avg_chars_per_second double precision,
-    avg_tokens_per_second double precision,
-    last_provider_call_at timestamptz,
-    next_checkpoint_eta_ms bigint,
-    pressure_kind text,
-    provider_failure_class text,
-    request_shape_key text,
-    request_size_bytes bigint,
-    upstream_status text,
-    retry_outcome text,
-    computed_at timestamptz not null default now(),
-    diagnostics_snapshot_at timestamptz,
-    primary key (ingestion_run_id, attempt_no),
-    check (attempt_no >= 1),
-    check (progress_percent is null or (progress_percent >= 0 and progress_percent <= 100))
-);
-
-create table runtime_graph_extraction_resume_state (
-    ingestion_run_id uuid not null references runtime_ingestion_run(id) on delete cascade,
-    chunk_ordinal integer not null,
-    chunk_content_hash text not null,
-    status text not null,
-    last_attempt_no integer not null,
-    replay_count integer not null default 0,
-    resume_hit_count integer not null default 0,
-    downgrade_level integer not null default 0,
-    provider_kind text,
-    model_name text,
-    prompt_hash text,
-    request_shape_key text,
-    request_size_bytes bigint,
-    provider_failure_class text,
-    provider_failure_json jsonb,
-    recovery_summary_json jsonb not null default '{}'::jsonb,
-    raw_output_json jsonb not null default '{}'::jsonb,
-    normalized_output_json jsonb not null default '{}'::jsonb,
-    last_successful_at timestamptz,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    primary key (ingestion_run_id, chunk_ordinal),
-    check (chunk_ordinal >= 0),
-    check (last_attempt_no >= 1),
-    check (replay_count >= 0),
-    check (resume_hit_count >= 0),
-    check (downgrade_level >= 0)
-);
-
-create table runtime_extracted_content (
-    id uuid primary key default uuidv7(),
-    ingestion_run_id uuid not null unique references runtime_ingestion_run(id) on delete cascade,
-    document_id uuid references content_document(id) on delete set null,
-    extraction_kind text not null,
-    content_text text,
-    page_count integer,
-    char_count integer,
-    extraction_warnings_json jsonb not null default '[]'::jsonb,
-    source_map_json jsonb not null default '{}'::jsonb,
-    provider_kind text,
-    model_name text,
-    extraction_version text,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
-create table runtime_document_contribution_summary (
-    document_id uuid primary key references content_document(id) on delete cascade,
-    revision_id uuid references content_revision(id) on delete set null,
-    ingestion_run_id uuid references runtime_ingestion_run(id) on delete set null,
-    latest_attempt_no integer not null default 0,
-    chunk_count integer,
-    admitted_graph_node_count integer not null default 0,
-    admitted_graph_edge_count integer not null default 0,
-    filtered_graph_edge_count integer not null default 0,
-    filtered_artifact_count integer not null default 0,
-    computed_at timestamptz not null default now(),
-    check (latest_attempt_no >= 0)
-);
-
-create table runtime_library_queue_slice (
-    library_id uuid primary key references catalog_library(id) on delete cascade,
-    workspace_id uuid not null references catalog_workspace(id) on delete cascade,
-    last_progress_at timestamptz not null default now(),
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-
 create table content_mutation_impact_scope (
     id uuid primary key default uuidv7(),
     workspace_id uuid not null references catalog_workspace(id) on delete cascade,
@@ -1232,18 +1174,6 @@ create table content_mutation_impact_scope (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
-
-alter table query_execution
-    add column runtime_execution_id uuid references runtime_execution(id) on delete restrict;
-
-alter table billing_provider_call
-    add column runtime_execution_id uuid references runtime_execution(id) on delete set null,
-    add column runtime_task_kind runtime_task_kind,
-    add constraint chk_billing_provider_call_runtime_attribution
-        check (
-            (runtime_execution_id is null and runtime_task_kind is null)
-            or (runtime_execution_id is not null and runtime_task_kind is not null)
-        );
 
 create table query_chunk_reference (
     execution_id uuid not null references query_execution(id) on delete cascade,
@@ -1305,8 +1235,13 @@ create table content_document_head (
     readable_revision_id uuid references content_revision(id) on delete set null,
     latest_mutation_id uuid references content_mutation(id) on delete set null,
     latest_successful_attempt_id uuid references ingest_attempt(id) on delete set null,
+    document_summary text,
     head_updated_at timestamptz not null default now()
 );
+
+-- ============================================================================
+-- Indexes
+-- ============================================================================
 
 create unique index idx_iam_api_token_secret_latest_active
     on iam_api_token_secret (token_principal_id)
@@ -1362,8 +1297,56 @@ create index idx_catalog_library_connector_library_sync_mode
 create index idx_iam_grant_principal_resource
     on iam_grant (principal_id, resource_kind, resource_id);
 
-create index idx_ai_library_model_binding_library_purpose
-    on ai_library_model_binding (library_id, binding_purpose, binding_state);
+create index idx_ai_binding_assignment_library_purpose
+    on ai_binding_assignment (library_id, binding_purpose, binding_state);
+
+-- ai_provider_credential scope indexes
+create unique index ai_provider_credential_instance_label_key
+    on ai_provider_credential (provider_catalog_id, label)
+    where scope_kind = 'instance';
+
+create unique index ai_provider_credential_workspace_label_key
+    on ai_provider_credential (workspace_id, provider_catalog_id, label)
+    where scope_kind = 'workspace';
+
+create unique index ai_provider_credential_library_label_key
+    on ai_provider_credential (library_id, provider_catalog_id, label)
+    where scope_kind = 'library';
+
+create index ai_provider_credential_scope_idx
+    on ai_provider_credential (scope_kind, workspace_id, library_id, provider_catalog_id);
+
+-- ai_model_preset scope indexes
+create unique index ai_model_preset_instance_name_key
+    on ai_model_preset (model_catalog_id, preset_name)
+    where scope_kind = 'instance';
+
+create unique index ai_model_preset_workspace_name_key
+    on ai_model_preset (workspace_id, model_catalog_id, preset_name)
+    where scope_kind = 'workspace';
+
+create unique index ai_model_preset_library_name_key
+    on ai_model_preset (library_id, model_catalog_id, preset_name)
+    where scope_kind = 'library';
+
+create index ai_model_preset_scope_idx
+    on ai_model_preset (scope_kind, workspace_id, library_id, model_catalog_id);
+
+-- ai_binding_assignment scope indexes
+create unique index ai_binding_assignment_instance_purpose_key
+    on ai_binding_assignment (binding_purpose)
+    where scope_kind = 'instance';
+
+create unique index ai_binding_assignment_workspace_purpose_key
+    on ai_binding_assignment (workspace_id, binding_purpose)
+    where scope_kind = 'workspace';
+
+create unique index ai_binding_assignment_library_purpose_key
+    on ai_binding_assignment (library_id, binding_purpose)
+    where scope_kind = 'library';
+
+create index ai_binding_assignment_scope_idx
+    on ai_binding_assignment (scope_kind, workspace_id, library_id, binding_purpose, binding_state);
 
 create index idx_content_document_library_state
     on content_document (library_id, document_state);
@@ -1405,6 +1388,9 @@ create index idx_ingest_attempt_job_state
 create index idx_ingest_stage_event_attempt_ordinal
     on ingest_stage_event (attempt_id, ordinal);
 
+create index idx_ingest_stage_provider_call_stage_event
+    on ingest_stage_provider_call(stage_event_id);
+
 create index idx_extract_chunk_result_attempt_state
     on extract_chunk_result (attempt_id, extract_state);
 
@@ -1423,49 +1409,6 @@ create index idx_runtime_graph_extraction_runtime_execution_id
 
 create index idx_runtime_graph_extraction_recovery_attempt_runtime_execution_id
     on runtime_graph_extraction_recovery_attempt (runtime_execution_id, started_at asc);
-
-create index idx_runtime_ingestion_run_library_created_at
-    on runtime_ingestion_run (library_id, created_at desc);
-
-create index idx_runtime_ingestion_run_library_status
-    on runtime_ingestion_run (library_id, status, current_stage, created_at desc);
-
-create index idx_runtime_ingestion_run_document_created_at
-    on runtime_ingestion_run (document_id, created_at desc)
-    where document_id is not null;
-
-create index idx_runtime_ingestion_stage_event_run_created_at
-    on runtime_ingestion_stage_event (ingestion_run_id, created_at asc);
-
-create index idx_runtime_ingestion_stage_event_run_attempt
-    on runtime_ingestion_stage_event (ingestion_run_id, attempt_no, created_at asc);
-
-create index idx_runtime_attempt_stage_accounting_run_created_at
-    on runtime_attempt_stage_accounting (ingestion_run_id, created_at asc);
-
-create index idx_runtime_attempt_stage_accounting_stage_pricing
-    on runtime_attempt_stage_accounting (stage, pricing_status, created_at desc);
-
-create index idx_runtime_graph_progress_checkpoint_run_computed_at
-    on runtime_graph_progress_checkpoint (ingestion_run_id, computed_at desc);
-
-create index idx_runtime_graph_extraction_resume_state_run_status
-    on runtime_graph_extraction_resume_state (ingestion_run_id, status, chunk_ordinal asc);
-
-create index idx_runtime_extracted_content_document
-    on runtime_extracted_content (document_id)
-    where document_id is not null;
-
-create index idx_runtime_document_contribution_summary_revision
-    on runtime_document_contribution_summary (revision_id)
-    where revision_id is not null;
-
-create index idx_runtime_document_contribution_summary_ingestion_run
-    on runtime_document_contribution_summary (ingestion_run_id)
-    where ingestion_run_id is not null;
-
-create index idx_runtime_library_queue_slice_workspace_progress
-    on runtime_library_queue_slice (workspace_id, last_progress_at desc);
 
 create index idx_content_mutation_impact_scope_document_active
     on content_mutation_impact_scope (document_id, updated_at desc)
@@ -1507,6 +1450,9 @@ create index idx_runtime_graph_canonical_summary_target_active
     on runtime_graph_canonical_summary (library_id, target_kind, target_id, generated_at desc)
     where superseded_at is null;
 
+create index idx_runtime_graph_community_library
+    on runtime_graph_community(library_id);
+
 create index idx_runtime_vector_target_library_kind_provider
     on runtime_vector_target (library_id, target_kind, provider_kind, model_name, updated_at desc);
 
@@ -1544,6 +1490,10 @@ create index idx_audit_event_actor_created_at
 create index idx_audit_event_request_id
     on audit_event (request_id)
     where request_id is not null;
+
+-- ============================================================================
+-- Seed data
+-- ============================================================================
 
 insert into ai_provider_catalog (
     id,

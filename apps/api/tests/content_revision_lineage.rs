@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use content_lifecycle_support::{ContentLifecycleFixture, revision_command};
 
-use rustrag_backend::services::content::service::CreateDocumentCommand;
+use ironrag_backend::services::content::service::CreateDocumentCommand;
 
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]

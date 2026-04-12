@@ -1,4 +1,4 @@
-use rustrag_backend::app;
+use ironrag_backend::app;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

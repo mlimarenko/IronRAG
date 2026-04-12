@@ -1,0 +1,27 @@
+app:
+  environment: single-node
+  frontendOrigin: https://ironrag.example.com
+
+api:
+  replicaCount: 1
+
+worker:
+  replicaCount: 1
+
+web:
+  replicaCount: 1
+
+startup:
+  mode: startup_job
+
+storage:
+  provider: filesystem
+  topology: single_node
+
+dependencies:
+  postgres:
+    mode: bundled
+  redis:
+    mode: bundled
+  arangodb:
+    mode: bundled

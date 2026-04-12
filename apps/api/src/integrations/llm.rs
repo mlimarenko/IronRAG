@@ -6,6 +6,26 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+mod openai_compatible;
+mod streaming;
+
+use self::{
+    openai_compatible::{
+        OpenAiCompatibleContentPart, OpenAiCompatibleImageUrl, OpenAiCompatibleMessage,
+        OpenAiCompatibleMessageContent, OpenAiCompatibleRequest, OpenAiCompatibleToolDef,
+        OpenAiCompatibleToolUseChatRequest, OpenAiCompatibleToolUseMessage,
+        extract_message_content_text, is_retryable_upstream_json_parse_failure,
+        openai_compatible_token_limit_fields, retryable_openai_parse_failure_error,
+    },
+    streaming::{
+        drain_openai_compatible_stream, is_retryable_transport_error, is_retryable_upstream_status,
+        transport_retry_delay,
+    },
+};
+
+#[cfg(test)]
+use self::streaming::{consume_openai_compatible_stream_frame, is_retryable_transport_error_text};
+
 use crate::{app::config::Settings, shared::provider_base_url::resolve_runtime_provider_base_url};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +99,131 @@ pub struct ChatResponse {
     pub provider_kind: String,
     pub model_name: String,
     pub output_text: String,
+    pub usage_json: serde_json::Value,
+}
+
+// =============================================================================
+// Tool-use types (used by the in-app assistant agent loop and external agents)
+// =============================================================================
+
+/// JSON-schema description of a single tool the LLM may call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// One tool invocation requested by the LLM in its response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatToolCall {
+    pub id: String,
+    pub name: String,
+    /// Raw JSON string of arguments as returned by the model.
+    pub arguments_json: String,
+}
+
+/// Multi-turn conversation message used by the agent loop. Mirrors the
+/// OpenAI chat.completions message shape so the same wire format works for
+/// every OpenAI-compatible provider (OpenAI, Qwen, DeepSeek, Ollama, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// One of: "system", "user", "assistant", "tool".
+    pub role: String,
+    /// Plain text content. Optional because assistant messages can be
+    /// tool-call only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Tool calls produced by the assistant on its previous turn.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tool_calls: Vec<ChatToolCall>,
+    /// For role="tool" messages: the id of the call this message answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// For role="tool" messages: the tool name (some providers want it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ChatMessage {
+    #[must_use]
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".into(),
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    #[must_use]
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".into(),
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    #[must_use]
+    pub fn assistant_text(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    #[must_use]
+    pub fn assistant_with_tool_calls(tool_calls: Vec<ChatToolCall>) -> Self {
+        Self { role: "assistant".into(), content: None, tool_calls, tool_call_id: None, name: None }
+    }
+
+    #[must_use]
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: "tool".into(),
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+            name: Some(tool_name.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUseRequest {
+    pub provider_kind: String,
+    pub model_name: String,
+    pub api_key_override: Option<String>,
+    pub base_url_override: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ChatToolDef>,
+    pub extra_parameters_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUseResponse {
+    pub provider_kind: String,
+    pub model_name: String,
+    /// Final text output. Populated when finish_reason is "stop".
+    pub output_text: String,
+    /// Tool calls the model wants the agent loop to execute. Populated when
+    /// finish_reason is "tool_calls".
+    pub tool_calls: Vec<ChatToolCall>,
+    pub finish_reason: Option<String>,
     pub usage_json: serde_json::Value,
 }
 
@@ -156,6 +301,13 @@ pub trait LlmGateway: Send + Sync {
         }
         Ok(response)
     }
+    /// Tool-use capable chat completion. The provider must be OpenAI-compatible
+    /// (OpenAI, Qwen, DeepSeek, Ollama with tool-capable models, etc.).
+    /// Default implementation rejects the request — concrete gateways MUST
+    /// override it. Test fakes are free to keep the default.
+    async fn generate_with_tools(&self, _request: ToolUseRequest) -> Result<ToolUseResponse> {
+        Err(anyhow!("generate_with_tools is not implemented for this LlmGateway"))
+    }
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse>;
     async fn embed_many(&self, request: EmbeddingBatchRequest) -> Result<EmbeddingBatchResponse>;
     async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse>;
@@ -166,113 +318,6 @@ pub struct UnifiedGateway {
     client: Client,
     transport_retry_attempts: usize,
     transport_retry_base_delay_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum OpenAiCompatibleMessageContent {
-    Text(String),
-    Parts(Vec<OpenAiCompatibleContentPart>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCompatibleMessage {
-    role: String,
-    content: OpenAiCompatibleMessageContent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCompatibleImageUrl {
-    url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum OpenAiCompatibleContentPart {
-    Text { text: String },
-    ImageUrl { image_url: OpenAiCompatibleImageUrl },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCompatibleChatCompletionRequest {
-    model: String,
-    messages: Vec<OpenAiCompatibleMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_completion_tokens: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_options: Option<serde_json::Value>,
-    #[serde(flatten)]
-    extra_parameters_json: serde_json::Value,
-}
-
-struct OpenAiCompatibleRequest<'a> {
-    provider_kind: &'a str,
-    api_key: Option<&'a str>,
-    base_url: &'a str,
-    model_name: &'a str,
-    messages: Vec<OpenAiCompatibleMessage>,
-    system_prompt: Option<&'a str>,
-    temperature: Option<f64>,
-    top_p: Option<f64>,
-    max_output_tokens: Option<i32>,
-    response_format: Option<&'a serde_json::Value>,
-    extra_parameters_json: &'a serde_json::Value,
-    stream: bool,
-}
-
-impl OpenAiCompatibleRequest<'_> {
-    fn body(&self) -> Result<Vec<u8>> {
-        let mut request_messages =
-            Vec::with_capacity(self.messages.len() + usize::from(self.system_prompt.is_some()));
-        if let Some(system_prompt) =
-            self.system_prompt.map(str::trim).filter(|value| !value.is_empty())
-        {
-            request_messages.push(OpenAiCompatibleMessage {
-                role: "system".to_string(),
-                content: OpenAiCompatibleMessageContent::Text(system_prompt.to_string()),
-            });
-        }
-        request_messages.extend(self.messages.clone());
-        let (max_completion_tokens, max_tokens) =
-            openai_compatible_token_limit_fields(self.provider_kind, self.max_output_tokens);
-        let payload = OpenAiCompatibleChatCompletionRequest {
-            model: self.model_name.to_string(),
-            messages: request_messages,
-            temperature: self.temperature,
-            top_p: self.top_p,
-            max_completion_tokens,
-            max_tokens,
-            response_format: self.response_format.cloned(),
-            stream: self.stream.then_some(true),
-            stream_options: self.stream.then(|| serde_json::json!({ "include_usage": true })),
-            extra_parameters_json: self.extra_parameters_json.clone(),
-        };
-        let body =
-            serde_json::to_vec(&payload).context("failed to serialize provider request body")?;
-        serde_json::from_slice::<serde_json::Value>(&body)
-            .context("serialized provider request body was not valid json")?;
-        Ok(body)
-    }
-}
-
-fn openai_compatible_token_limit_fields(
-    provider_kind: &str,
-    max_output_tokens: Option<i32>,
-) -> (Option<i32>, Option<i32>) {
-    match provider_kind {
-        "openai" => (max_output_tokens, None),
-        _ => (None, max_output_tokens),
-    }
 }
 
 impl UnifiedGateway {
@@ -680,6 +725,153 @@ impl LlmGateway for UnifiedGateway {
         })
     }
 
+    async fn generate_with_tools(&self, request: ToolUseRequest) -> Result<ToolUseResponse> {
+        let (api_key, base_url) = Self::resolve_provider(
+            &request.provider_kind,
+            request.api_key_override.as_deref(),
+            request.base_url_override.as_deref(),
+        )?;
+
+        let messages =
+            request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
+        let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
+        let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
+            &request.provider_kind,
+            request.max_output_tokens_override,
+        );
+
+        let payload = OpenAiCompatibleToolUseChatRequest {
+            model: &request.model_name,
+            messages,
+            tools,
+            temperature: request.temperature,
+            top_p: request.top_p,
+            max_completion_tokens,
+            max_tokens,
+            tool_choice: Some("auto"),
+            extra: request.extra_parameters_json.clone(),
+        };
+        let request_body =
+            serde_json::to_vec(&payload).context("failed to serialize tool-use request body")?;
+
+        let max_attempts = self.transport_retry_attempts.max(1);
+        let mut last_error: Option<anyhow::Error> = None;
+        for attempt in 1..=max_attempts {
+            let request_builder = self
+                .client
+                .post(format!("{}/chat/completions", base_url))
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "application/json");
+            let request_builder = if let Some(api_key) = api_key.as_deref() {
+                request_builder.bearer_auth(api_key)
+            } else {
+                request_builder
+            };
+            let response = match request_builder.body(request_body.clone()).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    if attempt < max_attempts && is_retryable_transport_error(&error) {
+                        last_error = Some(anyhow!(
+                            "tool-use transport failed: provider={} attempt={}/{}: {error}",
+                            request.provider_kind,
+                            attempt,
+                            max_attempts
+                        ));
+                        tokio::time::sleep(transport_retry_delay(
+                            self.transport_retry_base_delay_ms,
+                            attempt,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            };
+
+            let status = response.status();
+            let body_text = response.text().await?;
+            if !status.is_success() {
+                let body = serde_json::from_str::<serde_json::Value>(&body_text)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
+                last_error = Some(anyhow!(
+                    "tool-use request failed: provider={} status={status} body={body}",
+                    request.provider_kind
+                ));
+                if attempt < max_attempts && is_retryable_upstream_status(status.as_u16()) {
+                    tokio::time::sleep(transport_retry_delay(
+                        self.transport_retry_base_delay_ms,
+                        attempt,
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(last_error.take().unwrap_or_else(|| {
+                    anyhow!("tool-use request failed: provider={}", request.provider_kind)
+                }));
+            }
+
+            let body =
+                serde_json::from_str::<serde_json::Value>(&body_text).with_context(|| {
+                    format!(
+                        "failed to parse tool-use response from provider {}",
+                        request.provider_kind
+                    )
+                })?;
+
+            let choice = body
+                .get("choices")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .ok_or_else(|| anyhow!("tool-use response missing choices array"))?;
+
+            let message = choice
+                .get("message")
+                .ok_or_else(|| anyhow!("tool-use response choice missing message"))?;
+            let finish_reason =
+                choice.get("finish_reason").and_then(|v| v.as_str()).map(str::to_string);
+
+            let output_text =
+                message.get("content").map(extract_message_content_text).unwrap_or_default();
+
+            let tool_calls = message
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .filter_map(|raw| {
+                            let id = raw.get("id").and_then(|v| v.as_str())?.to_string();
+                            let function = raw.get("function")?;
+                            let name = function.get("name").and_then(|v| v.as_str())?.to_string();
+                            let arguments = function
+                                .get("arguments")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                                .or_else(|| function.get("arguments").map(|v| v.to_string()))
+                                .unwrap_or_default();
+                            Some(ChatToolCall { id, name, arguments_json: arguments })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
+
+            return Ok(ToolUseResponse {
+                provider_kind: request.provider_kind,
+                model_name: request.model_name,
+                output_text,
+                tool_calls,
+                finish_reason,
+                usage_json,
+            });
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            anyhow!("tool-use request failed: provider={}", request.provider_kind)
+        }))
+    }
+
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let (api_key, base_url) = Self::resolve_provider(
             &request.provider_kind,
@@ -858,210 +1050,6 @@ impl LlmGateway for UnifiedGateway {
             usage_json,
         })
     }
-}
-
-fn extract_message_content_text(content: &serde_json::Value) -> String {
-    if let Some(text) = content.as_str() {
-        return text.to_string();
-    }
-
-    let Some(parts) = content.as_array() else {
-        return String::new();
-    };
-
-    let mut rendered = String::new();
-    for part in parts.iter().filter_map(|item| {
-        item.get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                item.get("text")
-                    .and_then(|value| value.get("value"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                item.get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|kind| *kind == "text")
-                    .and_then(|_| item.get("content"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-    }) {
-        if !rendered.is_empty() {
-            rendered.push('\n');
-        }
-        rendered.push_str(&part);
-    }
-    rendered
-}
-
-fn consume_openai_compatible_stream_frame(
-    frame: &str,
-    output_text: &mut String,
-    usage_json: &mut serde_json::Value,
-    on_delta: &mut (dyn FnMut(String) + Send),
-) -> Result<bool> {
-    if frame.trim().is_empty() || frame.starts_with(':') {
-        return Ok(false);
-    }
-
-    let mut data_lines = Vec::new();
-    for raw_line in frame.split('\n') {
-        let line = raw_line.trim_end();
-        if let Some(data) = line.strip_prefix("data:") {
-            data_lines.push(data.trim_start());
-        }
-    }
-
-    if data_lines.is_empty() {
-        return Ok(false);
-    }
-
-    let mut payload_text = String::new();
-    for (index, line) in data_lines.iter().enumerate() {
-        if index > 0 {
-            payload_text.push('\n');
-        }
-        payload_text.push_str(line);
-    }
-    if payload_text.trim() == "[DONE]" {
-        return Ok(true);
-    }
-
-    let payload: serde_json::Value = serde_json::from_str(&payload_text)
-        .context("failed to parse upstream streaming payload as json")?;
-    let delta = extract_stream_delta_text(&payload);
-    if !delta.is_empty() {
-        output_text.push_str(&delta);
-        on_delta(delta);
-    }
-    if let Some(usage) = payload.get("usage").filter(|value| !value.is_null()) {
-        *usage_json = usage.clone();
-    }
-    Ok(false)
-}
-
-async fn drain_openai_compatible_stream(
-    mut response: reqwest::Response,
-    on_delta: &mut (dyn FnMut(String) + Send),
-) -> Result<(String, serde_json::Value)> {
-    let mut output_text = String::new();
-    let mut usage_json = serde_json::json!({});
-    let mut buffer = String::new();
-
-    while let Some(chunk) = response.chunk().await? {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        if buffer.contains('\r') {
-            buffer = buffer.replace("\r\n", "\n").replace('\r', "\n");
-        }
-        while let Some(boundary) = buffer.find("\n\n") {
-            let frame = buffer[..boundary].to_string();
-            buffer = buffer[boundary + 2..].to_string();
-            if consume_openai_compatible_stream_frame(
-                &frame,
-                &mut output_text,
-                &mut usage_json,
-                on_delta,
-            )? {
-                return Ok((output_text, usage_json));
-            }
-        }
-    }
-
-    if !buffer.trim().is_empty() {
-        let _ = consume_openai_compatible_stream_frame(
-            &buffer,
-            &mut output_text,
-            &mut usage_json,
-            on_delta,
-        )?;
-    }
-
-    Ok((output_text, usage_json))
-}
-
-fn extract_stream_delta_text(payload: &serde_json::Value) -> String {
-    let Some(choices) = payload.get("choices").and_then(serde_json::Value::as_array) else {
-        return String::new();
-    };
-
-    let mut rendered = String::new();
-    for value in choices.iter().filter_map(|choice| {
-        choice
-            .get("delta")
-            .and_then(|delta| delta.get("content"))
-            .map(extract_message_content_text)
-            .filter(|value| !value.is_empty())
-    }) {
-        rendered.push_str(&value);
-    }
-    rendered
-}
-
-fn is_retryable_upstream_json_parse_failure(
-    status_code: u16,
-    body: &serde_json::Value,
-    request_body_is_valid_json: bool,
-) -> bool {
-    if status_code != 400 || !request_body_is_valid_json {
-        return false;
-    }
-
-    let normalized = body.to_string().to_ascii_lowercase();
-    normalized.contains("could not parse the json body of your request")
-        || normalized.contains("json body of your request")
-        || normalized.contains("expects a json payload")
-        || (normalized.contains("invalid_request_error")
-            && normalized.contains("json payload")
-            && normalized.contains("status"))
-}
-
-const fn is_retryable_upstream_status(status_code: u16) -> bool {
-    matches!(
-        status_code,
-        408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 529
-    )
-}
-
-fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
-    error.is_timeout()
-        || error.is_connect()
-        || is_retryable_transport_error_text(&error.to_string())
-}
-
-fn is_retryable_transport_error_text(message: &str) -> bool {
-    let normalized = message.to_ascii_lowercase();
-    normalized.contains("connection closed before message completed")
-        || normalized.contains("connection reset")
-        || normalized.contains("broken pipe")
-        || normalized.contains("unexpected eof")
-        || normalized.contains("http2")
-        || normalized.contains("sendrequest")
-        || normalized.contains("error sending request")
-}
-
-const fn transport_retry_delay(base_delay_ms: u64, attempt: usize) -> Duration {
-    let attempt = if attempt == 0 { 0 } else { attempt - 1 };
-    let shift = if attempt > 4 { 4 } else { attempt };
-    let multiplier = 1_u64 << shift;
-    Duration::from_millis(base_delay_ms.saturating_mul(multiplier))
-}
-
-fn retryable_openai_parse_failure_error(
-    provider_kind: &str,
-    attempt: usize,
-    last_error: Option<&anyhow::Error>,
-) -> anyhow::Error {
-    last_error.map_or_else(
-        || anyhow!(
-            "upstream protocol failure: upstream rejected a locally valid JSON request body after {attempt} attempt(s) for provider={provider_kind}"
-        ),
-        |error| anyhow!(
-            "upstream protocol failure: upstream rejected a locally valid JSON request body after {attempt} attempt(s): {error}"
-        ),
-    )
 }
 
 #[cfg(test)]

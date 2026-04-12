@@ -1,5 +1,5 @@
 use anyhow::Context;
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::repositories::catalog_repository,
 };
@@ -9,7 +9,7 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
-    rustrag_backend::shared::telemetry::init(&settings.log_filter);
+    ironrag_backend::shared::telemetry::init(&settings.log_filter);
     let state = AppState::new(settings).await?;
 
     let mut args = std::env::args().skip(1);

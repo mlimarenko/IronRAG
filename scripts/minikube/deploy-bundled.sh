@@ -2,12 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CHART_DIR="${ROOT_DIR}/charts/rustrag"
+CHART_DIR="${ROOT_DIR}/charts/ironrag"
 VALUES_FILE="${CHART_DIR}/values/examples/bundled-s3.yaml"
-BACKEND_IMAGE="${BACKEND_IMAGE:-rustrag-backend:dev}"
-FRONTEND_IMAGE="${FRONTEND_IMAGE:-rustrag-frontend:dev}"
-NAMESPACE="${NAMESPACE:-rustrag}"
-RELEASE="${RELEASE:-rustrag}"
+BACKEND_IMAGE="${BACKEND_IMAGE:-ironrag-backend:dev}"
+FRONTEND_IMAGE="${FRONTEND_IMAGE:-ironrag-frontend:dev}"
+NAMESPACE="${NAMESPACE:-ironrag}"
+RELEASE="${RELEASE:-ironrag}"
 START_MINIKUBE="${START_MINIKUBE:-1}"
 SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-0}"
 MINIKUBE_RESET_ON_FAILURE="${MINIKUBE_RESET_ON_FAILURE:-1}"
@@ -54,9 +54,9 @@ STARTUP_JOB="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get jobs \
 if [ -n "${STARTUP_JOB}" ]; then
   "${KUBECTL_BIN}" wait --namespace "${NAMESPACE}" --for=condition=complete "job/${STARTUP_JOB}" --timeout=10m
 fi
-"${KUBECTL_BIN}" rollout status --namespace "${NAMESPACE}" "deployment/${RELEASE}-rustrag-api" --timeout=10m
-"${KUBECTL_BIN}" rollout status --namespace "${NAMESPACE}" "deployment/${RELEASE}-rustrag-worker" --timeout=10m
-"${KUBECTL_BIN}" rollout status --namespace "${NAMESPACE}" "deployment/${RELEASE}-rustrag-web" --timeout=10m
+"${KUBECTL_BIN}" rollout status --namespace "${NAMESPACE}" "deployment/${RELEASE}-ironrag-api" --timeout=10m
+"${KUBECTL_BIN}" rollout status --namespace "${NAMESPACE}" "deployment/${RELEASE}-ironrag-worker" --timeout=10m
+"${KUBECTL_BIN}" rollout status --namespace "${NAMESPACE}" "deployment/${RELEASE}-ironrag-web" --timeout=10m
 
 "${KUBECTL_BIN}" get pods --namespace "${NAMESPACE}" -o wide
-echo "port-forward: ${KUBECTL_BIN} -n ${NAMESPACE} port-forward svc/${RELEASE}-rustrag-web 19000:80"
+echo "port-forward: ${KUBECTL_BIN} -n ${NAMESPACE} port-forward svc/${RELEASE}-ironrag-web 19000:80"

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::repositories::{catalog_repository, content_repository},
     interfaces::http::router,
@@ -340,6 +340,7 @@ async fn read_only_tokens_do_not_receive_writable_tool_descriptors() -> anyhow::
         assert!(!tool_names.contains(&"create_library"));
         assert!(!tool_names.contains(&"upload_documents"));
         assert!(!tool_names.contains(&"update_document"));
+        assert!(!tool_names.contains(&"delete_document"));
         assert!(!tool_names.contains(&"get_mutation_status"));
 
         Ok(())
@@ -485,11 +486,19 @@ async fn mcp_tool_visibility_matches_token_scope() -> anyhow::Result<()> {
             .filter_map(|item| item["name"].as_str())
             .collect::<Vec<_>>();
 
-        for expected in
-            ["search_documents", "upload_documents", "get_mutation_status", "read_document"]
-        {
+        for expected in [
+            "search_documents",
+            "upload_documents",
+            "update_document",
+            "delete_document",
+            "get_mutation_status",
+            "read_document",
+        ] {
             assert!(tool_names.contains(&expected));
         }
+
+        assert!(!tool_names.contains(&"create_workspace"));
+        assert!(!tool_names.contains(&"create_library"));
 
         Ok(())
     }

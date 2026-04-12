@@ -5,7 +5,7 @@ use chrono::Utc;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use rustrag_backend::{
+use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
         arangodb::{
@@ -336,7 +336,7 @@ impl ExtractGraphFixture {
 }
 
 async fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
-    let persistence = rustrag_backend::infra::persistence::Persistence {
+    let persistence = ironrag_backend::infra::persistence::Persistence {
         postgres,
         redis: redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for extract_graph test state")?,

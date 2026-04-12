@@ -28,6 +28,6 @@ repos:
         pass_filenames: false
       - id: backend-lint
         name: backend-lint
-        entry: bash -lc 'CARGO_TARGET_DIR=.cargo-target/api cargo clippy -p rustrag-backend --all-targets -- -D warnings'
+        entry: bash -lc 'CARGO_TARGET_DIR=.cargo-target/api cargo clippy -p ironrag-backend --all-targets -- -D warnings'
         language: system
         pass_filenames: false

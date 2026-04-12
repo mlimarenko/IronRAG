@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 type JsonResult = serde_json::Result<()>;
 
-use rustrag_contracts::{
+use ironrag_contracts::{
     admin::{
         AdminCapabilityState, AdminSection, AdminSectionSummary, AdminSurface, AdminViewerSummary,
         CapabilityGate,
@@ -318,7 +318,7 @@ fn assistant_admin_api_and_diagnostics_surfaces_serialize() -> JsonResult {
 
     let apiref = ApiReferenceSurface {
         status: ApiReferenceStatus::Ready,
-        document_path: "/v1/openapi/rustrag.openapi.yaml".to_string(),
+        document_path: "/v1/openapi/ironrag.openapi.yaml".to_string(),
         server_origin: Some("/v1".to_string()),
         document_format: ApiReferenceFormat::OpenApiYaml,
         body: Some("openapi: 3.1.0".to_string()),

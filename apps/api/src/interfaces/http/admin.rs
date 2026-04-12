@@ -1,7 +1,7 @@
 use axum::{Json, Router, extract::State, routing::get};
 use tracing::warn;
 
-use rustrag_contracts::{
+use ironrag_contracts::{
     admin::{
         AdminCapabilityState, AdminSection, AdminSectionSummary, AdminSurface, AdminViewerSummary,
         CapabilityGate,

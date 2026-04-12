@@ -1,0 +1,23 @@
+app:
+  environment: production
+  frontendOrigin: https://ironrag.example.com
+
+startup:
+  mode: startup_job
+
+storage:
+  provider: s3
+  topology: shared_cluster
+  s3:
+    mode: bundled
+    bucket: ironrag
+    accessKeyId: ironrag
+    secretAccessKey: ironrag-dev-secret
+
+dependencies:
+  postgres:
+    mode: bundled
+  redis:
+    mode: bundled
+  arangodb:
+    mode: bundled

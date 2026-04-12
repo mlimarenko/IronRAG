@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPOSITORY="${RUSTRAG_GITHUB_REPOSITORY:-mlimarenko/RustRAG}"
+REPOSITORY="${IRONRAG_GITHUB_REPOSITORY:-mlimarenko/IronRAG}"
 VERSION_INPUT="${1:-latest}"
-INSTALL_DIR="${2:-rustrag}"
+INSTALL_DIR="${2:-ironrag}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -86,7 +86,7 @@ sync_frontend_origin_to_port() {
   local file="$1"
   local port="$2"
   local origin="http://127.0.0.1:${port},http://localhost:${port}"
-  env_file_set "RUSTRAG_FRONTEND_ORIGIN" "$origin" "$file"
+  env_file_set "IRONRAG_FRONTEND_ORIGIN" "$origin" "$file"
 }
 
 print_configuration_summary() {
@@ -94,24 +94,24 @@ print_configuration_summary() {
   echo ""
   echo "---"
   echo "Stack secrets:"
-  if [ "${RUSTRAG_NEW_ENV_SECRETS:-0}" = "1" ]; then
-    echo "  New .env: random Postgres, Arango, RUSTRAG_BOOTSTRAP_TOKEN (see .env; not printed)."
+  if [ "${IRONRAG_NEW_ENV_SECRETS:-0}" = "1" ]; then
+    echo "  New .env: random Postgres, Arango, IRONRAG_BOOTSTRAP_TOKEN (see .env; not printed)."
   else
     echo "  Existing .env: secrets unchanged."
   fi
   echo "Admin (UI):"
-  if env_value_nonempty "RUSTRAG_UI_BOOTSTRAP_ADMIN_PASSWORD" "$env_file"; then
-    echo "  Set in .env: RUSTRAG_UI_BOOTSTRAP_ADMIN_LOGIN / _PASSWORD."
+  if env_value_nonempty "IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD" "$env_file"; then
+    echo "  Set in .env: IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN / _PASSWORD."
   else
     echo "  Not in .env: create admin in UI on first visit."
   fi
   echo "LLM keys:"
-  if env_value_nonempty "RUSTRAG_OPENAI_API_KEY" "$env_file" \
-    || env_value_nonempty "RUSTRAG_DEEPSEEK_API_KEY" "$env_file" \
-    || env_value_nonempty "RUSTRAG_QWEN_API_KEY" "$env_file"; then
+  if env_value_nonempty "IRONRAG_OPENAI_API_KEY" "$env_file" \
+    || env_value_nonempty "IRONRAG_DEEPSEEK_API_KEY" "$env_file" \
+    || env_value_nonempty "IRONRAG_QWEN_API_KEY" "$env_file"; then
     echo "  At least one provider key in .env."
   else
-    echo "  None in .env: set RUSTRAG_*_API_KEY or in UI."
+    echo "  None in .env: set IRONRAG_*_API_KEY or in UI."
   fi
   echo "---"
 }
@@ -129,36 +129,36 @@ RAW_BASE_URL="https://raw.githubusercontent.com/${REPOSITORY}/${VERSION}"
 
 mkdir -p "$INSTALL_DIR"
 
-echo "Installing RustRAG ${VERSION} into ${INSTALL_DIR}"
+echo "Installing IronRAG ${VERSION} into ${INSTALL_DIR}"
 
 download "${RAW_BASE_URL}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml"
 download "${RAW_BASE_URL}/docker-compose-s4.yml" "${INSTALL_DIR}/docker-compose-s4.yml"
 download "${RAW_BASE_URL}/.env.example" "${INSTALL_DIR}/.env.example"
 
-RUSTRAG_NEW_ENV_SECRETS=0
+IRONRAG_NEW_ENV_SECRETS=0
 if [ ! -f "${INSTALL_DIR}/.env" ]; then
   cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
-  RUSTRAG_NEW_ENV_SECRETS=1
+  IRONRAG_NEW_ENV_SECRETS=1
   pg_pass="$(rand_hex_bytes 24)"
   arango_pass="$(rand_hex_bytes 24)"
   boot_token="$(rand_hex_bytes 24)"
-  env_file_set "RUSTRAG_POSTGRES_PASSWORD" "$pg_pass" "${INSTALL_DIR}/.env"
-  env_file_set "RUSTRAG_ARANGODB_PASSWORD" "$arango_pass" "${INSTALL_DIR}/.env"
-  env_file_set "RUSTRAG_BOOTSTRAP_TOKEN" "$boot_token" "${INSTALL_DIR}/.env"
+  env_file_set "IRONRAG_POSTGRES_PASSWORD" "$pg_pass" "${INSTALL_DIR}/.env"
+  env_file_set "IRONRAG_ARANGODB_PASSWORD" "$arango_pass" "${INSTALL_DIR}/.env"
+  env_file_set "IRONRAG_BOOTSTRAP_TOKEN" "$boot_token" "${INSTALL_DIR}/.env"
 fi
 
-# Optional: pin the published HTTP port (Ansible, CI, or manual: RUSTRAG_PORT=8080 install.sh …).
-if [ -n "${RUSTRAG_PORT:-}" ]; then
+# Optional: pin the published HTTP port (Ansible, CI, or manual: IRONRAG_PORT=8080 install.sh …).
+if [ -n "${IRONRAG_PORT:-}" ]; then
   env_file="${INSTALL_DIR}/.env"
-  if grep -q '^RUSTRAG_PORT=' "$env_file" 2>/dev/null; then
-    sed -i "s/^RUSTRAG_PORT=.*/RUSTRAG_PORT=${RUSTRAG_PORT}/" "$env_file"
+  if grep -q '^IRONRAG_PORT=' "$env_file" 2>/dev/null; then
+    sed -i "s/^IRONRAG_PORT=.*/IRONRAG_PORT=${IRONRAG_PORT}/" "$env_file"
   else
-    printf '\nRUSTRAG_PORT=%s\n' "${RUSTRAG_PORT}" >>"$env_file"
+    printf '\nIRONRAG_PORT=%s\n' "${IRONRAG_PORT}" >>"$env_file"
   fi
 fi
 
 published_port="$(
-  sed -n 's/^RUSTRAG_PORT=//p' "${INSTALL_DIR}/.env" 2>/dev/null | tail -n1 | tr -d '\r'
+  sed -n 's/^IRONRAG_PORT=//p' "${INSTALL_DIR}/.env" 2>/dev/null | tail -n1 | tr -d '\r'
 )"
 published_port="${published_port:-19000}"
 
@@ -171,7 +171,7 @@ sync_frontend_origin_to_port "${INSTALL_DIR}/.env" "$published_port"
 )
 
 cat <<EOF
-RustRAG ${VERSION} is starting.
+IronRAG ${VERSION} is starting.
 Directory: ${INSTALL_DIR}
 App: http://127.0.0.1:${published_port}
 MCP: http://127.0.0.1:${published_port}/v1/mcp

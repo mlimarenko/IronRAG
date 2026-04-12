@@ -65,19 +65,19 @@ describe("ShellFooter", () => {
       status: "update_available",
       currentVersion: "0.1.2",
       latestVersion: "0.1.3",
-      releaseUrl: "https://github.com/mlimarenko/RustRAG/releases/tag/v0.1.3",
-      repositoryUrl: "https://github.com/mlimarenko/RustRAG",
+      releaseUrl: "https://github.com/mlimarenko/IronRAG/releases/tag/v0.1.3",
+      repositoryUrl: "https://github.com/mlimarenko/IronRAG",
       checkedAt: "2026-04-08T18:00:00Z",
     });
 
     await renderFooter();
 
-    expect(container.textContent).toContain("RustRAG v0.1.2");
+    expect(container.textContent).toContain("IronRAG v0.1.2");
     const updateLink = Array.from(container.querySelectorAll("a")).find(node =>
       node.textContent?.includes("Update available: v0.1.3"),
     );
     expect(updateLink?.getAttribute("href")).toBe(
-      "https://github.com/mlimarenko/RustRAG/releases/tag/v0.1.3",
+      "https://github.com/mlimarenko/IronRAG/releases/tag/v0.1.3",
     );
   });
 
@@ -86,8 +86,8 @@ describe("ShellFooter", () => {
       status: "up_to_date",
       currentVersion: "0.1.2",
       latestVersion: "0.1.2",
-      releaseUrl: "https://github.com/mlimarenko/RustRAG/releases/tag/v0.1.2",
-      repositoryUrl: "https://github.com/mlimarenko/RustRAG",
+      releaseUrl: "https://github.com/mlimarenko/IronRAG/releases/tag/v0.1.2",
+      repositoryUrl: "https://github.com/mlimarenko/IronRAG",
       checkedAt: "2026-04-08T18:00:00Z",
     });
 

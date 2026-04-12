@@ -23,7 +23,7 @@ use crate::{
         router_support::ApiError,
     },
 };
-use rustrag_contracts::{
+use ironrag_contracts::{
     diagnostics::{MessageLevel, OperatorWarning},
     documents::{
         DashboardAttentionItem, DashboardMetric, DashboardSurface, DocumentReadiness,
@@ -770,7 +770,7 @@ mod tests {
         runtime_ingestion::RuntimeDocumentActivityStatus,
     };
     use chrono::Utc;
-    use rustrag_contracts::documents::{DocumentReadiness, DocumentStatus};
+    use ironrag_contracts::documents::{DocumentReadiness, DocumentStatus};
     use serde_json::json;
     use uuid::Uuid;
 

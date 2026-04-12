@@ -222,7 +222,7 @@ async fn build_readiness_response(
             .arango_document_store
             .get_revision(revision_id)
             .await
-            .map_err(|_| ApiError::Internal)?
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
         document_id = Some(revision.document_id);
         text_state = Some(revision.text_state.clone());

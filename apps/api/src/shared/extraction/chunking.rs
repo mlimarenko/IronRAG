@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::shared::extraction::structured_document::{
     StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
 };
+use crate::shared::extraction::table_summary::is_table_summary_text;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StructuredChunkingProfile {
@@ -25,8 +26,20 @@ pub fn build_structured_chunk_windows(
     blocks: &[StructuredBlockData],
     profile: StructuredChunkingProfile,
 ) -> Vec<StructuredChunkWindow> {
-    let filtered_blocks: Vec<StructuredBlockData> =
-        blocks.iter().filter(|block| !block.is_boilerplate).cloned().collect();
+    let table_parent_ids_with_rows = blocks
+        .iter()
+        .filter(|block| block.block_kind == StructuredBlockKind::TableRow)
+        .filter_map(|block| block.parent_block_id)
+        .collect::<HashSet<_>>();
+    let filtered_blocks: Vec<StructuredBlockData> = blocks
+        .iter()
+        .filter(|block| !block.is_boilerplate)
+        .filter(|block| {
+            !(block.block_kind == StructuredBlockKind::Table
+                && table_parent_ids_with_rows.contains(&block.block_id))
+        })
+        .cloned()
+        .collect();
 
     // Pre-split large code blocks at semantic boundaries
     let filtered_blocks = presplit_code_blocks(&filtered_blocks, profile.max_chars);
@@ -37,6 +50,19 @@ pub fn build_structured_chunk_windows(
     let mut current_char_count = 0_usize;
 
     for (index, block) in blocks.iter().enumerate() {
+        if block.block_kind == StructuredBlockKind::TableRow
+            || (block.block_kind == StructuredBlockKind::MetadataBlock
+                && is_table_summary_text(&block.normalized_text))
+        {
+            if window_start < index {
+                push_structured_chunk_window(&mut chunks, &blocks[window_start..index]);
+            }
+            push_structured_chunk_window(&mut chunks, std::slice::from_ref(block));
+            window_start = index.saturating_add(1);
+            current_char_count = 0;
+            continue;
+        }
+
         let block_len = chunk_block_len(block);
         let projected = if current_char_count == 0 {
             block_len
@@ -191,7 +217,10 @@ fn dominant_chunk_kind(blocks: &[StructuredBlockData]) -> StructuredBlockKind {
 }
 
 fn chunk_block_len(block: &StructuredBlockData) -> usize {
-    char_count(block.normalized_text.trim())
+    char_count(match block.block_kind {
+        StructuredBlockKind::TableRow => block.normalized_text.trim(),
+        _ => block.normalized_text.trim(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,5 +1073,130 @@ mod tests {
         assert!(
             chunks[0].literal_digest.as_deref().is_some_and(|value| value.starts_with("sha256:"))
         );
+    }
+
+    #[test]
+    fn table_rows_become_independent_chunks() {
+        let table_id = Uuid::now_v7();
+        let blocks = vec![
+            StructuredBlockData {
+                block_id: table_id,
+                ordinal: 0,
+                block_kind: StructuredBlockKind::Table,
+                text: "| Name | Value |\n| --- | --- |\n| Alice | 42 |".to_string(),
+                normalized_text: "| Name | Value |\n| --- | --- |\n| Alice | 42 |".to_string(),
+                heading_trail: vec!["people".to_string()],
+                section_path: vec!["people".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: None,
+                table_coordinates: None,
+                code_language: None,
+                is_boilerplate: false,
+            },
+            StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 1,
+                block_kind: StructuredBlockKind::TableRow,
+                text: "| Alice | 42 |".to_string(),
+                normalized_text: "Sheet: people | Row 1 | Name: Alice | Value: 42".to_string(),
+                heading_trail: vec!["people".to_string()],
+                section_path: vec!["people".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: Some(table_id),
+                table_coordinates: None,
+                code_language: None,
+                is_boilerplate: false,
+            },
+            StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 2,
+                block_kind: StructuredBlockKind::TableRow,
+                text: "| Bob | 7 |".to_string(),
+                normalized_text: "Sheet: people | Row 2 | Name: Bob | Value: 7".to_string(),
+                heading_trail: vec!["people".to_string()],
+                section_path: vec!["people".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: Some(table_id),
+                table_coordinates: None,
+                code_language: None,
+                is_boilerplate: false,
+            },
+        ];
+
+        let chunks = build_structured_chunk_windows(
+            &blocks,
+            StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
+        );
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.chunk_kind == StructuredBlockKind::TableRow));
+        assert_eq!(chunks[0].content_text, "| Alice | 42 |");
+        assert_eq!(chunks[1].content_text, "| Bob | 7 |");
+    }
+
+    #[test]
+    fn table_summaries_become_independent_chunks() {
+        let blocks = vec![
+            StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 0,
+                block_kind: StructuredBlockKind::Heading,
+                text: "organizations".to_string(),
+                normalized_text: "organizations".to_string(),
+                heading_trail: vec!["organizations".to_string()],
+                section_path: vec!["organizations".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: None,
+                table_coordinates: None,
+                code_language: None,
+                is_boilerplate: false,
+            },
+            StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 1,
+                block_kind: StructuredBlockKind::MetadataBlock,
+                text: String::new(),
+                normalized_text: "Table Summary | Sheet: organizations | Column: Country | Value Kind: categorical | Row Count: 3 | Non-empty Count: 3 | Distinct Count: 2 | Most Frequent Count: 2 | Most Frequent Tie Count: 1 | Most Frequent Values: Sweden".to_string(),
+                heading_trail: vec!["organizations".to_string()],
+                section_path: vec!["organizations".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: Some(Uuid::now_v7()),
+                table_coordinates: None,
+                code_language: None,
+                is_boilerplate: false,
+            },
+            StructuredBlockData {
+                block_id: Uuid::now_v7(),
+                ordinal: 2,
+                block_kind: StructuredBlockKind::MetadataBlock,
+                text: String::new(),
+                normalized_text: "Table Summary | Sheet: organizations | Column: Employees | Value Kind: numeric | Row Count: 3 | Non-empty Count: 3 | Distinct Count: 3 | Average: 20 | Min: 10 | Max: 30".to_string(),
+                heading_trail: vec!["organizations".to_string()],
+                section_path: vec!["organizations".to_string()],
+                page_number: None,
+                source_span: None,
+                parent_block_id: Some(Uuid::now_v7()),
+                table_coordinates: None,
+                code_language: None,
+                is_boilerplate: false,
+            },
+        ];
+
+        let chunks = build_structured_chunk_windows(
+            &blocks,
+            StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
+        );
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chunk_kind, StructuredBlockKind::Heading);
+        assert_eq!(chunks[1].chunk_kind, StructuredBlockKind::MetadataBlock);
+        assert_eq!(chunks[2].chunk_kind, StructuredBlockKind::MetadataBlock);
+        assert!(chunks[1].normalized_text.starts_with("Table Summary |"));
+        assert!(chunks[2].normalized_text.starts_with("Table Summary |"));
     }
 }

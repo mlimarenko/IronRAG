@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::Context;
@@ -10,10 +11,11 @@ use crate::{
     services::query::planner::QueryIntentProfile,
 };
 
-use super::{
-    CanonicalAnswerEvidence, RuntimeMatchedChunk, canonical_target_subject_label,
-    extract_multi_document_role_clauses, role_clause_canonical_target,
+use super::answer::{
+    canonical_target_subject_label, extract_multi_document_role_clauses,
+    role_clause_canonical_target,
 };
+use super::types::{CanonicalAnswerEvidence, RuntimeMatchedChunk};
 
 #[derive(Debug, Clone)]
 pub(super) struct RuntimeAnswerVerification {
@@ -27,6 +29,7 @@ pub(super) fn verify_answer_against_canonical_evidence(
     intent_profile: &QueryIntentProfile,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
+    prompt_context: &str,
 ) -> RuntimeAnswerVerification {
     if answer.trim().is_empty() {
         return RuntimeAnswerVerification {
@@ -41,7 +44,15 @@ pub(super) fn verify_answer_against_canonical_evidence(
     }
 
     let backticked_literals = extract_backticked_literals(answer);
-    let normalized_corpus = build_verification_corpus(evidence, chunks);
+    let mut normalized_corpus = build_verification_corpus(evidence, chunks);
+    // Library summary, document file names, document titles and other prompt
+    // metadata are part of what the LLM saw — include the whole rendered
+    // prompt context so file-name backticks like `customers.csv` are not
+    // marked as hallucinations.
+    let normalized_prompt_context = normalize_verification_literal(prompt_context);
+    if !normalized_prompt_context.is_empty() {
+        normalized_corpus.push(normalized_prompt_context);
+    }
     let mut warnings = Vec::<QueryVerificationWarning>::new();
     for literal in &backticked_literals {
         let normalized_literal = normalize_verification_literal(literal);

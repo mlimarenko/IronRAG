@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ironrag.fullname" . }}-runtime
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+data:
+  IRONRAG_BIND_ADDR: {{ .Values.app.bindAddr | quote }}
+  IRONRAG_ENVIRONMENT: {{ .Values.app.environment | quote }}
+  IRONRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
+  IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: {{ .Values.app.queryAnswerSourceLinksEnabled | quote }}
+  IRONRAG_ARANGODB_URL: {{ include "ironrag.arangodbUrl" . | quote }}
+  IRONRAG_ARANGODB_DATABASE: {{ .Values.dependencies.arangodb.database | quote }}
+  IRONRAG_ARANGODB_USERNAME: {{ .Values.dependencies.arangodb.username | quote }}
+  IRONRAG_LOG_FILTER: {{ .Values.app.logFilter | quote }}
+  IRONRAG_FRONTEND_ORIGIN: {{ .Values.app.frontendOrigin | quote }}
+  IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: {{ .Values.app.bootstrapAdmin.login | quote }}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: {{ .Values.app.modelDefaults.extractGraphProviderKind | quote }}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: {{ .Values.app.modelDefaults.extractGraphModelName | quote }}
+  IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: {{ .Values.app.modelDefaults.embedChunkProviderKind | quote }}
+  IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: {{ .Values.app.modelDefaults.embedChunkModelName | quote }}
+  IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: {{ .Values.app.modelDefaults.queryAnswerProviderKind | quote }}
+  IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: {{ .Values.app.modelDefaults.queryAnswerModelName | quote }}
+  IRONRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: {{ .Values.app.modelDefaults.visionProviderKind | quote }}
+  IRONRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: {{ .Values.app.modelDefaults.visionModelName | quote }}
+  IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: {{ .Values.app.runtimePolicy.rejectTaskKinds | quote }}
+  IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: {{ .Values.app.runtimePolicy.rejectTargetKinds | quote }}
+  IRONRAG_UI_DEFAULT_LOCALE: {{ .Values.app.uiDefaultLocale | quote }}
+  IRONRAG_STARTUP_AUTHORITY_MODE: {{ .Values.startup.mode | quote }}
+  IRONRAG_DEPENDENCY_POSTGRES_MODE: {{ .Values.dependencies.postgres.mode | quote }}
+  IRONRAG_DEPENDENCY_REDIS_MODE: {{ .Values.dependencies.redis.mode | quote }}
+  IRONRAG_DEPENDENCY_ARANGODB_MODE: {{ .Values.dependencies.arangodb.mode | quote }}
+  IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE: {{ include "ironrag.objectStorageMode" . | quote }}
+  IRONRAG_CONTENT_STORAGE_PROVIDER: {{ .Values.storage.provider | quote }}
+  IRONRAG_CONTENT_STORAGE_TOPOLOGY: {{ .Values.storage.topology | quote }}
+  IRONRAG_CONTENT_STORAGE_KEY_PREFIX: {{ .Values.storage.keyPrefix | quote }}
+  IRONRAG_CONTENT_STORAGE_ROOT: {{ .Values.storage.rootPath | quote }}
+  IRONRAG_CONTENT_STORAGE_S3_BUCKET: {{ .Values.storage.s3.bucket | quote }}
+  IRONRAG_CONTENT_STORAGE_S3_ENDPOINT: {{ include "ironrag.s3Endpoint" . | quote }}
+  IRONRAG_CONTENT_STORAGE_S3_REGION: {{ .Values.storage.s3.region | quote }}
+  IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE: {{ .Values.storage.s3.forcePathStyle | quote }}
+  IRONRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: {{ .Values.app.arangodbBootstrap.collections | quote }}
+  IRONRAG_ARANGODB_BOOTSTRAP_VIEWS: {{ .Values.app.arangodbBootstrap.views | quote }}
+  IRONRAG_ARANGODB_BOOTSTRAP_GRAPH: {{ .Values.app.arangodbBootstrap.graph | quote }}
+  IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: {{ .Values.app.arangodbBootstrap.vectorIndexes | quote }}
+{{- if not .Values.runtimeSecret.existingSecret }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "ironrag.runtimeSecretName" . }}
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  IRONRAG_DATABASE_URL: {{ include "ironrag.databaseUrl" . | quote }}
+  IRONRAG_REDIS_URL: {{ include "ironrag.redisUrl" . | quote }}
+  IRONRAG_BOOTSTRAP_TOKEN: {{ .Values.app.bootstrapToken | quote }}
+  IRONRAG_ARANGODB_PASSWORD: {{ .Values.dependencies.arangodb.password | quote }}
+  IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: {{ .Values.app.bootstrapAdmin.password | quote }}
+  IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: {{ .Values.app.bootstrapAdmin.apiToken | quote }}
+  IRONRAG_OPENAI_API_KEY: {{ .Values.app.providerSecrets.openaiApiKey | quote }}
+  IRONRAG_DEEPSEEK_API_KEY: {{ .Values.app.providerSecrets.deepseekApiKey | quote }}
+  IRONRAG_QWEN_API_KEY: {{ .Values.app.providerSecrets.qwenApiKey | quote }}
+  IRONRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID: {{ .Values.storage.s3.accessKeyId | quote }}
+  IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: {{ .Values.storage.s3.secretAccessKey | quote }}
+  IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: {{ .Values.storage.s3.sessionToken | quote }}
+{{- end }}
