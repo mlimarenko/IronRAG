@@ -10,7 +10,7 @@ pub fn hash_api_token(raw: &str) -> String {
 
 #[must_use]
 pub fn mint_plaintext_api_token() -> String {
-    format!("rtrg_{}", Uuid::now_v7().simple())
+    format!("inrg_{}", Uuid::now_v7().simple())
 }
 
 #[must_use]

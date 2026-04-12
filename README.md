@@ -211,6 +211,10 @@ make benchmark-golden          # golden dataset
 - [x] Admin CLI (`ironrag-cli`) with granular token permissions
 - [x] Ollama/local model support, verified live with Ollama `qwen3:4b`; stale-model detection verified against missing `qwen3:0.6b`.
 
+### Next up
+
+- [ ] Managed connectors for project workspaces: GitHub repositories, S3 buckets, and durable web sources with scoped grants and explicit sync lifecycle.
+
 ## Star History
 
 <p align="center">

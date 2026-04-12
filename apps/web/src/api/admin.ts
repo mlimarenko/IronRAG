@@ -71,6 +71,14 @@ export interface BindingValidationResponse {
   message?: string;
 }
 
+export interface MintTokenRequest {
+  label: string;
+  workspaceId?: string;
+  expiresAt?: string;
+  libraryIds?: string[];
+  permissionKinds?: string[];
+}
+
 function buildQuery(params: Record<string, string | number | boolean | undefined>) {
   const searchParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -86,8 +94,8 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 
 export const adminApi = {
   listTokens: () => apiFetch<RawTokenResponse[]>("/iam/tokens"),
-  mintToken: (label: string) =>
-    apiFetch<RawTokenMintResponse>("/iam/tokens", { method: "POST", body: JSON.stringify({ label }) }),
+  mintToken: (request: MintTokenRequest) =>
+    apiFetch<RawTokenMintResponse>("/iam/tokens", { method: "POST", body: JSON.stringify(request) }),
   revokeToken: (principalId: string) =>
     apiFetch<void>(`/iam/tokens/${principalId}/revoke`, { method: "POST" }),
 
@@ -158,6 +166,8 @@ export const adminApi = {
     ),
 
   listWorkspaces: () => apiFetch<CatalogWorkspaceResponse[]>("/catalog/workspaces"),
+  listLibraries: (workspaceId: string) =>
+    apiFetch<CatalogLibraryResponse[]>(`/catalog/workspaces/${workspaceId}/libraries`),
   createWorkspace: (name: string) =>
     apiFetch<CatalogWorkspaceResponse>("/catalog/workspaces", {
       method: "POST",

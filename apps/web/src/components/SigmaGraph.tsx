@@ -3,7 +3,7 @@ import Graph from 'graphology';
 import Sigma from 'sigma';
 import { EdgeCurvedArrowProgram } from '@sigma/edge-curve';
 import type { GraphNode } from '@/types';
-import { GRAPH_NODE_COLORS, type GraphLayoutType } from '@/components/graph/config';
+import { GRAPH_EDGE_COLORS, GRAPH_NODE_COLORS, type GraphLayoutType } from '@/components/graph/config';
 import { applyGraphLayout } from '@/components/graph/layouts';
 
 interface EdgeData {
@@ -24,12 +24,6 @@ interface SigmaGraphProps {
 }
 
 const LAYOUT_ANIMATION_DURATION_MS = 280;
-const GRAPH_EDGE_COLORS = {
-  dense: 'rgba(71, 85, 105, 0.34)',
-  regular: 'rgba(71, 85, 105, 0.5)',
-  muted: 'rgba(71, 85, 105, 0.24)',
-} as const;
-
 function cloneGraphStructure(source: Graph): Graph {
   const cloned = new Graph();
 
@@ -51,14 +45,9 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
   const dragStateRef = useRef<{ dragging: boolean; node: string | null }>({ dragging: false, node: null });
-  const selectedIdRef = useRef<string | null>(selectedId);
-  const selectedEdgesRef = useRef<EdgeData[]>([]);
-  const selectionOverlayRenderRef = useRef<(() => void) | null>(null);
   const layoutRef = useRef(layout);
   const layoutAnimationFrameRef = useRef<number | null>(null);
   const layoutAnimationTokenRef = useRef(0);
-
-  selectedIdRef.current = selectedId;
 
   const stopLayoutAnimation = () => {
     layoutAnimationTokenRef.current += 1;
@@ -85,7 +74,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     );
     const denseGraph = visibleEdges.length > 2200 || visibleNodes.length > 700;
     const edgeColor = denseGraph ? GRAPH_EDGE_COLORS.dense : GRAPH_EDGE_COLORS.regular;
-    const edgeSize = denseGraph ? 0.18 : 0.3;
+    const edgeSize = denseGraph ? 0.22 : 0.34;
     const labelDensity = visibleNodes.length > 900 ? 0.03 : visibleNodes.length > 450 ? 0.045 : 0.07;
 
     for (const node of visibleNodes) {
@@ -124,7 +113,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     if (sigmaRef.current) sigmaRef.current.kill();
 
     const sigma = new Sigma(graph, containerRef.current, {
-      hideEdgesOnMove: denseGraph,
+      hideEdgesOnMove: false,
       hideLabelsOnMove: visibleNodes.length > 350,
       renderLabels: true,
       renderEdgeLabels: false,
@@ -159,68 +148,6 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       camera.animate({ ratio: Math.max(0.01, Math.min(50, newRatio)) }, { duration: 50 });
     };
     container.addEventListener('wheel', wheelHandler, { passive: false });
-
-    // Highlight overlay: official Sigma layer API — Canvas2D ABOVE nodes
-    // Layer order: edges → nodes → **highlightEdges** → labels → hovers
-    const hlCanvas = sigma.createCanvas('highlightEdges', {
-      afterLayer: 'nodes',
-      style: { pointerEvents: 'none' },
-    });
-    const hlCtx = hlCanvas.getContext('2d');
-
-    const renderHighlight = () => {
-      if (!hlCtx) return;
-      const { width, height } = sigma.getDimensions();
-      const pr = window.devicePixelRatio || 1;
-      const cw = Math.round(width * pr);
-      const ch = Math.round(height * pr);
-      if (hlCanvas.width !== cw || hlCanvas.height !== ch) {
-        hlCanvas.width = cw;
-        hlCanvas.height = ch;
-        hlCanvas.style.width = `${width}px`;
-        hlCanvas.style.height = `${height}px`;
-      }
-      hlCtx.setTransform(pr, 0, 0, pr, 0, 0);
-      hlCtx.clearRect(0, 0, width, height);
-
-      const sid = selectedIdRef.current;
-      const hEdges = selectedEdgesRef.current;
-      if (!sid || hEdges.length === 0 || !graph.hasNode(sid)) return;
-
-      hlCtx.strokeStyle = 'rgba(59, 130, 246, 0.45)';
-      hlCtx.lineWidth = 1.5;
-      hlCtx.lineCap = 'round';
-
-      for (const edge of hEdges) {
-        if (!graph.hasNode(edge.sourceId) || !graph.hasNode(edge.targetId)) continue;
-        const s = sigma.graphToViewport({
-          x: graph.getNodeAttribute(edge.sourceId, 'x'),
-          y: graph.getNodeAttribute(edge.sourceId, 'y'),
-        });
-        const t = sigma.graphToViewport({
-          x: graph.getNodeAttribute(edge.targetId, 'x'),
-          y: graph.getNodeAttribute(edge.targetId, 'y'),
-        });
-
-        // Curved arc — perpendicular offset proportional to distance
-        const dx = t.x - s.x;
-        const dy = t.y - s.y;
-        const dist = Math.hypot(dx, dy) || 1;
-        const nx = -dy / dist;
-        const ny = dx / dist;
-        const curvature = Math.min(40, dist * 0.15);
-        const cx = (s.x + t.x) / 2 + nx * curvature;
-        const cy = (s.y + t.y) / 2 + ny * curvature;
-
-        hlCtx.beginPath();
-        hlCtx.moveTo(s.x, s.y);
-        hlCtx.quadraticCurveTo(cx, cy, t.x, t.y);
-        hlCtx.stroke();
-      }
-    };
-
-    sigma.on('afterRender', renderHighlight);
-    selectionOverlayRenderRef.current = renderHighlight;
 
     // Node dragging
     let draggedNode: string | null = null;
@@ -274,8 +201,6 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     return () => {
       stopLayoutAnimation();
       container.removeEventListener('wheel', wheelHandler);
-      sigma.off('afterRender', renderHighlight);
-      selectionOverlayRenderRef.current = null;
       sigma.kill();
       sigmaRef.current = null;
     };
@@ -356,62 +281,70 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     };
   }, [layout, nodes]);
 
-  // Selection highlighting via reducers + dedicated top overlay for active edges.
   useEffect(() => {
     const sigma = sigmaRef.current;
     const graph = graphRef.current;
     if (!sigma || !graph) return;
 
     if (selectedId && graph.hasNode(selectedId)) {
+      const connectedEdges = new Set<string>();
       const neighbors = new Set(graph.neighbors(selectedId));
-      const renderedSelectedEdges: EdgeData[] = [];
-      const seenEdges = new Set<string>();
-
-      for (const edge of edges) {
-        const isConnected = edge.sourceId === selectedId || edge.targetId === selectedId;
-        if (!isConnected) continue;
-        if (!graph.hasNode(edge.sourceId) || !graph.hasNode(edge.targetId)) continue;
-
-        const edgeKey = `${edge.sourceId}:${edge.targetId}:${edge.label}`;
-        if (seenEdges.has(edgeKey)) continue;
-        seenEdges.add(edgeKey);
-        renderedSelectedEdges.push(edge);
-      }
-
-      selectedEdgesRef.current = renderedSelectedEdges;
+      graph.forEachEdge((edge) => {
+        if (graph.source(edge) === selectedId || graph.target(edge) === selectedId) {
+          connectedEdges.add(edge);
+        }
+      });
 
       sigma.setSetting('nodeReducer', (node: string, data: any) => {
         const isSelected = node === selectedId;
         const isNeighbor = neighbors.has(node);
         if (isSelected) {
-          return { ...data, zIndex: 2, label: data.label, highlighted: true };
+          return {
+            ...data,
+            zIndex: 4,
+            size: Math.max((data.size ?? 0) as number, 9),
+            label: data.label,
+            highlighted: true,
+          };
         }
         if (isNeighbor) {
-          return { ...data, zIndex: 1, label: data.label };
+          return {
+            ...data,
+            zIndex: 3,
+            size: Math.max((data.size ?? 0) as number, 7),
+            label: data.label,
+          };
         }
-        return { ...data, color: '#d4d4d8', zIndex: 0, label: '' };
+        return {
+          ...data,
+          color: '#d4d4d8',
+          zIndex: 0,
+          size: Math.max((data.size ?? 0) as number, 2),
+          label: '',
+        };
       });
 
       sigma.setSetting('edgeReducer', (edge: string, data: any) => {
-        const source = graph.source(edge);
-        const target = graph.target(edge);
-        const isConnected = source === selectedId || target === selectedId;
-        if (isConnected) {
-          // Hide connected edges from normal WebGL layer — they'll be drawn
-          // on the highlight overlay ABOVE nodes instead
-          return { ...data, hidden: true };
+        if (connectedEdges.has(edge)) {
+          return {
+            ...data,
+            color: GRAPH_EDGE_COLORS.highlight,
+            size: Math.max((data.size ?? 0) as number, 0.6),
+          };
         }
-        return { ...data, color: GRAPH_EDGE_COLORS.muted, size: 0.15 };
+        return {
+          ...data,
+          color: GRAPH_EDGE_COLORS.muted,
+          size: Math.max((data.size ?? 0) as number, 0.2),
+        };
       });
     } else {
-      selectedEdgesRef.current = [];
       sigma.setSetting('nodeReducer', null);
       sigma.setSetting('edgeReducer', null);
     }
 
     sigma.refresh();
-    selectionOverlayRenderRef.current?.();
-  }, [selectedId, edges, nodes, hiddenTypes]);
+  }, [selectedId, nodes, hiddenTypes]);
 
   return (
     <div ref={containerRef} className="w-full h-full" style={{ minHeight: '400px' }} />

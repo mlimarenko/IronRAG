@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-04-12
+
+- Fixed web snapshot persistence for long percent-encoded page and attachment URLs.
+- Fixed frontend nginx API proxy re-resolution so Docker redeploys no longer strand `/v1/*` traffic on stale container DNS.
+- Fixed graph edge rendering during zoom and selection so focused neighbors stay visible above unrelated nodes.
+- Fixed web-ingested documents to render as `Web page` instead of leaking raw source/file extensions into the type column.
+- Added canonical token minting for an explicit target workspace plus multi-library grants in one token, fixed library-scoped discovery so tokens only enumerate selected libraries, and closed the workspace-scoped `iam_admin` auth bypass.
+- Hid unfinished connector-admin permissions from user-facing token issuance surfaces while keeping connector support on the backend roadmap.
+
 ## 0.2.0 — 2026-04-12
 
 ### Highlights

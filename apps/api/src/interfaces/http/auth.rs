@@ -231,11 +231,12 @@ impl AuthContext {
         accepted: &[&str],
     ) -> bool {
         self.is_system_admin
-            || self.can_access_workspace(workspace_id)
+            || (self.token_kind.is_session() && self.can_access_workspace(workspace_id))
             || self.grants.iter().any(|grant| {
                 (grant.resource_kind == "system"
-                    || grant.workspace_id == Some(workspace_id)
-                    || grant.library_id == Some(library_id))
+                    || (grant.resource_kind == "workspace"
+                        && grant.workspace_id == Some(workspace_id))
+                    || (grant.resource_kind == "library" && grant.library_id == Some(library_id)))
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
@@ -500,11 +501,28 @@ async fn build_auth_context_for_principal(
             membership_state: membership.membership_state,
         })
         .collect::<Vec<_>>();
+    let auth_grants = grants
+        .into_iter()
+        .map(|grant| AuthGrant {
+            id: grant.id,
+            resource_kind: grant.resource_kind,
+            resource_id: grant.resource_id,
+            permission_kind: grant.permission_kind,
+            workspace_id: grant.workspace_id,
+            library_id: grant.library_id,
+            document_id: grant.document_id,
+        })
+        .collect::<Vec<_>>();
     let mut visible_workspace_ids = workspace_memberships
         .iter()
         .map(|membership| membership.workspace_id)
         .collect::<BTreeSet<_>>();
-    visible_workspace_ids.extend(grants.iter().filter_map(|grant| grant.workspace_id));
+    visible_workspace_ids.extend(
+        auth_grants
+            .iter()
+            .filter(|grant| grant.resource_kind == "workspace")
+            .filter_map(|grant| grant.workspace_id),
+    );
 
     Ok(AuthContext {
         token_id,
@@ -513,18 +531,7 @@ async fn build_auth_context_for_principal(
         workspace_id,
         token_kind,
         scopes,
-        grants: grants
-            .into_iter()
-            .map(|grant| AuthGrant {
-                id: grant.id,
-                resource_kind: grant.resource_kind,
-                resource_id: grant.resource_id,
-                permission_kind: grant.permission_kind,
-                workspace_id: grant.workspace_id,
-                library_id: grant.library_id,
-                document_id: grant.document_id,
-            })
-            .collect(),
+        grants: auth_grants,
         workspace_memberships,
         visible_workspace_ids,
         is_system_admin,
@@ -556,6 +563,52 @@ mod tests {
 
     fn api_token_auth_context() -> AuthTokenKind {
         AuthTokenKind::Principal(PrincipalKind::ApiToken)
+    }
+
+    fn library_grant_token(workspace_id: Uuid, library_id: Uuid, permission: &str) -> AuthContext {
+        AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            token_kind: api_token_auth_context(),
+            scopes: vec![permission.to_string()],
+            grants: vec![AuthGrant {
+                id: Uuid::now_v7(),
+                resource_kind: "library".into(),
+                resource_id: library_id,
+                permission_kind: permission.to_string(),
+                workspace_id: Some(workspace_id),
+                library_id: Some(library_id),
+                document_id: None,
+            }],
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: false,
+        }
+    }
+
+    fn workspace_grant_token(workspace_id: Uuid, permission: &str) -> AuthContext {
+        AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            token_kind: api_token_auth_context(),
+            scopes: vec![permission.to_string()],
+            grants: vec![AuthGrant {
+                id: Uuid::now_v7(),
+                resource_kind: "workspace".into(),
+                resource_id: workspace_id,
+                permission_kind: permission.to_string(),
+                workspace_id: Some(workspace_id),
+                library_id: None,
+                document_id: None,
+            }],
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: std::iter::once(workspace_id).collect(),
+            is_system_admin: false,
+        }
     }
 
     fn workspace_token(workspace_id: Option<Uuid>) -> AuthContext {
@@ -753,6 +806,64 @@ mod tests {
         assert!(read_only.is_read_only_for_library(workspace_id, &["document_write"]));
         assert!(!writable.is_read_only_for_library(workspace_id, &["document_write"]));
         assert!(!read_only.is_read_only_for_library(Uuid::now_v7(), &["document_write"]));
+    }
+
+    #[test]
+    fn library_grant_discovers_only_matching_library() {
+        let workspace_id = Uuid::now_v7();
+        let visible_library_id = Uuid::now_v7();
+        let hidden_library_id = Uuid::now_v7();
+        let auth = library_grant_token(workspace_id, visible_library_id, "library_read");
+
+        assert!(auth.can_discover_workspace(workspace_id, &["library_read"]));
+        assert!(auth.can_discover_library(workspace_id, visible_library_id, &["library_read"]));
+        assert!(!auth.can_discover_library(workspace_id, hidden_library_id, &["library_read"]));
+        assert!(!auth.can_access_workspace(workspace_id));
+    }
+
+    #[test]
+    fn workspace_grant_discovers_all_libraries_in_workspace() {
+        let workspace_id = Uuid::now_v7();
+        let auth = workspace_grant_token(workspace_id, "workspace_admin");
+
+        assert!(auth.can_access_workspace(workspace_id));
+        assert!(auth.can_discover_library(workspace_id, Uuid::now_v7(), &["workspace_admin"]));
+        assert!(auth.can_discover_library(workspace_id, Uuid::now_v7(), &["library_read", "workspace_admin"]));
+    }
+
+    #[test]
+    fn library_grant_with_workspace_membership_does_not_discover_sibling_libraries() {
+        let workspace_id = Uuid::now_v7();
+        let visible_library_id = Uuid::now_v7();
+        let hidden_library_id = Uuid::now_v7();
+        let auth = AuthContext {
+            token_id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            token_kind: api_token_auth_context(),
+            scopes: vec!["library_read".into()],
+            grants: vec![AuthGrant {
+                id: Uuid::now_v7(),
+                resource_kind: "library".into(),
+                resource_id: visible_library_id,
+                permission_kind: "library_read".into(),
+                workspace_id: Some(workspace_id),
+                library_id: Some(visible_library_id),
+                document_id: None,
+            }],
+            workspace_memberships: vec![AuthWorkspaceMembership {
+                workspace_id,
+                membership_state: "active".into(),
+            }],
+            visible_workspace_ids: std::iter::once(workspace_id).collect(),
+            is_system_admin: false,
+        };
+
+        assert!(auth.can_access_workspace(workspace_id));
+        assert!(auth.can_discover_workspace(workspace_id, &["library_read"]));
+        assert!(auth.can_discover_library(workspace_id, visible_library_id, &["library_read"]));
+        assert!(!auth.can_discover_library(workspace_id, hidden_library_id, &["library_read"]));
     }
 
     #[test]

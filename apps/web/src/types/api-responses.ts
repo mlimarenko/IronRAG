@@ -77,6 +77,7 @@ export interface RawModelCatalogEntry {
 export interface RawTokenResponse {
   id?: string;
   principalId?: string;
+  workspaceId?: string;
   label?: string;
   tokenPrefix?: string;
   status?: string;

@@ -1,6 +1,8 @@
 mod session;
 mod types;
 
+use std::collections::BTreeSet;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -139,11 +141,74 @@ async fn mint_token(
     Json(payload): Json<MintTokenRequest>,
 ) -> Result<Json<MintTokenResponse>, ApiError> {
     auth.require_any_scope(POLICY_IAM_ADMIN)?;
-    let workspace_id = resolve_mint_workspace(&auth, payload.workspace_id)?;
+    let mut workspace_id = resolve_mint_workspace(&auth, payload.workspace_id)?;
+    let expires_at = payload.expires_at;
 
     if payload.label.trim().is_empty() {
         return Err(ApiError::BadRequest("label must not be empty".into()));
     }
+    let library_ids = dedupe_uuids(payload.library_ids);
+    let permission_kinds = dedupe_permissions(payload.permission_kinds);
+
+    if !library_ids.is_empty() && permission_kinds.is_empty() {
+        return Err(ApiError::BadRequest(
+            "permissionKinds must be provided when libraryIds are present".into(),
+        ));
+    }
+
+    if !library_ids.is_empty() {
+        let mut library_workspace_ids = BTreeSet::new();
+        for library_id in &library_ids {
+            let library =
+                catalog_repository::get_library_by_id(&state.persistence.postgres, *library_id)
+                    .await
+                    .map_err(|error| {
+                        error!(
+                            auth_principal_id = %auth.principal_id,
+                            library_id = %library_id,
+                            ?error,
+                            "failed to load library for iam token mint",
+                        );
+                        ApiError::Internal
+                    })?
+                    .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
+
+            if let Some(requested_workspace_id) = workspace_id {
+                if library.workspace_id != requested_workspace_id {
+                    return Err(ApiError::BadRequest(format!(
+                        "library {} does not belong to workspace {}",
+                        library.id, requested_workspace_id
+                    )));
+                }
+            }
+            library_workspace_ids.insert(library.workspace_id);
+        }
+
+        if workspace_id.is_none() && library_workspace_ids.len() == 1 {
+            workspace_id = library_workspace_ids.iter().copied().next();
+        }
+    }
+    let grants = if permission_kinds.is_empty() {
+        Vec::new()
+    } else if !library_ids.is_empty() {
+        build_mint_grants(
+            MintGrantScope::Libraries(library_ids),
+            &permission_kinds,
+            expires_at.clone(),
+        )?
+    } else {
+        let workspace_id = workspace_id.ok_or_else(|| {
+            ApiError::BadRequest(
+                "workspaceId is required when permissionKinds are provided without libraryIds"
+                    .to_string(),
+            )
+        })?;
+        build_mint_grants(
+            MintGrantScope::Workspace(workspace_id),
+            &permission_kinds,
+            expires_at.clone(),
+        )?
+    };
 
     let outcome = state
         .canonical_services
@@ -153,7 +218,8 @@ async fn mint_token(
             crate::services::iam::service::MintApiTokenCommand {
                 workspace_id,
                 label: payload.label,
-                expires_at: payload.expires_at,
+                expires_at,
+                grants,
                 issued_by_principal_id: Some(auth.principal_id),
             },
         )
@@ -405,7 +471,7 @@ fn resolve_workspace_filter(
     auth: &AuthContext,
     requested: Option<Uuid>,
 ) -> Result<Option<Uuid>, ApiError> {
-    if auth.is_system_admin || auth.has_scope("iam_admin") {
+    if auth.is_system_admin {
         return Ok(requested);
     }
 
@@ -468,7 +534,7 @@ fn resolve_mint_workspace(
     auth: &AuthContext,
     requested: Option<Uuid>,
 ) -> Result<Option<Uuid>, ApiError> {
-    if auth.is_system_admin || auth.has_scope("iam_admin") {
+    if auth.is_system_admin {
         return Ok(requested);
     }
 
@@ -604,7 +670,7 @@ fn authorize_workspace_scope_for_id(
     auth: &AuthContext,
     workspace_id: Uuid,
 ) -> Result<(), ApiError> {
-    if auth.is_system_admin || auth.has_scope("iam_admin") {
+    if auth.is_system_admin {
         return Ok(());
     }
     if auth.has_workspace_permission(workspace_id, POLICY_IAM_ADMIN) {
@@ -619,7 +685,7 @@ fn authorize_workspace_scope_for_row(
 ) -> Result<(), ApiError> {
     match workspace_id {
         Some(workspace_id) => authorize_workspace_scope_for_id(auth, workspace_id),
-        None if auth.is_system_admin || auth.has_scope("iam_admin") => Ok(()),
+        None if auth.is_system_admin => Ok(()),
         None => Err(ApiError::Unauthorized),
     }
 }
@@ -694,6 +760,76 @@ fn validate_permission_kind_for_resource(
             resource_kind.as_str()
         )))
     }
+}
+
+enum MintGrantScope {
+    Workspace(Uuid),
+    Libraries(Vec<Uuid>),
+}
+
+fn build_mint_grants(
+    scope: MintGrantScope,
+    permission_kinds: &[IamPermissionKind],
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<crate::services::iam::service::MintApiTokenGrantCommand>, ApiError> {
+    match scope {
+        MintGrantScope::Workspace(workspace_id) => permission_kinds
+            .iter()
+            .cloned()
+            .map(|permission_kind| {
+                validate_permission_kind_for_resource(
+                    IamGrantResourceKind::Workspace,
+                    permission_kind.clone(),
+                )?;
+                Ok(crate::services::iam::service::MintApiTokenGrantCommand {
+                    resource_kind: GrantResourceKind::Workspace,
+                    resource_id: workspace_id,
+                    permission_kind: permission_kind.as_str().to_string(),
+                    expires_at: expires_at.clone(),
+                })
+            })
+            .collect(),
+        MintGrantScope::Libraries(library_ids) => {
+            let mut grants = Vec::with_capacity(library_ids.len() * permission_kinds.len());
+            for library_id in library_ids {
+                for permission_kind in permission_kinds {
+                    validate_permission_kind_for_resource(
+                        IamGrantResourceKind::Library,
+                        permission_kind.clone(),
+                    )?;
+                    grants.push(crate::services::iam::service::MintApiTokenGrantCommand {
+                        resource_kind: GrantResourceKind::Library,
+                        resource_id: library_id,
+                        permission_kind: permission_kind.as_str().to_string(),
+                        expires_at: expires_at.clone(),
+                    });
+                }
+            }
+            Ok(grants)
+        }
+    }
+}
+
+fn dedupe_uuids(values: Vec<Uuid>) -> Vec<Uuid> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::with_capacity(values.len());
+    for value in values {
+        if seen.insert(value) {
+            deduped.push(value);
+        }
+    }
+    deduped
+}
+
+fn dedupe_permissions(values: Vec<IamPermissionKind>) -> Vec<IamPermissionKind> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::with_capacity(values.len());
+    for value in values {
+        if seen.insert(value.as_str()) {
+            deduped.push(value);
+        }
+    }
+    deduped
 }
 
 pub(crate) async fn load_contract_me(
@@ -999,6 +1135,33 @@ fn map_route_grant_resource_kind(value: IamGrantResourceKind) -> GrantResourceKi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        domains::iam::PrincipalKind,
+        interfaces::http::auth::{AuthContext, AuthGrant, AuthTokenKind},
+    };
+
+    fn workspace_iam_admin_auth(workspace_id: Uuid) -> AuthContext {
+        AuthContext {
+            token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            workspace_id: Some(workspace_id),
+            token_kind: AuthTokenKind::Principal(PrincipalKind::ApiToken),
+            scopes: vec!["iam_admin".to_string()],
+            grants: vec![AuthGrant {
+                id: Uuid::now_v7(),
+                resource_kind: "workspace".to_string(),
+                resource_id: workspace_id,
+                permission_kind: "iam_admin".to_string(),
+                workspace_id: Some(workspace_id),
+                library_id: None,
+                document_id: None,
+            }],
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: [workspace_id].into_iter().collect(),
+            is_system_admin: false,
+        }
+    }
 
     #[test]
     fn permission_kind_matches_expected_resource_kinds() {
@@ -1029,5 +1192,77 @@ mod tests {
     fn grant_resource_and_permission_strings_are_canonical() {
         assert_eq!(IamGrantResourceKind::ProviderCredential.as_str(), "provider_credential");
         assert_eq!(IamPermissionKind::IamAdmin.as_str(), "iam_admin");
+    }
+
+    #[test]
+    fn build_mint_grants_supports_workspace_scope() {
+        let workspace_id = Uuid::now_v7();
+        let grants = build_mint_grants(
+            MintGrantScope::Workspace(workspace_id),
+            &[IamPermissionKind::WorkspaceRead, IamPermissionKind::LibraryRead],
+            None,
+        )
+        .expect("workspace grants should build");
+
+        assert_eq!(grants.len(), 2);
+        assert!(grants.iter().all(|grant| grant.resource_kind == GrantResourceKind::Workspace));
+        assert!(grants.iter().all(|grant| grant.resource_id == workspace_id));
+    }
+
+    #[test]
+    fn build_mint_grants_supports_multiple_libraries() {
+        let library_a = Uuid::now_v7();
+        let library_b = Uuid::now_v7();
+        let grants = build_mint_grants(
+            MintGrantScope::Libraries(vec![library_a, library_b]),
+            &[IamPermissionKind::LibraryRead, IamPermissionKind::DocumentRead],
+            None,
+        )
+        .expect("library grants should build");
+
+        assert_eq!(grants.len(), 4);
+        assert!(grants.iter().all(|grant| grant.resource_kind == GrantResourceKind::Library));
+        assert!(grants.iter().any(|grant| grant.resource_id == library_a));
+        assert!(grants.iter().any(|grant| grant.resource_id == library_b));
+    }
+
+    #[test]
+    fn workspace_scoped_iam_admin_cannot_filter_foreign_workspace() {
+        let workspace_id = Uuid::now_v7();
+        let auth = workspace_iam_admin_auth(workspace_id);
+
+        assert_eq!(
+            resolve_workspace_filter(&auth, Some(workspace_id)).expect("same workspace allowed"),
+            Some(workspace_id)
+        );
+        assert!(matches!(
+            resolve_workspace_filter(&auth, Some(Uuid::now_v7())),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn workspace_scoped_iam_admin_cannot_mint_for_foreign_workspace() {
+        let workspace_id = Uuid::now_v7();
+        let auth = workspace_iam_admin_auth(workspace_id);
+
+        assert_eq!(
+            resolve_mint_workspace(&auth, Some(workspace_id)).expect("same workspace allowed"),
+            Some(workspace_id)
+        );
+        assert!(matches!(
+            resolve_mint_workspace(&auth, Some(Uuid::now_v7())),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn workspace_scoped_iam_admin_cannot_manage_global_token_rows() {
+        let auth = workspace_iam_admin_auth(Uuid::now_v7());
+
+        assert!(matches!(
+            authorize_workspace_scope_for_row(&auth, None),
+            Err(ApiError::Unauthorized)
+        ));
     }
 }

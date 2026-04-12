@@ -5,6 +5,7 @@ pub mod types;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use percent_encoding::percent_decode_str;
 use uuid::Uuid;
 
 use crate::{
@@ -297,6 +298,8 @@ fn build_revision_storage_key(
     format!("content/{workspace_id}/{library_id}/{digest}-{safe_file_name}")
 }
 
+const MAX_STORAGE_FILE_NAME_LEN: usize = 140;
+
 /// Prevents path traversal attacks by stripping directory separators, `.` prefixes,
 /// and null bytes from user-supplied file names. This is a security-critical function —
 /// do not remove or weaken the sanitization logic.
@@ -314,7 +317,8 @@ fn sanitize_file_name(file_name: &str) -> String {
         sanitized = sanitized.replace("--", "-");
     }
     let sanitized = sanitized.trim_matches('-').trim_matches('.').to_string();
-    if sanitized.is_empty() { "document.bin".to_string() } else { sanitized }
+    let sanitized = if sanitized.is_empty() { "document.bin".to_string() } else { sanitized };
+    truncate_file_name(&sanitized, MAX_STORAGE_FILE_NAME_LEN)
 }
 
 fn build_web_snapshot_file_name(source_uri: &str) -> String {
@@ -324,8 +328,33 @@ fn build_web_snapshot_file_name(source_uri: &str) -> String {
         .and_then(|url| url.path_segments())
         .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
         .filter(|segment| !segment.trim().is_empty())
-        .unwrap_or("index.html");
-    sanitize_file_name(file_name)
+        .map(|segment| percent_decode_str(segment).decode_utf8_lossy().into_owned())
+        .unwrap_or_else(|| "index.html".to_string());
+    sanitize_file_name(&file_name)
+}
+
+fn truncate_file_name(file_name: &str, max_len: usize) -> String {
+    if file_name.len() <= max_len {
+        return file_name.to_string();
+    }
+
+    let (stem, extension) = match file_name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+            (stem, Some(extension))
+        }
+        _ => (file_name, None),
+    };
+
+    let reserved = extension.map_or(0, |value| value.len() + 1);
+    let max_stem_len = max_len.saturating_sub(reserved).max(1);
+    let truncated_stem = stem.chars().take(max_stem_len).collect::<String>();
+
+    match extension {
+        Some(extension) if !truncated_stem.is_empty() => {
+            format!("{truncated_stem}.{extension}")
+        }
+        _ => truncated_stem,
+    }
 }
 
 fn required_s3_setting(name: &str, value: Option<&str>) -> anyhow::Result<String> {
@@ -343,7 +372,10 @@ mod tests {
 
     use crate::domains::deployment::DeploymentTopology;
 
-    use super::{ContentStorageService, types::ContentStorageDiagnostics};
+    use super::{
+        ContentStorageService, MAX_STORAGE_FILE_NAME_LEN, build_web_snapshot_file_name,
+        truncate_file_name, types::ContentStorageDiagnostics,
+    };
 
     fn filesystem_storage(tempdir: &tempfile::TempDir) -> ContentStorageService {
         ContentStorageService {
@@ -424,5 +456,45 @@ mod tests {
         storage.purge_stashed_directory(&stashed_again).await.expect("purge stashed directory");
 
         assert!(!storage.has_revision_source(&storage_key).await.expect("source inspection"));
+    }
+
+    #[tokio::test]
+    async fn persist_web_snapshot_decodes_and_bounds_long_attachment_file_name() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        let source_uri = "https://docs.artix.su/download/attachments/40468542/2023_09_01_%D0%BC%D0%B5%D1%82%D0%BE%D0%B4%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5_%D1%80%D0%B5%D0%BA%D0%BE%D0%BC%D0%B5%D0%BD%D0%B4%D0%B0%D1%86%D0%B8%D0%B8_%D0%B201_3_rev_%D0%B8_%D0%BE%D1%84%D0%BB%D0%B0%D0%B8%CC%86%D0%BD_2.pdf?version=1&modificationDate=1712205956919&api=v2";
+        let bytes = b"pdf bytes";
+
+        let storage_key = storage
+            .persist_web_snapshot(workspace_id, library_id, source_uri, "sha256:feedbeef", bytes)
+            .await
+            .expect("persist web snapshot");
+
+        let leaf = storage_key.rsplit('/').next().expect("storage leaf");
+        assert!(leaf.len() <= 64 + 1 + MAX_STORAGE_FILE_NAME_LEN);
+        assert!(leaf.ends_with("2023_09_01_-_-_-01_3_rev_-_-_2.pdf"));
+
+        let loaded = storage.read_revision_source(&storage_key).await.expect("read source");
+        assert_eq!(loaded, bytes);
+    }
+
+    #[test]
+    fn truncate_file_name_preserves_extension_within_limit() {
+        let file_name = format!("{}.pdf", "a".repeat(400));
+        let truncated = truncate_file_name(&file_name, MAX_STORAGE_FILE_NAME_LEN);
+
+        assert!(truncated.len() <= MAX_STORAGE_FILE_NAME_LEN);
+        assert!(truncated.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn build_web_snapshot_file_name_decodes_percent_encoded_segments() {
+        let file_name = build_web_snapshot_file_name(
+            "https://docs.artix.su/download/attachments/40468542/2023_09_01_%D0%BC%D0%B5%D1%82%D0%BE%D0%B4%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5_%D1%80%D0%B5%D0%BA%D0%BE%D0%BC%D0%B5%D0%BD%D0%B4%D0%B0%D1%86%D0%B8%D0%B8_%D0%B201_3_rev_%D0%B8_%D0%BE%D1%84%D0%BB%D0%B0%D0%B8%CC%86%D0%BD_2.pdf?version=1&modificationDate=1712205956919&api=v2",
+        );
+
+        assert_eq!(file_name, "2023_09_01_-_-_-01_3_rev_-_-_2.pdf");
     }
 }

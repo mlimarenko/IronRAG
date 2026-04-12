@@ -8,10 +8,12 @@ server {
     server_name _;
     root /usr/share/nginx/html;
     index index.html;
+    resolver 127.0.0.11 ipv6=off valid=10s;
 
     client_max_body_size 100M;
 
     location /v1/ {
+        set $ironrag_api_upstream "${IRONRAG_API_UPSTREAM}";
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -21,7 +23,7 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 300s;
-        proxy_pass ${IRONRAG_API_UPSTREAM};
+        proxy_pass $ironrag_api_upstream;
     }
 
     location /assets/ {

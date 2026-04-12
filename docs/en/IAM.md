@@ -26,7 +26,6 @@
 | `query_run` | Execute `ask` queries against libraries. | Q&A agent |
 | `ops_read` | View runtime execution status and traces. | Monitoring |
 | `audit_read` | View audit log entries. | Compliance |
-| `connector_admin` | Manage AI provider connectors. | Integration setup |
 | `credential_admin` | Manage provider credentials (API keys). | Secret management |
 | `binding_admin` | Manage model bindings per library. | Model configuration |
 

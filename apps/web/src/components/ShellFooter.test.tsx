@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ShellFooter } from "@/components/ShellFooter";
 import { versionApi } from "@/api/version";
+import { BUILD_VERSION_LABEL } from "@/lib/build-version";
 
 vi.mock("@/api/version", () => ({
   versionApi: {
@@ -72,7 +73,7 @@ describe("ShellFooter", () => {
 
     await renderFooter();
 
-    expect(container.textContent).toContain("IronRAG v0.1.2");
+    expect(container.textContent).toContain(BUILD_VERSION_LABEL);
     const updateLink = Array.from(container.querySelectorAll("a")).find(node =>
       node.textContent?.includes("Update available: v0.1.3"),
     );

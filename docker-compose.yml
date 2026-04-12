@@ -90,7 +90,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "arangosh --server.endpoint tcp://127.0.0.1:8529 --server.username root --server.password \"$$ARANGO_ROOT_PASSWORD\" --javascript.execute-string \"db._version()\" >/dev/null 2>&1 || exit 1",
+          "wget -q --spider http://127.0.0.1:8529/_db/_system/_admin/aardvark/index.html || exit 1",
         ]
       interval: 5s
       timeout: 5s

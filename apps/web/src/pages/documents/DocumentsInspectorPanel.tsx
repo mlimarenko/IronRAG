@@ -15,7 +15,7 @@ import {
 import { Button } from '@/components/ui/button';
 import type { DocumentItem, DocumentLifecycle, DocumentReadiness } from '@/types';
 
-import { formatDate, formatSize } from './mappers';
+import { formatDate, formatDocumentTypeLabel, formatSize } from './mappers';
 
 type DocumentsInspectorPanelProps = {
   canEdit: boolean;
@@ -62,6 +62,8 @@ export function DocumentsInspectorPanel({
   onEdit,
   onRetry,
 }: DocumentsInspectorPanelProps) {
+  const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t);
+
   const openSource = () => {
     const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri;
     if (!href) {
@@ -134,7 +136,7 @@ export function DocumentsInspectorPanel({
             {selectedDoc.sourceKind === 'web_page' ? t('documents.webSource') : t('documents.fileInfo')}
           </div>
           {[
-            [t('documents.type'), selectedDoc.fileType.toUpperCase()],
+            [t('documents.type'), typeLabel],
             [t('documents.size'), formatSize(selectedDoc.fileSize)],
             [t('documents.uploaded'), formatDate(selectedDoc.uploadedAt, locale)],
             [t('documents.documentId'), selectedDoc.id],
@@ -216,7 +218,7 @@ export function DocumentsInspectorPanel({
                 <div className="flex justify-between">
                   <span>{t('documents.sourceFormat')}</span>
                   <span className="font-semibold text-foreground">
-                    {selectedDoc.fileType.toUpperCase()}
+                    {typeLabel}
                   </span>
                 </div>
               </div>

@@ -187,6 +187,10 @@ make benchmark-golden          # golden dataset
 - [x] Admin CLI (`ironrag-cli`) с гранулярными правами токенов
 - [x] Ollama и локальные модели, проверено на живом Ollama с моделью `qwen3:4b`; отдельно проверен сценарий недоступной модели `qwen3:0.6b`.
 
+## Дальше
+
+- [ ] Управляемые коннекторы для project-workspace: GitHub-репозитории, S3-бакеты и долговечные web-source с явным lifecycle синхронизации и scoped grants.
+
 ## Contributing
 
 PRs приветствуются. Один канонический путь вместо compatibility-слоёв.

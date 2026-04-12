@@ -42,7 +42,7 @@ enum Commands {
         /// Permissions to grant (can specify multiple). Default: iam_admin.
         /// Available: iam_admin, workspace_admin, workspace_read, library_read,
         /// library_write, document_read, document_write, query_run, ops_read,
-        /// audit_read, connector_admin, credential_admin, binding_admin
+        /// audit_read, credential_admin, binding_admin
         #[arg(short = 'p', long)]
         permission: Vec<String>,
     },
@@ -68,7 +68,7 @@ enum Commands {
         /// Permissions to grant (can specify multiple). Default: iam_admin.
         /// Available: iam_admin, workspace_admin, workspace_read, library_read,
         /// library_write, document_read, document_write, query_run, ops_read,
-        /// audit_read, connector_admin, credential_admin, binding_admin
+        /// audit_read, credential_admin, binding_admin
         #[arg(short, long)]
         permission: Vec<String>,
         /// Resource scope for permission grants: 'system', 'workspace:<slug>', 'library:<slug>'
@@ -241,7 +241,6 @@ const VALID_PERMISSIONS: &[&str] = &[
     "query_run",
     "ops_read",
     "audit_read",
-    "connector_admin",
     "credential_admin",
     "binding_admin",
 ];
@@ -259,11 +258,7 @@ async fn resolve_permission_scope(
     }
     match perm {
         "iam_admin" | "ops_read" | "audit_read" => Ok(("system", Uuid::nil())),
-        p if p.starts_with("workspace_")
-            || p == "connector_admin"
-            || p == "credential_admin"
-            || p == "binding_admin" =>
-        {
+        p if p.starts_with("workspace_") || p == "credential_admin" || p == "binding_admin" => {
             match workspace {
                 Some(ws) => {
                     let id = resolve_workspace_id(pool, ws).await?;
