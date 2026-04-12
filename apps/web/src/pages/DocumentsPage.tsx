@@ -22,6 +22,7 @@ import type {
 import {
   PAGE_SIZE_OPTIONS,
   formatDate,
+  formatDocumentTypeLabel,
   formatSize,
   mapApiDocument,
   parsePage,
@@ -806,6 +807,7 @@ export default function DocumentsPage() {
                     {pagedDocuments.map(doc => {
                       const rc = readinessConfig[doc.readiness];
                       const canEditDocument = editAvailability(doc);
+                      const typeLabel = formatDocumentTypeLabel(doc.fileType, doc.sourceKind, t);
                       return (
                         <tr
                           key={doc.id}
@@ -839,7 +841,13 @@ export default function DocumentsPage() {
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-3.5 text-muted-foreground uppercase text-[10px] font-bold tracking-widest">{doc.fileType}</td>
+                          <td
+                            className={`px-4 py-3.5 text-muted-foreground text-[10px] font-bold tracking-widest ${
+                              doc.sourceKind === 'web_page' ? '' : 'uppercase'
+                            }`}
+                          >
+                            {typeLabel}
+                          </td>
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{formatSize(doc.fileSize)}</td>
                           <td className="px-4 py-3.5 text-muted-foreground text-xs">{formatDate(doc.uploadedAt, locale)}</td>
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{doc.cost != null ? `$${doc.cost.toFixed(3)}` : '—'}</td>

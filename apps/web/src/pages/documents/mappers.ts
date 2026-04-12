@@ -158,6 +158,18 @@ export function mapApiDocument(raw: RawDocumentForUI, t: TFunction): DocumentIte
   };
 }
 
+export function formatDocumentTypeLabel(
+  fileType: string,
+  sourceKind: DocumentItem['sourceKind'],
+  t: TFunction,
+): string {
+  if (sourceKind === 'web_page') {
+    return t('documents.webPageType');
+  }
+
+  return fileType.toUpperCase();
+}
+
 export function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;

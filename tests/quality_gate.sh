@@ -648,7 +648,7 @@ namespace IronRAG.Services
         /// Create an API token with specific permissions.
         /// Supports 13 permission kinds: iam_admin, workspace_admin, workspace_read,
         /// library_read, library_write, document_read, document_write, query_run,
-        /// ops_read, audit_read, connector_admin, credential_admin, binding_admin.
+        /// ops_read, audit_read, credential_admin, binding_admin.
         /// </summary>
         public async Task<ApiToken> CreateApiTokenAsync(
             Guid principalId,

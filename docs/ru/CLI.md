@@ -80,7 +80,7 @@ ironrag-cli create-token <LOGIN> [--label "my-token"] [--workspace "my-workspace
 - `document_read`, `document_write` -- доступ на уровне документа
 - `query_run` -- выполнение запросов (ask)
 - `ops_read`, `audit_read` -- операционные и аудит данные
-- `connector_admin`, `credential_admin`, `binding_admin` -- управление интеграциями
+- `credential_admin`, `binding_admin` -- управление интеграциями
 
 Разрешение скоупа (когда `--scope` не указан):
 - Системные права (`iam_admin`, `ops_read`, `audit_read`) → скоуп `system`

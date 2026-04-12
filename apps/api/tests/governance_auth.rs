@@ -1093,6 +1093,51 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
 
 #[tokio::test]
 #[ignore = "requires local postgres, redis, and arango services"]
+async fn workspace_scoped_iam_admin_cannot_mint_foreign_workspace_token() -> Result<()> {
+    let fixture = GovernanceAuthFixture::create().await?;
+
+    let result = async {
+        let token = fixture
+            .mint_workspace_token(fixture.workspace_id, "workspace-iam-admin", &["iam_admin"])
+            .await?;
+
+        let label = format!("foreign-workspace-token-{}", Uuid::now_v7());
+        let before_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+
+        let (status, _) = fixture
+            .rest_post(
+                &token,
+                "/v1/iam/tokens",
+                json!({
+                    "workspaceId": fixture.foreign_workspace_id,
+                    "label": label,
+                    "permissionKinds": ["workspace_read"]
+                }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let after_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+        assert_eq!(before_count, after_count);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn mcp_tools_list_hides_unauthorized_mutation_and_admin_tools() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 

@@ -101,6 +101,10 @@ pub struct MintTokenRequest {
     pub workspace_id: Option<Uuid>,
     pub label: String,
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub library_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub permission_kinds: Vec<IamPermissionKind>,
 }
 
 #[derive(Debug, Deserialize)]

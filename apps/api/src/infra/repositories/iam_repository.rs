@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -145,6 +145,39 @@ pub async fn create_principal(
     .bind(display_label)
     .bind(parent_principal_id)
     .fetch_one(postgres)
+    .await
+}
+
+pub async fn create_principal_with_transaction(
+    transaction: &mut PgConnection,
+    principal_kind: &str,
+    display_label: &str,
+    parent_principal_id: Option<Uuid>,
+) -> Result<IamPrincipalRow, sqlx::Error> {
+    sqlx::query_as::<_, IamPrincipalRow>(
+        "insert into iam_principal (
+            id,
+            principal_kind,
+            display_label,
+            status,
+            parent_principal_id,
+            created_at,
+            disabled_at
+        )
+        values ($1, $2::iam_principal_kind, $3, 'active', $4, now(), null)
+        returning
+            id,
+            principal_kind::text as principal_kind,
+            status::text as status,
+            display_label,
+            created_at,
+            disabled_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind(principal_kind)
+    .bind(display_label)
+    .bind(parent_principal_id)
+    .fetch_one(&mut *transaction)
     .await
 }
 
@@ -421,6 +454,51 @@ pub async fn create_api_token(
     .await
 }
 
+pub async fn create_api_token_with_transaction(
+    transaction: &mut PgConnection,
+    workspace_id: Option<Uuid>,
+    label: &str,
+    token_prefix: &str,
+    issued_by_principal_id: Option<Uuid>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<IamApiTokenRow, sqlx::Error> {
+    let principal =
+        create_principal_with_transaction(transaction, "api_token", label, issued_by_principal_id)
+            .await?;
+    sqlx::query_as::<_, IamApiTokenRow>(
+        "insert into iam_api_token (
+            principal_id,
+            workspace_id,
+            label,
+            token_prefix,
+            status,
+            expires_at,
+            revoked_at,
+            issued_by_principal_id,
+            last_used_at
+        )
+        values ($1, $2, $3, $4, 'active', $5, null, $6, null)
+        returning
+            principal_id,
+            workspace_id,
+            label,
+            token_prefix,
+            status::text as status,
+            expires_at,
+            revoked_at,
+            issued_by_principal_id,
+            last_used_at",
+    )
+    .bind(principal.id)
+    .bind(workspace_id)
+    .bind(label)
+    .bind(token_prefix)
+    .bind(expires_at)
+    .bind(issued_by_principal_id)
+    .fetch_one(&mut *transaction)
+    .await
+}
+
 pub async fn get_api_token_by_principal_id(
     postgres: &PgPool,
     principal_id: Uuid,
@@ -553,6 +631,38 @@ pub async fn create_api_token_secret(
     .bind(next_version)
     .bind(secret_hash)
     .fetch_one(postgres)
+    .await
+}
+
+pub async fn create_api_token_secret_with_transaction(
+    transaction: &mut PgConnection,
+    token_principal_id: Uuid,
+    secret_hash: &str,
+) -> Result<IamApiTokenSecretRow, sqlx::Error> {
+    let next_version = sqlx::query_scalar::<_, i32>(
+        "select coalesce(max(secret_version), 0) + 1
+         from iam_api_token_secret
+         where token_principal_id = $1",
+    )
+    .bind(token_principal_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    sqlx::query_as::<_, IamApiTokenSecretRow>(
+        "insert into iam_api_token_secret (
+            token_principal_id,
+            secret_version,
+            secret_hash,
+            issued_at,
+            revoked_at
+        )
+        values ($1, $2, $3, now(), null)
+        returning token_principal_id, secret_version, secret_hash, issued_at, revoked_at",
+    )
+    .bind(token_principal_id)
+    .bind(next_version)
+    .bind(secret_hash)
+    .fetch_one(&mut *transaction)
     .await
 }
 
@@ -735,6 +845,48 @@ pub async fn create_grant(
     .bind(granted_by_principal_id)
     .bind(expires_at)
     .fetch_one(postgres)
+    .await
+}
+
+pub async fn create_grant_with_transaction(
+    transaction: &mut PgConnection,
+    principal_id: Uuid,
+    resource_kind: &str,
+    resource_id: Uuid,
+    permission_kind: &str,
+    granted_by_principal_id: Option<Uuid>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<IamGrantRow, sqlx::Error> {
+    sqlx::query_as::<_, IamGrantRow>(
+        "insert into iam_grant (
+            id,
+            principal_id,
+            resource_kind,
+            resource_id,
+            permission_kind,
+            granted_by_principal_id,
+            granted_at,
+            expires_at
+        )
+        values ($1, $2, $3::iam_grant_resource_kind, $4, $5::iam_permission_kind, $6, now(), $7)
+        returning
+            id,
+            principal_id,
+            resource_kind::text as resource_kind,
+            resource_id,
+            permission_kind::text as permission_kind,
+            granted_at,
+            granted_by_principal_id,
+            expires_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind(principal_id)
+    .bind(resource_kind)
+    .bind(resource_id)
+    .bind(permission_kind)
+    .bind(granted_by_principal_id)
+    .bind(expires_at)
+    .fetch_one(&mut *transaction)
     .await
 }
 

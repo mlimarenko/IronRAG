@@ -53,6 +53,7 @@ pub struct MintApiTokenCommand {
     pub workspace_id: Option<Uuid>,
     pub label: String,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub grants: Vec<MintApiTokenGrantCommand>,
     pub issued_by_principal_id: Option<Uuid>,
 }
 
@@ -99,6 +100,14 @@ pub struct RuntimeExecutionAccessScope {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub document_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MintApiTokenGrantCommand {
+    pub resource_kind: GrantResourceKind,
+    pub resource_id: Uuid,
+    pub permission_kind: String,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -347,10 +356,23 @@ impl IamService {
         if label.is_empty() {
             return Err(ApiError::BadRequest("label must not be empty".into()));
         }
+        for permission_kind in command.grants.iter().map(|grant| &grant.permission_kind) {
+            if permission_kind.is_empty() {
+                return Err(ApiError::BadRequest("permission kind must not be empty".into()));
+            }
+        }
 
         let plaintext = mint_plaintext_api_token();
-        let token_row = iam_repository::create_api_token(
-            &state.persistence.postgres,
+        let mut transaction = state
+            .persistence
+            .postgres
+            .begin()
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        let transaction_connection = transaction.as_mut();
+
+        let token_row = iam_repository::create_api_token_with_transaction(
+            transaction_connection,
             command.workspace_id,
             label,
             &preview_api_token(&plaintext),
@@ -358,14 +380,54 @@ impl IamService {
             command.expires_at,
         )
         .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        iam_repository::create_api_token_secret(
-            &state.persistence.postgres,
+        .map_err(|e| {
+            warn!(token_label = %label, workspace_id = ?command.workspace_id, ?e, "failed to create api token");
+            ApiError::internal_with_log(e, "internal")
+        })?;
+
+        iam_repository::create_api_token_secret_with_transaction(
+            transaction_connection,
             token_row.principal_id,
             &hash_api_token(&plaintext),
         )
         .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        .map_err(|e| {
+            warn!(
+                token_principal_id = %token_row.principal_id,
+                ?e,
+                "failed to persist api token secret"
+            );
+            ApiError::internal_with_log(e, "internal")
+        })?;
+
+        for grant in &command.grants {
+            iam_repository::create_grant_with_transaction(
+                transaction_connection,
+                token_row.principal_id,
+                grant_resource_kind_as_str(&grant.resource_kind),
+                grant.resource_id,
+                &grant.permission_kind,
+                command.issued_by_principal_id,
+                grant.expires_at.clone(),
+            )
+            .await
+            .map_err(|e| {
+                warn!(
+                    token_principal_id = %token_row.principal_id,
+                    resource_kind = %grant_resource_kind_as_str(&grant.resource_kind),
+                    resource_id = %grant.resource_id,
+                    permission_kind = %grant.permission_kind,
+                    ?e,
+                    "failed to create token grant",
+                );
+                ApiError::internal_with_log(e, "internal")
+            })?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
         Ok(MintApiTokenOutcome { token: plaintext, api_token: map_api_token(token_row) })
     }

@@ -346,4 +346,39 @@ describe('DocumentsPage', () => {
     expect(documentsApiMock.getSourceText).toHaveBeenCalledTimes(1);
     expect(documentsApiMock.getSourceText).toHaveBeenCalledWith('/v1/content/documents/doc-code/source');
   });
+
+  it('shows web page as the document type for web-ingested documents', async () => {
+    documentsApiMock.list.mockResolvedValue([
+      {
+        fileName: 'https://ru.wikipedia.org/wiki/Test',
+        document: {
+          id: 'doc-web',
+          external_key: 'https://ru.wikipedia.org/wiki/Test',
+          created_at: '2026-04-10T12:00:00Z',
+        },
+        activeRevision: {
+          title: 'index.php',
+          mime_type: 'text/html',
+          byte_size: 2048,
+          content_source_kind: 'web_page',
+          source_uri: 'https://ru.wikipedia.org/wiki/Test',
+        },
+        readinessSummary: {
+          readinessKind: 'graph_ready',
+          activityStatus: 'completed',
+        },
+        pipeline: {
+          latest_job: {
+            queue_state: 'completed',
+            current_stage: 'extracting_graph',
+            retryable: false,
+          },
+        },
+      },
+    ]);
+
+    await renderPage();
+
+    expect(container.textContent).toContain('Web page');
+  });
 });

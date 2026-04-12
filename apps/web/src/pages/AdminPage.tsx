@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useApp } from '@/contexts/AppContext';
 import { adminApi, dashboardApi } from '@/api';
+import type { CatalogLibraryResponse, CatalogWorkspaceResponse } from '@/api/admin';
 import { AVAILABLE_LOCALES } from '@/types';
 import type { Locale } from '@/types';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -18,6 +19,7 @@ import {
 } from '@/components/ui/dialog';
 import AiConfigurationPanel from '@/components/admin/AiConfigurationPanel';
 import { mapProvider } from '@/lib/ai-mappers';
+import { buildMintTokenRequest } from '@/pages/admin/tokenMint';
 import type {
   RawModelCatalogEntry,
   RawTokenResponse,
@@ -72,6 +74,7 @@ function errorMessage(err: unknown, fallback: string): string {
 // ── Response mappers ──
 
 function mapToken(raw: RawTokenResponse): APIToken {
+  const scopeSummary = raw.workspaceId ? `workspace:${raw.workspaceId}` : 'system';
   return {
     id: raw.principalId ?? raw.id ?? '',
     label: raw.label ?? '',
@@ -82,7 +85,7 @@ function mapToken(raw: RawTokenResponse): APIToken {
     issuedBy: raw.issuedByPrincipalId ?? 'system',
     lastUsedAt: raw.lastUsedAt ?? undefined,
     grants: [],
-    scopeSummary: raw.status ?? '',
+    scopeSummary,
     principalLabel: raw.label ?? '',
   };
 }
@@ -365,8 +368,8 @@ function humanizeAuditResult(resultKind: AuditEvent['resultKind'], t: TFunction)
 
 // ── Static data ──
 
-const WS_PERMISSIONS = ['workspace_admin', 'workspace_read', 'library_read', 'library_write', 'document_read', 'document_write', 'connector_admin', 'credential_admin', 'binding_admin', 'query_run', 'ops_read', 'audit_read', 'iam_admin'];
-const LIB_PERMISSIONS = ['library_read', 'library_write', 'document_read', 'document_write', 'connector_admin', 'binding_admin', 'query_run'];
+const WS_PERMISSIONS = ['workspace_admin', 'workspace_read', 'library_read', 'library_write', 'document_read', 'document_write', 'credential_admin', 'binding_admin', 'query_run', 'ops_read', 'audit_read', 'iam_admin'];
+const LIB_PERMISSIONS = ['library_read', 'library_write', 'document_read', 'document_write', 'binding_admin', 'query_run'];
 
 function getMcpConfigs(origin: string) {
   const mcpUrl = `${origin}/v1/mcp`;
@@ -406,6 +409,14 @@ export default function AdminPage() {
   const [tokenLabel, setTokenLabel] = useState('');
   const [tokenExpiry, setTokenExpiry] = useState('90');
   const [tokenScope, setTokenScope] = useState<'workspace' | 'library'>('workspace');
+  const [tokenWorkspaceId, setTokenWorkspaceId] = useState('');
+  const [tokenWorkspaces, setTokenWorkspaces] = useState<CatalogWorkspaceResponse[]>([]);
+  const [tokenWorkspacesLoading, setTokenWorkspacesLoading] = useState(false);
+  const [tokenWorkspacesError, setTokenWorkspacesError] = useState<string | null>(null);
+  const [tokenLibraries, setTokenLibraries] = useState<CatalogLibraryResponse[]>([]);
+  const [tokenLibrariesLoading, setTokenLibrariesLoading] = useState(false);
+  const [tokenLibrariesError, setTokenLibrariesError] = useState<string | null>(null);
+  const [selectedLibraryIds, setSelectedLibraryIds] = useState<string[]>([]);
   const [selectedPermissions, setSelectedPermissions] = useState<string[]>([]);
   const [mintingToken, setMintingToken] = useState(false);
 
@@ -585,15 +596,89 @@ export default function AdminPage() {
     setAuditPage(1);
   }, [activeLibrary?.id, activeWorkspace?.id]);
 
+  useEffect(() => {
+    setSelectedLibraryIds((previous) => previous.filter((libraryId) => tokenLibraries.some((library) => library.id === libraryId)));
+  }, [tokenLibraries]);
+
+  useEffect(() => {
+    if (!createTokenOpen) {
+      return;
+    }
+    setTokenWorkspacesLoading(true);
+    setTokenWorkspacesError(null);
+    adminApi.listWorkspaces()
+      .then((workspaceRows) => {
+        const nextWorkspaces = Array.isArray(workspaceRows) ? workspaceRows : [];
+        setTokenWorkspaces(nextWorkspaces);
+        setTokenWorkspaceId((current) => {
+          if (current && nextWorkspaces.some((workspace) => workspace.id === current)) {
+            return current;
+          }
+          if (activeWorkspace && nextWorkspaces.some((workspace) => workspace.id === activeWorkspace.id)) {
+            return activeWorkspace.id;
+          }
+          return nextWorkspaces[0]?.id ?? '';
+        });
+      })
+      .catch((err: unknown) => {
+        setTokenWorkspaces([]);
+        setTokenWorkspaceId('');
+        const message = errorMessage(err, t('admin.loadWorkspacesFailed'));
+        setTokenWorkspacesError(message);
+        toast.error(message);
+      })
+      .finally(() => setTokenWorkspacesLoading(false));
+  }, [activeWorkspace, createTokenOpen, t]);
+
+  useEffect(() => {
+    if (!createTokenOpen || !tokenWorkspaceId) {
+      setTokenLibraries([]);
+      setTokenLibrariesError(null);
+      return;
+    }
+    setTokenLibrariesLoading(true);
+    setTokenLibrariesError(null);
+    adminApi.listLibraries(tokenWorkspaceId)
+      .then((libraryRows) => {
+        const nextLibraries = Array.isArray(libraryRows) ? libraryRows : [];
+        setTokenLibraries(nextLibraries);
+        setSelectedLibraryIds((current) => current.filter((libraryId) => nextLibraries.some((library) => library.id === libraryId)));
+      })
+      .catch((err: unknown) => {
+        setTokenLibraries([]);
+        const message = errorMessage(err, t('admin.loadLibrariesFailed'));
+        setTokenLibrariesError(message);
+        toast.error(message);
+      })
+      .finally(() => setTokenLibrariesLoading(false));
+  }, [createTokenOpen, tokenWorkspaceId, t]);
+
   // ── Actions ──
 
   const handleCreateToken = () => {
+    if (!tokenWorkspaceId) {
+      toast.error(t('admin.tokenRequiresWorkspace'));
+      return;
+    }
     setMintingToken(true);
-    adminApi.mintToken(tokenLabel)
+    adminApi.mintToken(buildMintTokenRequest({
+      label: tokenLabel.trim(),
+      expiryDays: tokenExpiry,
+      scope: tokenScope,
+      workspaceId: tokenWorkspaceId,
+      libraryIds: selectedLibraryIds,
+      permissionKinds: selectedPermissions,
+    }))
       .then((data) => {
         setCreatedToken(data.token ?? '');
         setCreateTokenOpen(false);
         setShowToken(true);
+        setTokenLabel('');
+        setTokenExpiry('90');
+        setTokenScope('workspace');
+        setSelectedPermissions([]);
+        setSelectedLibraryIds([]);
+        setTokenWorkspaceId(activeWorkspace?.id ?? '');
         loadTokens();
       })
       .catch((err: unknown) => toast.error(errorMessage(err, t('admin.createTokenFailed'))))
@@ -643,6 +728,18 @@ export default function AdminPage() {
     if (pricingSearch && !p.model.toLowerCase().includes(pricingSearch.toLowerCase())) return false;
     return true;
   });
+  const selectedTokenWorkspaceName = tokenWorkspaces.find((workspace) => workspace.id === tokenWorkspaceId)?.displayName;
+  const canCreateToken = Boolean(
+    tokenWorkspaceId
+    && tokenLabel.trim()
+    && selectedPermissions.length > 0
+    && !tokenWorkspacesLoading
+    && !tokenWorkspacesError
+    && (
+      tokenScope === 'workspace'
+      || (!tokenLibrariesLoading && !tokenLibrariesError && selectedLibraryIds.length > 0)
+    ),
+  ) && !mintingToken;
   const opsStatusMeta = ops ? getOperationsStatusMeta(ops, t) : null;
   const opsActionItems = ops ? getOperationsActionItems(ops, t) : [];
   const auditTotalPages = Math.max(1, Math.ceil(audit.total / auditPageSize));
@@ -1136,13 +1233,82 @@ export default function AdminPage() {
       </Tabs>
 
       {/* Dialogs */}
-      <Dialog open={createTokenOpen} onOpenChange={setCreateTokenOpen}>
+      <Dialog open={createTokenOpen} onOpenChange={(open) => {
+        setCreateTokenOpen(open);
+        if (!open) {
+          setTokenLabel('');
+          setTokenExpiry('90');
+          setTokenScope('workspace');
+          setSelectedPermissions([]);
+          setSelectedLibraryIds([]);
+          setTokenWorkspaces([]);
+          setTokenWorkspacesLoading(false);
+          setTokenWorkspacesError(null);
+          setTokenLibraries([]);
+          setTokenLibrariesLoading(false);
+          setTokenLibrariesError(null);
+          setTokenWorkspaceId(activeWorkspace?.id ?? '');
+        }
+      }}>
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t('admin.createTokenTitle')}</DialogTitle><DialogDescription>{t('admin.createTokenDesc')}</DialogDescription></DialogHeader>
           <div className="space-y-4">
             <div><Label>{t('admin.tokenLabel')}</Label><Input value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={t('admin.tokenLabelPlaceholder')} className="mt-2" /></div>
+            <div>
+              <Label>{t('admin.tokenWorkspace')}</Label>
+              <p className={`mt-1 text-xs ${tokenWorkspacesError ? 'text-status-failed' : 'text-muted-foreground'}`}>
+                {tokenWorkspacesError ?? t('admin.tokenWorkspaceDesc')}
+              </p>
+              <Select value={tokenWorkspaceId} onValueChange={(workspaceId) => { setTokenWorkspaceId(workspaceId); setSelectedLibraryIds([]); }} disabled={tokenWorkspacesLoading || tokenWorkspaces.length === 0}>
+                <SelectTrigger className="mt-2"><SelectValue placeholder={tokenWorkspacesLoading ? t('admin.loading') : t('admin.selectWorkspace')} /></SelectTrigger>
+                <SelectContent>
+                  {tokenWorkspaces.map((workspace) => (
+                    <SelectItem key={workspace.id} value={workspace.id}>
+                      {workspace.displayName ?? workspace.id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div><Label>{t('admin.tokenExpiry')}</Label><Select value={tokenExpiry} onValueChange={setTokenExpiry}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="30">{t('admin.tokenExpiry30')}</SelectItem><SelectItem value="90">{t('admin.tokenExpiry90')}</SelectItem><SelectItem value="365">{t('admin.tokenExpiry365')}</SelectItem><SelectItem value="never">{t('admin.never')}</SelectItem></SelectContent></Select></div>
-            <div><Label>{t('admin.tokenScope')}</Label><Select value={tokenScope} onValueChange={v => { setTokenScope(v as typeof tokenScope); setSelectedPermissions([]); }}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="workspace">{t('admin.workspace')}</SelectItem><SelectItem value="library">{t('admin.library')}</SelectItem></SelectContent></Select></div>
+            <div><Label>{t('admin.tokenScope')}</Label><Select value={tokenScope} onValueChange={v => { const nextScope = v as typeof tokenScope; const allowedPermissions = new Set(nextScope === 'workspace' ? WS_PERMISSIONS : LIB_PERMISSIONS); setTokenScope(nextScope); setSelectedPermissions((current) => current.filter((permission) => allowedPermissions.has(permission))); setSelectedLibraryIds([]); }}><SelectTrigger className="mt-2"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="workspace">{t('admin.workspace')}</SelectItem><SelectItem value="library">{t('admin.library')}</SelectItem></SelectContent></Select></div>
+            {tokenScope === 'library' && (
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <Label>{t('admin.tokenLibraries')}</Label>
+                  {selectedTokenWorkspaceName ? (
+                    <span className="text-xs text-muted-foreground">
+                      {selectedTokenWorkspaceName}
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{t('admin.tokenLibrariesDesc')}</p>
+                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto p-3 border rounded-xl bg-surface-sunken">
+                  {tokenLibrariesLoading ? (
+                    <p className="text-sm text-muted-foreground flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('admin.loading')}</p>
+                  ) : tokenLibrariesError ? (
+                    <p className="text-sm text-status-failed">{tokenLibrariesError}</p>
+                  ) : tokenLibraries.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">{t('admin.tokenNoLibrariesAvailable')}</p>
+                  ) : tokenLibraries.map((library) => (
+                    <div key={library.id} className="flex items-center gap-2.5">
+                        <Checkbox
+                          id={`token-library-${library.id}`}
+                          checked={selectedLibraryIds.includes(library.id)}
+                          onCheckedChange={(checked) => setSelectedLibraryIds((previous) => checked
+                            ? previous.includes(library.id)
+                              ? previous
+                              : [...previous, library.id]
+                            : previous.filter((libraryId) => libraryId !== library.id))}
+                        />
+                      <Label htmlFor={`token-library-${library.id}`} className="text-sm font-normal">
+                        {library.displayName ?? library.id}
+                      </Label>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div>
               <Label>{t('admin.tokenPermissions')}</Label>
               <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto p-3 border rounded-xl bg-surface-sunken">
@@ -1155,7 +1321,7 @@ export default function AdminPage() {
               </div>
             </div>
           </div>
-          <DialogFooter><Button variant="outline" onClick={() => setCreateTokenOpen(false)}>{t('admin.cancel')}</Button><Button onClick={handleCreateToken} disabled={!tokenLabel.trim() || mintingToken}>{mintingToken ? t('admin.creating') : t('admin.create')}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => setCreateTokenOpen(false)}>{t('admin.cancel')}</Button><Button onClick={handleCreateToken} disabled={!canCreateToken}>{mintingToken ? t('admin.creating') : t('admin.create')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
 

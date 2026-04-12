@@ -80,7 +80,7 @@ Available permissions:
 - `document_read`, `document_write` -- document-level access
 - `query_run` -- execute queries (ask)
 - `ops_read`, `audit_read` -- operational and audit data
-- `connector_admin`, `credential_admin`, `binding_admin` -- integration management
+- `credential_admin`, `binding_admin` -- integration management
 
 Scope resolution (when `--scope` is not specified):
 - System permissions (`iam_admin`, `ops_read`, `audit_read`) → `system` scope

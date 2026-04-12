@@ -12,6 +12,13 @@ export const GRAPH_NODE_COLORS: Record<string, string> = {
   entity: '#78716c',
 };
 
+export const GRAPH_EDGE_COLORS = {
+  dense: 'rgba(71, 85, 105, 0.48)',
+  regular: 'rgba(71, 85, 105, 0.64)',
+  muted: 'rgba(71, 85, 105, 0.34)',
+  highlight: 'rgba(51, 65, 85, 0.82)',
+} as const;
+
 export const GRAPH_LAYOUT_OPTIONS = [
   {
     id: 'sectors',

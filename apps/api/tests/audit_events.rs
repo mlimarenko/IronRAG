@@ -434,6 +434,219 @@ async fn latest_audit_event_for_action(
 
 #[tokio::test]
 #[ignore = "requires local postgres, redis, and arango services"]
+async fn token_mint_with_library_ids_creates_library_grants() -> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let system_admin = fixture.mint_system_admin_token("system-admin").await?;
+        let sibling_library = catalog_repository::create_library(
+            fixture.pool(),
+            fixture.workspace_id,
+            "audit-events-sibling-library",
+            "Audit Events Sibling Library",
+            Some("audit events sibling library"),
+            None,
+        )
+        .await
+        .context("failed to create sibling library")?;
+        let label = format!("mint-multi-lib-{}", Uuid::now_v7());
+
+        let (status, body) = fixture
+            .rest_post(
+                &system_admin,
+                "/v1/iam/tokens",
+                json!({
+                    "workspaceId": fixture.workspace_id,
+                    "label": label,
+                    "libraryIds": [fixture.library_id, sibling_library.id],
+                    "permissionKinds": ["library_read", "document_read"]
+                }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+        let token_principal_id =
+            body["apiToken"]["principalId"].as_str().context("expected token principal id")?;
+        let token_principal_id = Uuid::parse_str(token_principal_id)?;
+
+        let grants =
+            iam_repository::list_grants_by_principal(fixture.pool(), token_principal_id).await?;
+        assert_eq!(grants.len(), 4);
+        assert!(grants.iter().all(|grant| grant.resource_kind == "library"));
+        let permission_kinds: Vec<String> =
+            grants.iter().map(|grant| grant.permission_kind.clone()).collect();
+        assert!(permission_kinds.iter().any(|value| value == "library_read"));
+        assert!(permission_kinds.iter().any(|value| value == "document_read"));
+        let library_ids: Vec<Uuid> = grants.iter().map(|grant| grant.resource_id).collect();
+        assert!(library_ids.contains(&fixture.library_id));
+        assert!(library_ids.contains(&sibling_library.id));
+
+        let mint_subjects = audit_repository::list_audit_event_subjects(
+            fixture.pool(),
+            latest_audit_event_for_action(fixture.pool(), "iam.api_token.mint").await?.id,
+        )
+        .await?;
+        assert_eq!(mint_subjects.len(), 1);
+        assert_eq!(mint_subjects[0].subject_id, token_principal_id);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn token_mint_with_library_ids_rejects_cross_workspace_library_ids() -> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let system_admin = fixture.mint_system_admin_token("system-admin").await?;
+        let foreign_workspace = catalog_repository::create_workspace(
+            fixture.pool(),
+            "audit-events-foreign-workspace",
+            "Audit Events Foreign Workspace",
+            None,
+        )
+        .await
+        .context("failed to create foreign workspace")?;
+        let foreign_library = catalog_repository::create_library(
+            fixture.pool(),
+            foreign_workspace.id,
+            "audit-events-foreign-library",
+            "Audit Events Foreign Library",
+            Some("audit events foreign library"),
+            None,
+        )
+        .await
+        .context("failed to create foreign library")?;
+
+        let label = format!("mint-multi-lib-fail-{}", Uuid::now_v7());
+        let before_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+        let (status, body) = fixture
+            .rest_post(
+                &system_admin,
+                "/v1/iam/tokens",
+                json!({
+                    "workspaceId": fixture.workspace_id,
+                    "label": label,
+                    "libraryIds": [fixture.library_id, foreign_library.id],
+                    "permissionKinds": ["library_read"]
+                }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["errorKind"].as_str().context("expected api error kind")?, "bad_request");
+
+        let after_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+        assert_eq!(before_count, after_count);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn token_mint_with_library_ids_requires_permissions() -> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let system_admin = fixture.mint_system_admin_token("system-admin").await?;
+        let label = format!("mint-multi-lib-missing-permissions-{}", Uuid::now_v7());
+
+        let before_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+        let (status, body) = fixture
+            .rest_post(
+                &system_admin,
+                "/v1/iam/tokens",
+                json!({
+                    "workspaceId": fixture.workspace_id,
+                    "label": label,
+                    "libraryIds": [fixture.library_id],
+                }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["errorKind"].as_str().context("expected api error kind")?, "bad_request");
+
+        let after_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+        assert_eq!(before_count, after_count);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn token_mint_with_library_ids_rejects_invalid_permissions() -> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let system_admin = fixture.mint_system_admin_token("system-admin").await?;
+        let label = format!("mint-multi-lib-invalid-permission-{uuid}", uuid = Uuid::now_v7());
+
+        let before_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+        let (status, body) = fixture
+            .rest_post(
+                &system_admin,
+                "/v1/iam/tokens",
+                json!({
+                    "workspaceId": fixture.workspace_id,
+                    "label": label,
+                    "libraryIds": [fixture.library_id],
+                    "permissionKinds": ["iam_admin"]
+                }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["errorKind"].as_str().context("expected api error kind")?, "bad_request");
+
+        let after_count: i64 =
+            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+                .bind(&label)
+                .fetch_one(fixture.pool())
+                .await?;
+        assert_eq!(before_count, after_count);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
 async fn token_mint_and_revoke_append_audit_events_with_api_token_subjects() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 

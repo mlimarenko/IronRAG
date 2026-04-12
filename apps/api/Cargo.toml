@@ -1,6 +1,6 @@
 [package]
 name = "ironrag-backend"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 build = "build.rs"
@@ -86,6 +86,7 @@ url = "2"
 ironrag-contracts = { path = "../../crates/contracts" }
 clap = { version = "4", features = ["derive"] }
 rand = "0.9"
+percent-encoding = "2"
 
 [[bin]]
 name = "ironrag-cli"

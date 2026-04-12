@@ -180,4 +180,19 @@ describe('DocumentsInspectorPanel', () => {
 
     expect(container.textContent).toContain('$0.0000');
   });
+
+  it('renders web-ingested documents with a web page type label', async () => {
+    await renderPanel({
+      selectedDoc: buildSelectedDoc({
+        fileName: 'index.php',
+        fileType: 'php',
+        sourceKind: 'web_page',
+        sourceUri: 'https://ru.wikipedia.org/wiki/Test',
+        sourceAccess: { kind: 'external_url', href: 'https://ru.wikipedia.org/wiki/Test' },
+      }),
+    });
+
+    expect(container.textContent).toContain('Web page');
+    expect(container.textContent).not.toContain('PHP');
+  });
 });
