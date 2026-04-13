@@ -43,9 +43,20 @@ use self::{
 };
 
 const WORKER_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const CANONICAL_LEASE_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
-const CANONICAL_STALE_LEASE_SECONDS: i64 = 120;
-const CANONICAL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const CANONICAL_LEASE_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
+// Steady-state stale-lease threshold. Was 120s; that is 8× the heartbeat
+// interval and lets the dispatcher self-deadlock for two minutes after a
+// worker crashes. 60s = 4× heartbeat, still safe against transient DB
+// latency, and gets the queue moving again much faster.
+const CANONICAL_STALE_LEASE_SECONDS: i64 = 60;
+/// Aggressive threshold used **only** for the one-shot sweep that runs when
+/// the worker pool boots. At pool startup we know nothing in this process is
+/// currently holding a lease, so any `leased` row older than two heartbeat
+/// intervals is guaranteed to be orphaned by a previous process that crashed
+/// or was restarted before it could finalize. We pick a threshold well above
+/// the heartbeat interval (`CANONICAL_HEARTBEAT_INTERVAL`) so a healthy
+/// sibling worker in a multi-worker deployment is never falsely reclaimed.
+const CANONICAL_STARTUP_LEASE_RECOVERY_SECONDS: i64 = 30;
 
 struct AttemptHeartbeatGuard {
     running: Arc<AtomicBool>,
@@ -74,6 +85,50 @@ pub(super) struct CanonicalExtractContentError {
 #[error("document {document_id} was deleted before ingest could run")]
 struct DeletedDocumentJobSkipped {
     document_id: Uuid,
+}
+
+/// Raised from inside the pipeline when the heartbeat observer notices that
+/// the job has been transitioned to `queue_state='canceled'` by the cancel
+/// endpoint (`cancel_jobs_for_document`). The outer execute handler converts
+/// this into a `canceled` attempt finalization and does **not** mark the job
+/// as `failed` — `queue_state` is already `canceled` and must be preserved.
+#[derive(Debug, Error)]
+#[error("canonical ingest job {job_id} was canceled by user request")]
+struct JobCanceledByRequest {
+    job_id: Uuid,
+}
+
+/// Shared abort flag observed by the pipeline. The heartbeat observer sets it
+/// to `true` the moment it reads `queue_state='canceled'` from the database;
+/// the pipeline calls `check_cancel` between stages to react.
+#[derive(Debug, Clone, Default)]
+pub(super) struct JobCancellationToken {
+    canceled: Arc<AtomicBool>,
+}
+
+impl JobCancellationToken {
+    fn new() -> Self {
+        Self { canceled: Arc::new(AtomicBool::new(false)) }
+    }
+
+    pub(super) fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Relaxed)
+    }
+
+    fn mark_canceled(&self) {
+        self.canceled.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns `Err(JobCanceledByRequest)` if the token has been tripped. Call
+    /// this between pipeline stages so the worker stops as soon as possible
+    /// after the cancel request arrives.
+    pub(super) fn check(&self, job_id: Uuid) -> anyhow::Result<()> {
+        if self.is_canceled() {
+            Err(anyhow::Error::new(JobCanceledByRequest { job_id }))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl CanonicalExtractContentError {
@@ -162,11 +217,34 @@ async fn execute_canonical_ingest_job(
 
     let heartbeat_running = Arc::new(AtomicBool::new(true));
     let heartbeat_guard = AttemptHeartbeatGuard::new(Arc::clone(&heartbeat_running));
+    let cancellation = JobCancellationToken::new();
+
+    // The heartbeat loop does double duty: it refreshes `heartbeat_at` so the
+    // stale-lease reaper leaves this attempt alone, AND it polls the job's
+    // current `queue_state` so the pipeline notices a user-issued cancel
+    // between stages. One DB round-trip per tick keeps the observer latency
+    // bounded by `CANONICAL_HEARTBEAT_INTERVAL` (≤15s), which is tight enough
+    // for an interactive "Cancel Processing" button.
     let heartbeat_flag = Arc::clone(&heartbeat_running);
     let heartbeat_pg = state.persistence.postgres.clone();
+    let heartbeat_cancellation = cancellation.clone();
+    let heartbeat_job_id = job.id;
+    let heartbeat_interval = Duration::from_secs(
+        state.settings.ingestion_worker_heartbeat_interval_seconds.max(1),
+    );
     tokio::spawn(async move {
+        // The cancel poll only runs until we observe the first `canceled`
+        // signal: after that we know the pipeline is cooperatively unwinding,
+        // and the heartbeat loop switches to pure heartbeat mode so the
+        // stale-lease reaper does **not** clobber the attempt with
+        // `stale_heartbeat` while the worker is draining a mid-stage LLM call
+        // on its way to `JobCanceledByRequest`. Without this, long-running
+        // stages like `extract_graph` would see the attempt re-written to
+        // `failed + lease_expired` by the reaper before they finished
+        // unwinding, losing the user's cancel intent.
+        let mut observed_cancel = false;
         while heartbeat_flag.load(Ordering::Relaxed) {
-            time::sleep(CANONICAL_HEARTBEAT_INTERVAL).await;
+            time::sleep(heartbeat_interval).await;
             if !heartbeat_flag.load(Ordering::Relaxed) {
                 break;
             }
@@ -175,64 +253,95 @@ async fn execute_canonical_ingest_job(
             {
                 tracing::warn!(?e, %attempt_id, "failed to touch attempt heartbeat");
             }
+            if observed_cancel {
+                continue;
+            }
+            match ingest_repository::get_ingest_job_by_id(&heartbeat_pg, heartbeat_job_id).await {
+                Ok(Some(row)) if row.queue_state == "canceled" => {
+                    info!(
+                        job_id = %heartbeat_job_id,
+                        %attempt_id,
+                        "cancellation observed on heartbeat tick, signalling pipeline abort"
+                    );
+                    heartbeat_cancellation.mark_canceled();
+                    observed_cancel = true;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        %attempt_id,
+                        "heartbeat cancel poll failed; will retry on next tick"
+                    );
+                }
+            }
         }
     });
 
-    // Check if the job was canceled while queued
+    // Pre-lease cancellation guard: a job may have been canceled *between*
+    // `claim_next_queued_ingest_job` and the point where the heartbeat loop
+    // starts observing. Fold the first observation into the same path we use
+    // mid-pipeline so there is exactly one cancel handling branch.
     let current_job = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job.id)
         .await
         .context("failed to reload ingest job for cancellation check")?;
     if current_job.as_ref().is_some_and(|j| j.queue_state == "canceled") {
-        info!(job_id = %job.id, "skipping canceled ingest job");
-        return Ok(());
+        cancellation.mark_canceled();
     }
 
-    let result = match job.job_kind.as_str() {
-        "content_mutation" => {
-            let revision_id = job
-                .knowledge_revision_id
-                .context("canonical ingest job is missing knowledge_revision_id")?;
-            let document_id = job
-                .knowledge_document_id
-                .context("canonical ingest job is missing knowledge_document_id")?;
+    let result = if cancellation.is_canceled() {
+        Err(anyhow::Error::new(JobCanceledByRequest { job_id: job.id }))
+    } else {
+        match job.job_kind.as_str() {
+            "content_mutation" => {
+                let revision_id = job
+                    .knowledge_revision_id
+                    .context("canonical ingest job is missing knowledge_revision_id")?;
+                let document_id = job
+                    .knowledge_document_id
+                    .context("canonical ingest job is missing knowledge_document_id")?;
 
-            // Check if document was deleted while job was queued
-            let document =
-                content_repository::get_document_by_id(&state.persistence.postgres, document_id)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("failed to load document"))?;
-            if document.as_ref().is_some_and(|d| d.document_state == "deleted") {
-                if let Some(mutation_id) = job.mutation_id {
-                    state
-                        .canonical_services
-                        .content
-                        .settle_deleted_document_mutation(&state, mutation_id)
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "failed to settle skipped mutation for deleted document: {error}"
-                            )
-                        })?;
+                // Check if document was deleted while job was queued
+                let document = content_repository::get_document_by_id(
+                    &state.persistence.postgres,
+                    document_id,
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("failed to load document"))?;
+                if document.as_ref().is_some_and(|d| d.document_state == "deleted") {
+                    if let Some(mutation_id) = job.mutation_id {
+                        state
+                            .canonical_services
+                            .content
+                            .settle_deleted_document_mutation(&state, mutation_id)
+                            .await
+                            .map_err(|error| {
+                                anyhow::anyhow!(
+                                    "failed to settle skipped mutation for deleted document: {error}"
+                                )
+                            })?;
+                    }
+                    info!(document_id = %document_id, "canceling leased ingest for deleted document");
+                    return Err(anyhow::Error::new(DeletedDocumentJobSkipped { document_id }));
                 }
-                info!(document_id = %document_id, "canceling leased ingest for deleted document");
-                return Err(anyhow::Error::new(DeletedDocumentJobSkipped { document_id }));
-            }
 
-            run_canonical_ingest_pipeline(
-                &state,
-                worker_id,
-                &job,
-                attempt_id,
-                document_id,
-                revision_id,
-            )
-            .await
+                run_canonical_ingest_pipeline(
+                    &state,
+                    worker_id,
+                    &job,
+                    attempt_id,
+                    document_id,
+                    revision_id,
+                    &cancellation,
+                )
+                .await
+            }
+            "web_discovery" => run_canonical_web_discovery_job(&state, &job, attempt_id).await,
+            "web_materialize_page" => {
+                run_canonical_web_materialize_page_job(&state, &job, attempt_id).await
+            }
+            other => Err(anyhow::anyhow!("unsupported canonical ingest job kind {other}")),
         }
-        "web_discovery" => run_canonical_web_discovery_job(&state, &job, attempt_id).await,
-        "web_materialize_page" => {
-            run_canonical_web_materialize_page_job(&state, &job, attempt_id).await
-        }
-        other => Err(anyhow::anyhow!("unsupported canonical ingest job kind {other}")),
     };
 
     drop(heartbeat_guard);
@@ -270,6 +379,34 @@ async fn execute_canonical_ingest_job(
             Ok(())
         }
         Err(error) => {
+            if error.downcast_ref::<JobCanceledByRequest>().is_some() {
+                if let Err(e) = state
+                    .canonical_services
+                    .ingest
+                    .finalize_attempt(
+                        &state,
+                        FinalizeAttemptCommand {
+                            attempt_id,
+                            knowledge_generation_id: None,
+                            attempt_state: "canceled".to_string(),
+                            current_stage: Some(initial_stage.clone()),
+                            failure_class: Some("content_mutation".to_string()),
+                            failure_code: Some("canceled_by_request".to_string()),
+                            retryable: false,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(%attempt_id, ?e, "failed to finalize user-canceled attempt as canceled");
+                }
+                info!(
+                    %worker_id,
+                    %job_id,
+                    %attempt_id,
+                    "canonical ingest job aborted by user cancel request",
+                );
+                return Ok(());
+            }
             if error.downcast_ref::<DeletedDocumentJobSkipped>().is_some() {
                 if let Err(e) = state
                     .canonical_services
@@ -344,8 +481,10 @@ async fn run_canonical_ingest_pipeline(
     attempt_id: Uuid,
     document_id: Uuid,
     revision_id: Uuid,
+    cancellation: &JobCancellationToken,
 ) -> anyhow::Result<()> {
     // --- Stage: extract_content -----------------------------------------------
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -511,6 +650,7 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record extract_content stage event")?;
 
     // --- Stage: prepare_structure / chunk_content / extract_technical_facts ---
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -686,6 +826,7 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record extract_technical_facts stage event")?;
 
     // --- Stage: embed_chunk (deferred) ----------------------------------------
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -738,6 +879,7 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record embed_chunk stage event")?;
 
     // --- Stage: extract_graph -------------------------------------------------
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -1048,6 +1190,7 @@ async fn run_canonical_ingest_pipeline(
     }
 
     // --- Stage: finalize readiness --------------------------------------------
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest

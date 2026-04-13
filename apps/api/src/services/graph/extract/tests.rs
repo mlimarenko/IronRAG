@@ -165,6 +165,7 @@ fn sample_request() -> GraphExtractionRequest {
         activated_by_attempt_id: None,
         resume_hint: None,
         library_extraction_prompt: None,
+        sub_type_hints: GraphExtractionSubTypeHints::default(),
     }
 }
 

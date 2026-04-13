@@ -1,9 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Graph from 'graphology';
 import Sigma from 'sigma';
 import { EdgeCurvedArrowProgram } from '@sigma/edge-curve';
 import type { GraphNode } from '@/types';
-import { GRAPH_EDGE_COLORS, GRAPH_NODE_COLORS, type GraphLayoutType } from '@/components/graph/config';
+import {
+  buildGraphCanvasLabel,
+  buildGraphFocusLabel,
+  GRAPH_EDGE_COLORS,
+  GRAPH_NODE_COLORS,
+  selectProminentGraphLabelIds,
+  type GraphLayoutType,
+} from '@/components/graph/config';
 import { applyGraphLayout } from '@/components/graph/layouts';
 
 interface EdgeData {
@@ -20,7 +27,6 @@ interface SigmaGraphProps {
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   layout: GraphLayoutType;
-  hiddenTypes: Set<string>;
 }
 
 const LAYOUT_ANIMATION_DURATION_MS = 280;
@@ -40,11 +46,12 @@ function cloneGraphStructure(source: Graph): Graph {
 
 // --- Component ---
 
-export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenTypes }: SigmaGraphProps) {
+export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout }: SigmaGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
   const dragStateRef = useRef<{ dragging: boolean; node: string | null }>({ dragging: false, node: null });
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const layoutRef = useRef(layout);
   const layoutAnimationFrameRef = useRef<number | null>(null);
   const layoutAnimationTokenRef = useRef(0);
@@ -63,9 +70,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     stopLayoutAnimation();
     const graph = new Graph();
 
-    const visibleNodes = hiddenTypes.size > 0
-      ? nodes.filter(n => !hiddenTypes.has(n.type))
-      : nodes;
+    const visibleNodes = nodes;
     const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
     const visibleEdges = edges.filter((edge) =>
       edge.sourceId !== edge.targetId &&
@@ -75,19 +80,26 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     const denseGraph = visibleEdges.length > 2200 || visibleNodes.length > 700;
     const edgeColor = denseGraph ? GRAPH_EDGE_COLORS.dense : GRAPH_EDGE_COLORS.regular;
     const edgeSize = denseGraph ? 0.22 : 0.34;
-    const labelDensity = visibleNodes.length > 900 ? 0.03 : visibleNodes.length > 450 ? 0.045 : 0.07;
+    const labelDensity = visibleNodes.length > 900 ? 0.016 : visibleNodes.length > 450 ? 0.022 : 0.045;
+    const prominentLabelIds = selectProminentGraphLabelIds(visibleNodes);
+    const defaultEdgeType = denseGraph ? 'line' : 'curvedArrow';
 
     for (const node of visibleNodes) {
       const color = GRAPH_NODE_COLORS[node.type] || GRAPH_NODE_COLORS.entity;
       const size = Math.max(3, Math.min(13, 3 + Math.sqrt(node.edgeCount) * 0.65));
+      const showLabel = prominentLabelIds.has(node.id);
+      const canvasLabel = showLabel ? buildGraphCanvasLabel(node.label, visibleNodes.length) : '';
       graph.addNode(node.id, {
-        label: node.label,
+        label: canvasLabel,
+        displayLabel: canvasLabel,
+        originalLabel: node.label,
+        focusLabel: buildGraphFocusLabel(node.label),
         x: 0,
         y: 0,
         size,
         color,
         nodeType: node.type,
-        forceLabel: node.type === 'document' || node.edgeCount >= 24,
+        forceLabel: showLabel,
       });
     }
 
@@ -102,6 +114,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
           label: edge.label || '',
           size: edgeSize,
           color: edgeColor,
+          type: defaultEdgeType,
         });
       } catch { /* skip parallel */ }
     }
@@ -113,8 +126,8 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     if (sigmaRef.current) sigmaRef.current.kill();
 
     const sigma = new Sigma(graph, containerRef.current, {
-      hideEdgesOnMove: false,
-      hideLabelsOnMove: visibleNodes.length > 350,
+      hideEdgesOnMove: denseGraph,
+      hideLabelsOnMove: visibleNodes.length > 140,
       renderLabels: true,
       renderEdgeLabels: false,
       labelFont: 'Inter, system-ui, sans-serif',
@@ -123,13 +136,13 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       labelColor: { color: '#94a3b8' },
       defaultNodeColor: '#78716c',
       defaultEdgeColor: edgeColor,
-      defaultEdgeType: 'curvedArrow',
+      defaultEdgeType,
       edgeProgramClasses: {
         curvedArrow: EdgeCurvedArrowProgram,
       },
       labelDensity,
       labelGridCellSize: 100,
-      labelRenderedSizeThreshold: visibleNodes.length > 900 ? 9 : 7,
+      labelRenderedSizeThreshold: visibleNodes.length > 900 ? 10 : 8,
       autoCenter: true,
       autoRescale: true,
       zIndex: true,
@@ -179,10 +192,12 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     });
 
     // Pointer cursor on node hover
-    sigma.on('enterNode', () => {
+    sigma.on('enterNode', ({ node }) => {
+      setHoveredId(node);
       if (containerRef.current) containerRef.current.style.cursor = 'pointer';
     });
-    sigma.on('leaveNode', () => {
+    sigma.on('leaveNode', ({ node }) => {
+      setHoveredId((current) => (current === node ? null : current));
       if (containerRef.current) containerRef.current.style.cursor = 'default';
     });
 
@@ -190,6 +205,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
       if (!dragStateRef.current.dragging) onSelect(node);
     });
     sigma.on('clickStage', () => {
+      setHoveredId(null);
       if (!dragStateRef.current.dragging) onSelect(null);
     });
 
@@ -200,11 +216,12 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
 
     return () => {
       stopLayoutAnimation();
+      setHoveredId(null);
       container.removeEventListener('wheel', wheelHandler);
       sigma.kill();
       sigmaRef.current = null;
     };
-  }, [nodes, edges, onSelect, hiddenTypes]);
+  }, [nodes, edges, onSelect]);
 
   useEffect(() => {
     const sigma = sigmaRef.current;
@@ -286,24 +303,27 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     const graph = graphRef.current;
     if (!sigma || !graph) return;
 
-    if (selectedId && graph.hasNode(selectedId)) {
+    const activeId = selectedId ?? hoveredId;
+
+    if (activeId && graph.hasNode(activeId)) {
       const connectedEdges = new Set<string>();
-      const neighbors = new Set(graph.neighbors(selectedId));
+      const neighbors = new Set(graph.neighbors(activeId));
       graph.forEachEdge((edge) => {
-        if (graph.source(edge) === selectedId || graph.target(edge) === selectedId) {
+        if (graph.source(edge) === activeId || graph.target(edge) === activeId) {
           connectedEdges.add(edge);
         }
       });
 
       sigma.setSetting('nodeReducer', (node: string, data: any) => {
-        const isSelected = node === selectedId;
+        const isActive = node === activeId;
         const isNeighbor = neighbors.has(node);
-        if (isSelected) {
+        if (isActive) {
           return {
             ...data,
             zIndex: 4,
             size: Math.max((data.size ?? 0) as number, 9),
-            label: data.label,
+            label: data.focusLabel ?? data.displayLabel ?? data.label,
+            forceLabel: true,
             highlighted: true,
           };
         }
@@ -312,7 +332,8 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
             ...data,
             zIndex: 3,
             size: Math.max((data.size ?? 0) as number, 7),
-            label: data.label,
+            label: data.focusLabel ?? data.displayLabel ?? data.label,
+            forceLabel: true,
           };
         }
         return {
@@ -344,7 +365,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     }
 
     sigma.refresh();
-  }, [selectedId, nodes, hiddenTypes]);
+  }, [hoveredId, selectedId, nodes]);
 
   return (
     <div ref={containerRef} className="w-full h-full" style={{ minHeight: '400px' }} />

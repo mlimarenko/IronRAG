@@ -41,7 +41,9 @@ pub(super) async fn fail_canonical_ingest_job(
         }
     };
 
-    if existing.queue_state == "completed" {
+    if existing.queue_state == "completed" || existing.queue_state == "canceled" {
+        // A canceled job has already reached its terminal state via the cancel
+        // endpoint; demoting it to "failed" here would clobber user intent.
         return;
     }
 

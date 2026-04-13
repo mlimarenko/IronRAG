@@ -406,7 +406,7 @@ fn map_document_row(row: content_repository::ContentDocumentRow) -> ContentDocum
     }
 }
 
-fn map_revision_row(row: content_repository::ContentRevisionRow) -> ContentRevision {
+pub(super) fn map_revision_row(row: content_repository::ContentRevisionRow) -> ContentRevision {
     ContentRevision {
         id: row.id,
         document_id: row.document_id,

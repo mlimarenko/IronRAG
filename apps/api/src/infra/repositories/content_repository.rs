@@ -172,8 +172,7 @@ pub async fn list_documents_by_library(
             deleted_at
          from content_document
          where library_id = $1
-         order by created_at desc
-         limit 1000",
+         order by created_at desc",
     )
     .bind(library_id)
     .fetch_all(postgres)

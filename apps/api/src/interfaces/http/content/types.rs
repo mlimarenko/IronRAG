@@ -9,9 +9,12 @@ use crate::{
     },
     domains::knowledge::{PreparedSegmentDetail, StructuredDocumentRevision, TypedTechnicalFact},
     interfaces::http::router_support::ApiError,
-    services::content::{
-        document_accounting::DocumentLifecycleDetail,
-        service::{ContentMutationAdmission, RevisionAdmissionMetadata},
+    services::{
+        content::{
+            document_accounting::DocumentLifecycleDetail,
+            service::{ContentMutationAdmission, RevisionAdmissionMetadata},
+        },
+        ingest::web::RefetchedWebDocumentSource,
     },
 };
 
@@ -237,6 +240,28 @@ pub(super) fn build_reprocess_revision_metadata(
         language_code: active_revision.language_code.clone(),
         source_uri: active_revision.source_uri.clone(),
         storage_key: storage_key.or_else(|| active_revision.storage_key.clone()),
+    }
+}
+
+/// Builds revision metadata for the web-retry path, where the caller just
+/// re-fetched the source URL and wants the new mutation to reference the
+/// fresh blob instead of the previous capture. `checksum`, `byte_size`,
+/// `storage_key` and `mime_type` come from the live fetch; the rest (title,
+/// language, and the source_uri itself) is carried forward from the previous
+/// revision so downstream identity normalization stays stable across retries.
+pub(super) fn build_web_refetch_revision_metadata(
+    active_revision: &ContentRevision,
+    refetched: RefetchedWebDocumentSource,
+) -> RevisionAdmissionMetadata {
+    RevisionAdmissionMetadata {
+        content_source_kind: active_revision.content_source_kind.clone(),
+        checksum: refetched.checksum,
+        mime_type: refetched.mime_type.unwrap_or_else(|| active_revision.mime_type.clone()),
+        byte_size: refetched.byte_size,
+        title: active_revision.title.clone(),
+        language_code: active_revision.language_code.clone(),
+        source_uri: active_revision.source_uri.clone(),
+        storage_key: Some(refetched.storage_key),
     }
 }
 

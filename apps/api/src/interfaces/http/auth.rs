@@ -828,7 +828,11 @@ mod tests {
 
         assert!(auth.can_access_workspace(workspace_id));
         assert!(auth.can_discover_library(workspace_id, Uuid::now_v7(), &["workspace_admin"]));
-        assert!(auth.can_discover_library(workspace_id, Uuid::now_v7(), &["library_read", "workspace_admin"]));
+        assert!(auth.can_discover_library(
+            workspace_id,
+            Uuid::now_v7(),
+            &["library_read", "workspace_admin"]
+        ));
     }
 
     #[test]

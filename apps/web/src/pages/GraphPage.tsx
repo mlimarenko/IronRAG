@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import { documentsApi, knowledgeApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { compactText } from '@/lib/compactText';
 import {
   GRAPH_LAYOUT_OPTIONS,
   GRAPH_NODE_COLORS,
@@ -90,6 +91,41 @@ function subtypeLegendLabel(t: (key: string, options?: Record<string, unknown>) 
 
 type GraphEdgeData = { id: string; sourceId: string; targetId: string; label: string; weight: number };
 
+type RawGraphTopologyPayload = {
+  entities?: unknown;
+  relations?: unknown;
+  documents?: unknown;
+  documentLinks?: unknown;
+  document_links?: unknown;
+  status?: GraphStatus;
+  convergenceStatus?: string;
+};
+
+function normalizeArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? value as T[] : [];
+}
+
+function readTopologyEntities(topology: RawGraphTopologyPayload): RawKnowledgeEntity[] {
+  return normalizeArray<RawKnowledgeEntity>(topology.entities);
+}
+
+function readTopologyRelations(topology: RawGraphTopologyPayload): RawKnowledgeRelation[] {
+  return normalizeArray<RawKnowledgeRelation>(topology.relations);
+}
+
+function readTopologyDocuments(topology: RawGraphTopologyPayload): RawKnowledgeDocument[] {
+  return normalizeArray<RawKnowledgeDocument>(topology.documents);
+}
+
+function readTopologyDocumentLinks(topology: RawGraphTopologyPayload): RawGraphDocumentLink[] {
+  return (
+    normalizeArray<RawGraphDocumentLink>(topology.documentLinks).length > 0
+      ? normalizeArray<RawGraphDocumentLink>(topology.documentLinks)
+      : normalizeArray<RawGraphDocumentLink>(topology.document_links)
+  );
+}
+
+
 function countConnectedComponents(nodes: GraphNode[], edges: GraphEdgeData[]): number {
   if (nodes.length === 0) return 0;
 
@@ -168,6 +204,7 @@ export default function GraphPage() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<GraphNode | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
 
   // UI controls
   const [searchQuery, setSearchQuery] = useState('');
@@ -188,7 +225,7 @@ export default function GraphPage() {
     setExpandedSubtypeGroups(new Set());
   };
 
-  // Fetch graph workbench data, falling back to entities+relations endpoints
+  // Fetch graph data from the canonical topology endpoint only.
   useEffect(() => {
     if (!activeLibrary) return;
     let cancelled = false;
@@ -202,110 +239,107 @@ export default function GraphPage() {
     setHiddenTypes(new Set());
     setHiddenSubTypes(new Set());
 
-    // Load graph data from fast individual endpoints (not slow graph-workbench)
-    Promise.all([
-      knowledgeApi.listEntities(activeLibrary.id),
-      knowledgeApi.listRelations(activeLibrary.id),
-      knowledgeApi.listDocuments(activeLibrary.id),
-      knowledgeApi.getGraphTopology(activeLibrary.id).catch((err) => {
-        console.warn('failed to load graph topology', err);
-        return null;
-      }),
-    ]).then(([entitiesRes, relationsRes, documentsRes, topologyRes]) => {
-          if (cancelled) return;
+    (async () => {
+      try {
+        const topologyRes = await knowledgeApi.getGraphTopology(activeLibrary.id);
+        if (cancelled) return;
 
-          const entities: RawKnowledgeEntity[] = Array.isArray(entitiesRes)
-            ? (entitiesRes as RawKnowledgeEntity[])
-            : ((entitiesRes.items ?? []) as RawKnowledgeEntity[]);
-          const relations: RawKnowledgeRelation[] = Array.isArray(relationsRes)
-            ? (relationsRes as RawKnowledgeRelation[])
-            : ((relationsRes.items ?? []) as RawKnowledgeRelation[]);
-          const documents: RawKnowledgeDocument[] = Array.isArray(documentsRes)
-            ? (documentsRes as RawKnowledgeDocument[])
-            : ((documentsRes.items ?? documentsRes.documents ?? []) as RawKnowledgeDocument[]);
-          const documentLinks: RawGraphDocumentLink[] =
-            (topologyRes?.documentLinks as RawGraphDocumentLink[] | undefined) ?? [];
+        const topology: RawGraphTopologyPayload = (topologyRes as RawGraphTopologyPayload) ?? {};
+        const entities = readTopologyEntities(topology);
+        const relations = readTopologyRelations(topology);
+        const documents = readTopologyDocuments(topology);
+        const documentLinks = readTopologyDocumentLinks(topology);
 
-          // Pre-compute per-document edge counts from topology links
-          const docEdgeCounts = new Map<string, number>();
-          documentLinks.forEach((link) => {
-            docEdgeCounts.set(link.documentId, (docEdgeCounts.get(link.documentId) ?? 0) + 1);
-          });
+        const docEdgeCounts = new Map<string, number>();
+        documentLinks.forEach((link) => {
+          docEdgeCounts.set(link.documentId, (docEdgeCounts.get(link.documentId) ?? 0) + 1);
+        });
 
-          const entityNodes: GraphNode[] = entities.map((e) => {
-            const canonical = mapNodeType(e.entityType);
-            const rawType = (e.entityType ?? '').toLowerCase();
-            return {
-              id: e.entityId ?? e.id ?? '',
-              label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
-              type: canonical,
-              subType: e.entitySubType ?? (rawType !== canonical ? rawType : undefined),
-              summary: e.summary ?? undefined,
-              edgeCount: e.supportCount ?? 0,
-              properties: {},
-              sourceDocumentIds: [],
-            };
-          });
-
-          const documentNodes: GraphNode[] = documents.map((d) => {
-            const docId = d.document_id ?? d.documentId ?? d.id ?? '';
-            return {
-              id: docId,
-              label: d.title ?? d.fileName ?? d.external_key ?? 'untitled',
-              type: 'document' as GraphNodeType,
-              summary: undefined,
-              edgeCount: docEdgeCounts.get(docId) ?? 0,
-              properties: {},
-              sourceDocumentIds: [],
-            };
-          });
-
-          const fallbackNodes: GraphNode[] = [...entityNodes, ...documentNodes];
-
-          const relationEdges = relations.map((r) => ({
-            id: r.relationId ?? r.id ?? '',
-            sourceId: r.subjectEntityId,
-            targetId: r.objectEntityId,
-            label: r.predicate ?? '',
-            weight: r.supportCount ?? 1,
-          }));
-
-          const documentEdges = documentLinks.map((link) => ({
-            id: `dl-${link.documentId}-${link.targetNodeId}`,
-            sourceId: link.documentId,
-            targetId: link.targetNodeId,
-            label: 'supports',
-            weight: link.supportCount ?? 1,
-          }));
-
-          const fallbackEdges = [...relationEdges, ...documentEdges];
-
-          // Store edges on the module level so GraphCanvas can use them
-          edgesRef.current = fallbackEdges;
-          const recommendedLayout = recommendGraphLayout(fallbackNodes, fallbackEdges);
-
-          const fallbackMeta: GraphMetadata = {
-            nodeCount: fallbackNodes.length,
-            edgeCount: fallbackEdges.length,
-            hiddenDisconnectedCount: 0,
-            status: fallbackNodes.length > 0 ? 'ready' : 'empty',
-            convergenceStatus: 'current',
-            recommendedLayout,
+        const entityNodes: GraphNode[] = entities.map((e) => {
+          const canonical = mapNodeType(e.entityType);
+          const rawType = (e.entityType ?? '').toLowerCase();
+          return {
+            id: e.entityId ?? e.id ?? '',
+            label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
+            type: canonical,
+            subType: e.entitySubType ?? (rawType !== canonical ? rawType : undefined),
+            summary: e.summary ?? undefined,
+            edgeCount: e.supportCount ?? 0,
+            properties: {},
+            sourceDocumentIds: [],
           };
+        });
 
-          setAllNodes(fallbackNodes);
-          setGraphMeta(fallbackMeta);
-          setGraphStatus(fallbackMeta.status);
-          setLayout(recommendedLayout);
-      })
-      .catch((err: unknown) => {
+        const documentNodes: GraphNode[] = documents.map((d) => {
+          const docId = d.document_id ?? d.documentId ?? d.id ?? '';
+          return {
+            id: docId,
+            label: d.title ?? d.fileName ?? d.external_key ?? 'untitled',
+            type: 'document' as GraphNodeType,
+            summary: undefined,
+            edgeCount: docEdgeCounts.get(docId) ?? 0,
+            properties: {},
+            sourceDocumentIds: [],
+          };
+        });
+
+        const topologyNodes: GraphNode[] = [...entityNodes, ...documentNodes];
+
+        const relationEdges = relations
+          .map((r) => {
+            if (!r.subjectEntityId || !r.objectEntityId) return null;
+            return {
+              id: r.relationId ?? r.id ?? '',
+              sourceId: r.subjectEntityId,
+              targetId: r.objectEntityId,
+              label: r.predicate ?? '',
+              weight: r.supportCount ?? 1,
+            };
+          })
+          .filter((edge): edge is GraphEdgeData => edge !== null);
+
+        const documentEdges = documentLinks.map((link) => ({
+          id: `dl-${link.documentId}-${link.targetNodeId}`,
+          sourceId: link.documentId,
+          targetId: link.targetNodeId,
+          label: 'supports',
+          weight: link.supportCount ?? 1,
+        }));
+
+        const topologyEdges = [...relationEdges, ...documentEdges];
+
+        edgesRef.current = topologyEdges;
+        const recommendedLayout = recommendGraphLayout(topologyNodes, topologyEdges);
+
+        const topologyStatus = topology.status ?? (topologyNodes.length > 0 ? 'ready' : 'empty');
+        const topologyMeta: GraphMetadata = {
+          nodeCount: topologyNodes.length,
+          edgeCount: topologyEdges.length,
+          hiddenDisconnectedCount: 0,
+          status: topologyStatus,
+          convergenceStatus: topology.convergenceStatus ?? 'current',
+          recommendedLayout,
+        };
+
+        setAllNodes(topologyNodes);
+        setGraphMeta(topologyMeta);
+        setGraphStatus(topologyMeta.status);
+        setLayout(recommendedLayout);
+      } catch (err: unknown) {
         if (cancelled) return;
         setLoadError(errorMessage(err, 'Failed to load graph'));
         setGraphStatus('failed');
-      });
+      }
+    })();
 
     return () => { cancelled = true; };
   }, [activeLibrary]);
+
+  // Reset the "expand summary" toggle whenever a new node is selected so the
+  // inspector starts collapsed for every fresh selection.
+  useEffect(() => {
+    setSummaryExpanded(false);
+  }, [selectedNode]);
 
   // Fetch node detail when selected — different API for entities vs documents
   useEffect(() => {
@@ -324,18 +358,34 @@ export default function GraphPage() {
       documentsApi.get(selectedNode)
         .then((doc) => {
           if (cancelled) return;
+          // Web-captured documents store their URL path basename as
+          // `fileName` (e.g. "viewpage.action" for Confluence pages), which
+          // is meaningless to a human. Prefer the full `source_uri` for
+          // `web_page` documents so the inspector header shows the actual
+          // page URL instead of a noisy CGI handler name.
+          const rev = (doc.activeRevision ?? doc.active_revision) as
+            | {
+                mime_type?: string;
+                byte_size?: number;
+                revision_number?: number;
+                content_source_kind?: string;
+                source_uri?: string;
+              }
+            | undefined;
+          const isWebPage = rev?.content_source_kind === 'web_page';
+          const fileNameLabel =
+            typeof doc.fileName === 'string' ? doc.fileName : undefined;
+          const label =
+            (isWebPage ? rev?.source_uri : undefined) ?? fileNameLabel ?? basic.label;
           const enriched: GraphNode = {
             id: selectedNode,
-            label: (typeof doc.fileName === 'string' ? doc.fileName : undefined) ?? basic.label,
+            label,
             type: 'document',
             summary: resolveDocumentSummary(doc as Record<string, unknown>) ?? basic.summary,
             edgeCount: basic.edgeCount,
             properties: {},
             sourceDocumentIds: [],
           };
-          const rev = (doc.activeRevision ?? doc.active_revision) as
-            | { mime_type?: string; byte_size?: number; revision_number?: number }
-            | undefined;
           if (rev?.mime_type) enriched.properties['format'] = rev.mime_type;
           if (rev?.byte_size != null) enriched.properties['size'] = `${(rev.byte_size / 1024).toFixed(1)} KB`;
           if (rev?.revision_number != null) enriched.properties['revision'] = String(rev.revision_number);
@@ -552,7 +602,6 @@ export default function GraphPage() {
                 selectedId={selectedNode}
                 onSelect={setSelectedNode}
                 layout={effectiveLayout}
-                hiddenTypes={hiddenTypes}
               />
             </Suspense>
           )}
@@ -754,9 +803,14 @@ export default function GraphPage() {
           const connectedConcepts = connectedNodes.filter(n => n.type === 'concept');
 
           return (
-            <div className="absolute top-0 right-0 h-full w-80 lg:w-96 bg-card border-l shadow-xl z-20 overflow-y-auto animate-slide-in-right">
-              <div className="p-4 border-b flex items-center justify-between">
-                <h3 className="text-sm font-bold truncate tracking-tight">{selected.label}</h3>
+            <div className="absolute top-0 right-0 z-20 h-full w-[24rem] overflow-y-auto border-l bg-card shadow-xl animate-slide-in-right lg:w-[30rem] xl:w-[34rem]">
+              <div className="flex items-start gap-2 border-b p-4">
+                <h3
+                  className="min-w-0 flex-1 text-[15px] font-bold tracking-tight leading-5 text-foreground [overflow-wrap:anywhere]"
+                  title={selected.label}
+                >
+                  {selected.label}
+                </h3>
                 <div className="flex items-center gap-1">
                   {detailLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
                   <button onClick={() => setSelectedNode(null)} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label={t('common.close')}><X className="h-4 w-4" /></button>
@@ -782,10 +836,36 @@ export default function GraphPage() {
                   </div>
                 )}
 
-                {/* Summary */}
-                {selected.summary && (
-                  <div><div className="section-label mb-1">{t('graph.summary')}</div><p className="text-sm leading-relaxed text-muted-foreground">{selected.summary}</p></div>
-                )}
+                {/* Summary — truncated by default, expandable on click. The
+                    full backend summary can be ~1000 chars and crowds the
+                    inspector; the short form keeps the panel scannable while
+                    the user can drill in when they actually want the full
+                    text. */}
+                {selected.summary && (() => {
+                  const SUMMARY_PREVIEW_CHARS = 280;
+                  const fullSummary = selected.summary.trim();
+                  const isLong = fullSummary.length > SUMMARY_PREVIEW_CHARS;
+                  const visible = !isLong || summaryExpanded
+                    ? fullSummary
+                    : `${fullSummary.slice(0, SUMMARY_PREVIEW_CHARS).trimEnd()}…`;
+                  return (
+                    <div>
+                      <div className="section-label mb-1">{t('graph.summary')}</div>
+                      <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
+                        {visible}
+                      </p>
+                      {isLong && (
+                        <button
+                          type="button"
+                          onClick={() => setSummaryExpanded(prev => !prev)}
+                          className="mt-1 text-xs font-semibold text-primary hover:underline"
+                        >
+                          {summaryExpanded ? t('graph.summaryCollapse') : t('graph.summaryExpand')}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Properties */}
                 {Object.keys(selected.properties).length > 0 && (
@@ -823,12 +903,15 @@ export default function GraphPage() {
                   <div>
                     <div className="section-label mb-1.5">{t('graph.sourceDocuments')} ({connectedDocs.length})</div>
                     <div className="space-y-0.5">
-                      {connectedDocs.map(n => (
-                        <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.document }} />
-                          <span className="truncate font-medium">{n.label}</span>
-                        </button>
-                      ))}
+                      {connectedDocs.map(n => {
+                        const compactLabel = compactText(n.label, 48);
+                        return (
+                          <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.document }} />
+                            <span className="truncate font-medium" title={compactLabel.fullText}>{compactLabel.text}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -838,13 +921,16 @@ export default function GraphPage() {
                   <div>
                     <div className="section-label mb-1.5">{t('graph.connectedEntities')} ({connectedEntities.length})</div>
                     <div className="space-y-0.5">
-                      {connectedEntities.slice(0, 15).map(n => (
-                        <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.entity }} />
-                          <span className="truncate">{n.label}</span>
-                          {n.edgeCount > 0 && <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{n.edgeCount}</span>}
-                        </button>
-                      ))}
+                      {connectedEntities.slice(0, 15).map(n => {
+                        const compactLabel = compactText(n.label, 48);
+                        return (
+                          <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.entity }} />
+                            <span className="truncate" title={compactLabel.fullText}>{compactLabel.text}</span>
+                            {n.edgeCount > 0 && <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{n.edgeCount}</span>}
+                          </button>
+                        );
+                      })}
                       {connectedEntities.length > 15 && <span className="text-xs text-muted-foreground pl-6">+{connectedEntities.length - 15} more</span>}
                     </div>
                   </div>
@@ -855,12 +941,15 @@ export default function GraphPage() {
                   <div>
                     <div className="section-label mb-1.5">{t('graph.connectedConcepts')} ({connectedConcepts.length})</div>
                     <div className="space-y-0.5">
-                      {connectedConcepts.slice(0, 10).map(n => (
-                        <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.concept }} />
-                          <span className="truncate">{n.label}</span>
-                        </button>
-                      ))}
+                      {connectedConcepts.slice(0, 10).map(n => {
+                        const compactLabel = compactText(n.label, 48);
+                        return (
+                          <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.concept }} />
+                            <span className="truncate" title={compactLabel.fullText}>{compactLabel.text}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 )}

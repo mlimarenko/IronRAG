@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
-import type { DocumentItem, DocumentReadiness } from '@/types';
+import type { DocumentItem } from '@/types';
 
 import { DocumentsInspectorPanel } from './DocumentsInspectorPanel';
 
@@ -27,14 +27,6 @@ function buildSelectedDoc(overrides: Partial<DocumentItem> = {}): DocumentItem {
     ...overrides,
   };
 }
-
-const readinessConfig: Record<DocumentReadiness, { label: string; cls: string }> = {
-  processing: { label: 'Processing', cls: 'status-processing' },
-  readable: { label: 'Readable', cls: 'status-warning' },
-  graph_sparse: { label: 'Graph Sparse', cls: 'status-warning' },
-  graph_ready: { label: 'Graph Ready', cls: 'status-ready' },
-  failed: { label: 'Failed', cls: 'status-failed' },
-};
 
 describe('DocumentsInspectorPanel', () => {
   let container: HTMLDivElement;
@@ -72,16 +64,10 @@ describe('DocumentsInspectorPanel', () => {
           locale="en"
           onEdit={noop}
           onRetry={noop}
-          readinessConfig={readinessConfig}
           selectedDoc={overrides?.selectedDoc ?? buildSelectedDoc()}
           selectionMode={false}
-          setAddLinkOpen={noop}
-          setCrawlMode={noop}
           setDeleteDocOpen={noop}
-          setMaxDepth={noop}
-          setMaxPages={noop}
           setReplaceFileOpen={noop}
-          setSeedUrl={noop}
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
@@ -162,16 +148,10 @@ describe('DocumentsInspectorPanel', () => {
           locale="en"
           onEdit={noop}
           onRetry={noop}
-          readinessConfig={readinessConfig}
           selectedDoc={buildSelectedDoc()}
           selectionMode={false}
-          setAddLinkOpen={noop}
-          setCrawlMode={noop}
           setDeleteDocOpen={noop}
-          setMaxDepth={noop}
-          setMaxPages={noop}
           setReplaceFileOpen={noop}
-          setSeedUrl={noop}
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,

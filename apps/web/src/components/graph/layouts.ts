@@ -56,6 +56,20 @@ function groupNodesByType(graph: Graph): GroupedNodes[] {
     });
 }
 
+/**
+ * The minimum visual gap between two adjacent nodes in any layout. All the
+ * scale-dependent maths keys off this constant so a tweak here re-tunes
+ * every layout consistently.
+ */
+const NODE_VISUAL_GAP = 6;
+
+/** How many nodes can comfortably sit on a single concentric ring at radius
+ *  R, given the global node gap. The ring's circumference is `2πR`, and we
+ *  reserve `NODE_VISUAL_GAP` of arc length per node. */
+function ringCapacity(radius: number): number {
+  return Math.max(8, Math.floor((2 * Math.PI * radius) / NODE_VISUAL_GAP));
+}
+
 function layoutNodesInSector(
   graph: Graph,
   nodes: string[],
@@ -102,9 +116,15 @@ function layoutSectors(graph: Graph): void {
   const usableAngle = 2 * Math.PI - groups.length * sectorGap;
   const weights = groups.map((group) => Math.sqrt(group.nodes.length + 2));
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const innerRadius = Math.max(10, Math.sqrt(graph.order) * 0.8);
-  const rowGap = Math.max(4.5, Math.sqrt(graph.order) * 0.18);
-  const arcGap = Math.max(3.2, rowGap * 0.9);
+  // Spacing GROWS with graph size — every quadratic step in `order` adds
+  // a linear step in physical separation, which keeps node density roughly
+  // constant on the canvas as the dataset grows. Without this the sector
+  // rows pack tighter and tighter, and on 5k+ nodes the inner sectors
+  // become an opaque smear of overlapping discs.
+  const orderRoot = Math.sqrt(graph.order);
+  const innerRadius = Math.max(20, orderRoot * 1.4);
+  const rowGap = Math.max(NODE_VISUAL_GAP * 1.6, orderRoot * 0.45);
+  const arcGap = Math.max(NODE_VISUAL_GAP * 1.3, rowGap * 0.85);
 
   let cursor = -Math.PI / 2;
 
@@ -121,15 +141,28 @@ function layoutBands(graph: Graph): void {
   if (graph.order === 0) return;
 
   const groups = groupNodesByType(graph);
-  const maxGroupSize = Math.max(...groups.map((group) => group.nodes.length));
-  const cell = Math.max(4.2, Math.min(7, 180 / Math.sqrt(graph.order)));
-  const rowGap = cell * 1.15;
+  // `cell` is the base unit of separation between adjacent nodes. It now
+  // grows with `sqrt(order)` instead of shrinking — the previous formula
+  // capped cell at 4.2 once the graph crossed ~750 nodes, which is exactly
+  // when the bands layout started to look like a solid color block. Sigma
+  // can pan/zoom freely, so there is no reason to compress the layout to
+  // fit a fixed canvas; aim for visual clarity instead.
+  const orderRoot = Math.sqrt(graph.order);
+  const cell = Math.max(NODE_VISUAL_GAP * 1.1, orderRoot * 0.32);
+  const rowGap = cell * 1.2;
   const columnGap = cell * 1.7;
-  const bandGap = cell * 2.4;
-  const baseColumns = Math.max(14, Math.min(72, Math.ceil(Math.sqrt(maxGroupSize) * 3.2)));
+  const bandGap = cell * 3.2;
+
+  // Width of each band is bounded so that even the largest group does not
+  // become an absurdly wide horizontal smear; instead it wraps onto more
+  // rows. Aspect ratio stays close to "comfortable strip", not "string".
+  const maxColumns = Math.max(20, Math.min(96, Math.ceil(orderRoot * 1.6)));
 
   const bandMeasurements = groups.map((group) => {
-    const columns = Math.min(baseColumns, Math.max(8, Math.ceil(Math.sqrt(group.nodes.length) * 2.6)));
+    const columns = Math.min(
+      maxColumns,
+      Math.max(10, Math.ceil(Math.sqrt(group.nodes.length) * 2.4)),
+    );
     const rows = Math.max(1, Math.ceil(group.nodes.length / columns));
     const bandHeight = rows * rowGap;
     return { group, columns, rows, bandHeight };
@@ -168,29 +201,53 @@ function layoutRings(graph: Graph): void {
   if (graph.order === 0) return;
 
   const groups = groupNodesByType(graph);
-  const typeCount = groups.length;
-  const baseRingGap = Math.max(12, Math.sqrt(graph.order) * 0.55);
-  const minArcGap = Math.max(2.4, baseRingGap * 0.48);
-  let currentRadius = Math.max(baseRingGap * 2, 6);
 
-  groups.forEach((group, ring) => {
-    const radiusForCount = (group.nodes.length * minArcGap) / (2 * Math.PI);
-    const ringGap =
-      ring === 0
-        ? baseRingGap * 2
-        : baseRingGap * (1 + ring / Math.max(1, typeCount - 1)) + Math.sqrt(currentRadius) * 0.7;
+  // Each concentric ring is placed at a uniform additive gap from the
+  // previous one. This keeps every ring visually distinct regardless of
+  // how many groups or nodes there are — the previous algorithm let the
+  // first big group set a huge `currentRadius` and then crammed every
+  // remaining group into a tiny annulus on top of it.
+  const ringGap = 28;
+  const innerRadius = 36;
 
-    currentRadius =
-      ring === 0
-        ? Math.max(baseRingGap * 2.5, radiusForCount)
-        : Math.max(radiusForCount, currentRadius + ringGap);
+  // Big groups (e.g. 4000 entities) cannot fit on a single ring without
+  // overlapping. Split them across multiple sub-rings so each sub-ring
+  // stays at a comfortable density. The capacity of a ring grows with its
+  // radius (more circumference = more nodes), so we figure out the radius
+  // first, then partition the group into chunks small enough to fit.
+  type RingPlan = { type: string; nodes: string[]; radius: number };
+  const ringPlans: RingPlan[] = [];
 
-    const angularOffset = ring * (Math.PI / Math.max(6, group.nodes.length));
+  let currentRadius = innerRadius;
+  groups.forEach((group) => {
+    let remaining = group.nodes.length;
+    let pointer = 0;
+    while (remaining > 0) {
+      const capacity = ringCapacity(currentRadius);
+      const taken = Math.min(remaining, capacity);
+      ringPlans.push({
+        type: group.type,
+        nodes: group.nodes.slice(pointer, pointer + taken),
+        radius: currentRadius,
+      });
+      pointer += taken;
+      remaining -= taken;
+      currentRadius += ringGap;
+    }
+  });
 
-    for (let index = 0; index < group.nodes.length; index += 1) {
-      const angle = (2 * Math.PI * index) / group.nodes.length + angularOffset;
-      graph.setNodeAttribute(group.nodes[index], 'x', Math.cos(angle) * currentRadius);
-      graph.setNodeAttribute(group.nodes[index], 'y', Math.sin(angle) * currentRadius);
+  ringPlans.forEach((plan, ringIndex) => {
+    // Stagger the angular start position per ring so neighbouring sub-rings
+    // do not align their nodes on the same radial spoke (looks like spokes
+    // instead of concentric circles).
+    const angularOffset = ringIndex * (Math.PI / 6);
+    const count = plan.nodes.length;
+    if (count === 0) return;
+    const step = (2 * Math.PI) / count;
+    for (let index = 0; index < count; index += 1) {
+      const angle = angularOffset + index * step;
+      graph.setNodeAttribute(plan.nodes[index], 'x', Math.cos(angle) * plan.radius);
+      graph.setNodeAttribute(plan.nodes[index], 'y', Math.sin(angle) * plan.radius);
     }
   });
 }

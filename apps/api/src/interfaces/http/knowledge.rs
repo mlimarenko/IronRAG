@@ -310,9 +310,8 @@ async fn get_graph_workbench(
         .cloned()
         .map(map_runtime_relation_to_graph_edge)
         .collect::<Vec<_>>();
-    let selected_node_id = selected_node_id
-        .filter(|node_id| nodes.iter().any(|node| node.id == *node_id))
-        .or_else(|| nodes.first().map(|node| node.id));
+    let selected_node_id =
+        selected_node_id.filter(|node_id| nodes.iter().any(|node| node.id == *node_id));
     let selected_node = match selected_node_id {
         Some(node_id) => {
             build_graph_node_detail(

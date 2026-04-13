@@ -130,9 +130,17 @@ pub(super) fn is_retryable_transport_error_text(message: &str) -> bool {
         || normalized.contains("error sending request")
 }
 
-pub(super) const fn transport_retry_delay(base_delay_ms: u64, attempt: usize) -> Duration {
-    let attempt = if attempt == 0 { 0 } else { attempt - 1 };
-    let shift = if attempt > 4 { 4 } else { attempt };
-    let multiplier = 1_u64 << shift;
-    Duration::from_millis(base_delay_ms.saturating_mul(multiplier))
+/// Fixed canonical backoff schedule for retryable LLM provider failures
+/// (timeouts, 4xx transient, 5xx). Each entry is the delay to wait *after*
+/// the N-th failed attempt before the next retry. After exhausting the
+/// schedule the caller surfaces the final error. Total worst-case backoff:
+/// 1 + 3 + 10 + 30 + 90 = 134 seconds across 5 retries, covering typical
+/// provider warm-up, rate-limit windows, and long transient outages.
+const TRANSPORT_RETRY_SCHEDULE_SECS: &[u64] = &[1, 3, 10, 30, 90];
+
+pub(super) fn transport_retry_delay(_base_delay_ms: u64, attempt: usize) -> Duration {
+    let idx = if attempt == 0 { 0 } else { attempt - 1 };
+    let idx = idx.min(TRANSPORT_RETRY_SCHEDULE_SECS.len() - 1);
+    Duration::from_secs(TRANSPORT_RETRY_SCHEDULE_SECS[idx])
 }
+

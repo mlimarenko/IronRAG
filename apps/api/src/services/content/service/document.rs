@@ -15,13 +15,17 @@ use crate::{
     interfaces::http::router_support::ApiError,
     services::content::source_access::{derive_content_source_file_name, describe_content_source},
     services::knowledge::service::PromoteKnowledgeDocumentCommand,
+    shared::extraction::document_summary::{
+        DocumentSummaryBlock, build_document_summary_from_blocks,
+    },
 };
 
 use super::{
     ContentService, PrefetchedDocumentSummaryData, ReconcileFailedIngestMutationCommand,
     map_document_pipeline_job, map_document_row, map_knowledge_chunk_row,
     map_knowledge_document_row, map_knowledge_revision_readiness, map_knowledge_revision_row,
-    map_mutation_row, map_structured_revision_row, map_web_page_provenance_row, segment_excerpt,
+    map_mutation_row, map_revision_row, map_structured_revision_row, map_web_page_provenance_row,
+    segment_excerpt,
 };
 
 impl ContentService {
@@ -354,7 +358,16 @@ impl ContentService {
             web_pages_by_result_revision_id.insert(page.0, page.1);
         }
 
-        Ok(self.build_document_summary_from_prefetched(
+        let document_summary = self
+            .resolve_document_summary_from_revision(
+                state,
+                document_row.document_id,
+                effective_readiness_row.as_ref().map(|revision| revision.revision_id),
+                content_head.and_then(|row| row.document_summary.as_deref()),
+            )
+            .await?;
+
+        let mut summary = self.build_document_summary_from_prefetched(
             state,
             document_row,
             content_head,
@@ -365,7 +378,53 @@ impl ContentService {
                 structured_revisions_by_revision_id,
                 web_pages_by_result_revision_id,
             },
-        ))
+        );
+        if let Some(head) = summary.head.as_mut() {
+            head.document_summary = document_summary;
+        }
+        Ok(summary)
+    }
+
+    async fn resolve_document_summary_from_revision(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+        revision_id: Option<Uuid>,
+        stored_summary: Option<&str>,
+    ) -> Result<Option<String>, ApiError> {
+        let stored_summary =
+            stored_summary.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        let Some(revision_id) = revision_id else {
+            return Ok(stored_summary);
+        };
+
+        let blocks = state
+            .arango_document_store
+            .list_structured_blocks_by_revision(revision_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if blocks.is_empty() {
+            return Ok(stored_summary);
+        }
+
+        let summary = build_document_summary_from_blocks(blocks.iter().map(|block| {
+            DocumentSummaryBlock { block_kind: &block.block_kind, text: &block.text }
+        }));
+        if summary.is_empty() {
+            return Ok(stored_summary);
+        }
+
+        if stored_summary.as_deref() != Some(summary.as_str()) {
+            content_repository::update_document_summary(
+                &state.persistence.postgres,
+                document_id,
+                &summary,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        }
+
+        Ok(Some(summary))
     }
 
     pub(super) async fn prefetch_document_summary_data(
@@ -611,7 +670,7 @@ impl ContentService {
             .begin()
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let _ = ingest_repository::cancel_queued_jobs_for_document_with_executor(
+        let _ = ingest_repository::cancel_jobs_for_document_with_executor(
             &mut *transaction,
             document_id,
         )
@@ -679,6 +738,173 @@ impl ContentService {
             document_state: document.document_state,
             created_at: document.created_at,
         })
+    }
+
+    /// Resolves the revision that retry should re-run against. Prefers the
+    /// currently-active revision (head pointer), but falls back to the latest
+    /// revision row when the head was never promoted — this is the common
+    /// shape for documents whose previous ingest crashed mid-pipeline before
+    /// `promote_document_head` ever fired. The revision row exists in
+    /// `content_revision` with a `storage_key`, the blob is in storage, but
+    /// `content_document_head.active_revision_id` is still `NULL`, so the
+    /// older retry path (`summary.active_revision`) would bail out and leave
+    /// the document permanently stuck.
+    ///
+    /// When the document has literally zero revisions (an orphan document
+    /// row left over from an even earlier crash that never persisted any
+    /// source bytes), this function force-finalizes the document — it marks
+    /// any inflight mutation as `failed`, flips queued/leased ingest jobs to
+    /// `canceled`, and reports a `BadRequest` with `unrecoverable_no_source`.
+    /// That moves the document from "needs attention" to "failed" so the
+    /// operator can see it in the failed bucket and decide whether to delete
+    /// it manually, instead of having it block retry forever with no way to
+    /// recover.
+    pub async fn resolve_reprocess_revision(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+    ) -> Result<ContentRevision, ApiError> {
+        let summary = self.get_document(state, document_id).await?;
+        if let Some(active) = summary.active_revision {
+            return Ok(active);
+        }
+        let rows = content_repository::list_revisions_by_document(
+            &state.persistence.postgres,
+            document_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if let Some(row) = rows.into_iter().next() {
+            return Ok(map_revision_row(row));
+        }
+        // Zero revisions: this document is orphan debris with nothing to
+        // recover from. Tombstone it (`document_state='deleted'`) so it
+        // leaves the active list, and report it as `NotFound` — by the time
+        // this function returns, the document is genuinely gone, and the
+        // batch handler should bucket it under `skipped_count` (already
+        // removed) instead of `failed_count`.
+        self.force_fail_unrecoverable_document(state, document_id).await?;
+        Err(ApiError::resource_not_found("document", document_id))
+    }
+
+    /// Permanently retires an orphan document that has no recoverable source.
+    /// Cancels any inflight ingest jobs, flips an inflight mutation to
+    /// `failed` (if any), and tombstones the document itself by setting
+    /// `document_state='deleted'`. The document then disappears from the
+    /// active list and stops jamming the retry loop. Idempotent — safe to
+    /// call repeatedly.
+    async fn force_fail_unrecoverable_document(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+    ) -> Result<(), ApiError> {
+        if let Err(error) = ingest_repository::cancel_jobs_for_document(
+            &state.persistence.postgres,
+            document_id,
+        )
+        .await
+        {
+            return Err(ApiError::internal_with_log(error, "internal"));
+        }
+        if let Some(head) = self.get_document_head(state, document_id).await?
+            && let Some(latest_mutation_id) = head.latest_mutation_id
+            && let Some(latest_mutation) = content_repository::get_mutation_by_id(
+                &state.persistence.postgres,
+                latest_mutation_id,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            && matches!(latest_mutation.mutation_state.as_str(), "accepted" | "running")
+        {
+            self.reconcile_failed_ingest_mutation(
+                state,
+                ReconcileFailedIngestMutationCommand {
+                    mutation_id: latest_mutation_id,
+                    failure_code: "unrecoverable_no_source".to_string(),
+                    failure_message:
+                        "document has no content_revision rows; nothing to ingest from"
+                            .to_string(),
+                },
+            )
+            .await?;
+        }
+        // Tombstone the document so it leaves the active listing. Without
+        // this the retry caller would see the same orphan back on the next
+        // page refresh and try again forever.
+        let _ = content_repository::update_document_state(
+            &state.persistence.postgres,
+            document_id,
+            "deleted",
+            Some(chrono::Utc::now()),
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(())
+    }
+
+    /// Force-aborts any ingest work still attached to `document_id` and
+    /// finalizes the latest mutation so a subsequent `admit_mutation` call
+    /// can proceed. Called from the retry path — a user-initiated retry is
+    /// an explicit "stop whatever was happening and start over", which the
+    /// automatic `reconcile_stale_inflight_mutation_if_terminal` refuses to
+    /// do because it only acts on jobs that reached a terminal failure state
+    /// on their own.
+    ///
+    /// Sequence:
+    /// 1. `cancel_jobs_for_document` — transitions every queued/leased
+    ///    `ingest_job` for this document to `queue_state='canceled'`. Queued
+    ///    rows are atomically terminal. Leased rows become a signal that the
+    ///    worker's heartbeat observer picks up within `≤15s`, aborting the
+    ///    pipeline cooperatively and finalizing the attempt as canceled.
+    /// 2. `reconcile_failed_ingest_mutation` — flips the stuck mutation
+    ///    (`accepted`/`running`) to `failed` with
+    ///    `failure_code='superseded_by_retry'`, updates mutation items and
+    ///    async operation, and re-promotes the document head. From this
+    ///    point `ensure_document_accepts_new_mutation` no longer blocks
+    ///    a fresh mutation on this document.
+    ///
+    /// Terminal mutations (`failed`, `canceled`, `applied`) are left alone.
+    pub async fn force_reset_inflight_for_retry(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+    ) -> Result<(), ApiError> {
+        if let Err(error) = ingest_repository::cancel_jobs_for_document(
+            &state.persistence.postgres,
+            document_id,
+        )
+        .await
+        {
+            return Err(ApiError::internal_with_log(error, "internal"));
+        }
+
+        let Some(head) = self.get_document_head(state, document_id).await? else {
+            return Ok(());
+        };
+        let Some(latest_mutation_id) = head.latest_mutation_id else {
+            return Ok(());
+        };
+        let Some(latest_mutation) =
+            content_repository::get_mutation_by_id(&state.persistence.postgres, latest_mutation_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        else {
+            return Ok(());
+        };
+        if !matches!(latest_mutation.mutation_state.as_str(), "accepted" | "running") {
+            return Ok(());
+        }
+
+        self.reconcile_failed_ingest_mutation(
+            state,
+            ReconcileFailedIngestMutationCommand {
+                mutation_id: latest_mutation_id,
+                failure_code: "superseded_by_retry".to_string(),
+                failure_message: "document retry requested by user while previous ingest was still inflight".to_string(),
+            },
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn ensure_document_accepts_new_mutation(

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.2 — 2026-04-13
+
+### Ingest resilience
+
+- Startup lease sweep (`reclaim_orphaned_leases_on_startup`) requeues orphan `leased` rows before the dispatcher claims anything, so a backend/worker restart no longer freezes in-flight docs. Steady-state reaper tightened to 15s interval / 60s stale threshold.
+- Dispatcher claim query now counts **all** `queue_state='leased'` rows against the global / workspace / library limits — the previous `heartbeat_at` freshness filter introduced a TOCTOU that let the per-library cap be bypassed, stacking parallel docs past the cgroup.
+- Cancel now reaches active leases. `cancel_jobs_for_document` flips both `ingest_job → canceled` and `ingest_attempt → canceled` in one CTE; the heartbeat loop polls `queue_state` and signals a `JobCancellationToken` that pipeline stages check between steps, so a cancel is observed in ≤15 s.
+- Retry unsticks stalled documents (`force_reset_inflight_for_retry`), falls back to the latest `content_revision` when the head promote never fired, and tombstones orphans with zero revisions. Web retries re-fetch the source URL via `WebIngestService::refetch_document_source`; uploaded docs reuse their stored source. Diff-aware chunk reuse is preserved across retries.
+
+### Worker memory footprint
+
+- Vision LLM image bytes moved instead of cloned (`describe_extracted_images` takes `Vec<ExtractedImage>` by value, drops each image after its call). `extraction_plan` is moved into `CanonicalExtractedContent` instead of deep-cloned. Per-chunk graph-extract uses `Arc<…>` for shared state and `try_fold` instead of `buffer_unordered + try_collect` so nothing accumulates across a document's chunk stream.
+- PDF extractor parses the `lopdf::Document` once (was twice), `drop`s it before vision phase, and caps images at 30 / 150 MB per doc. HTML extractor truncates the decoded source to 4 MB at a tag boundary before `scraper::Html::parse_document` so pathological Confluence exports can't blow the `html5ever` arena. Both paths warn but never reject a document.
+- Noisy third-party `tracing` crates (`scraper`, `html5ever`, `selectors`, `hyper`, `h2`, `reqwest`, `rustls`, `sqlx`, `mio`, `tower`, `tonic`, `tungstenite`) are clamped to `warn` in `telemetry::init` regardless of `IRONRAG_LOG_FILTER`, so `debug` no longer amplifies HTML parse events into gigabytes of log allocation.
+- `build_chunk_reuse_plan` stores `Arc<RuntimeGraphExtractionRecordRow>` in all three HashMaps so the diff-reuse path refcount-bumps instead of deep-cloning `raw_output_json` + `normalized_output_json` three times per doc.
+
+### Throughput & CPU
+
+- Per-library dispatcher ceiling raised to 16 with a **memory-aware throttle**: before each claim, `fill_available_job_slots` reads worker RSS and holds new claims when the process is over `ingestion_memory_soft_limit_mib`. The soft limit auto-resolves to 90 % of the detected cgroup (or `/proc/meminfo`) memory — any container size gets a sensible cap with zero manual tuning; an explicit positive value overrides.
+- Per-document graph-extract fan-out decoupled from the cross-doc limit via the new `ingestion_graph_extract_parallelism_per_doc` (default 8). Heavy docs get proper chunk parallelism without raising `per_library`.
+- LLM transport retries now follow a fixed `[1, 3, 10, 30, 90]` second schedule (5 retries, 134 s total) covering timeouts and the retryable 4xx/5xx set (408, 409, 425, 429, 500, 502, 503, 504, 520–524, 529). `llm_transport_retry_attempts` bumped 3 → 5 and `runtime_graph_extract_recovery_max_attempts` 2 → 4 so both layers have room to run.
+- Synchronous extractors (`extract_pdf`, `extract_docx`, `extract_tabular`, `extract_pptx`, `extract_html_main_content`) now run on `tokio::task::spawn_blocking`, freeing the async runtime for concurrent I/O. Postgres connection pool raised 20 → 64 so 16 parallel jobs don't contend on connections. Heartbeat loop now respects `ingestion_worker_heartbeat_interval_seconds` instead of using a hardcoded constant.
+
+### Vocabulary-aware graph extraction
+
+- New `list_observed_sub_type_hints` aggregates existing `metadata_json->>'sub_type'` values per `node_type` for the library + projection version. `build_graph_extraction_prompt_plan` renders them as a `sub_type_hints` section so the model converges on in-use vocabulary instead of inventing fresh near-duplicates.
+
+### Document status taxonomy (UI)
+
+- Canonical `DocumentStatus` with strict priority: `canceled` → `failed` → `ready` → `ready_no_graph` → `blocked` / `retrying` / `stalled` → `processing` → `queued`. Timer only ticks for in-flight states. `documentStatusSortRank` + `Finished` column give operators proper severity sort and completion time.
+- Filter pills rebuilt around four buckets: **All | In Progress | Needs Attention | Ready | Failed**. Retry toasts surface real outcomes with accurate skipped / failed counts; documents that no longer exist come back as `skipped` instead of `failed`. `queue_state='completed'` + `readiness='processing'` zombies are reclassified as `failed` with an explicit reason.
+- Inspector cleanup: dropped the legacy "Re-ingest from URL" button, summary truncated to 280 chars with a "Show full" toggle, `source_uri` shown for `web_page` docs instead of the `viewpage.action` basename.
+
+### Documentation
+
+- `docs/{en,ru}/PIPELINE.md` refreshed for the new parallelism model, memory-aware throttle, auto-resolved soft limit, LLM retry schedule, and updated lease thresholds.
+
 ## 0.2.1 — 2026-04-12
 
 - Fixed web snapshot persistence for long percent-encoded page and attachment URLs.

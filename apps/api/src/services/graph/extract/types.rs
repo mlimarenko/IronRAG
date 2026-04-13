@@ -21,6 +21,36 @@ pub struct GraphExtractionRequest {
     pub activated_by_attempt_id: Option<uuid::Uuid>,
     pub resume_hint: Option<GraphExtractionResumeHint>,
     pub library_extraction_prompt: Option<String>,
+    pub sub_type_hints: GraphExtractionSubTypeHints,
+}
+
+/// Vocabulary-aware extraction hint: observed `sub_type` values per `node_type`
+/// in the current library, used as a soft prompt anchor so the LLM converges on
+/// existing terms instead of inventing fresh near-duplicates each call.
+///
+/// Empty hints (no prior `sub_type`s observed) render as nothing in the prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphExtractionSubTypeHints {
+    pub by_node_type: Vec<GraphExtractionSubTypeHintGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphExtractionSubTypeHintGroup {
+    pub node_type: String,
+    pub entries: Vec<GraphExtractionSubTypeHintEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphExtractionSubTypeHintEntry {
+    pub sub_type: String,
+    pub occurrences: i64,
+}
+
+impl GraphExtractionSubTypeHints {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_node_type.iter().all(|group| group.entries.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

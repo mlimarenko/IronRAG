@@ -72,7 +72,7 @@ api:
   replicaCount: 2
   image:
     repository: pipingspace/ironrag-backend
-    tag: 0.2.0
+    tag: 0.2.2
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -94,7 +94,7 @@ worker:
   replicaCount: 2
   image:
     repository: pipingspace/ironrag-backend
-    tag: 0.2.0
+    tag: 0.2.2
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -116,7 +116,7 @@ web:
   replicaCount: 2
   image:
     repository: pipingspace/ironrag-frontend
-    tag: 0.2.0
+    tag: 0.2.2
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP

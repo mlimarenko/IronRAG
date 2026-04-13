@@ -149,10 +149,22 @@
       "canceled": "Canceled"
     },
     "readinessLabels": {
+      "queued": "Queued",
       "processing": "Processing",
       "readable": "No Graph Yet",
       "graph_sparse": "Graph Sparse",
       "graph_ready": "Graph Ready",
+      "failed": "Failed"
+    },
+    "statusLabels": {
+      "queued": "Queued",
+      "processing": "Processing",
+      "retrying": "Retrying",
+      "blocked": "Blocked",
+      "stalled": "Stalled",
+      "canceled": "Canceled",
+      "ready": "Ready",
+      "ready_no_graph": "No Graph",
       "failed": "Failed"
     }
   },
@@ -168,6 +180,7 @@
     "searchPlaceholder": "Search documents...",
     "all": "All",
     "inProgress": "In Progress",
+    "attention": "Needs Attention",
     "ready": "Ready",
     "sparseTab": "Graph Sparse",
     "failedTab": "Failed",
@@ -214,6 +227,9 @@
     "progress": "Progress",
     "actions": "Actions",
     "error": "Error",
+    "stalled": "Worker stalled",
+    "blocked": "Waiting for dependency",
+    "finished": "Finished",
     "notYetAvailable": "Not yet available",
     "processingEllipsis": "Processing...",
     "total": "total",
@@ -249,7 +265,6 @@
     "totalCost": "Total cost",
     "webIngestRuns": "Web Ingest Runs",
     "pages": "pages",
-    "reIngest": "Re-ingest from URL",
     "select": "Select",
     "cancelSelection": "Cancel",
     "nSelected": "{{count}} selected",
@@ -263,6 +278,10 @@
     "bulkCancelSuccess": "Cancelled processing for {{count}} documents",
     "bulkCancelFailed": "Bulk cancel failed",
     "bulkReprocessSuccess": "Reprocessing {{count}} documents",
+    "bulkReprocessPartial": "Reprocessing {{ok}} documents, {{failed}} could not be retried, {{skipped}} already removed: {{error}}",
+    "bulkReprocessAllFailed": "None of {{count}} documents could be retried: {{error}}",
+    "bulkReprocessSkipped": "Reprocessing {{ok}} documents; {{skipped}} were already removed (refresh to update)",
+    "bulkReprocessAllSkipped": "{{skipped}} documents were already removed; refresh to update the list",
     "bulkReprocessFailed": "Bulk reprocess failed",
     "bulkPartialSuccess": "{{successCount}} completed, {{failedCount}} failed",
     "uploadFailed": "Upload failed",
@@ -340,6 +359,7 @@
     },
     "failureMessages": {
       "generic": "Document processing failed.",
+      "completedWithoutReadable": "Ingest finished without producing readable content. The job was likely canceled or aborted before extraction completed. Retry to rerun, or delete the document.",
       "unknownCode": "Processing failed: {{code}}.",
       "byCode": {
         "canonical_pipeline_failed": "Document processing failed.",
@@ -401,6 +421,8 @@
     "connections": "connections",
     "connectedNodes": "Connected Nodes",
     "summary": "Summary",
+    "summaryExpand": "Show full summary",
+    "summaryCollapse": "Show less",
     "canonical": "Canonical",
     "convergence": "Convergence",
     "sourceDocuments": "Source Documents",

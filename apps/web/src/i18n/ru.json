@@ -149,10 +149,22 @@
       "canceled": "Отменено"
     },
     "readinessLabels": {
+      "queued": "В очереди",
       "processing": "В обработке",
       "readable": "Без графа",
       "graph_sparse": "Разрежено",
       "graph_ready": "Граф готов",
+      "failed": "Ошибка"
+    },
+    "statusLabels": {
+      "queued": "В очереди",
+      "processing": "В обработке",
+      "retrying": "Повтор",
+      "blocked": "Заблокировано",
+      "stalled": "Застряло",
+      "canceled": "Отменено",
+      "ready": "Готово",
+      "ready_no_graph": "Без графа",
       "failed": "Ошибка"
     }
   },
@@ -168,6 +180,7 @@
     "searchPlaceholder": "Поиск документов...",
     "all": "Все",
     "inProgress": "В обработке",
+    "attention": "Требуют внимания",
     "ready": "Готовые",
     "sparseTab": "Разреженные",
     "failedTab": "С ошибками",
@@ -213,6 +226,9 @@
     "progress": "Прогресс",
     "actions": "Действия",
     "error": "Ошибка",
+    "stalled": "Воркер застрял",
+    "blocked": "Ожидание зависимости",
+    "finished": "Завершено",
     "notYetAvailable": "Пока недоступно",
     "processingEllipsis": "Обработка...",
     "total": "всего",
@@ -249,7 +265,6 @@
     "totalCost": "Общая стоимость",
     "webIngestRuns": "Запуски веб-загрузки",
     "pages": "стр.",
-    "reIngest": "Повторить загрузку из URL",
     "select": "Выбрать",
     "cancelSelection": "Отмена",
     "nSelected": "{{count}} выбрано",
@@ -264,6 +279,10 @@
     "bulkCancelSuccess": "Обработка отменена для {{count}} документов",
     "bulkCancelFailed": "Массовая отмена не удалась",
     "bulkReprocessSuccess": "Повторная обработка {{count}} документов",
+    "bulkReprocessPartial": "Повторно запущено {{ok}}, не удалось {{failed}}, уже удалено {{skipped}}: {{error}}",
+    "bulkReprocessAllFailed": "Ни один из {{count}} документов не удалось перезапустить: {{error}}",
+    "bulkReprocessSkipped": "Повторно запущено {{ok}} документов; {{skipped}} уже удалены (обновите список)",
+    "bulkReprocessAllSkipped": "{{skipped}} документов уже удалены; обновите список",
     "bulkReprocessFailed": "Массовая повторная обработка не удалась",
     "uploadFailed": "Загрузка не удалась",
     "deleteFailed": "Не удалось удалить документ",
@@ -340,6 +359,7 @@
     },
     "failureMessages": {
       "generic": "Обработка документа завершилась ошибкой.",
+      "completedWithoutReadable": "Загрузка завершена, но читаемое содержимое не было создано. Скорее всего job был отменён или прерван до завершения извлечения. Нажмите Retry, чтобы запустить заново, или удалите документ.",
       "unknownCode": "Обработка завершилась ошибкой: {{code}}.",
       "byCode": {
         "canonical_pipeline_failed": "Обработка документа завершилась ошибкой.",
@@ -401,6 +421,8 @@
     "connections": "связей",
     "connectedNodes": "Связанные узлы",
     "summary": "Описание",
+    "summaryExpand": "Показать полностью",
+    "summaryCollapse": "Свернуть",
     "canonical": "Каноническое",
     "convergence": "Конвергенция",
     "sourceDocuments": "Исходные документы",

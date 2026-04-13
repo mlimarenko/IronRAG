@@ -12,6 +12,14 @@ use crate::shared::web::url_identity::normalize_absolute_url;
 
 const HTML_LINK_LIMIT: usize = 512;
 const HTML_CHARSET_SCAN_BYTES: usize = 4_096;
+/// Hard cap on the size of HTML we hand to `scraper::Html::parse_document`.
+/// The DOM arena built by `html5ever` is dense: a 20 MB HTML source with
+/// heavy inline markup or base64-encoded images can allocate 1.5–2 GB of
+/// nested `Node` structures and OOM-kill the worker. Above this cap we
+/// truncate the decoded source at a tag boundary, parse whatever fits, and
+/// warn. The pipeline still produces a usable extraction for any input size;
+/// only the tail of very large pages is dropped from graph extraction.
+const HTML_PARSE_SOFT_CAP_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct DecodedHtml {
@@ -25,7 +33,21 @@ pub fn extract_html_main_content(
     mime_type: Option<&str>,
 ) -> Result<ExtractionOutput> {
     let decoded = decode_html(file_bytes, mime_type);
-    let document = Html::parse_document(&decoded.content);
+    let original_len = decoded.content.len();
+    let (parse_source, truncated) = if original_len > HTML_PARSE_SOFT_CAP_BYTES {
+        let boundary = safe_html_truncation_boundary(&decoded.content, HTML_PARSE_SOFT_CAP_BYTES);
+        tracing::warn!(
+            stage = "html_extract",
+            original_bytes = original_len,
+            kept_bytes = boundary,
+            cap_bytes = HTML_PARSE_SOFT_CAP_BYTES,
+            "HTML source exceeds parse soft cap; truncating before DOM build to protect worker memory"
+        );
+        (&decoded.content[..boundary], true)
+    } else {
+        (decoded.content.as_str(), false)
+    };
+    let document = Html::parse_document(parse_source);
     let title = extract_title(&document);
     let content_root = select_content_root(&document);
     let root = content_root.unwrap_or_else(|| document.root_element());
@@ -44,6 +66,13 @@ pub fn extract_html_main_content(
     }
     if outbound_links.len() == HTML_LINK_LIMIT {
         warnings.push("outbound link collection reached the canonical limit".to_string());
+    }
+    if truncated {
+        warnings.push(format!(
+            "html source was truncated from {} to {} bytes before DOM parsing to stay within worker memory budget",
+            original_len,
+            parse_source.len(),
+        ));
     }
 
     Ok(ExtractionOutput {
@@ -112,6 +141,31 @@ pub fn payload_looks_like_html_document(text: &str) -> bool {
         || prefix.starts_with("<article")
         || prefix.contains("<html")
         || prefix.contains("<body")
+}
+
+/// Finds a safe byte index at or just before `target_bytes` that lands on a
+/// UTF-8 character boundary and, where possible, at a `<` tag boundary so the
+/// truncated fragment is still well-structured for the HTML parser to recover.
+fn safe_html_truncation_boundary(source: &str, target_bytes: usize) -> usize {
+    if source.len() <= target_bytes {
+        return source.len();
+    }
+    let mut boundary = target_bytes;
+    while boundary > 0 && !source.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    // Walk back up to 4 KiB looking for a `<` so we cut between elements
+    // rather than mid-attribute. Keeps the truncated fragment parse-friendly.
+    let window_start = boundary.saturating_sub(4096);
+    if let Some(offset) =
+        source[window_start..boundary].rfind('<').map(|rel| window_start + rel)
+    {
+        boundary = offset;
+        while boundary > 0 && !source.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+    }
+    boundary
 }
 
 fn decode_html(file_bytes: &[u8], mime_type: Option<&str>) -> DecodedHtml {

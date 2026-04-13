@@ -15,6 +15,10 @@ const TABLE_DETECTION_MIN_SPACES: usize = 3;
 const TABLE_MIN_ROWS: usize = 2;
 /// Minimum columns required to recognize a table.
 const TABLE_MIN_COLUMNS: usize = 2;
+/// Per-document cap on how many images we hand to the vision LLM.
+const MAX_EXTRACTED_IMAGES_PER_DOC: usize = 30;
+/// Per-document cap on total image byte footprint held in RAM.
+const MAX_EXTRACTED_IMAGE_BYTES_PER_DOC: usize = 150 * 1024 * 1024;
 
 #[derive(Debug)]
 struct PopplerPdfExtraction {
@@ -24,15 +28,21 @@ struct PopplerPdfExtraction {
 
 pub fn extract_pdf(file_bytes: &[u8]) -> Result<ExtractionOutput> {
     let mut warnings = Vec::new();
-    let (pages, page_numbers, page_count) = match Document::load_mem(file_bytes) {
-        Ok(document) => {
+    // Parse the PDF **once**: the `Document` holds the full object graph in
+    // memory (tens of MB for typical PDFs, 100+ MB for image-heavy Confluence
+    // exports). Previously this function did `Document::load_mem` twice — once
+    // for text extraction and once again for image extraction — doubling the
+    // resident footprint for the duration of extraction.
+    let loaded_document = Document::load_mem(file_bytes).ok();
+    let (pages, page_numbers, page_count) = match loaded_document.as_ref() {
+        Some(document) => {
             let pages = document.get_pages();
             let page_numbers = pages.keys().copied().collect::<Vec<_>>();
             let page_count = Some(u32::try_from(page_numbers.len()).unwrap_or(u32::MAX));
             if page_numbers.is_empty() {
                 (Vec::new(), Vec::new(), page_count)
             } else {
-                match extract_pdf_pages_with_lopdf(&document, &page_numbers) {
+                match extract_pdf_pages_with_lopdf(document, &page_numbers) {
                     Ok(extracted_pages) => (extracted_pages, page_numbers, page_count),
                     Err(primary_error) => {
                         let fallback = extract_pdf_with_poppler(file_bytes).with_context(|| {
@@ -48,34 +58,37 @@ pub fn extract_pdf(file_bytes: &[u8]) -> Result<ExtractionOutput> {
                 }
             }
         }
-        Err(load_error) => {
+        None => {
             let fallback = extract_pdf_with_poppler(file_bytes).with_context(|| {
-                format!(
-                    "failed to extract pdf text with lopdf and poppler fallback: {load_error:#}"
-                )
+                "failed to extract pdf text with lopdf and poppler fallback".to_string()
             })?;
             let page_numbers = fallback
                 .page_count
                 .map(|count| (1..=count).collect::<Vec<_>>())
                 .unwrap_or_default();
-            warnings.push(format!(
-                "lopdf could not parse the pdf structure; used pdftotext fallback ({load_error})"
-            ));
+            warnings.push(
+                "lopdf could not parse the pdf structure; used pdftotext fallback".to_string(),
+            );
             (fallback.pages, page_numbers, fallback.page_count)
         }
     };
     let pages = apply_table_heuristics(pages);
     let layout = build_text_layout(&pages);
 
-    let extracted_images = match Document::load_mem(file_bytes) {
-        Ok(document) => {
+    let extracted_images = match loaded_document {
+        Some(document) => {
             let images = extract_pdf_images(&document);
             if !images.is_empty() {
                 tracing::info!(count = images.len(), "extracted images from pdf");
             }
+            // Explicitly drop the `Document` so its in-memory object graph is
+            // freed *before* the caller hands `extracted_images` to the vision
+            // describer. Without this, both the PDF DOM and all image byte
+            // buffers stay resident through the entire vision phase.
+            drop(document);
             images
         }
-        Err(_) => Vec::new(),
+        None => Vec::new(),
     };
 
     Ok(ExtractionOutput {
@@ -192,17 +205,37 @@ fn extract_pdf_page_count_with_pdfinfo(pdf_path: &Path) -> Option<u32> {
 }
 
 /// Extracts embedded images from a PDF document by traversing page XObject resources.
+///
+/// Capped at `MAX_EXTRACTED_IMAGES_PER_DOC` images and
+/// `MAX_EXTRACTED_IMAGE_BYTES_PER_DOC` total bytes per document. Image-heavy
+/// Confluence/Swagger exports routinely have hundreds of embedded screenshots
+/// whose combined decompressed footprint blows past the worker cgroup limit
+/// and kills the process. The cap keeps peak memory bounded without
+/// meaningfully hurting RAG quality (the vision LLM already hits strong
+/// diminishing returns past ~30 images per document).
 fn extract_pdf_images(document: &Document) -> Vec<ExtractedImage> {
     let mut images = Vec::new();
+    let mut total_bytes: usize = 0;
     let pages = document.get_pages();
     let mut skipped_count: usize = 0;
+    let mut capped_by_count = false;
+    let mut capped_by_bytes = false;
 
-    for (&page_number, &page_id) in &pages {
+    'pages: for (&page_number, &page_id) in &pages {
+        if images.len() >= MAX_EXTRACTED_IMAGES_PER_DOC {
+            capped_by_count = true;
+            break 'pages;
+        }
+        if total_bytes >= MAX_EXTRACTED_IMAGE_BYTES_PER_DOC {
+            capped_by_bytes = true;
+            break 'pages;
+        }
         match extract_images_from_page(
             document,
             page_id,
             page_number,
             &mut images,
+            &mut total_bytes,
             &mut skipped_count,
         ) {
             Ok(()) => {}
@@ -212,10 +245,22 @@ fn extract_pdf_images(document: &Document) -> Vec<ExtractedImage> {
         }
     }
 
+    if capped_by_count || capped_by_bytes {
+        tracing::warn!(
+            stage = "pdf_images",
+            images_extracted = images.len(),
+            total_bytes,
+            capped_by_count,
+            capped_by_bytes,
+            "PDF image extraction hit per-document cap; remaining images skipped"
+        );
+    }
+
     tracing::info!(
         stage = "pdf_images",
         images_extracted = images.len(),
         images_skipped = skipped_count,
+        total_bytes,
         "PDF image extraction complete"
     );
 
@@ -227,6 +272,7 @@ fn extract_images_from_page(
     page_id: ObjectId,
     page_number: u32,
     images: &mut Vec<ExtractedImage>,
+    total_bytes: &mut usize,
     skipped_count: &mut usize,
 ) -> Result<()> {
     let page_obj = document.get_object(page_id).context("page object not found")?;
@@ -259,6 +305,11 @@ fn extract_images_from_page(
     };
 
     for (_name, xobj_ref) in xobjects.iter() {
+        if images.len() >= MAX_EXTRACTED_IMAGES_PER_DOC
+            || *total_bytes >= MAX_EXTRACTED_IMAGE_BYTES_PER_DOC
+        {
+            break;
+        }
         let resolved = match document.dereference(xobj_ref) {
             Ok((_, obj)) => obj,
             Err(_) => continue,
@@ -371,6 +422,7 @@ fn extract_images_from_page(
             }
         };
 
+        *total_bytes = total_bytes.saturating_add(image_bytes.len());
         images.push(ExtractedImage {
             page: usize::try_from(page_number).unwrap_or(0),
             image_bytes,

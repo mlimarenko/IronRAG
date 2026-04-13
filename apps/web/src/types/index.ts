@@ -33,6 +33,10 @@ export type AIPurpose =
 export type DocumentStatus =
   | "queued"
   | "processing"
+  | "retrying"
+  | "blocked"
+  | "stalled"
+  | "canceled"
   | "ready"
   | "ready_no_graph"
   | "failed";
@@ -60,8 +64,10 @@ export interface DocumentItem {
   readiness: DocumentReadiness;
   stage?: string;
   progressPercent?: number;
-  lastActivity?: string;
+  processingStartedAt?: string;
+  processingFinishedAt?: string;
   failureMessage?: string;
+  statusReason?: string;
   canRetry?: boolean;
   sourceKind?:
     | "upload"

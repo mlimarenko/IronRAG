@@ -427,29 +427,59 @@ pub async fn build_runtime_file_extraction_plan(
             Ok(build_plan_from_extraction(file_kind, output))
         }
         UploadFileKind::Pdf | UploadFileKind::Docx => {
-            let mut output = match file_kind {
-                UploadFileKind::Pdf => {
-                    extraction::pdf::extract_pdf(&file_bytes).map_err(|error| {
-                        FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
-                    })?
-                }
-                UploadFileKind::Docx => {
-                    extraction::docx::extract_docx(&file_bytes).map_err(|error| {
-                        FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
-                    })?
-                }
-                _ => unreachable!(),
-            };
+            // Run the synchronous parser on the tokio blocking pool so the
+            // async runtime's worker threads stay free for I/O during what
+            // is otherwise a pure-CPU stall. `extract_pdf` walks the lopdf
+            // object graph and `extract_docx` runs zip + xml decoding —
+            // both can easily hold a worker thread for hundreds of ms on a
+            // large document, which previously blocked concurrent ingest
+            // futures from making progress on their own LLM calls.
+            let mut output =
+                tokio::task::spawn_blocking(move || -> Result<ExtractionOutput, FileExtractError> {
+                    match file_kind {
+                        UploadFileKind::Pdf => extraction::pdf::extract_pdf(&file_bytes).map_err(
+                            |error| FileExtractError::ExtractionFailed {
+                                file_kind,
+                                message: error.to_string(),
+                            },
+                        ),
+                        UploadFileKind::Docx => extraction::docx::extract_docx(&file_bytes)
+                            .map_err(|error| FileExtractError::ExtractionFailed {
+                                file_kind,
+                                message: error.to_string(),
+                            }),
+                        _ => unreachable!(),
+                    }
+                })
+                .await
+                .map_err(|join_err| FileExtractError::ExtractionFailed {
+                    file_kind,
+                    message: format!("extraction task failed: {join_err}"),
+                })??;
 
             if let Some(vision_provider) = vision_provider {
                 if !output.extracted_images.is_empty() {
+                    // Move ownership of `extracted_images` into the vision
+                    // describer so it can drop each image's bytes the
+                    // moment they have been base64-encoded into a request.
+                    // The previous `&output.extracted_images` borrow forced
+                    // a `.clone()` per image (147 MB held in flight per
+                    // 294-image PDF, ×12 docs in parallel = ~1.8 GB just on
+                    // the in-flight clones), and on top of that the entire
+                    // `Vec<ExtractedImage>` was kept alive on `output` for
+                    // the rest of the document lifecycle (chunking, embed,
+                    // graph extract, finalize), inflating the worker's
+                    // resident set well beyond the 2 GB cgroup limit and
+                    // causing repeated OOM kills. After the describer
+                    // returns, the vec is empty and the bytes are gone.
+                    let images = std::mem::take(&mut output.extracted_images);
                     let result = describe_extracted_images(
                         gateway,
                         vision_provider.provider_kind.as_str(),
                         &vision_provider.model_name,
                         api_key.unwrap_or_default(),
                         base_url,
-                        &output.extracted_images,
+                        images,
                     )
                     .await;
                     append_image_descriptions_to_output(&mut output, &result.descriptions);
@@ -461,7 +491,27 @@ pub async fn build_runtime_file_extraction_plan(
 
             Ok(build_plan_from_extraction(file_kind, output))
         }
-        _ => build_local_file_extraction_plan(file_name, mime_type, &file_bytes),
+        _ => {
+            // Text / HTML / spreadsheet / pptx parsers are all synchronous
+            // and CPU-heavy (scraper DOM build, calamine sheet scan, zip +
+            // xml decode). Run them on the blocking pool so the async
+            // runtime's worker threads stay available for concurrent jobs'
+            // network I/O.
+            let file_name_owned = file_name.map(str::to_string);
+            let mime_type_owned = mime_type.map(str::to_string);
+            tokio::task::spawn_blocking(move || {
+                build_local_file_extraction_plan(
+                    file_name_owned.as_deref(),
+                    mime_type_owned.as_deref(),
+                    &file_bytes,
+                )
+            })
+            .await
+            .map_err(|join_err| FileExtractError::ExtractionFailed {
+                file_kind,
+                message: format!("extraction task failed: {join_err}"),
+            })?
+        }
     }
 }
 
@@ -507,20 +557,25 @@ pub struct ImageDescriptionResult {
     pub usage_json: serde_json::Value,
 }
 
-/// Sends extracted images to a Vision LLM for description.
-/// Images smaller than 50x50 pixels are skipped (icons/bullets).
+/// Sends extracted images to a Vision LLM for description. Takes the image
+/// vector by value and consumes it with `into_iter()` so that each image's
+/// `Vec<u8>` is dropped the moment its vision call returns, instead of being
+/// held in memory for the entire document lifecycle. Images smaller than
+/// 50x50 pixels are skipped (icons/bullets) without ever touching the LLM.
 pub async fn describe_extracted_images(
     gateway: &dyn LlmGateway,
     provider_kind: &str,
     model_name: &str,
     api_key: &str,
     base_url: Option<&str>,
-    images: &[ExtractedImage],
+    images: Vec<ExtractedImage>,
 ) -> ImageDescriptionResult {
-    let eligible: Vec<&ExtractedImage> = images
-        .iter()
+    let total_count = images.len();
+    let eligible: Vec<ExtractedImage> = images
+        .into_iter()
         .filter(|img| img.width >= MIN_IMAGE_DIMENSION && img.height >= MIN_IMAGE_DIMENSION)
         .collect();
+    let eligible_count = eligible.len();
 
     if eligible.is_empty() {
         return ImageDescriptionResult {
@@ -532,7 +587,7 @@ pub async fn describe_extracted_images(
     }
 
     tracing::info!(
-        total = images.len(),
+        total = total_count,
         eligible = eligible.len(),
         "describing extracted images with vision llm"
     );
@@ -541,13 +596,20 @@ pub async fn describe_extracted_images(
     let mut prompt_tokens_sum: i64 = 0;
     let mut completion_tokens_sum: i64 = 0;
     let mut total_tokens_sum: i64 = 0;
-    for (idx, image) in eligible.iter().enumerate() {
+    // `into_iter()` lets us *move* each `ExtractedImage` out of the vector
+    // one at a time. The vector's backing buffer is held until the loop
+    // finishes, but the individual `image_bytes: Vec<u8>` allocations are
+    // dropped at the end of each iteration body — so resident image-byte
+    // memory shrinks linearly through the loop instead of staying at peak
+    // for the entire document.
+    for (idx, image) in eligible.into_iter().enumerate() {
+        let page = image.page;
         let request = VisionRequest {
             provider_kind: provider_kind.to_string(),
             model_name: model_name.to_string(),
             prompt: IMAGE_DESCRIPTION_PROMPT.to_string(),
-            image_bytes: image.image_bytes.clone(),
-            mime_type: image.mime_type.clone(),
+            image_bytes: image.image_bytes,
+            mime_type: image.mime_type,
             api_key_override: Some(api_key.to_string()),
             base_url_override: base_url.map(str::to_string),
             system_prompt: None,
@@ -571,10 +633,7 @@ pub async fn describe_extracted_images(
                     total_tokens_sum += v;
                 }
                 if !response.output_text.trim().is_empty() {
-                    results.push(ImageDescriptionBlock {
-                        page: image.page,
-                        description: response.output_text,
-                    });
+                    results.push(ImageDescriptionBlock { page, description: response.output_text });
                 }
             }
             Err(error) => {
@@ -584,7 +643,7 @@ pub async fn describe_extracted_images(
     }
 
     let described_count = results.len();
-    let failed_count = eligible.len() - described_count;
+    let failed_count = eligible_count - described_count;
     tracing::info!(
         stage = "vision",
         images_described = described_count,

@@ -1,4 +1,11 @@
 import { apiFetch } from "./client";
+import type {
+  RawGraphDocumentLink,
+  RawKnowledgeDocument,
+  RawKnowledgeEntity,
+  RawKnowledgeRelation,
+} from "@/types/api-responses";
+import type { GraphStatus } from "@/types";
 
 /**
  * Knowledge endpoints return either a bare array or a paginated `{ items }`
@@ -20,7 +27,13 @@ export interface KnowledgeEntityDetailResponse {
 }
 
 export interface KnowledgeGraphTopologyResponse {
-  documentLinks?: Array<Record<string, unknown>>;
+  documents?: RawKnowledgeDocument[];
+  entities?: RawKnowledgeEntity[];
+  relations?: RawKnowledgeRelation[];
+  documentLinks?: RawGraphDocumentLink[];
+  status?: GraphStatus;
+  convergenceStatus?: string;
+  updatedAt?: string;
   [key: string]: unknown;
 }
 
@@ -37,14 +50,8 @@ export const knowledgeApi = {
     apiFetch<KnowledgeGraphWorkbenchResponse>(`/knowledge/libraries/${libraryId}/graph-workbench`),
   getGraphTopology: (libraryId: string) =>
     apiFetch<KnowledgeGraphTopologyResponse>(`/knowledge/libraries/${libraryId}/graph-topology`),
-  listEntities: (libraryId: string) =>
-    apiFetch<KnowledgeListResponse>(`/knowledge/libraries/${libraryId}/entities`),
   getEntity: (libraryId: string, entityId: string) =>
     apiFetch<KnowledgeEntityDetailResponse>(`/knowledge/libraries/${libraryId}/entities/${entityId}`),
-  listRelations: (libraryId: string) =>
-    apiFetch<KnowledgeListResponse>(`/knowledge/libraries/${libraryId}/relations`),
   getLibrarySummary: (libraryId: string) =>
     apiFetch<KnowledgeLibrarySummaryResponse>(`/knowledge/libraries/${libraryId}/summary`),
-  listDocuments: (libraryId: string) =>
-    apiFetch<KnowledgeListResponse>(`/knowledge/libraries/${libraryId}/documents`),
 };
