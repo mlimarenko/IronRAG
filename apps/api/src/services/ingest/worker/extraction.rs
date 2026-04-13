@@ -4,7 +4,10 @@ use crate::{
     app::state::AppState,
     infra::{arangodb::document_store::KnowledgeRevisionRow, repositories::ingest_repository},
     services::ingest::worker::{CanonicalExtractContentError, CanonicalExtractedContent},
-    shared::extraction::file_extract::build_inline_text_extraction_plan,
+    shared::extraction::{
+        document_summary::{DocumentSummaryBlock, build_document_summary_from_blocks},
+        file_extract::build_inline_text_extraction_plan,
+    },
 };
 
 fn canonical_revision_file_name(revision: &KnowledgeRevisionRow) -> String {
@@ -88,22 +91,32 @@ pub(super) async fn resolve_canonical_extract_content(
         )
         .await
         .map_err(|rejection| CanonicalExtractContentError::extraction_rejected(&rejection))?;
-    let text = plan.normalized_text.clone().unwrap_or_default();
+    // Build the per-stage details payload without cloning the plan: pull
+    // the small metadata fields by reference, derive the stage_details JSON,
+    // then move the entire `plan` (which still carries any leftover
+    // `extracted_images` plus `normalized_text`) into the result. Previously
+    // this branch did `plan.clone()` AND four small `.clone()`s on top —
+    // for a 294-image PDF the clone of `plan` doubled the in-flight image
+    // bytes (~147 MB → ~294 MB per document), and at library_limit=12 that
+    // alone added ~1.7 GB of resident memory on top of the per-document
+    // baseline.
+    let content_char_count = plan.normalized_text.as_deref().unwrap_or("").chars().count();
+    let stage_details = serde_json::json!({
+        "contentLength": content_char_count,
+        "fileKind": plan.file_kind.as_str(),
+        "warningCount": plan.extraction_warnings.len(),
+        "lineCount": plan.source_format_metadata.line_count,
+        "pageCount": plan.source_format_metadata.page_count,
+        "normalizationProfile": plan.normalization_profile,
+        "source": "content_storage",
+        "storageRef": storage_ref,
+    });
     Ok(CanonicalExtractedContent {
         provider_kind: plan.provider_kind.clone(),
         model_name: plan.model_name.clone(),
         usage_json: plan.usage_json.clone(),
-        extraction_plan: plan.clone(),
-        stage_details: serde_json::json!({
-            "contentLength": text.chars().count(),
-            "fileKind": plan.file_kind.as_str(),
-            "warningCount": plan.extraction_warnings.len(),
-            "lineCount": plan.source_format_metadata.line_count,
-            "pageCount": plan.source_format_metadata.page_count,
-            "normalizationProfile": plan.normalization_profile,
-            "source": "content_storage",
-            "storageRef": storage_ref,
-        }),
+        extraction_plan: plan,
+        stage_details,
     })
 }
 
@@ -121,34 +134,9 @@ pub(super) async fn generate_document_summary_from_blocks(
         return Ok(String::new());
     }
 
-    let mut parts = Vec::new();
-    let mut chars_used = 0_usize;
-    let max_summary_chars = 600;
-
-    for block in &blocks {
-        if chars_used >= max_summary_chars {
-            break;
-        }
-
-        let text = block.text.trim();
-        if text.is_empty() {
-            continue;
-        }
-
-        if text.len() < 10 && block.block_kind != "heading" {
-            continue;
-        }
-
-        let remaining = max_summary_chars.saturating_sub(chars_used);
-        let truncated = if text.len() > remaining {
-            &text[..text.floor_char_boundary(remaining)]
-        } else {
-            text
-        };
-
-        parts.push(truncated.to_string());
-        chars_used += truncated.len();
-    }
-
-    Ok(parts.join(" ").trim().to_string())
+    Ok(build_document_summary_from_blocks(
+        blocks
+            .iter()
+            .map(|block| DocumentSummaryBlock { block_kind: &block.block_kind, text: &block.text }),
+    ))
 }

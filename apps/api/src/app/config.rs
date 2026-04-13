@@ -142,16 +142,31 @@ pub struct Settings {
     pub content_storage_s3_secret_access_key: Option<String>,
     pub content_storage_s3_session_token: Option<String>,
     pub content_storage_s3_force_path_style: bool,
-    pub ingestion_worker_concurrency: usize,
+    pub ingestion_max_parallel_jobs_global: usize,
+    pub ingestion_max_parallel_jobs_per_workspace: usize,
+    pub ingestion_max_parallel_jobs_per_library: usize,
+    /// Soft RSS cap (MiB) the dispatcher watches before claiming a new job.
+    /// Set to `0` to auto-derive from the detected cgroup / host memory
+    /// ceiling (90%) via `shared::telemetry::resolve_memory_soft_limit_mib`
+    /// so any deployment size adapts without manual tuning. A positive
+    /// value overrides auto-detection for operators who need a hard-coded
+    /// floor. The static per-library parallelism limit is still the ceiling;
+    /// this throttle only drops concurrency *below* it under memory
+    /// pressure.
+    pub ingestion_memory_soft_limit_mib: u64,
     pub ingestion_worker_lease_seconds: u64,
     pub ingestion_worker_heartbeat_interval_seconds: u64,
-    /// Max concurrent ingest jobs per library (0 = unlimited).
-    /// Prevents one library starving others when many docs are queued at once.
-    pub ingestion_max_jobs_per_library: usize,
     /// Number of embedding batches sent in parallel within one job.
     /// Each batch contains EMBEDDING_BATCH_SIZE inputs. Higher values speed up
     /// long documents but may hit provider rate limits.
     pub ingestion_embedding_parallelism: usize,
+    /// Max concurrent per-chunk graph-extract LLM calls *within* a single
+    /// document. Previously tied to `ingestion_max_parallel_jobs_per_library`
+    /// (clamped 1..=8), which coupled two unrelated tuning knobs and starved
+    /// long docs when the library limit was small. Now decoupled so heavy
+    /// docs get proper chunk-level parallelism without pushing the cross-doc
+    /// limit up. The worker is rarely CPU-bound here, so 8 default is safe.
+    pub ingestion_graph_extract_parallelism_per_doc: usize,
     pub web_ingest_http_timeout_seconds: u64,
     pub web_ingest_max_redirects: usize,
     pub web_ingest_user_agent: String,
@@ -233,6 +248,7 @@ impl Settings {
         validate_content_storage_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
         validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
+        validate_ingestion_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_release_monitor_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
@@ -443,7 +459,7 @@ fn settings_config_builder()
         .set_default("service_name", "ironrag-backend")?
         .set_default("environment", "local")?
         .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/ironrag")?
-        .set_default("database_max_connections", 20)?
+        .set_default("database_max_connections", 64)?
         .set_default("redis_url", "redis://127.0.0.1:6379")?
         .set_default("arangodb_url", "http://127.0.0.1:8529")?
         .set_default("arangodb_database", "ironrag")?
@@ -476,18 +492,21 @@ fn settings_config_builder()
         .set_default("content_storage_root", "/var/lib/ironrag/content-storage")?
         .set_default("content_storage_s3_region", "us-east-1")?
         .set_default("content_storage_s3_force_path_style", true)?
-        .set_default("ingestion_worker_concurrency", 4)?
+        .set_default("ingestion_max_parallel_jobs_global", 512)?
+        .set_default("ingestion_max_parallel_jobs_per_workspace", 128)?
+        .set_default("ingestion_max_parallel_jobs_per_library", 16)?
+        .set_default("ingestion_memory_soft_limit_mib", 0)?
         .set_default("ingestion_worker_lease_seconds", 300)?
         .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
-        .set_default("ingestion_max_jobs_per_library", 0)?
         .set_default("ingestion_embedding_parallelism", 4)?
+        .set_default("ingestion_graph_extract_parallelism_per_doc", 8)?
         .set_default("web_ingest_http_timeout_seconds", 20)?
         .set_default("web_ingest_max_redirects", 10)?
         .set_default("web_ingest_user_agent", "IronRAG-WebIngest/0.1")?
         .set_default("web_ingest_crawl_concurrency", 4)?
         .set_default("llm_http_timeout_seconds", 120)?
-        .set_default("llm_transport_retry_attempts", 3)?
-        .set_default("llm_transport_retry_base_delay_ms", 250)?
+        .set_default("llm_transport_retry_attempts", 5)?
+        .set_default("llm_transport_retry_base_delay_ms", 500)?
         .set_default("runtime_agent_max_turns", 4)?
         .set_default("runtime_agent_max_parallel_actions", 4)?
         .set_default(
@@ -507,14 +526,23 @@ fn settings_config_builder()
         .set_default("query_rerank_candidate_limit", 24)?
         .set_default("query_balanced_context_enabled", true)?
         .set_default("runtime_graph_extract_recovery_enabled", true)?
-        .set_default("runtime_graph_extract_recovery_max_attempts", 2)?
+        .set_default("runtime_graph_extract_recovery_max_attempts", 4)?
         .set_default("runtime_graph_extract_resume_downgrade_level_one_after_replays", 3)?
         .set_default("runtime_graph_extract_resume_downgrade_level_two_after_replays", 5)?
         .set_default("runtime_graph_summary_refresh_batch_size", 64)?
         .set_default("runtime_graph_targeted_reconciliation_enabled", true)?
         .set_default("runtime_graph_targeted_reconciliation_max_targets", 128)?
-        .set_default("runtime_document_activity_freshness_seconds", 45)?
-        .set_default("runtime_document_stalled_after_seconds", 180)?
+        // Activity freshness window must be wider than the worker's heartbeat
+        // interval (`CANONICAL_HEARTBEAT_INTERVAL = 15s`) by a comfortable
+        // margin, otherwise the UI flips to "stalled" every time a heartbeat
+        // is briefly delayed by DB lock contention from many parallel
+        // attempts hitting `touch_attempt_heartbeat`. 90s = 6× heartbeat,
+        // matched to the dispatcher's `active_leases` freshness window so
+        // all three thresholds (worker heartbeat, dispatcher count, UI
+        // stalled flag) agree on the same definition of "this lease is
+        // alive".
+        .set_default("runtime_document_activity_freshness_seconds", 90)?
+        .set_default("runtime_document_stalled_after_seconds", 240)?
         .set_default("runtime_graph_filter_empty_relations", true)?
         .set_default("runtime_graph_filter_degenerate_self_loops", true)?
         .set_default("runtime_graph_convergence_warning_backlog_threshold", 1)?
@@ -683,6 +711,35 @@ fn validate_arangodb_settings(settings: &Settings) -> Result<(), String> {
     }
     if settings.arangodb_vector_index_training_iterations == 0 {
         return Err("arangodb_vector_index_training_iterations must be greater than zero".into());
+    }
+    Ok(())
+}
+
+fn validate_ingestion_settings(settings: &Settings) -> Result<(), String> {
+    if settings.ingestion_max_parallel_jobs_global == 0 {
+        return Err("ingestion_max_parallel_jobs_global must be greater than zero".into());
+    }
+    if settings.ingestion_max_parallel_jobs_per_workspace == 0 {
+        return Err("ingestion_max_parallel_jobs_per_workspace must be greater than zero".into());
+    }
+    if settings.ingestion_max_parallel_jobs_per_library == 0 {
+        return Err("ingestion_max_parallel_jobs_per_library must be greater than zero".into());
+    }
+    if settings.ingestion_max_parallel_jobs_per_workspace
+        > settings.ingestion_max_parallel_jobs_global
+    {
+        return Err(
+            "ingestion_max_parallel_jobs_per_workspace must be less than or equal to ingestion_max_parallel_jobs_global"
+                .into(),
+        );
+    }
+    if settings.ingestion_max_parallel_jobs_per_library
+        > settings.ingestion_max_parallel_jobs_per_workspace
+    {
+        return Err(
+            "ingestion_max_parallel_jobs_per_library must be less than or equal to ingestion_max_parallel_jobs_per_workspace"
+                .into(),
+        );
     }
     Ok(())
 }

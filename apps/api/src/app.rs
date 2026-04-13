@@ -68,7 +68,9 @@ pub async fn run() -> anyhow::Result<()> {
                 service_role = %config.service_role,
                 environment = %config.environment,
                 graph_backend,
-                worker_concurrency = config.ingestion_worker_concurrency.max(1),
+                ingestion_max_parallel_jobs_global = config.ingestion_max_parallel_jobs_global,
+                ingestion_max_parallel_jobs_per_workspace = config.ingestion_max_parallel_jobs_per_workspace,
+                ingestion_max_parallel_jobs_per_library = config.ingestion_max_parallel_jobs_per_library,
                 "starting ironrag worker service",
             );
             run_probe_http_api(&config, &state, graph_backend, shutdown.clone()).await

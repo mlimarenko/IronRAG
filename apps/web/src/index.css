@@ -168,6 +168,12 @@
     --status-sparse: 26 72% 48%;
     --status-sparse-bg: 26 60% 95%;
     --status-sparse-ring: 26 50% 84%;
+    --status-queued: 224 10% 48%;
+    --status-queued-bg: 224 14% 94%;
+    --status-queued-ring: 224 12% 82%;
+    --status-stalled: 14 78% 44%;
+    --status-stalled-bg: 14 70% 95%;
+    --status-stalled-ring: 14 60% 82%;
 
     /* Shell */
     --shell-bg: 225 32% 10%;
@@ -236,6 +242,10 @@
     --status-failed-ring: 0 45% 22%;
     --status-sparse-bg: 26 55% 9%;
     --status-sparse-ring: 26 40% 22%;
+    --status-queued-bg: 224 14% 10%;
+    --status-queued-ring: 224 14% 22%;
+    --status-stalled-bg: 14 60% 10%;
+    --status-stalled-ring: 14 50% 24%;
 
     --shell-bg: 225 32% 4%;
     --shell-foreground: 224 14% 88%;
@@ -667,6 +677,16 @@
     background: hsl(var(--status-sparse-bg));
     color: hsl(var(--status-sparse));
     box-shadow: inset 0 0 0 1px hsl(var(--status-sparse-ring) / 0.5), inset 0 1px 0 hsl(0 0% 100% / 0.2);
+  }
+  .status-queued {
+    background: hsl(var(--status-queued-bg));
+    color: hsl(var(--status-queued));
+    box-shadow: inset 0 0 0 1px hsl(var(--status-queued-ring) / 0.5), inset 0 1px 0 hsl(0 0% 100% / 0.2);
+  }
+  .status-stalled {
+    background: hsl(var(--status-stalled-bg));
+    color: hsl(var(--status-stalled));
+    box-shadow: inset 0 0 0 1px hsl(var(--status-stalled-ring) / 0.5), inset 0 1px 0 hsl(0 0% 100% / 0.2);
   }
 
   /* Shell nav items */

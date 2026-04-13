@@ -21,9 +21,13 @@ import type {
 } from '@/types/api-responses';
 import {
   PAGE_SIZE_OPTIONS,
+  buildDocumentStatusBadgeConfig,
+  documentStatusBucket,
+  documentStatusSortRank,
   formatDate,
   formatDocumentTypeLabel,
   formatSize,
+  getDocumentProcessingDurationMs,
   mapApiDocument,
   parsePage,
   parsePageSize,
@@ -38,6 +42,7 @@ import { DocumentsOverlays } from '@/pages/documents/DocumentsOverlays';
 import { DocumentEditorShell } from '@/pages/documents/editor/DocumentEditorShell';
 import { isEditorEditableSourceFormat } from '@/pages/documents/editor/editorSurfaceMode';
 import { useDocumentEditor } from '@/pages/documents/editor/useDocumentEditor';
+import { compactText } from '@/lib/compactText';
 
 export default function DocumentsPage() {
   const { t } = useTranslation();
@@ -102,6 +107,7 @@ export default function DocumentsPage() {
     graph_ready: { label: t('dashboard.readinessLabels.graph_ready'), cls: 'status-ready' },
     failed: { label: t('dashboard.readinessLabels.failed'), cls: 'status-failed' },
   };
+  const statusBadgeConfig = buildDocumentStatusBadgeConfig(t);
 
   const updateSearchParamState = useCallback((updates: Record<string, string | null>) => {
     const next = new URLSearchParams(searchParams);
@@ -484,8 +490,40 @@ export default function DocumentsPage() {
 
   const handleBulkReprocess = async () => {
     try {
-      await documentsApi.batchReprocess(Array.from(selectedIds));
-      toast.success(t('documents.bulkReprocessSuccess', { count: selectedCount }));
+      const response = await documentsApi.batchReprocess(Array.from(selectedIds));
+      const ok = response.reprocessedCount;
+      const failed = response.failedCount;
+      const skipped = response.skippedCount;
+      // Real failures (excluding "already removed" skips) get a destructive
+      // toast; skipped-only outcomes get a neutral info toast so they do not
+      // alarm the operator. Both are surfaced honestly with counts.
+      if (failed === 0 && skipped === 0) {
+        toast.success(t('documents.bulkReprocessSuccess', { count: ok }));
+      } else if (failed === 0 && skipped > 0) {
+        if (ok > 0) {
+          toast.success(t('documents.bulkReprocessSkipped', { ok, skipped }));
+        } else {
+          toast.info(t('documents.bulkReprocessAllSkipped', { skipped }));
+        }
+      } else if (ok === 0 && skipped === 0) {
+        const firstError = response.results.find(r => !r.success && !r.skipped)?.error;
+        toast.error(
+          t('documents.bulkReprocessAllFailed', {
+            count: failed,
+            error: firstError ?? '',
+          }),
+        );
+      } else {
+        const firstError = response.results.find(r => !r.success && !r.skipped)?.error;
+        toast.warning(
+          t('documents.bulkReprocessPartial', {
+            ok,
+            failed,
+            skipped,
+            error: firstError ?? '',
+          }),
+        );
+      }
       clearSelection();
       await fetchDocuments();
     } catch {
@@ -493,12 +531,12 @@ export default function DocumentsPage() {
     }
   };
 
+  const processingClockMs = Date.now();
+
   const filteredDocuments = documents.filter(d => {
     if (searchQuery && !d.fileName.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     if (readinessFilter && d.readiness !== readinessFilter) return false;
-    if (statusFilter === 'in_progress') return d.readiness === 'processing';
-    if (statusFilter === 'ready') return d.readiness === 'graph_ready' || d.readiness === 'readable' || d.readiness === 'graph_sparse';
-    if (statusFilter === 'failed') return d.readiness === 'failed';
+    if (statusFilter !== 'all') return documentStatusBucket(d.status) === statusFilter;
     return true;
   }).sort((a, b) => {
     const dir = sortDir === 'asc' ? 1 : -1;
@@ -506,9 +544,31 @@ export default function DocumentsPage() {
     if (sortField === 'fileSize') return (a.fileSize - b.fileSize) * dir;
     if (sortField === 'cost') return ((a.cost ?? 0) - (b.cost ?? 0)) * dir;
     if (sortField === 'time') {
-      const aTime = a.lastActivity && a.uploadedAt ? new Date(a.lastActivity).getTime() - new Date(a.uploadedAt).getTime() : 0;
-      const bTime = b.lastActivity && b.uploadedAt ? new Date(b.lastActivity).getTime() - new Date(b.uploadedAt).getTime() : 0;
+      const aTime = getDocumentProcessingDurationMs(a, processingClockMs) ?? 0;
+      const bTime = getDocumentProcessingDurationMs(b, processingClockMs) ?? 0;
       return (aTime - bTime) * dir;
+    }
+    if (sortField === 'finishedAt') {
+      // Documents that have not finished yet sort to the bottom in asc order
+      // (push "still running" out of the way), and to the top in desc order
+      // (most recent finishes at the top, then in-flight, then never-ran).
+      const aFinished = a.processingFinishedAt
+        ? new Date(a.processingFinishedAt).getTime()
+        : null;
+      const bFinished = b.processingFinishedAt
+        ? new Date(b.processingFinishedAt).getTime()
+        : null;
+      if (aFinished == null && bFinished == null) return 0;
+      if (aFinished == null) return 1; // null sinks regardless of direction
+      if (bFinished == null) return -1;
+      return (aFinished - bFinished) * dir;
+    }
+    if (sortField === 'status') {
+      const rankDelta = documentStatusSortRank(a.status) - documentStatusSortRank(b.status);
+      if (rankDelta !== 0) return rankDelta * dir;
+      // Tie-break inside the same status by upload time so the order is
+      // deterministic and not jittery between renders.
+      return (new Date(a.uploadedAt).getTime() - new Date(b.uploadedAt).getTime()) * dir;
     }
     return (new Date(a.uploadedAt).getTime() - new Date(b.uploadedAt).getTime()) * dir;
   });
@@ -547,11 +607,10 @@ export default function DocumentsPage() {
 
   const statCounts = {
     total: documents.length,
-    ready: documents.filter(d => d.readiness === 'graph_ready' || d.readiness === 'readable' || d.readiness === 'graph_sparse').length,
-    readable: documents.filter(d => d.readiness === 'readable').length,
-    graphSparse: documents.filter(d => d.readiness === 'graph_sparse').length,
-    processing: documents.filter(d => d.readiness === 'processing').length,
-    failed: documents.filter(d => d.readiness === 'failed').length,
+    inProgress: documents.filter(d => documentStatusBucket(d.status) === 'in_progress').length,
+    attention: documents.filter(d => documentStatusBucket(d.status) === 'attention').length,
+    ready: documents.filter(d => documentStatusBucket(d.status) === 'ready').length,
+    failed: documents.filter(d => documentStatusBucket(d.status) === 'failed').length,
   };
 
   const toggleSort = (field: string) => {
@@ -627,10 +686,18 @@ export default function DocumentsPage() {
             {
               key: 'in_progress',
               label: t('documents.inProgress'),
-              count: statCounts.processing,
+              count: statCounts.inProgress,
               icon: <Clock className="h-3 w-3 text-status-processing" />,
               active: statusFilter === 'in_progress',
               updates: { status: 'in_progress', readiness: null, documentId: null, page: null },
+            },
+            {
+              key: 'attention',
+              label: t('documents.attention'),
+              count: statCounts.attention,
+              icon: <AlertTriangle className="h-3 w-3 text-status-stalled" />,
+              active: statusFilter === 'attention',
+              updates: { status: 'attention', readiness: null, documentId: null, page: null },
             },
             {
               key: 'ready',
@@ -639,22 +706,6 @@ export default function DocumentsPage() {
               icon: <CheckCircle2 className="h-3 w-3 text-status-ready" />,
               active: statusFilter === 'ready',
               updates: { status: 'ready', readiness: null, documentId: null, page: null },
-            },
-            {
-              key: 'readable',
-              label: t('dashboard.readableNoGraph'),
-              count: statCounts.readable,
-              icon: <AlertTriangle className="h-3 w-3 text-status-warning" />,
-              active: readinessFilter === 'readable',
-              updates: { status: null, readiness: 'readable', documentId: null, page: null },
-            },
-            {
-              key: 'graph_sparse',
-              label: t('documents.sparseTab'),
-              count: statCounts.graphSparse,
-              icon: <AlertTriangle className="h-3 w-3 text-status-sparse" />,
-              active: readinessFilter === 'graph_sparse',
-              updates: { status: null, readiness: 'graph_sparse', documentId: null, page: null },
             },
             {
               key: 'failed',
@@ -792,6 +843,7 @@ export default function DocumentsPage() {
                         { key: 'uploadedAt', label: t('documents.uploaded') },
                         { key: 'cost', label: t('documents.cost') },
                         { key: 'time', label: t('documents.pipelineTime') },
+                        { key: 'finishedAt', label: t('documents.finished') },
                         { key: 'status', label: t('documents.status') },
                       ].map(col => (
                         <th key={col.key} className="px-4 py-3 section-label">
@@ -805,9 +857,17 @@ export default function DocumentsPage() {
                   </thead>
                   <tbody>
                     {pagedDocuments.map(doc => {
-                      const rc = readinessConfig[doc.readiness];
+                      const rc = statusBadgeConfig[doc.status];
                       const canEditDocument = editAvailability(doc);
                       const typeLabel = formatDocumentTypeLabel(doc.fileType, doc.sourceKind, t);
+                      // Tight char limits for the documents table — horizontal
+                      // space is at a premium with 8 columns (selection,
+                      // name, type, size, uploaded, cost, time, finished,
+                      // status). The full name is shown unabbreviated in the
+                      // inspector panel on the right when a row is selected.
+                      const fileNameLabel = compactText(doc.fileName, 28);
+                      const sourceUriLabel = compactText(doc.sourceUri, 36);
+                      const processingDurationMs = getDocumentProcessingDurationMs(doc, processingClockMs);
                       return (
                         <tr
                           key={doc.id}
@@ -834,9 +894,19 @@ export default function DocumentsPage() {
                                 {doc.sourceKind === 'web_page' ? <Globe className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" /> : <File className="h-3.5 w-3.5 text-muted-foreground" />}
                               </div>
                               <div className="min-w-0">
-                                <span className="truncate block max-w-[200px] font-semibold">{doc.fileName}</span>
+                                <span
+                                  className="truncate block max-w-[200px] font-semibold"
+                                  title={fileNameLabel.fullText}
+                                >
+                                  {fileNameLabel.text}
+                                </span>
                                 {doc.sourceKind === 'web_page' && doc.sourceUri && (
-                                  <span className="truncate block max-w-[200px] text-[10px] text-muted-foreground">{doc.sourceUri}</span>
+                                  <span
+                                    className="truncate block max-w-[200px] text-[10px] text-muted-foreground"
+                                    title={sourceUriLabel.fullText}
+                                  >
+                                    {sourceUriLabel.text}
+                                  </span>
                                 )}
                               </div>
                             </div>
@@ -845,6 +915,7 @@ export default function DocumentsPage() {
                             className={`px-4 py-3.5 text-muted-foreground text-[10px] font-bold tracking-widest ${
                               doc.sourceKind === 'web_page' ? '' : 'uppercase'
                             }`}
+                            title={typeLabel}
                           >
                             {typeLabel}
                           </td>
@@ -852,13 +923,20 @@ export default function DocumentsPage() {
                           <td className="px-4 py-3.5 text-muted-foreground text-xs">{formatDate(doc.uploadedAt, locale)}</td>
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">{doc.cost != null ? `$${doc.cost.toFixed(3)}` : '—'}</td>
                           <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
-                            {doc.lastActivity && doc.uploadedAt
-                              ? `${((new Date(doc.lastActivity).getTime() - new Date(doc.uploadedAt).getTime()) / 1000).toFixed(0)}s`
+                            {processingDurationMs != null
+                              ? `${Math.floor(processingDurationMs / 1000)}s`
+                              : '—'}
+                          </td>
+                          <td className="px-4 py-3.5 text-muted-foreground text-xs">
+                            {doc.processingFinishedAt
+                              ? formatDate(doc.processingFinishedAt, locale)
                               : '—'}
                           </td>
                           <td className="px-4 py-3.5">
                             <div className="flex items-center gap-2">
-                              <span className={`status-badge ${rc.cls}`}>{rc.label}</span>
+                              <span className={`status-badge ${rc.cls}`} title={doc.statusReason}>
+                                {rc.label}
+                              </span>
                               {doc.progressPercent != null && (
                                 <span className="text-xs text-muted-foreground tabular-nums font-medium">{doc.progressPercent}%</span>
                               )}
@@ -979,7 +1057,7 @@ export default function DocumentsPage() {
                       <span className={`status-badge ${run.runState === 'completed' ? 'status-ready' : run.runState === 'failed' ? 'status-failed' : 'status-processing'}`}>
                         {run.runState}
                       </span>
-                      <span className="truncate font-medium">{run.seedUrl}</span>
+                      <span className="truncate font-medium" title={run.seedUrl}>{run.seedUrl}</span>
                       <span className="text-muted-foreground shrink-0">
                         {run.mode === 'single_page' ? t('documents.singlePage') : run.mode === 'recursive_crawl' ? t('documents.recursiveCrawl') : run.mode}
                       </span>
@@ -1008,7 +1086,7 @@ export default function DocumentsPage() {
                               page.candidateState === 'failed' ? 'bg-red-500' :
                               page.candidateState === 'excluded' ? 'bg-yellow-500' : 'bg-gray-400'
                             }`} />
-                            <span className="truncate text-muted-foreground">{page.normalizedUrl ?? page.discoveredUrl ?? '?'}</span>
+                            <span className="truncate text-muted-foreground" title={page.normalizedUrl ?? page.discoveredUrl ?? '?'}>{page.normalizedUrl ?? page.discoveredUrl ?? '?'}</span>
                             <span className="text-[10px] text-muted-foreground shrink-0">{page.candidateState}</span>
                           </div>
                         ))}
@@ -1040,16 +1118,10 @@ export default function DocumentsPage() {
             inspectorFacts={inspectorFacts}
             inspectorSegments={inspectorSegments}
             lifecycle={inspectorLifecycle}
-            readinessConfig={readinessConfig}
             selectedDoc={selectedDoc}
             selectionMode={selectionMode}
-            setAddLinkOpen={setAddLinkOpen}
-            setCrawlMode={setCrawlMode}
             setDeleteDocOpen={setDeleteDocOpen}
-            setMaxDepth={setMaxDepth}
-            setMaxPages={setMaxPages}
             setReplaceFileOpen={setReplaceFileOpen}
-            setSeedUrl={setSeedUrl}
             updateSearchParamState={updateSearchParamState}
             onEdit={() => void documentEditor.openEditor(selectedDoc)}
             onRetry={handleRetry}

@@ -1,6 +1,7 @@
 use super::types::{
     GraphExtractionPromptPlan, GraphExtractionPromptVariant, GraphExtractionRequest,
-    GraphExtractionStructuredChunkContext, GraphExtractionTechnicalFact,
+    GraphExtractionStructuredChunkContext, GraphExtractionSubTypeHints,
+    GraphExtractionTechnicalFact,
 };
 
 pub(crate) const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v6";
@@ -164,6 +165,9 @@ Critical rules:\n\
             sections.push(("library_context".to_string(), trimmed.to_string()));
         }
     }
+    if let Some(rendered) = render_sub_type_hints(&request.sub_type_hints) {
+        sections.push(("sub_type_hints".to_string(), rendered));
+    }
     sections.push((
         "structured_chunk".to_string(),
         render_structured_chunk_context(&request.structured_chunk),
@@ -284,6 +288,34 @@ fn segment_chunk_text_for_prompt(
         format!("Prepared chunk text segment 2/{segment_count}:\n{middle}"),
         format!("Prepared chunk text segment 3/{segment_count}:\n{tail}"),
     ]
+}
+
+fn render_sub_type_hints(hints: &GraphExtractionSubTypeHints) -> Option<String> {
+    if hints.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(hints.by_node_type.len() + 2);
+    lines.push(
+        "Observed sub_types in this library (prefer one of these if it fits an extracted entity; \
+         create a new sub_type only if none of these match):"
+            .to_string(),
+    );
+    for group in &hints.by_node_type {
+        if group.entries.is_empty() {
+            continue;
+        }
+        let entries = group
+            .entries
+            .iter()
+            .map(|entry| format!("{} ({})", entry.sub_type, entry.occurrences))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("- {}: {}", group.node_type, entries));
+    }
+    if lines.len() <= 1 {
+        return None;
+    }
+    Some(lines.join("\n"))
 }
 
 fn render_structured_chunk_context(context: &GraphExtractionStructuredChunkContext) -> String {

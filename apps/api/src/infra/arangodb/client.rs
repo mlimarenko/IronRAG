@@ -450,19 +450,103 @@ impl ArangoClient {
             "query": query,
             "bindVars": bind_vars,
         });
-        let response = self.request(Method::POST, "_api/cursor").json(&body).send().await?;
+        let mut cursor =
+            self.send_cursor_request(Method::POST, "_api/cursor", Some(&body), "AQL query").await?;
+        let mut merged_rows = take_cursor_result_rows(&mut cursor)?;
+        if cursor.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            || merged_rows.len() >= 1000
+        {
+            tracing::info!(
+                query_prefix = %query.chars().take(96).collect::<String>(),
+                initial_rows = merged_rows.len(),
+                has_more = cursor.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                cursor_id = cursor.get("id").and_then(serde_json::Value::as_str).unwrap_or("-"),
+                "arangodb cursor received initial batch"
+            );
+        }
+
+        while cursor.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+            let cursor_id = cursor
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .context("ArangoDB cursor reported hasMore=true without an id")?
+                .to_string();
+            let mut next_cursor = self
+                .send_cursor_request(
+                    Method::PUT,
+                    &format!("_api/cursor/{cursor_id}"),
+                    None,
+                    "ArangoDB cursor continuation",
+                )
+                .await?;
+            let next_rows = take_cursor_result_rows(&mut next_cursor)?;
+            tracing::info!(
+                query_prefix = %query.chars().take(96).collect::<String>(),
+                cursor_id = %cursor_id,
+                batch_rows = next_rows.len(),
+                has_more = next_cursor.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "arangodb cursor fetched continuation batch"
+            );
+            merged_rows.extend(next_rows);
+            if let Some(extra) = next_cursor.get("extra").cloned() {
+                cursor["extra"] = extra;
+            }
+            if let Some(count) = next_cursor.get("count").cloned() {
+                cursor["count"] = count;
+            }
+            cursor["hasMore"] =
+                next_cursor.get("hasMore").cloned().unwrap_or(serde_json::Value::Bool(false));
+            if let Some(id) = next_cursor.get("id").cloned() {
+                cursor["id"] = id;
+            } else if let Some(object) = cursor.as_object_mut() {
+                object.remove("id");
+            }
+        }
+
+        cursor["result"] = serde_json::Value::Array(merged_rows);
+        cursor["hasMore"] = serde_json::Value::Bool(false);
+        if let Some(object) = cursor.as_object_mut() {
+            object.remove("id");
+        }
+        if cursor
+            .get("result")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| rows.len() >= 1000)
+        {
+            tracing::info!(
+                query_prefix = %query.chars().take(96).collect::<String>(),
+                merged_rows = cursor
+                    .get("result")
+                    .and_then(serde_json::Value::as_array)
+                    .map_or(0, std::vec::Vec::len),
+                "arangodb cursor merged final result"
+            );
+        }
+        Ok(cursor)
+    }
+
+    async fn send_cursor_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        operation: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self.request(method, path);
+        let request = if let Some(payload) = body { request.json(payload) } else { request };
+        let response = request.send().await?;
         if !response.status().is_success() {
             let status = response.status();
             let response_body = response
                 .text()
                 .await
                 .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
-            return Err(anyhow!("AQL query failed with status {status}, body {response_body}"));
+            return Err(anyhow!("{operation} failed with status {status}, body {response_body}"));
         }
         response
             .json::<serde_json::Value>()
             .await
-            .context("failed to decode ArangoDB cursor response")
+            .with_context(|| format!("failed to decode {operation} response"))
     }
 
     async fn index_exists(&self, collection: &str, index_name: &str) -> anyhow::Result<bool> {
@@ -680,11 +764,115 @@ fn field_link_matches(
     })
 }
 
+fn take_cursor_result_rows(
+    cursor: &mut serde_json::Value,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let result =
+        cursor.get_mut("result").context("ArangoDB cursor payload missing result field")?;
+    let rows =
+        result.as_array_mut().context("ArangoDB cursor payload result field is not an array")?;
+    Ok(std::mem::take(rows))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        ArangoIndexRow, persistent_index_definition_matches, view_links_semantically_match,
+    use std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
+
+    use anyhow::Context;
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        routing::{post, put},
+    };
+    use reqwest::Client;
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    use super::{
+        ArangoClient, ArangoIndexRow, persistent_index_definition_matches,
+        view_links_semantically_match,
+    };
+
+    async fn create_cursor(State(requests): State<Arc<AtomicUsize>>) -> Json<serde_json::Value> {
+        requests.fetch_add(1, Ordering::SeqCst);
+        Json(json!({
+            "result": (1..=1000).map(|value| json!({ "value": value })).collect::<Vec<_>>(),
+            "hasMore": true,
+            "id": "cursor-1",
+            "extra": { "stats": { "writesExecuted": 0 } }
+        }))
+    }
+
+    async fn continue_cursor(
+        Path(cursor_id): Path<String>,
+        State(requests): State<Arc<AtomicUsize>>,
+    ) -> Json<serde_json::Value> {
+        requests.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(cursor_id, "cursor-1");
+        Json(json!({
+            "result": [{ "value": 1001 }, { "value": 1002 }],
+            "hasMore": false
+        }))
+    }
+
+    async fn spawn_cursor_server() -> anyhow::Result<(SocketAddr, Arc<AtomicUsize>)> {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/_db/testdb/_api/cursor", post(create_cursor))
+            .route("/_db/testdb/_api/cursor/{cursor_id}", put(continue_cursor))
+            .with_state(Arc::clone(&requests));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((address, requests))
+    }
+
+    #[tokio::test]
+    async fn query_json_merges_all_cursor_batches() -> anyhow::Result<()> {
+        let (address, requests) = spawn_cursor_server().await?;
+        let client = ArangoClient {
+            http: Client::builder().build()?,
+            base_url: format!("http://{address}"),
+            database: "testdb".to_string(),
+            username: "user".to_string(),
+            password: "password".to_string(),
+        };
+
+        let payload = client.query_json("FOR doc IN docs RETURN doc", json!({})).await?;
+        let rows = payload
+            .get("result")
+            .and_then(serde_json::Value::as_array)
+            .context("result array missing from merged cursor payload")?;
+
+        assert_eq!(rows.len(), 1002);
+        assert_eq!(
+            rows.first().and_then(|row| row.get("value")).and_then(serde_json::Value::as_i64),
+            Some(1),
+        );
+        assert_eq!(
+            rows.last().and_then(|row| row.get("value")).and_then(serde_json::Value::as_i64),
+            Some(1002),
+        );
+        assert_eq!(payload.get("hasMore").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            payload
+                .get("extra")
+                .and_then(|extra| extra.get("stats"))
+                .and_then(|stats| stats.get("writesExecuted"))
+                .and_then(serde_json::Value::as_i64),
+            Some(0),
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
 
     #[test]
     fn persistent_index_definition_requires_exact_match() {

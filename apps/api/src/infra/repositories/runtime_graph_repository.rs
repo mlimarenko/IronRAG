@@ -96,6 +96,13 @@ pub struct RuntimeGraphDocumentLinkRow {
     pub support_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeGraphSubTypeHintRow {
+    pub node_type: String,
+    pub sub_type: String,
+    pub occurrences: i64,
+}
+
 fn runtime_graph_evidence_identity_key(
     target_kind: &str,
     target_id: Uuid,
@@ -405,6 +412,39 @@ pub async fn list_runtime_graph_nodes_by_library(
          from runtime_graph_node
          where library_id = $1 and projection_version = $2
          order by node_type asc, label asc, created_at asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Aggregates observed `sub_type` values per `node_type` for one library at a
+/// given projection version. Drives vocabulary-aware extraction: the returned
+/// rows feed the `sub_type_hints` prompt section so the LLM converges on terms
+/// already present in the graph instead of inventing fresh near-duplicates.
+///
+/// Rows are ordered by `node_type asc, occurrences desc, sub_type asc`. The
+/// caller (typically `revision.rs`) trims to top-N per `node_type`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while running the aggregation.
+pub async fn list_observed_sub_type_hints(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphSubTypeHintRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphSubTypeHintRow>(
+        "select node_type,
+                metadata_json->>'sub_type' as sub_type,
+                count(*)::bigint as occurrences
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and metadata_json ? 'sub_type'
+           and length(metadata_json->>'sub_type') > 0
+         group by node_type, metadata_json->>'sub_type'
+         order by node_type asc, occurrences desc, sub_type asc",
     )
     .bind(library_id)
     .bind(projection_version)

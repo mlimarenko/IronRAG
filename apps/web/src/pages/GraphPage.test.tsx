@@ -67,28 +67,28 @@ describe('GraphPage', () => {
       locale: 'en',
     });
 
-    knowledgeApiMock.listEntities.mockResolvedValue([
-      {
-        entityId: 'entity-1',
-        canonicalLabel: 'Pipeline Stage',
-        entityType: 'concept',
-        supportCount: 2,
-      },
-    ]);
-    knowledgeApiMock.listRelations.mockResolvedValue([]);
-    knowledgeApiMock.listDocuments.mockResolvedValue([
-      {
-        document_id: 'doc-1',
-        title: 'data_pipeline.py',
-        document_state: 'graph_ready',
-      },
-      {
-        document_id: 'doc-2',
-        title: 'etl_service.py',
-        document_state: 'graph_ready',
-      },
-    ]);
     knowledgeApiMock.getGraphTopology.mockResolvedValue({
+      entities: [
+        {
+          entityId: 'entity-1',
+          canonicalLabel: 'Pipeline Stage',
+          entityType: 'concept',
+          supportCount: 2,
+        },
+      ],
+      relations: [],
+      documents: [
+        {
+          document_id: 'doc-1',
+          title: 'data_pipeline.py',
+          document_state: 'graph_ready',
+        },
+        {
+          document_id: 'doc-2',
+          title: 'etl_service.py',
+          document_state: 'graph_ready',
+        },
+      ],
       documentLinks: [
         { documentId: 'doc-1', targetNodeId: 'entity-1', supportCount: 1 },
         { documentId: 'doc-2', targetNodeId: 'entity-1', supportCount: 1 },
@@ -171,6 +171,7 @@ describe('GraphPage', () => {
     const searchInput = container.querySelector('input') as HTMLInputElement | null;
 
     expect(searchInput).toBeTruthy();
+    expect(knowledgeApiMock.getGraphTopology).toHaveBeenCalledTimes(1);
     expect(visibleNodeCount()).toBe('3');
 
     const documentNodeButton = findButton('data_pipeline.py');
@@ -203,18 +204,20 @@ describe('GraphPage', () => {
   });
 
   it('expands and collapses overflowing subtype groups with explicit controls', async () => {
-    knowledgeApiMock.listEntities.mockResolvedValue([
-      ...Array.from({ length: 14 }, (_, index) => ({
-        entityId: `artifact-${index + 1}`,
-        canonicalLabel: `Artifact ${index + 1}`,
-        entityType: 'artifact',
-        entitySubType: `artifact_sub_${index + 1}`,
-        supportCount: 1,
-      })),
-    ]);
-    knowledgeApiMock.listDocuments.mockResolvedValue([]);
-    knowledgeApiMock.listRelations.mockResolvedValue([]);
-    knowledgeApiMock.getGraphTopology.mockResolvedValue({ documentLinks: [] });
+    knowledgeApiMock.getGraphTopology.mockResolvedValue({
+      entities: [
+        ...Array.from({ length: 14 }, (_, index) => ({
+          entityId: `artifact-${index + 1}`,
+          canonicalLabel: `Artifact ${index + 1}`,
+          entityType: 'artifact',
+          entitySubType: `artifact_sub_${index + 1}`,
+          supportCount: 1,
+        })),
+      ],
+      relations: [],
+      documents: [],
+      documentLinks: [],
+    });
 
     await renderPage();
 
@@ -300,35 +303,35 @@ describe('GraphPage', () => {
   });
 
   it('shows and filters the no-sub-type legend bucket only when the type also has real sub-types', async () => {
-    knowledgeApiMock.listEntities.mockResolvedValue([
-      {
-        entityId: 'entity-1',
-        canonicalLabel: 'Pipeline Stage',
-        entityType: 'concept',
-        entitySubType: 'pipeline_stage',
-        supportCount: 1,
-      },
-      {
-        entityId: 'entity-2',
-        canonicalLabel: 'Untyped Concept',
-        entityType: 'concept',
-        supportCount: 1,
-      },
-    ]);
-    knowledgeApiMock.listDocuments.mockResolvedValue([
-      {
-        document_id: 'doc-1',
-        title: 'data_pipeline.py',
-        document_state: 'graph_ready',
-      },
-      {
-        document_id: 'doc-2',
-        title: 'etl_service.py',
-        document_state: 'graph_ready',
-      },
-    ]);
-    knowledgeApiMock.listRelations.mockResolvedValue([]);
     knowledgeApiMock.getGraphTopology.mockResolvedValue({
+      entities: [
+        {
+          entityId: 'entity-1',
+          canonicalLabel: 'Pipeline Stage',
+          entityType: 'concept',
+          entitySubType: 'pipeline_stage',
+          supportCount: 1,
+        },
+        {
+          entityId: 'entity-2',
+          canonicalLabel: 'Untyped Concept',
+          entityType: 'concept',
+          supportCount: 1,
+        },
+      ],
+      relations: [],
+      documents: [
+        {
+          document_id: 'doc-1',
+          title: 'data_pipeline.py',
+          document_state: 'graph_ready',
+        },
+        {
+          document_id: 'doc-2',
+          title: 'etl_service.py',
+          document_state: 'graph_ready',
+        },
+      ],
       documentLinks: [],
     });
 

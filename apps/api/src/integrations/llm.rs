@@ -1250,10 +1250,14 @@ mod tests {
     }
 
     #[test]
-    fn transport_retry_delay_is_bounded_backoff() {
-        assert_eq!(transport_retry_delay(250, 1), Duration::from_millis(250));
-        assert_eq!(transport_retry_delay(250, 2), Duration::from_millis(500));
-        assert_eq!(transport_retry_delay(250, 5), Duration::from_millis(4000));
+    fn transport_retry_delay_follows_fixed_schedule() {
+        assert_eq!(transport_retry_delay(0, 1), Duration::from_secs(1));
+        assert_eq!(transport_retry_delay(0, 2), Duration::from_secs(3));
+        assert_eq!(transport_retry_delay(0, 3), Duration::from_secs(10));
+        assert_eq!(transport_retry_delay(0, 4), Duration::from_secs(30));
+        assert_eq!(transport_retry_delay(0, 5), Duration::from_secs(90));
+        // Past-end saturates to the last step rather than looping.
+        assert_eq!(transport_retry_delay(0, 99), Duration::from_secs(90));
     }
 
     #[test]

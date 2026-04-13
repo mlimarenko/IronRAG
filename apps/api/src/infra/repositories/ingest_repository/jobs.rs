@@ -546,22 +546,44 @@ pub async fn update_ingest_job(
 pub async fn claim_next_queued_ingest_job(
     postgres: &PgPool,
     max_jobs_per_library: i64,
+    max_jobs_per_workspace: i64,
+    max_jobs_global: i64,
 ) -> Result<Option<IngestJobRow>, sqlx::Error> {
+    // The dispatcher counts ALL leased jobs against the limits. Previously
+    // the CTE filtered on `heartbeat_at > now() - 90s` to exclude zombie
+    // leases from crashed workers, which introduced a TOCTOU bug: between
+    // the moment a fresh claim sets `queue_state='leased'` and the moment
+    // the per-attempt row is inserted with `heartbeat_at=now()`, the next
+    // concurrent claim query sees zero "active" leases for that library
+    // and bypasses the per-library cap entirely. With the worker claiming
+    // slots in a tight loop, all slots filled before any attempt heartbeat
+    // was written — effectively `per_library=∞`, which overran the worker
+    // memory budget and OOM-killed it.
+    //
+    // The zombie-lease problem is handled by `recover_stale_canonical_leases`
+    // (the stale-lease reaper) on its own tick. The dispatcher should not
+    // try to detect zombies — its only job is to enforce limits.
     sqlx::query_as::<_, IngestJobRow>(
-        "update ingest_job
+        "with active_leases as (
+             select j.id, j.library_id, j.workspace_id
+             from ingest_job j
+             where j.queue_state = 'leased'
+         )
+         update ingest_job
          set queue_state = 'leased'::ingest_queue_state
          where id = (
              select id from ingest_job j
              where j.queue_state = 'queued'
                and j.available_at <= now()
+               and (select count(*) from active_leases) < $3::bigint
                and (
-                   $1::bigint <= 0
-                   or (
-                       select count(*) from ingest_job leased
-                       where leased.queue_state = 'leased'
-                         and leased.library_id = j.library_id
-                   ) < $1::bigint
-               )
+                   select count(*) from active_leases al
+                   where al.workspace_id = j.workspace_id
+               ) < $2::bigint
+               and (
+                   select count(*) from active_leases al
+                   where al.library_id = j.library_id
+               ) < $1::bigint
              order by j.priority asc, j.available_at asc, j.queued_at asc, j.id asc
              limit 1
              for update skip locked
@@ -584,6 +606,8 @@ pub async fn claim_next_queued_ingest_job(
             completed_at",
     )
     .bind(max_jobs_per_library)
+    .bind(max_jobs_per_workspace)
+    .bind(max_jobs_global)
     .fetch_optional(postgres)
     .await
 }
@@ -623,14 +647,30 @@ pub async fn recover_stale_canonical_leases(
     Ok(result.rows_affected())
 }
 
-pub async fn cancel_queued_jobs_for_document(
+/// Marks every **non-terminal** ingest job tied to `document_id` as canceled
+/// AND finalizes any attached leased attempts in one SQL round trip.
+///
+/// Covers both `queued` (never claimed) and `leased` (a worker currently
+/// holds it) jobs. For queued rows this is atomically terminal. For leased
+/// rows, setting `queue_state='canceled'` is the signal the worker observes
+/// on its next heartbeat tick so it can cooperatively drain the current
+/// pipeline stage; the attempt-level UPDATE below immediately bookkeeps the
+/// attempt as `canceled`, so the stale-lease reaper and the UI activity
+/// deriver both see a consistent terminal attempt without waiting for the
+/// worker to finish its in-flight LLM call. A subsequent worker-side
+/// finalize call becomes a harmless no-op because its WHERE clause filters
+/// on `attempt_state='leased'`.
+///
+/// Terminal states (`completed`, `failed`, already `canceled`) are left alone
+/// because nothing useful can be canceled from them.
+pub async fn cancel_jobs_for_document(
     postgres: &PgPool,
     document_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
-    cancel_queued_jobs_for_document_with_executor(postgres, document_id).await
+    cancel_jobs_for_document_with_executor(postgres, document_id).await
 }
 
-pub async fn cancel_queued_jobs_for_document_with_executor<'e, E>(
+pub async fn cancel_jobs_for_document_with_executor<'e, E>(
     executor: E,
     document_id: Uuid,
 ) -> Result<u64, sqlx::Error>
@@ -638,15 +678,28 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let result = sqlx::query(
-        "UPDATE ingest_job
-         SET queue_state = 'canceled', completed_at = now()
-         WHERE mutation_id IN (
-             SELECT m.id FROM content_mutation m
-             JOIN content_mutation_item mi ON mi.mutation_id = m.id
-             WHERE mi.document_id = $1
+        "WITH target_jobs AS (
+             SELECT j.id FROM ingest_job j
+             WHERE j.mutation_id IN (
+                 SELECT m.id FROM content_mutation m
+                 JOIN content_mutation_item mi ON mi.mutation_id = m.id
+                 WHERE mi.document_id = $1
+             )
+             AND j.queue_state IN ('queued', 'leased')
+             AND j.completed_at IS NULL
+         ),
+         attempts_canceled AS (
+             UPDATE ingest_attempt
+             SET attempt_state = 'canceled',
+                 failure_class = 'content_mutation',
+                 failure_code = 'canceled_by_request',
+                 finished_at = now()
+             WHERE job_id IN (SELECT id FROM target_jobs)
+               AND attempt_state IN ('leased', 'running')
          )
-         AND queue_state = 'queued'
-         AND completed_at IS NULL",
+         UPDATE ingest_job
+         SET queue_state = 'canceled', completed_at = now()
+         WHERE id IN (SELECT id FROM target_jobs)",
     )
     .bind(document_id)
     .execute(executor)

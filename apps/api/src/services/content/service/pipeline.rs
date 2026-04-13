@@ -17,7 +17,7 @@ use crate::{
     services::{
         graph::extract::{
             GraphExtractionRequest, GraphExtractionStructuredChunkContext,
-            GraphExtractionTechnicalFact,
+            GraphExtractionSubTypeHints, GraphExtractionTechnicalFact,
         },
         ingest::service::{
             FinalizeAttemptCommand, INGEST_STAGE_CHUNK_CONTENT, INGEST_STAGE_EMBED_CHUNK,
@@ -73,6 +73,7 @@ pub(super) fn build_canonical_graph_extraction_request(
     technical_facts: &[TypedTechnicalFact],
     attempt_id: Option<Uuid>,
     library_extraction_prompt: Option<String>,
+    sub_type_hints: GraphExtractionSubTypeHints,
 ) -> GraphExtractionRequest {
     let graph_technical_facts = if chunk.chunk_kind.as_deref() == Some("table_row") {
         Vec::new()
@@ -137,6 +138,7 @@ pub(super) fn build_canonical_graph_extraction_request(
         activated_by_attempt_id: attempt_id,
         resume_hint: None,
         library_extraction_prompt,
+        sub_type_hints,
     }
 }
 

@@ -21,7 +21,11 @@ export interface BatchCancelResponse {
 export interface BatchReprocessResponse {
   reprocessedCount: number;
   failedCount: number;
-  results: Array<BatchMutationErrorResult>;
+  /** Documents that were already gone (deleted/tombstoned) when the batch
+   *  reached them. Counted separately so the UI can render them as
+   *  "already removed — refresh to update" rather than as a hard failure. */
+  skippedCount: number;
+  results: Array<BatchMutationErrorResult & { skipped?: boolean }>;
 }
 
 /**

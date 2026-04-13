@@ -15,7 +15,7 @@ use crate::{
         KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
     },
     infra::repositories::{
-        catalog_repository,
+        self as repositories, catalog_repository,
         content_repository::{
             self, NewContentDocument, NewContentDocumentHead, NewContentRevision,
         },
@@ -24,7 +24,11 @@ use crate::{
     services::{
         content::source_access::derive_storage_backed_content_file_name,
         content::storage::ContentStorageService,
-        graph::extract::extract_chunk_graph_candidates,
+        graph::extract::{
+            GraphExtractionSubTypeHintEntry, GraphExtractionSubTypeHintGroup,
+            GraphExtractionSubTypeHints, extract_chunk_graph_candidates,
+        },
+        graph::projection::resolve_projection_scope,
         ingest::runtime::resolve_effective_runtime_task_context,
         ingest::service::{INGEST_STAGE_EXTRACT_CONTENT, LeaseAttemptCommand},
         ingest::structured_preparation::PrepareStructuredRevisionCommand,
@@ -951,8 +955,11 @@ impl ContentService {
                 .ok()
                 .flatten()
                 .and_then(|row| row.extraction_prompt);
+        let sub_type_hints =
+            load_sub_type_hints_for_extraction(state, command.library_id).await;
         let chunk_count = all_chunks.len();
-        let graph_extract_parallelism = state.settings.ingestion_worker_concurrency.clamp(1, 8);
+        let graph_extract_parallelism =
+            state.settings.ingestion_graph_extract_parallelism_per_doc.max(1);
 
         let chunks = all_chunks;
 
@@ -1045,15 +1052,32 @@ impl ContentService {
             .filter(|chunk| !reused_chunk_ids.contains(&chunk.chunk_id))
             .collect();
 
-        let per_chunk_totals = stream::iter(chunks.into_iter().map(|chunk| {
+        // Per-chunk graph extraction shares immutable state. The previous
+        // version `.clone()`-d every captured value once *per chunk* — for
+        // a 100-chunk document with thousands of typed facts, hundreds of
+        // sub_type hints and a populated table-graph context, that
+        // amounted to ~50–200 MB of redundant copies floating in memory
+        // alongside the in-flight LLM futures. Wrapping the heavy shared
+        // structures in `Arc` once turns each per-chunk capture into a
+        // refcount bump (8 bytes), so the hot loop only allocates the
+        // small per-chunk content/facts views.
+        let document = std::sync::Arc::new(document);
+        let revision = std::sync::Arc::new(revision);
+        let revision_facts = std::sync::Arc::new(revision_facts);
+        let library_extraction_prompt = std::sync::Arc::new(library_extraction_prompt);
+        let sub_type_hints = std::sync::Arc::new(sub_type_hints);
+        let table_graph_context = std::sync::Arc::new(table_graph_context);
+
+        let per_chunk_stream = stream::iter(chunks.into_iter().map(|chunk| {
             let state = state.clone();
             let graph_runtime_context = graph_runtime_context.clone();
-            let document = document.clone();
-            let revision = revision.clone();
+            let document = std::sync::Arc::clone(&document);
+            let revision = std::sync::Arc::clone(&revision);
             let command = command.clone();
-            let revision_facts = revision_facts.clone();
-            let library_extraction_prompt = library_extraction_prompt.clone();
-            let table_graph_context = table_graph_context.clone();
+            let revision_facts = std::sync::Arc::clone(&revision_facts);
+            let library_extraction_prompt = std::sync::Arc::clone(&library_extraction_prompt);
+            let sub_type_hints = std::sync::Arc::clone(&sub_type_hints);
+            let table_graph_context = std::sync::Arc::clone(&table_graph_context);
 
             async move {
                 let table_graph_profile = table_graph_context.profile_for_chunk(&chunk);
@@ -1064,10 +1088,9 @@ impl ContentService {
                         table_graph_context.requires_row_only_graph(),
                     )
                 else {
-                    return Ok::<
-                        (usize, usize, Option<String>, Option<String>, serde_json::Value),
-                        ApiError,
-                    >((0, 0, None, None, serde_json::json!({ "skipped": true })));
+                    return Ok::<ChunkExtractAggregate, ApiError>(
+                        ChunkExtractAggregate::default(),
+                    );
                 };
 
                 let chunk_facts = revision_facts
@@ -1085,7 +1108,8 @@ impl ContentService {
                         chunk_content,
                         &chunk_facts,
                         command.attempt_id,
-                        library_extraction_prompt,
+                        (*library_extraction_prompt).clone(),
+                        (*sub_type_hints).clone(),
                     ),
                 )
                 .await
@@ -1139,46 +1163,71 @@ impl ContentService {
                 let extracted_entities = response.normalized.entities.len();
                 let extracted_relations = response.normalized.relations.len();
 
-                Ok::<(usize, usize, Option<String>, Option<String>, serde_json::Value), ApiError>((
+                // Pull the few small numeric/string fields we actually need
+                // out of the response BEFORE moving it. Everything else
+                // (the full normalized graph, the raw output JSON, recovery
+                // attempts, etc.) is dropped at the end of this future,
+                // not held in a result Vec across the whole library.
+                let prompt_tokens = response
+                    .usage_json
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let completion_tokens = response
+                    .usage_json
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let total_tokens = response
+                    .usage_json
+                    .get("total_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                Ok::<ChunkExtractAggregate, ApiError>(ChunkExtractAggregate {
                     extracted_entities,
                     extracted_relations,
-                    Some(response.provider_kind.clone()),
-                    Some(response.model_name.clone()),
-                    response.usage_json.clone(),
-                ))
+                    provider_kind: Some(response.provider_kind),
+                    model_name: Some(response.model_name),
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                })
             }
-        }))
-        .buffer_unordered(graph_extract_parallelism)
-        .try_collect::<Vec<_>>()
-        .await?;
+        }));
 
-        let mut extracted_entities = 0usize;
-        let mut extracted_relations = 0usize;
-        let mut last_provider_kind: Option<String> = None;
-        let mut last_model_name: Option<String> = None;
-        let mut agg_prompt: i64 = 0;
-        let mut agg_completion: i64 = 0;
-        let mut agg_total: i64 = 0;
+        // Stream-fold the per-chunk results into a single aggregate. The
+        // previous version did `.try_collect::<Vec<_>>()` + a follow-up
+        // `for (entities, ...)` loop, which kept *every* chunk's tuple
+        // (including its `serde_json::Value` usage payload) resident until
+        // the entire document was done. For a 100-chunk document with
+        // mid-sized usage payloads that was ~5 MB just on `Value` objects,
+        // multiplied by `library_limit=12` parallel docs = 60 MB sitting
+        // around for nothing. Fold consumes each result inline and drops it.
+        let aggregate = per_chunk_stream
+            .buffer_unordered(graph_extract_parallelism)
+            .try_fold(ChunkExtractAggregate::default(), |mut acc, item| async move {
+                acc.extracted_entities = acc.extracted_entities.saturating_add(item.extracted_entities);
+                acc.extracted_relations = acc.extracted_relations.saturating_add(item.extracted_relations);
+                if item.provider_kind.is_some() {
+                    acc.provider_kind = item.provider_kind;
+                }
+                if item.model_name.is_some() {
+                    acc.model_name = item.model_name;
+                }
+                acc.prompt_tokens += item.prompt_tokens;
+                acc.completion_tokens += item.completion_tokens;
+                acc.total_tokens += item.total_tokens;
+                Ok(acc)
+            })
+            .await?;
 
-        for (entities, relations, provider, model, usage) in &per_chunk_totals {
-            extracted_entities = extracted_entities.saturating_add(*entities);
-            extracted_relations = extracted_relations.saturating_add(*relations);
-            if let Some(provider) = provider {
-                last_provider_kind = Some(provider.clone());
-            }
-            if let Some(model) = model {
-                last_model_name = Some(model.clone());
-            }
-            if let Some(v) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
-                agg_prompt += v;
-            }
-            if let Some(v) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
-                agg_completion += v;
-            }
-            if let Some(v) = usage.get("total_tokens").and_then(|v| v.as_i64()) {
-                agg_total += v;
-            }
-        }
+        let extracted_entities = aggregate.extracted_entities;
+        let extracted_relations = aggregate.extracted_relations;
+        let last_provider_kind = aggregate.provider_kind;
+        let last_model_name = aggregate.model_name;
+        let agg_prompt = aggregate.prompt_tokens;
+        let agg_completion = aggregate.completion_tokens;
+        let agg_total = aggregate.total_tokens;
 
         let usage_json = serde_json::json!({
             "prompt_tokens": agg_prompt,
@@ -1254,9 +1303,15 @@ impl ContentService {
                     "diff_reuse: list_runtime_graph_extraction_records_by_document",
                 )
             })?;
+        // Wrap each record in Arc so the subsequent text_checksum and
+        // new_chunk HashMaps only clone the refcount instead of the full
+        // `raw_output_json` + `normalized_output_json` `serde_json::Value`
+        // payloads, which for documents with hundreds of chunks across
+        // multiple revisions can be 200+ MB each map level (previously
+        // cloned three times through this function).
         let mut latest_records_by_parent_chunk: HashMap<
             Uuid,
-            crate::infra::repositories::RuntimeGraphExtractionRecordRow,
+            std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
         > = HashMap::new();
         for record in all_records {
             if record.status != "ready" {
@@ -1265,17 +1320,14 @@ impl ContentService {
             if !parent_chunk_ids.contains(&record.chunk_id) {
                 continue;
             }
-            // Only reuse outputs from the current prompt version. A version
-            // bump must force fresh extraction so we never serve stale
-            // graphs from an older prompt.
             if record.extraction_version != GRAPH_EXTRACTION_VERSION_FOR_REUSE {
                 continue;
             }
-            // Keep the most recent record per parent chunk.
             match latest_records_by_parent_chunk.get(&record.chunk_id) {
                 Some(existing) if existing.created_at >= record.created_at => {}
                 _ => {
-                    latest_records_by_parent_chunk.insert(record.chunk_id, record);
+                    latest_records_by_parent_chunk
+                        .insert(record.chunk_id, std::sync::Arc::new(record));
                 }
             }
         }
@@ -1283,23 +1335,21 @@ impl ContentService {
             return Ok(ChunkReusePlan::default());
         }
 
-        // Step 4: build text_checksum -> old_record map (joining parent chunks
-        // with their extraction records).
         let mut record_by_checksum: HashMap<
             String,
-            crate::infra::repositories::RuntimeGraphExtractionRecordRow,
+            std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
         > = HashMap::new();
         for chunk in &parent_chunks {
             if let Some(record) = latest_records_by_parent_chunk.get(&chunk.id) {
-                record_by_checksum.entry(chunk.text_checksum.clone()).or_insert(record.clone());
+                record_by_checksum
+                    .entry(chunk.text_checksum.clone())
+                    .or_insert_with(|| std::sync::Arc::clone(record));
             }
         }
         if record_by_checksum.is_empty() {
             return Ok(ChunkReusePlan::default());
         }
 
-        // Step 5: load new revision chunks from Postgres (so we have their
-        // canonical text_checksum) and match each one against the index.
         let new_chunks_pg = content_repository::list_chunks_by_revision(
             &state.persistence.postgres,
             command.revision_id,
@@ -1310,14 +1360,14 @@ impl ContentService {
             new_chunks.iter().map(|c| c.chunk_id).collect();
         let mut records_by_new_chunk: HashMap<
             Uuid,
-            crate::infra::repositories::RuntimeGraphExtractionRecordRow,
+            std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
         > = HashMap::new();
         for chunk in new_chunks_pg {
             if !new_chunk_id_set.contains(&chunk.id) {
                 continue;
             }
             if let Some(record) = record_by_checksum.get(&chunk.text_checksum) {
-                records_by_new_chunk.insert(chunk.id, record.clone());
+                records_by_new_chunk.insert(chunk.id, std::sync::Arc::clone(record));
             }
         }
         Ok(ChunkReusePlan { records_by_new_chunk })
@@ -1328,8 +1378,24 @@ impl ContentService {
 struct ChunkReusePlan {
     records_by_new_chunk: std::collections::HashMap<
         Uuid,
-        crate::infra::repositories::RuntimeGraphExtractionRecordRow,
+        std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
     >,
+}
+
+/// Per-chunk graph extraction outcome reduced to just the small fields the
+/// caller actually aggregates. Replaces the old 5-tuple `(usize, usize,
+/// Option<String>, Option<String>, serde_json::Value)` so the stream-fold
+/// path holds only ~96 bytes per chunk in flight instead of the full
+/// `serde_json::Value` usage payload.
+#[derive(Debug, Default)]
+struct ChunkExtractAggregate {
+    extracted_entities: usize,
+    extracted_relations: usize,
+    provider_kind: Option<String>,
+    model_name: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
 }
 
 #[derive(Clone, Default)]
@@ -1349,6 +1415,70 @@ impl RevisionTableGraphContext {
     fn requires_row_only_graph(&self) -> bool {
         self.row_only_table_graph
     }
+}
+
+/// Loads vocabulary-aware extraction hints: observed `sub_type` values per
+/// `node_type` for the current library at the active projection version.
+///
+/// Returns an empty `GraphExtractionSubTypeHints` on any failure (missing
+/// snapshot, SQL error, empty graph). Hints are a soft prompt anchor — never
+/// fail the ingest path because of them.
+async fn load_sub_type_hints_for_extraction(
+    state: &AppState,
+    library_id: Uuid,
+) -> GraphExtractionSubTypeHints {
+    const TOP_PER_NODE_TYPE: usize = 15;
+
+    let projection_scope = match resolve_projection_scope(state, library_id).await {
+        Ok(scope) => scope,
+        Err(error) => {
+            warn!(
+                library_id = %library_id,
+                error = %error,
+                "sub_type hints: failed to resolve projection scope, falling back to empty hints"
+            );
+            return GraphExtractionSubTypeHints::default();
+        }
+    };
+
+    let rows = match repositories::list_observed_sub_type_hints(
+        &state.persistence.postgres,
+        library_id,
+        projection_scope.projection_version,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(
+                library_id = %library_id,
+                error = %error,
+                "sub_type hints: SQL aggregation failed, falling back to empty hints"
+            );
+            return GraphExtractionSubTypeHints::default();
+        }
+    };
+
+    let mut groups: Vec<GraphExtractionSubTypeHintGroup> = Vec::new();
+    for row in rows {
+        if groups.last().is_none_or(|group| group.node_type != row.node_type) {
+            groups.push(GraphExtractionSubTypeHintGroup {
+                node_type: row.node_type.clone(),
+                entries: Vec::new(),
+            });
+        }
+        if let Some(group) = groups.last_mut() {
+            if group.entries.len() >= TOP_PER_NODE_TYPE {
+                continue;
+            }
+            group.entries.push(GraphExtractionSubTypeHintEntry {
+                sub_type: row.sub_type,
+                occurrences: row.occurrences,
+            });
+        }
+    }
+
+    GraphExtractionSubTypeHints { by_node_type: groups }
 }
 
 fn build_revision_table_graph_context(

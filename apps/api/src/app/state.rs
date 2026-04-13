@@ -371,7 +371,7 @@ impl AppState {
         };
         let pipeline_hardening = PipelineHardeningSettings {
             minimum_slice_capacity: 1,
-            total_worker_slots: settings.ingestion_worker_concurrency.max(1),
+            total_worker_slots: settings.ingestion_max_parallel_jobs_global.max(1),
             token_touch_min_interval_seconds: settings
                 .ingestion_worker_heartbeat_interval_seconds
                 .max(1),

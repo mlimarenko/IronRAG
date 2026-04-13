@@ -3,7 +3,6 @@ import {
   FilePenLine,
   Download,
   ExternalLink,
-  Globe,
   Loader2,
   RotateCw,
   Trash2,
@@ -13,9 +12,15 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import type { DocumentItem, DocumentLifecycle, DocumentReadiness } from '@/types';
+import type { DocumentItem, DocumentLifecycle } from '@/types';
+import { compactText, truncatedTitle } from '@/lib/compactText';
 
-import { formatDate, formatDocumentTypeLabel, formatSize } from './mappers';
+import {
+  buildDocumentStatusBadgeConfig,
+  formatDate,
+  formatDocumentTypeLabel,
+  formatSize,
+} from './mappers';
 
 type DocumentsInspectorPanelProps = {
   canEdit: boolean;
@@ -25,16 +30,10 @@ type DocumentsInspectorPanelProps = {
   inspectorFacts: number | null;
   inspectorSegments: number | null;
   lifecycle: DocumentLifecycle | null;
-  readinessConfig: Record<DocumentReadiness, { label: string; cls: string }>;
   selectedDoc: DocumentItem;
   selectionMode: boolean;
-  setAddLinkOpen: (open: boolean) => void;
-  setCrawlMode: (value: string) => void;
   setDeleteDocOpen: (open: boolean) => void;
-  setMaxDepth: (value: string) => void;
-  setMaxPages: (value: string) => void;
   setReplaceFileOpen: (open: boolean) => void;
-  setSeedUrl: (value: string) => void;
   updateSearchParamState: (updates: Record<string, string | null>) => void;
   onEdit: () => void;
   onRetry: () => void;
@@ -48,21 +47,17 @@ export function DocumentsInspectorPanel({
   inspectorFacts,
   inspectorSegments,
   lifecycle,
-  readinessConfig,
   selectedDoc,
   selectionMode,
-  setAddLinkOpen,
-  setCrawlMode,
   setDeleteDocOpen,
-  setMaxDepth,
-  setMaxPages,
   setReplaceFileOpen,
-  setSeedUrl,
   updateSearchParamState,
   onEdit,
   onRetry,
 }: DocumentsInspectorPanelProps) {
   const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t);
+  const compactTypeLabel = compactText(typeLabel, 54);
+  const statusBadge = buildDocumentStatusBadgeConfig(t)[selectedDoc.status];
 
   const openSource = () => {
     const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri;
@@ -79,11 +74,23 @@ export function DocumentsInspectorPanel({
         selectionMode ? 'opacity-40 pointer-events-none' : ''
       }`}
     >
-      <div className="p-4 border-b flex items-center justify-between">
-        <h3 className="text-sm font-bold truncate tracking-tight">{selectedDoc.fileName}</h3>
+      <div className="p-4 border-b flex items-start justify-between gap-3">
+        {/* Full document title — the table column truncates aggressively
+            because horizontal space is tight; the inspector is the place to
+            show the unabbreviated name with natural wrapping so the operator
+            can read the whole URL or filename. For web-captured documents
+            the display label is the full `sourceUri` (the actual page URL),
+            not the path basename — Confluence in particular emits the CGI
+            handler name (`viewpage.action`, `viewlabel.action`) as the
+            "filename", which is meaningless to a human. */}
+        <h3 className="min-w-0 flex-1 text-sm font-bold tracking-tight leading-5 [overflow-wrap:anywhere]">
+          {selectedDoc.sourceKind === 'web_page' && selectedDoc.sourceUri
+            ? selectedDoc.sourceUri
+            : selectedDoc.fileName}
+        </h3>
         <button
           onClick={() => updateSearchParamState({ documentId: null })}
-          className="p-1.5 rounded-lg hover:bg-muted transition-colors"
+          className="shrink-0 p-1.5 rounded-lg hover:bg-muted transition-colors"
           aria-label={t('common.close')}
         >
           <X className="h-4 w-4" />
@@ -91,13 +98,26 @@ export function DocumentsInspectorPanel({
       </div>
       <div className="p-4 space-y-5">
         <div>
-          <span className={`status-badge ${readinessConfig[selectedDoc.readiness].cls}`}>
-            {readinessConfig[selectedDoc.readiness].label}
+          <span className={`status-badge ${statusBadge.cls}`} title={selectedDoc.statusReason}>
+            {statusBadge.label}
           </span>
-          {selectedDoc.stage && selectedDoc.readiness === 'processing' && (
+          {selectedDoc.stage && selectedDoc.status === 'processing' && (
             <span className="text-xs text-muted-foreground ml-2">{selectedDoc.stage}</span>
           )}
         </div>
+
+        {selectedDoc.statusReason &&
+          (selectedDoc.status === 'stalled' || selectedDoc.status === 'blocked') && (
+            <div className="inline-error">
+              <div className="flex items-center gap-1.5 font-bold text-destructive mb-1.5">
+                <XCircle className="h-3.5 w-3.5" />
+                {selectedDoc.status === 'stalled'
+                  ? t('documents.stalled')
+                  : t('documents.blocked')}
+              </div>
+              {selectedDoc.statusReason}
+            </div>
+          )}
 
         {selectedDoc.failureMessage && (
           <div className="inline-error">
@@ -136,14 +156,19 @@ export function DocumentsInspectorPanel({
             {selectedDoc.sourceKind === 'web_page' ? t('documents.webSource') : t('documents.fileInfo')}
           </div>
           {[
-            [t('documents.type'), typeLabel],
+            [t('documents.type'), compactTypeLabel.text],
             [t('documents.size'), formatSize(selectedDoc.fileSize)],
             [t('documents.uploaded'), formatDate(selectedDoc.uploadedAt, locale)],
             [t('documents.documentId'), selectedDoc.id],
           ].map(([label, value]) => (
-            <div key={label} className="flex justify-between text-sm">
+            <div key={label} className="flex justify-between gap-3 text-sm">
               <span className="text-muted-foreground">{label}</span>
-              <span className="font-mono text-xs font-semibold">{value}</span>
+              <span
+                className="font-mono text-xs font-semibold text-right [overflow-wrap:anywhere]"
+                title={label === t('documents.type') ? truncatedTitle(compactTypeLabel) : undefined}
+              >
+                {value}
+              </span>
             </div>
           ))}
         </div>
@@ -217,8 +242,8 @@ export function DocumentsInspectorPanel({
                 </div>
                 <div className="flex justify-between">
                   <span>{t('documents.sourceFormat')}</span>
-                  <span className="font-semibold text-foreground">
-                    {typeLabel}
+                  <span className="font-semibold text-foreground" title={truncatedTitle(compactTypeLabel)}>
+                    {compactTypeLabel.text}
                   </span>
                 </div>
               </div>
@@ -257,27 +282,9 @@ export function DocumentsInspectorPanel({
               </Button>
             )}
           </div>
-          {selectedDoc.canRetry && (
-            <Button variant="outline" size="sm" className="w-full justify-start" onClick={onRetry}>
-              <RotateCw className="h-3.5 w-3.5 mr-2" /> {t('documents.retryProcessing')}
-            </Button>
-          )}
-          {selectedDoc.sourceKind === 'web_page' && selectedDoc.sourceUri && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full justify-start"
-              onClick={() => {
-                setSeedUrl(selectedDoc.sourceUri || '');
-                setCrawlMode('single_page');
-                setMaxDepth('1');
-                setMaxPages('10');
-                setAddLinkOpen(true);
-              }}
-            >
-              <Globe className="h-3.5 w-3.5 mr-2" /> {t('documents.reIngest')}
-            </Button>
-          )}
+          <Button variant="outline" size="sm" className="w-full justify-start" onClick={onRetry}>
+            <RotateCw className="h-3.5 w-3.5 mr-2" /> {t('documents.retryProcessing')}
+          </Button>
           <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setReplaceFileOpen(true)}>
             <Upload className="h-3.5 w-3.5 mr-2" /> {t('documents.replaceFile')}
           </Button>
