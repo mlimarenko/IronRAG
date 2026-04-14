@@ -1005,6 +1005,24 @@ impl ContentService {
                 reused_relation_count = reused_relation_count.saturating_add(arr.len());
             }
 
+            // The downstream reconcile step filters extraction records by
+            // lifecycle.revision_id. Cloning the parent's raw_output_json
+            // verbatim would carry the OLD revision_id and cause every reused
+            // chunk to be silently dropped during merge. Rewrite lifecycle to
+            // point at the current revision before persisting.
+            let mut raw_output_json = old_record.raw_output_json.clone();
+            if let Some(obj) = raw_output_json.as_object_mut() {
+                let lifecycle = obj
+                    .entry("lifecycle")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(lifecycle_obj) = lifecycle.as_object_mut() {
+                    lifecycle_obj.insert(
+                        "revision_id".to_string(),
+                        serde_json::Value::String(command.revision_id.to_string()),
+                    );
+                }
+            }
+
             let synthetic_id = Uuid::now_v7();
             crate::infra::repositories::create_runtime_graph_extraction_record(
                 &state.persistence.postgres,
@@ -1019,7 +1037,7 @@ impl ContentService {
                     extraction_version: old_record.extraction_version.clone(),
                     prompt_hash: old_record.prompt_hash.clone(),
                     status: "ready".to_string(),
-                    raw_output_json: old_record.raw_output_json.clone(),
+                    raw_output_json,
                     normalized_output_json: old_record.normalized_output_json.clone(),
                     glean_pass_count: 0,
                     error_message: None,
@@ -1186,8 +1204,6 @@ impl ContentService {
                 Ok::<ChunkExtractAggregate, ApiError>(ChunkExtractAggregate {
                     extracted_entities,
                     extracted_relations,
-                    provider_kind: Some(response.provider_kind),
-                    model_name: Some(response.model_name),
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
@@ -1208,12 +1224,6 @@ impl ContentService {
             .try_fold(ChunkExtractAggregate::default(), |mut acc, item| async move {
                 acc.extracted_entities = acc.extracted_entities.saturating_add(item.extracted_entities);
                 acc.extracted_relations = acc.extracted_relations.saturating_add(item.extracted_relations);
-                if item.provider_kind.is_some() {
-                    acc.provider_kind = item.provider_kind;
-                }
-                if item.model_name.is_some() {
-                    acc.model_name = item.model_name;
-                }
                 acc.prompt_tokens += item.prompt_tokens;
                 acc.completion_tokens += item.completion_tokens;
                 acc.total_tokens += item.total_tokens;
@@ -1223,8 +1233,17 @@ impl ContentService {
 
         let extracted_entities = aggregate.extracted_entities;
         let extracted_relations = aggregate.extracted_relations;
-        let last_provider_kind = aggregate.provider_kind;
-        let last_model_name = aggregate.model_name;
+        // The active extract_graph binding is the single source of truth for
+        // provider/model on this stage. Per-chunk responses always echo the
+        // same binding, so we read it directly from the runtime context
+        // instead of carrying it through the per-chunk aggregate.
+        let provider_kind = graph_runtime_context
+            .provider_profile
+            .indexing
+            .provider_kind
+            .as_str()
+            .to_string();
+        let model_name = graph_runtime_context.provider_profile.indexing.model_name.clone();
         let agg_prompt = aggregate.prompt_tokens;
         let agg_completion = aggregate.completion_tokens;
         let agg_total = aggregate.total_tokens;
@@ -1239,8 +1258,8 @@ impl ContentService {
             chunk_count,
             extracted_entities: extracted_entities.saturating_add(reused_entity_count),
             extracted_relations: extracted_relations.saturating_add(reused_relation_count),
-            provider_kind: last_provider_kind,
-            model_name: last_model_name,
+            provider_kind: Some(provider_kind),
+            model_name: Some(model_name),
             usage_json,
             reused_chunks: reused_chunk_ids.len(),
             reused_entities: reused_entity_count,
@@ -1391,8 +1410,6 @@ struct ChunkReusePlan {
 struct ChunkExtractAggregate {
     extracted_entities: usize,
     extracted_relations: usize,
-    provider_kind: Option<String>,
-    model_name: Option<String>,
     prompt_tokens: i64,
     completion_tokens: i64,
     total_tokens: i64,

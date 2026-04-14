@@ -632,6 +632,122 @@ pub async fn create_runtime_graph_evidence(
     .await
 }
 
+/// Single per-row payload for `bulk_create_runtime_graph_evidence_for_chunk`.
+/// All other evidence columns are constant per merge call (the chunk's
+/// document_id / revision_id / attempt_id / chunk_id / source_file_name /
+/// evidence_text), so the bulk insert sends N rows in one round-trip
+/// instead of N separate INSERTs.
+#[derive(Debug, Clone)]
+pub struct GraphEvidenceTarget {
+    pub target_kind: &'static str,
+    pub target_id: Uuid,
+    pub evidence_context_key: &'static str,
+}
+
+/// Bulk-inserts a batch of `runtime_graph_evidence` rows that share the same
+/// chunk-level context (library / document / revision / attempt / chunk /
+/// source_file_name / evidence_text). Replaces N sequential
+/// `create_runtime_graph_evidence` calls with a single `INSERT ... SELECT
+/// FROM unnest(...)` round-trip — for a typical chunk with 10 entities and
+/// 10 relations, that's ~50 round-trips collapsed into 1.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while running the bulk insert.
+#[allow(clippy::too_many_arguments)]
+pub async fn bulk_create_runtime_graph_evidence_for_chunk(
+    pool: &PgPool,
+    library_id: Uuid,
+    document_id: Option<Uuid>,
+    revision_id: Option<Uuid>,
+    activated_by_attempt_id: Option<Uuid>,
+    chunk_id: Option<Uuid>,
+    source_file_name: Option<&str>,
+    evidence_text: &str,
+    confidence_score: Option<f64>,
+    targets: &[GraphEvidenceTarget],
+) -> Result<(), sqlx::Error> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    // Postgres forbids `ON CONFLICT DO UPDATE` from touching the same
+    // conflict target twice in one statement. The chunk merge happily
+    // emits duplicate evidence rows when the same entity / edge gets
+    // mentioned multiple times inside one chunk (e.g. an entity appears
+    // both as itself and as the target of a relation), which produced
+    // the runtime error
+    //   ON CONFLICT DO UPDATE command cannot affect row a second time
+    // and broke the entire chunk merge. Dedupe by `evidence_identity_key`
+    // here so the bulk insert sees each unique row exactly once. Order
+    // is preserved so the first occurrence wins.
+    let count = targets.len();
+    let mut seen = std::collections::HashSet::with_capacity(count);
+    let mut ids = Vec::with_capacity(count);
+    let mut identity_keys = Vec::with_capacity(count);
+    let mut target_kinds = Vec::with_capacity(count);
+    let mut target_ids = Vec::with_capacity(count);
+    for target in targets {
+        let identity_key = runtime_graph_evidence_identity_key(
+            target.target_kind,
+            target.target_id,
+            document_id,
+            revision_id,
+            activated_by_attempt_id,
+            chunk_id,
+            None,
+            source_file_name,
+            target.evidence_context_key,
+        );
+        if !seen.insert(identity_key.clone()) {
+            continue;
+        }
+        ids.push(Uuid::now_v7());
+        identity_keys.push(identity_key);
+        target_kinds.push(target.target_kind.to_string());
+        target_ids.push(target.target_id);
+    }
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "insert into runtime_graph_evidence (
+            id, library_id, evidence_identity_key, target_kind, target_id,
+            document_id, revision_id, activated_by_attempt_id, chunk_id,
+            source_file_name, page_ref, evidence_text, confidence_score
+         )
+         select
+            ids.id, $2, ids.identity_key, ids.target_kind, ids.target_id,
+            $3, $4, $5, $6, $7, NULL, $8, $9
+         from unnest($1::uuid[], $10::text[], $11::text[], $12::uuid[])
+            as ids(id, identity_key, target_kind, target_id)
+         on conflict (library_id, evidence_identity_key) do update
+         set document_id = excluded.document_id,
+             revision_id = excluded.revision_id,
+             activated_by_attempt_id = excluded.activated_by_attempt_id,
+             chunk_id = excluded.chunk_id,
+             source_file_name = excluded.source_file_name,
+             page_ref = excluded.page_ref,
+             evidence_text = excluded.evidence_text,
+             confidence_score = excluded.confidence_score,
+             is_active = true",
+    )
+    .bind(&ids)
+    .bind(library_id)
+    .bind(document_id)
+    .bind(revision_id)
+    .bind(activated_by_attempt_id)
+    .bind(chunk_id)
+    .bind(source_file_name)
+    .bind(evidence_text)
+    .bind(confidence_score)
+    .bind(&identity_keys)
+    .bind(&target_kinds)
+    .bind(&target_ids)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
 /// Recalculates support counts for a targeted set of graph nodes.
 ///
 /// # Errors

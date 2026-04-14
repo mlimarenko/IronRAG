@@ -52,6 +52,8 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedDoc, setSelectedDoc] = useState<DocumentItem | null>(null);
+  const selectedDocRef = useRef<DocumentItem | null>(null);
+  useEffect(() => { selectedDocRef.current = selectedDoc; }, [selectedDoc]);
   const [sortField, setSortField] = useState<string>('uploadedAt');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
@@ -180,6 +182,14 @@ export default function DocumentsPage() {
         return doc;
       });
       setDocuments(items);
+      // Silently refresh the currently-selected row so the table cells and
+      // the inspector header pick up status/cost changes without resetting
+      // the user's selection or any inspector sub-state.
+      setSelectedDoc((current) => {
+        if (!current) return current;
+        const refreshed = items.find((item) => item.id === current.id);
+        return refreshed ?? current;
+      });
       // Also load web ingest runs
       try {
         const runsRaw = await apiFetch<
@@ -202,13 +212,37 @@ export default function DocumentsPage() {
     fetchDocuments();
   }, [fetchDocuments]);
 
-  // Auto-refresh while any document is processing
+  // Quiet background refresh on a fixed cadence. Always runs while the page
+  // is mounted so status/cost cells reflect worker progress without a manual
+  // reload. `silent=true` keeps the loading spinner and error banner out of
+  // the path, and the fetch updater preserves the user's row selection.
+  // The selected document's inspector data is refreshed in-place on the same
+  // tick so lifecycle stages, costs, segments, and facts stay live without
+  // resetting any inspector sub-state.
   useEffect(() => {
-    const hasProcessing = documents.some(d => d.readiness === 'processing');
-    if (!hasProcessing) return;
-    const interval = setInterval(() => { fetchDocuments(true); }, 15000);
+    if (!activeLibrary) return;
+    const interval = setInterval(() => {
+      void fetchDocuments(true);
+      const currentId = selectedDocRef.current?.id;
+      if (!currentId) return;
+      void documentsApi.get(currentId).then((raw) => {
+        const refreshed = mapApiDocument(raw as RawDocumentForUI, t);
+        setSelectedDoc((current) => (current?.id === refreshed.id ? refreshed : current));
+        if (raw.lifecycle) {
+          setInspectorLifecycle(raw.lifecycle as DocumentLifecycle);
+        }
+      }).catch(() => {});
+      void Promise.all([
+        documentsApi.getPreparedSegments(currentId).catch(() => []),
+        documentsApi.getTechnicalFacts(currentId).catch(() => []),
+      ]).then(([segments, facts]) => {
+        if (selectedDocRef.current?.id !== currentId) return;
+        setInspectorSegments(segments.length);
+        setInspectorFacts(facts.length);
+      });
+    }, 5000);
     return () => clearInterval(interval);
-  }, [documents, fetchDocuments]);
+  }, [activeLibrary, fetchDocuments, t]);
 
   const doUploadFile = useCallback(async (file: File) => {
     if (!activeLibrary) return;

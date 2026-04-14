@@ -852,61 +852,6 @@ impl ContentService {
                 state,
                 RecordStageEventCommand {
                     attempt_id,
-                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
-                    stage_state: "started".to_string(),
-                    message: Some("rebuilding chunk embeddings for inline mutation".to_string()),
-                    details_json: serde_json::json!({
-                        "libraryId": context.library_id,
-                        "revisionId": context.revision_id,
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: None,
-                },
-            )
-            .await?;
-        let stage_start = Instant::now();
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id,
-                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
-                    stage_state: "completed".to_string(),
-                    message: Some(
-                        "vector stage deferred to keep inline ingestion non-blocking".to_string(),
-                    ),
-                    details_json: serde_json::json!({
-                        "strategy": "deferred_non_blocking",
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: Some(stage_start.elapsed().as_millis() as i64),
-                },
-            )
-            .await?;
-
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id,
                     stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                     stage_state: "started".to_string(),
                     message: Some("extracting graph candidates from chunks".to_string()),
@@ -926,7 +871,7 @@ impl ContentService {
                 },
             )
             .await?;
-        let stage_start = Instant::now();
+        let extract_start = Instant::now();
         let graph_materialization = self
             .materialize_revision_graph_candidates(
                 state,
@@ -938,10 +883,13 @@ impl ContentService {
                 },
             )
             .await;
+        let extract_elapsed_ms = extract_start.elapsed().as_millis() as i64;
         let mut graph_ready = false;
+        let mut graph_failure: Option<String> = None;
 
         match graph_materialization {
             Ok(graph_materialization) => {
+                let embed_start = Instant::now();
                 let graph_outcome = state
                     .canonical_services
                     .graph
@@ -953,6 +901,7 @@ impl ContentService {
                         Some(attempt_id),
                     )
                     .await;
+                let embed_elapsed_ms = embed_start.elapsed().as_millis() as i64;
                 graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
 
                 match graph_outcome {
@@ -990,8 +939,35 @@ impl ContentService {
                                 );
                             }
 
-                            // Record embed_chunk stage event with actual embedding data
-                            let _ = state
+                            state
+                                .canonical_services
+                                .ingest
+                                .record_stage_event(
+                                    state,
+                                    RecordStageEventCommand {
+                                        attempt_id,
+                                        stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                                        stage_state: "started".to_string(),
+                                        message: Some(
+                                            "embedding rebuilt graph nodes and edges".to_string(),
+                                        ),
+                                        details_json: serde_json::json!({
+                                            "providerKind": embed_provider,
+                                            "modelName": embed_model,
+                                        }),
+                                        provider_kind: embed_provider.clone(),
+                                        model_name: embed_model.clone(),
+                                        prompt_tokens: None,
+                                        completion_tokens: None,
+                                        total_tokens: None,
+                                        cached_tokens: None,
+                                        estimated_cost: None,
+                                        currency_code: None,
+                                        elapsed_ms: None,
+                                    },
+                                )
+                                .await?;
+                            state
                                 .canonical_services
                                 .ingest
                                 .record_stage_event(
@@ -1015,10 +991,10 @@ impl ContentService {
                                         cached_tokens: None,
                                         estimated_cost: None,
                                         currency_code: None,
-                                        elapsed_ms: None,
+                                        elapsed_ms: Some(embed_elapsed_ms),
                                     },
                                 )
-                                .await;
+                                .await?;
                         }
                         state
                             .canonical_services
@@ -1051,12 +1027,16 @@ impl ContentService {
                                     cached_tokens: None,
                                     estimated_cost: None,
                                     currency_code: None,
-                                    elapsed_ms: Some(stage_start.elapsed().as_millis() as i64),
+                                    elapsed_ms: Some(extract_elapsed_ms),
                                 },
                             )
                             .await?;
                     }
                     Err(error) => {
+                        graph_failure = Some(format!("graph reconcile failed: {error:#}"));
+                        // extract_graph itself succeeded — failure is in the
+                        // embed/reconcile phase. Close extract_graph normally
+                        // so the UI shows where the pipeline actually broke.
                         state
                             .canonical_services
                             .ingest
@@ -1065,18 +1045,14 @@ impl ContentService {
                                 RecordStageEventCommand {
                                     attempt_id,
                                     stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
-                                    stage_state: "failed".to_string(),
+                                    stage_state: "completed".to_string(),
                                     message: Some(
-                                        "inline graph rebuild failed; readable revision preserved"
-                                            .to_string(),
+                                        "graph candidates extracted".to_string(),
                                     ),
                                     details_json: serde_json::json!({
                                         "chunksProcessed": graph_materialization.chunk_count,
                                         "extractedEntityCandidates": graph_materialization.extracted_entities,
                                         "extractedRelationCandidates": graph_materialization.extracted_relations,
-                                        "graphReady": false,
-                                        "degradedToReadable": true,
-                                        "error": format!("{error:#}"),
                                         "providerKind": graph_materialization.provider_kind,
                                         "modelName": graph_materialization.model_name,
                                     }),
@@ -1088,7 +1064,34 @@ impl ContentService {
                                     cached_tokens: None,
                                     estimated_cost: None,
                                     currency_code: None,
-                                    elapsed_ms: Some(stage_start.elapsed().as_millis() as i64),
+                                    elapsed_ms: Some(extract_elapsed_ms),
+                                },
+                            )
+                            .await?;
+                        state
+                            .canonical_services
+                            .ingest
+                            .record_stage_event(
+                                state,
+                                RecordStageEventCommand {
+                                    attempt_id,
+                                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                                    stage_state: "failed".to_string(),
+                                    message: Some(
+                                        "graph reconcile/embedding failed".to_string(),
+                                    ),
+                                    details_json: serde_json::json!({
+                                        "error": format!("{error:#}"),
+                                    }),
+                                    provider_kind: None,
+                                    model_name: None,
+                                    prompt_tokens: None,
+                                    completion_tokens: None,
+                                    total_tokens: None,
+                                    cached_tokens: None,
+                                    estimated_cost: None,
+                                    currency_code: None,
+                                    elapsed_ms: Some(embed_elapsed_ms),
                                 },
                             )
                             .await?;
@@ -1096,6 +1099,7 @@ impl ContentService {
                 }
             }
             Err(error) => {
+                graph_failure = Some(format!("graph candidate extraction failed: {error:#}"));
                 state
                     .canonical_services
                     .ingest
@@ -1106,12 +1110,10 @@ impl ContentService {
                             stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                             stage_state: "failed".to_string(),
                             message: Some(
-                                "inline graph candidate extraction failed; readable revision preserved"
-                                    .to_string(),
+                                "inline graph candidate extraction failed".to_string(),
                             ),
                             details_json: serde_json::json!({
                                 "graphReady": false,
-                                "degradedToReadable": true,
                                 "error": error.to_string(),
                             }),
                             provider_kind: None,
@@ -1122,11 +1124,21 @@ impl ContentService {
                             cached_tokens: None,
                             estimated_cost: None,
                             currency_code: None,
-                            elapsed_ms: Some(stage_start.elapsed().as_millis() as i64),
-},
+                            elapsed_ms: Some(extract_elapsed_ms),
+                        },
                     )
                     .await?;
             }
+        }
+
+        // Fail-fast: graph_ready already encodes
+        // (graph_contribution_count > 0 && projection.graph_status == "ready").
+        // Anything else is a hard failure for this pipeline — there is no
+        // half-complete state and no silent degradation to readable.
+        if !graph_ready && graph_failure.is_none() {
+            graph_failure = Some(
+                "graph reconcile produced no contributions for this revision".to_string(),
+            );
         }
 
         let revision = state
@@ -1138,13 +1150,14 @@ impl ContentService {
                 ApiError::resource_not_found("knowledge_revision", context.revision_id)
             })?;
         let now = Utc::now();
-        let _ = state
+        let graph_state_label = if graph_ready { "ready" } else { "failed" };
+        state
             .arango_document_store
             .update_revision_readiness(
                 revision.revision_id,
                 &revision.text_state,
                 "ready",
-                if graph_ready { "ready" } else { "processing" },
+                graph_state_label,
                 revision.text_readable_at,
                 revision.vector_ready_at.or(Some(now)),
                 revision.graph_ready_at.or(graph_ready.then_some(now)),
@@ -1152,6 +1165,10 @@ impl ContentService {
             )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+
+        if let Some(reason) = graph_failure {
+            return Err(ApiError::internal_with_log(&reason, "inline graph pipeline failed"));
+        }
 
         Ok(())
     }

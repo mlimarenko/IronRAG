@@ -1246,6 +1246,14 @@ mod tests {
         assert!(is_retryable_transport_error_text(
             "error sending request for url (...): connection reset by peer"
         ));
+        // Mid-response TLS shutdown — observed in production when LLM
+        // providers terminate the TLS session abruptly under load.
+        assert!(is_retryable_transport_error_text(
+            "error decoding response body: request or response body error: error reading a body from connection: peer closed connection without sending TLS close_notify"
+        ));
+        assert!(is_retryable_transport_error_text(
+            "peer closed connection without sending TLS close_notify"
+        ));
         assert!(!is_retryable_transport_error_text("missing OpenAI API key"));
     }
 
