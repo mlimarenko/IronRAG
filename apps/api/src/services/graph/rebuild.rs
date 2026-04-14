@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use anyhow::Context;
 use chrono::Utc;
+use futures::stream::{self, StreamExt, TryStreamExt};
 use uuid::Uuid;
 
 use crate::{
@@ -307,49 +309,104 @@ pub async fn reconcile_revision_graph(
         latest_records_by_chunk.insert(record.chunk_id, record);
     }
 
+    let merge_scope = GraphMergeScope::new(library_id, projection_scope.projection_version)
+        .with_lifecycle(Some(revision_id), activated_by_attempt_id);
+
+    // Parallelize the per-chunk merge fan-out so the document's graph
+    // contribution does not stall on a sequential N×(SELECT+UPSERT+INSERT)
+    // walk. Empirically this loop was the dominant CPU starvation on prod
+    // workers at 0.2.2: each chunk burns ~7 sequential DB round-trips per
+    // entity + ~6 per relation, all on the async runtime, blocking the
+    // tokio worker threads from making progress on heartbeat / cancel poll
+    // / dispatcher claims. By driving the chunk fan-out through
+    // `buffer_unordered(MERGE_PARALLELISM)` we let independent chunks
+    // overlap their DB waits and free the runtime to service other tasks.
+    //
+    // Each per-chunk future captures only what it needs through `Arc`-ed
+    // shared state to keep capture cost down (the postgres pool clones
+    // cheaply, but `DocumentRow` and the GraphQualityGuardService get one
+    // explicit `Arc` apiece). We also consume `latest_records_by_chunk` by
+    // value via `into_values()` and `mem::take` the heavy
+    // `normalized_output_json` `serde_json::Value` straight into the
+    // deserializer — eliminating the per-chunk deep clone that previously
+    // dominated allocator pressure on documents with many chunks.
+    const MERGE_PARALLELISM: usize = 8;
+    let pool = state.persistence.postgres.clone();
+    let quality_guard = state.bulk_ingest_hardening_services.graph_quality_guard.clone();
+    let document_arc = Arc::new(document.clone());
+    let chunk_rows_by_id_arc = Arc::new(chunk_rows_by_id);
+    let merge_scope = Arc::new(merge_scope);
+
+    #[derive(Debug, Default)]
+    struct ChunkMergeOutcome {
+        contribution: usize,
+        follow_up: bool,
+        node_ids: Vec<Uuid>,
+        edge_ids: Vec<Uuid>,
+    }
+
+    let merge_results = stream::iter(latest_records_by_chunk.into_values().map(|record| {
+        let pool = pool.clone();
+        let quality_guard = quality_guard.clone();
+        let document = Arc::clone(&document_arc);
+        let chunk_rows_by_id = Arc::clone(&chunk_rows_by_id_arc);
+        let merge_scope = Arc::clone(&merge_scope);
+        async move {
+            let chunk_id = record.chunk_id;
+            let Some(chunk_row) = chunk_rows_by_id.get(&chunk_id).cloned() else {
+                return Ok::<ChunkMergeOutcome, anyhow::Error>(ChunkMergeOutcome::default());
+            };
+            let mut record = record;
+            let normalized = std::mem::take(&mut record.normalized_output_json);
+            let recovery = extraction_recovery_summary_from_record(&record);
+            let candidates =
+                serde_json::from_value::<GraphExtractionCandidateSet>(normalized)
+                    .unwrap_or_default();
+            if candidates.entities.is_empty() && candidates.relations.is_empty() {
+                return Ok(ChunkMergeOutcome::default());
+            }
+            let merge_outcome = merge_chunk_graph_candidates(
+                &pool,
+                &quality_guard,
+                &merge_scope,
+                document.as_ref(),
+                &chunk_row,
+                &candidates,
+                recovery.as_ref(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to merge graph candidates for document {} chunk {}",
+                    document.id, chunk_id
+                )
+            })?;
+            Ok(ChunkMergeOutcome {
+                contribution: merge_outcome.nodes.len() + merge_outcome.edges.len(),
+                follow_up: merge_outcome.has_projection_follow_up(),
+                node_ids: merge_outcome.summary_refresh_node_ids().into_iter().collect(),
+                edge_ids: merge_outcome.summary_refresh_edge_ids().into_iter().collect(),
+            })
+        }
+    }))
+    .buffer_unordered(MERGE_PARALLELISM)
+    .try_collect::<Vec<_>>()
+    .await?;
+
     let mut graph_contribution_count = 0usize;
     let mut merge_follow_up_required = false;
     let mut changed_node_ids = BTreeSet::new();
     let mut changed_edge_ids = BTreeSet::new();
-    let merge_scope = GraphMergeScope::new(library_id, projection_scope.projection_version)
-        .with_lifecycle(Some(revision_id), activated_by_attempt_id);
-
-    for record in latest_records_by_chunk.values() {
-        let Some(chunk_row) = chunk_rows_by_id.get(&record.chunk_id) else {
-            continue;
-        };
-        let candidates = serde_json::from_value::<GraphExtractionCandidateSet>(
-            record.normalized_output_json.clone(),
-        )
-        .unwrap_or_default();
-        if candidates.entities.is_empty() && candidates.relations.is_empty() {
-            continue;
-        }
-        let merge_outcome = merge_chunk_graph_candidates(
-            &state.persistence.postgres,
-            &state.bulk_ingest_hardening_services.graph_quality_guard,
-            &merge_scope,
-            &document,
-            chunk_row,
-            &candidates,
-            extraction_recovery_summary_from_record(record).as_ref(),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to merge graph candidates for document {document_id} chunk {}",
-                chunk_row.id
-            )
-        })?;
-        merge_follow_up_required |= merge_outcome.has_projection_follow_up();
-        graph_contribution_count += merge_outcome.nodes.len() + merge_outcome.edges.len();
-        changed_node_ids.extend(merge_outcome.summary_refresh_node_ids());
-        changed_edge_ids.extend(merge_outcome.summary_refresh_edge_ids());
+    for outcome in merge_results {
+        graph_contribution_count = graph_contribution_count.saturating_add(outcome.contribution);
+        merge_follow_up_required |= outcome.follow_up;
+        changed_node_ids.extend(outcome.node_ids);
+        changed_edge_ids.extend(outcome.edge_ids);
     }
 
     reconcile_merge_support_counts(
         &state.persistence.postgres,
-        &merge_scope,
+        merge_scope.as_ref(),
         &changed_node_ids.iter().copied().collect::<Vec<_>>(),
         &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
     )

@@ -137,23 +137,18 @@ pub async fn merge_chunk_graph_candidates(
     extraction_recovery: Option<&ExtractionRecoverySummary>,
 ) -> Result<GraphMergeOutcome> {
     let entity_key_index = build_entity_key_index(candidates);
+    // Collect every evidence row generated during this chunk merge into one
+    // batch and flush via `bulk_create_runtime_graph_evidence_for_chunk` at
+    // the end. Replaces 50+ sequential single-row INSERTs with a single
+    // bulk `INSERT ... SELECT FROM unnest(...)` round-trip.
+    let mut evidence_targets: Vec<repositories::GraphEvidenceTarget> = Vec::new();
+
     let document_node = upsert_document_node(pool, scope, document).await?;
-    repositories::create_runtime_graph_evidence(
-        pool,
-        scope.library_id,
-        "node",
-        document_node.id,
-        Some(document.id),
-        scope.revision_id,
-        scope.activated_by_attempt_id,
-        Some(chunk.id),
-        Some(&document.external_key),
-        None,
-        &chunk.content,
-        None,
-        "document_node",
-    )
-    .await?;
+    evidence_targets.push(repositories::GraphEvidenceTarget {
+        target_kind: "node",
+        target_id: document_node.id,
+        evidence_context_key: "document_node",
+    });
     let mut nodes = vec![document_node.clone()];
     let mut edges = Vec::new();
     let mut evidence_count = 1usize;
@@ -175,22 +170,11 @@ pub async fn merge_chunk_graph_candidates(
             extraction_recovery,
         )
         .await?;
-        repositories::create_runtime_graph_evidence(
-            pool,
-            scope.library_id,
-            "node",
-            node.id,
-            Some(document.id),
-            scope.revision_id,
-            scope.activated_by_attempt_id,
-            Some(chunk.id),
-            Some(&document.external_key),
-            None,
-            &chunk.content,
-            None,
-            "entity_node",
-        )
-        .await?;
+        evidence_targets.push(repositories::GraphEvidenceTarget {
+            target_kind: "node",
+            target_id: node.id,
+            evidence_context_key: "entity_node",
+        });
         let document_edge = upsert_graph_edge(
             pool,
             scope,
@@ -204,22 +188,11 @@ pub async fn merge_chunk_graph_candidates(
         nodes.push(node);
         match document_edge {
             EdgePersistenceOutcome::Admitted(document_edge) => {
-                repositories::create_runtime_graph_evidence(
-                    pool,
-                    scope.library_id,
-                    "edge",
-                    document_edge.id,
-                    Some(document.id),
-                    scope.revision_id,
-                    scope.activated_by_attempt_id,
-                    Some(chunk.id),
-                    Some(&document.external_key),
-                    None,
-                    &chunk.content,
-                    None,
-                    "document_mentions_edge",
-                )
-                .await?;
+                evidence_targets.push(repositories::GraphEvidenceTarget {
+                    target_kind: "edge",
+                    target_id: document_edge.id,
+                    evidence_context_key: "document_mentions_edge",
+                });
                 edges.push(document_edge);
                 evidence_count += 2;
             }
@@ -240,26 +213,16 @@ pub async fn merge_chunk_graph_candidates(
             &entity_key_index,
             relation,
             extraction_recovery,
+            &mut evidence_targets,
         )
         .await?
         {
             RelationMergeOutcome::Admitted { edge, nodes: relation_nodes } => {
-                repositories::create_runtime_graph_evidence(
-                    pool,
-                    scope.library_id,
-                    "edge",
-                    edge.id,
-                    Some(document.id),
-                    scope.revision_id,
-                    scope.activated_by_attempt_id,
-                    Some(chunk.id),
-                    Some(&document.external_key),
-                    None,
-                    &chunk.content,
-                    None,
-                    "relation_edge",
-                )
-                .await?;
+                evidence_targets.push(repositories::GraphEvidenceTarget {
+                    target_kind: "edge",
+                    target_id: edge.id,
+                    evidence_context_key: "relation_edge",
+                });
                 nodes.extend(relation_nodes);
                 edges.push(edge);
                 evidence_count += 3;
@@ -269,6 +232,20 @@ pub async fn merge_chunk_graph_candidates(
             }
         }
     }
+
+    repositories::bulk_create_runtime_graph_evidence_for_chunk(
+        pool,
+        scope.library_id,
+        Some(document.id),
+        scope.revision_id,
+        scope.activated_by_attempt_id,
+        Some(chunk.id),
+        Some(&document.external_key),
+        &chunk.content,
+        None,
+        &evidence_targets,
+    )
+    .await?;
 
     Ok(GraphMergeOutcome { nodes, edges, evidence_count, filtered_artifact_count })
 }
@@ -282,6 +259,7 @@ async fn merge_relation_candidate(
     entity_key_index: &crate::services::graph::identity::GraphLabelNodeTypeIndex,
     relation: &GraphRelationCandidate,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
+    evidence_targets: &mut Vec<repositories::GraphEvidenceTarget>,
 ) -> Result<RelationMergeOutcome> {
     let source_node_key = entity_key_index.canonical_node_key_for_label(&relation.source_label);
     let target_node_key = entity_key_index.canonical_node_key_for_label(&relation.target_label);
@@ -351,38 +329,16 @@ async fn merge_relation_candidate(
         extraction_recovery,
     )
     .await?;
-    repositories::create_runtime_graph_evidence(
-        pool,
-        scope.library_id,
-        "node",
-        source_node.id,
-        Some(document.id),
-        scope.revision_id,
-        scope.activated_by_attempt_id,
-        Some(chunk.id),
-        Some(&document.external_key),
-        None,
-        &chunk.content,
-        None,
-        "relation_source_node",
-    )
-    .await?;
-    repositories::create_runtime_graph_evidence(
-        pool,
-        scope.library_id,
-        "node",
-        target_node.id,
-        Some(document.id),
-        scope.revision_id,
-        scope.activated_by_attempt_id,
-        Some(chunk.id),
-        Some(&document.external_key),
-        None,
-        &chunk.content,
-        None,
-        "relation_target_node",
-    )
-    .await?;
+    evidence_targets.push(repositories::GraphEvidenceTarget {
+        target_kind: "node",
+        target_id: source_node.id,
+        evidence_context_key: "relation_source_node",
+    });
+    evidence_targets.push(repositories::GraphEvidenceTarget {
+        target_kind: "node",
+        target_id: target_node.id,
+        evidence_context_key: "relation_target_node",
+    });
 
     Ok(RelationMergeOutcome::Admitted {
         edge: match upsert_graph_edge(

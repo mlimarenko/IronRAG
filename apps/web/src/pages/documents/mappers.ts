@@ -273,32 +273,31 @@ export function mapApiDocument(raw: RawDocumentForUI, t: TFunction): DocumentIte
   //     `derive_queued_status` and end up under "Needs Attention", even
   //     though they are simply waiting for a worker. They are now plain
   //     `queued` again.
+  // Priority chain: terminal failures first, then any in-flight job state,
+  // then ready content, then zombie completion. An in-flight job dominates
+  // stale "ready" readiness from a previous attempt — when the operator hits
+  // Retry, the doc must surface as queued/processing immediately, not stay
+  // green on the old success.
   let status: DocumentStatus;
   if (jobState === 'canceled') {
     status = 'canceled';
   } else if (jobState === 'failed' || readiness === 'failed') {
     status = 'failed';
+  } else if (jobState === 'leased') {
+    if (activityStatus === 'blocked') status = 'blocked';
+    else if (activityStatus === 'retrying') status = 'retrying';
+    else if (activityStatus === 'stalled') status = 'stalled';
+    else status = 'processing';
+  } else if (jobState === 'queued') {
+    status = 'queued';
   } else if (readiness === 'graph_ready' || readiness === 'readable') {
     status = 'ready';
   } else if (readiness === 'graph_sparse') {
     status = 'ready_no_graph';
   } else if (jobState === 'completed') {
-    // Job is terminal but readiness never reached a usable level. This is
-    // a broken/incomplete ingest, not an in-flight state. Surface it as
-    // `failed` so it leaves "Needs Attention" / "In Progress" and shows up
-    // in the Failed bucket where the operator can retry or delete it.
+    // Zombie: terminal job but readiness never reached a usable level.
     status = 'failed';
-  } else if (jobState === 'leased') {
-    // Worker holds the job. activity_status discriminates between an
-    // actively-progressing pipeline and a stuck one.
-    if (activityStatus === 'blocked') status = 'blocked';
-    else if (activityStatus === 'retrying') status = 'retrying';
-    else if (activityStatus === 'stalled') status = 'stalled';
-    else status = 'processing';
   } else {
-    // jobState is 'queued' or absent. Always plain 'queued' — a queued doc
-    // has no live claim, so any `activity_status='stalled'` left over from
-    // a previous attempt is irrelevant here.
     status = 'queued';
   }
 

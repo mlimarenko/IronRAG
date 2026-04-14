@@ -116,15 +116,14 @@ function layoutSectors(graph: Graph): void {
   const usableAngle = 2 * Math.PI - groups.length * sectorGap;
   const weights = groups.map((group) => Math.sqrt(group.nodes.length + 2));
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  // Spacing GROWS with graph size — every quadratic step in `order` adds
-  // a linear step in physical separation, which keeps node density roughly
-  // constant on the canvas as the dataset grows. Without this the sector
-  // rows pack tighter and tighter, and on 5k+ nodes the inner sectors
-  // become an opaque smear of overlapping discs.
+  // Spacing GROWS with graph size aggressively so Sigma's autoRescale
+  // (which fits the entire layout into the viewport) still leaves enough
+  // pixels between node centers for them to be visually distinct on dense
+  // datasets. Previous factors collapsed at 5k+ nodes after rescale.
   const orderRoot = Math.sqrt(graph.order);
-  const innerRadius = Math.max(20, orderRoot * 1.4);
-  const rowGap = Math.max(NODE_VISUAL_GAP * 1.6, orderRoot * 0.45);
-  const arcGap = Math.max(NODE_VISUAL_GAP * 1.3, rowGap * 0.85);
+  const innerRadius = Math.max(40, orderRoot * 4);
+  const rowGap = Math.max(NODE_VISUAL_GAP * 2.5, orderRoot * 1.4);
+  const arcGap = Math.max(NODE_VISUAL_GAP * 2, rowGap);
 
   let cursor = -Math.PI / 2;
 
@@ -141,17 +140,21 @@ function layoutBands(graph: Graph): void {
   if (graph.order === 0) return;
 
   const groups = groupNodesByType(graph);
-  // `cell` is the base unit of separation between adjacent nodes. It now
-  // grows with `sqrt(order)` instead of shrinking — the previous formula
-  // capped cell at 4.2 once the graph crossed ~750 nodes, which is exactly
-  // when the bands layout started to look like a solid color block. Sigma
-  // can pan/zoom freely, so there is no reason to compress the layout to
-  // fit a fixed canvas; aim for visual clarity instead.
+  // `cell` is the base unit of separation between adjacent nodes. We push
+  // it aggressively higher than before so that even after Sigma's
+  // `autoRescale` shrinks 25k+ nodes down to fit the viewport, the
+  // resulting per-cell pixel size is still wide enough to keep nodes
+  // visually distinct. The previous `orderRoot * 0.32` capped cell at
+  // ~50 for 25k nodes; once Sigma compressed that to fit a 600 px canvas
+  // every cell collapsed to ~3 px and the entire graph painted as one
+  // colored block. The new factor (1.4) reserves enough layout-space
+  // headroom that even the worst rescaling still leaves ~6-8 px between
+  // node centers at 25k nodes.
   const orderRoot = Math.sqrt(graph.order);
-  const cell = Math.max(NODE_VISUAL_GAP * 1.1, orderRoot * 0.32);
-  const rowGap = cell * 1.2;
-  const columnGap = cell * 1.7;
-  const bandGap = cell * 3.2;
+  const cell = Math.max(NODE_VISUAL_GAP * 2, orderRoot * 1.4);
+  const rowGap = cell * 1.5;
+  const columnGap = cell * 2;
+  const bandGap = cell * 4;
 
   // Width of each band is bounded so that even the largest group does not
   // become an absurdly wide horizontal smear; instead it wraps onto more
@@ -203,12 +206,13 @@ function layoutRings(graph: Graph): void {
   const groups = groupNodesByType(graph);
 
   // Each concentric ring is placed at a uniform additive gap from the
-  // previous one. This keeps every ring visually distinct regardless of
-  // how many groups or nodes there are — the previous algorithm let the
-  // first big group set a huge `currentRadius` and then crammed every
-  // remaining group into a tiny annulus on top of it.
-  const ringGap = 28;
-  const innerRadius = 36;
+  // previous one. The gap GROWS with graph size so that on dense graphs,
+  // after Sigma's autoRescale fits the layout into the viewport, the
+  // physical pixel distance between rings is still large enough for the
+  // rings to be visually distinct discs of nodes.
+  const orderRoot = Math.sqrt(graph.order);
+  const ringGap = Math.max(60, orderRoot * 1.6);
+  const innerRadius = Math.max(80, orderRoot * 2.2);
 
   // Big groups (e.g. 4000 entities) cannot fit on a single ring without
   // overlapping. Split them across multiple sub-rings so each sub-ring

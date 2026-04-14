@@ -611,6 +611,19 @@ fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSumm
     }
 }
 
+/// Maps a document's pipeline state to the canonical `DocumentStatus` enum
+/// the dashboard counts use. The mapping mirrors `apps/web/src/pages/documents/
+/// mappers.ts:mapApiDocument` so the backend dashboard counts match the
+/// "Failed" filter pill on the documents page (single source of truth for
+/// "what counts as failed"). Two cases the previous version silently dropped
+/// into `Processing`:
+///   1. `queue_state='canceled'` — contract enum has no `Canceled`, so
+///      reported as `Failed` (the documents-page bucket treats canceled
+///      and failed the same).
+///   2. **Zombie completion**: `queue_state='completed'` but readiness never
+///      reached a usable level (ingest finished without producing readable
+///      content, e.g. cancel landed mid-pipeline). Reported as `Failed`
+///      with the same logic the frontend mapper uses.
 fn map_document_status(
     document_state: &str,
     readiness: Option<&crate::domains::content::ContentRevisionReadiness>,
@@ -618,25 +631,52 @@ fn map_document_status(
     pipeline: &ContentDocumentPipelineState,
 ) -> DocumentStatus {
     let state = document_state.trim().to_ascii_lowercase();
+    let queue_state =
+        pipeline.latest_job.as_ref().map(|job| job.queue_state.as_str()).unwrap_or("");
+    let readiness_kind = readiness_summary
+        .as_ref()
+        .map(|summary| summary.readiness_kind.as_str())
+        .unwrap_or("");
+    let graph_coverage_kind = readiness_summary
+        .as_ref()
+        .map(|summary| summary.graph_coverage_kind.as_str())
+        .unwrap_or("");
+    let graph_state = readiness.as_ref().map(|r| r.graph_state.as_str()).unwrap_or("");
+    let text_state = readiness.as_ref().map(|r| r.text_state.as_str()).unwrap_or("");
 
+    let readiness_is_ready = matches!(graph_state, "ready" | "graph_ready")
+        || graph_coverage_kind.contains("ready")
+        || matches!(text_state, "readable" | "ready" | "text_readable");
+    let readiness_is_sparse = matches!(graph_state, "graph_sparse" | "sparse")
+        || graph_coverage_kind.contains("sparse");
+
+    // Terminal failure family (matches frontend bucket): explicit failed,
+    // canceled, or `completed` job that never produced readable content.
     if state.contains("failed")
+        || queue_state == "failed"
+        || queue_state == "canceled"
         || pipeline.latest_job.as_ref().and_then(|job| job.failure_code.as_ref()).is_some()
         || pipeline
             .latest_mutation
             .as_ref()
             .and_then(|mutation| mutation.failure_code.as_ref())
             .is_some()
-        || readiness_summary
-            .as_ref()
-            .is_some_and(|summary| summary.readiness_kind.contains("failed"))
+        || readiness_kind.contains("failed")
         || readiness_summary.as_ref().is_some_and(|summary| {
             matches!(summary.activity_status, RuntimeDocumentActivityStatus::Failed)
         })
+        // Zombie completion: job is `completed` but content never became
+        // readable. The frontend surfaces these as Failed; the dashboard
+        // must agree.
+        || (queue_state == "completed" && !readiness_is_ready && !readiness_is_sparse)
     {
         return DocumentStatus::Failed;
     }
 
-    if pipeline.latest_job.as_ref().is_some_and(|job| job.queue_state == "queued")
+    // An active in-flight job beats stale readiness from a previous attempt.
+    // After Retry the doc must surface as Queued/Processing immediately, even
+    // if the prior revision was already marked ready.
+    if queue_state == "queued"
         || readiness_summary.as_ref().is_some_and(|summary| {
             matches!(summary.activity_status, RuntimeDocumentActivityStatus::Queued)
         })
@@ -645,10 +685,7 @@ fn map_document_status(
         return DocumentStatus::Queued;
     }
 
-    if pipeline
-        .latest_job
-        .as_ref()
-        .is_some_and(|job| matches!(job.queue_state.as_str(), "leased" | "running" | "processing"))
+    if matches!(queue_state, "leased" | "running" | "processing")
         || readiness_summary.as_ref().is_some_and(|summary| {
             matches!(
                 summary.activity_status,
@@ -664,26 +701,10 @@ fn map_document_status(
         return DocumentStatus::Processing;
     }
 
-    if readiness_summary
-        .as_ref()
-        .is_some_and(|summary| summary.graph_coverage_kind.contains("sparse"))
-    {
-        return DocumentStatus::ReadyNoGraph;
-    }
-
-    if readiness_summary
-        .as_ref()
-        .is_some_and(|summary| summary.graph_coverage_kind.contains("ready"))
-        || readiness.as_ref().is_some_and(|readiness| {
-            matches!(readiness.graph_state.as_str(), "ready" | "graph_ready")
-        })
-    {
+    if readiness_is_ready {
         return DocumentStatus::Ready;
     }
-
-    if readiness.as_ref().is_some_and(|readiness| {
-        matches!(readiness.text_state.as_str(), "readable" | "ready" | "text_readable")
-    }) {
+    if readiness_is_sparse {
         return DocumentStatus::ReadyNoGraph;
     }
 

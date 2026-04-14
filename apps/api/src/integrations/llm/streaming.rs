@@ -128,6 +128,17 @@ pub(super) fn is_retryable_transport_error_text(message: &str) -> bool {
         || normalized.contains("http2")
         || normalized.contains("sendrequest")
         || normalized.contains("error sending request")
+        // `rustls` uncategorized "peer dropped the TLS session" cases. We
+        // observe this in production when the LLM provider terminates the
+        // TLS session abruptly mid-response under load: the actual reqwest
+        // error surfaces as `error decoding response body: ... peer closed
+        // connection without sending TLS close_notify`. Without these two
+        // patterns the transport retry layer falls through and the
+        // `extract_graph` stage gives up after ~51 s at the outer recovery
+        // instead of cycling the [1,3,10,30,90] s schedule against a
+        // recovering provider.
+        || normalized.contains("peer closed connection")
+        || normalized.contains("close_notify")
 }
 
 /// Fixed canonical backoff schedule for retryable LLM provider failures
