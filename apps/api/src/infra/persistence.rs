@@ -53,13 +53,17 @@ impl Persistence {
             .connect(&settings.database_url)
             .await?;
 
-        // Independent 2-connection pool — kept tiny on purpose so it
-        // cannot compete with the main pool for PG slots, but guarantees
-        // the heartbeat loop gets a connection even when `postgres` is
-        // fully checked out by parallel graph merges.
+        // Independent control-plane pool. Sized to cover concurrent
+        // heartbeat tasks (one per in-flight ingest attempt, up to the
+        // worker's slot count) plus the dedicated stale-lease reaper that
+        // shares this pool. The previous size of 2 occasionally starved
+        // when 3+ heartbeats raced the reaper, surfacing as
+        // `PoolTimedOut` and a missed reaper cycle. The pool stays small
+        // enough that it cannot meaningfully compete with the main pool
+        // for PG slots.
         let heartbeat_postgres = PgPoolOptions::new()
             .min_connections(1)
-            .max_connections(2)
+            .max_connections(6)
             .connect(&settings.database_url)
             .await?;
 

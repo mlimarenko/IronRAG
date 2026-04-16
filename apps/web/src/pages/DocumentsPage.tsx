@@ -403,12 +403,14 @@ export default function DocumentsPage() {
       setLoadError(null);
       const { sortBy, sortOrder } = splitSortValue(sortValue);
       try {
-        // Always request status + total counts: every fetch updates the
-        // filter pill numbers live. The total-count query is a single
-        // aggregate per fetch and is measured in ms on a ~5 k-doc
-        // reference library; the old `refreshTotal=false` path froze the
-        // counts mid-poll and made the UI lie about what was still
-        // processing.
+        // `includeTotal` triggers a separate library-wide aggregate CTE on
+        // the backend that is O(documents) and trips the >1 s slow-query
+        // threshold on reference-sized libraries. We pay it on the first
+        // load per filter set and on explicit refreshes (upload, batch
+        // action, manual reload) — the polling effect (2.5 s tick) reuses
+        // the previous counts. They snap on the next filter change or
+        // explicit reload, which is far cheaper than recomputing the
+        // aggregate every 2.5 s during a long batch rerun.
         const [page, costs] = await Promise.all([
           documentsApi.list({
             libraryId: activeLibrary.id,
@@ -417,7 +419,7 @@ export default function DocumentsPage() {
             search: debouncedSearch || undefined,
             sortBy,
             sortOrder,
-            includeTotal: true,
+            includeTotal: refreshTotal,
             status:
               statusBackendFilter.length > 0 ? statusBackendFilter : undefined,
           }),
@@ -449,8 +451,14 @@ export default function DocumentsPage() {
         }
         setItems(mapped);
         setNextCursor(page.nextCursor);
-        setTotalCount(page.totalCount ?? null);
-        setStatusCounts(page.statusCounts ?? null);
+        // Counts are only present in the response when the backend was
+        // asked for them via `includeTotal`. On a polling refresh we
+        // intentionally skip the aggregate, so keep the previously
+        // observed counts rather than blanking them.
+        if (refreshTotal) {
+          setTotalCount(page.totalCount ?? null);
+          setStatusCounts(page.statusCounts ?? null);
+        }
       } catch (err) {
         setLoadError(errorMessage(err, t("documents.failedToLoad")));
         if (isFirstLoad) {
