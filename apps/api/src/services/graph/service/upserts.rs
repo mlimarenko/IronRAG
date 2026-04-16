@@ -208,6 +208,7 @@ impl GraphService {
             relation.relation_id,
             "knowledge_entity",
             subject.entity_id,
+            relation.library_id,
             json!({}),
         )
         .await?;
@@ -219,6 +220,7 @@ impl GraphService {
             relation.relation_id,
             "knowledge_entity",
             object.entity_id,
+            relation.library_id,
             json!({}),
         )
         .await
@@ -237,6 +239,7 @@ impl GraphService {
             revision.document_id,
             "knowledge_revision",
             revision.revision_id,
+            revision.library_id,
             json!({}),
         )
         .await
@@ -256,6 +259,7 @@ impl GraphService {
             revision.revision_id,
             "knowledge_chunk",
             chunk_id,
+            revision.library_id,
             json!({}),
         )
         .await
@@ -267,6 +271,7 @@ impl GraphService {
         chunk_id: Uuid,
         entity_id: Uuid,
         score: Option<f64>,
+        library_id: Uuid,
     ) -> Result<()> {
         self.upsert_arango_edge(
             state,
@@ -276,6 +281,7 @@ impl GraphService {
             chunk_id,
             "knowledge_entity",
             entity_id,
+            library_id,
             json!({
                 "rank": 1,
                 "score": score,
@@ -294,6 +300,7 @@ impl GraphService {
         from_id: Uuid,
         to_collection: &str,
         to_id: Uuid,
+        library_id: Uuid,
         extra_fields: serde_json::Value,
     ) -> Result<()> {
         let client = state.arango_graph_store.client();
@@ -302,6 +309,7 @@ impl GraphService {
                         _key: @key,
                         _from: @from,
                         _to: @to,
+                        library_id: @library_id,
                         created_at: @created_at,
                         updated_at: @updated_at,
                         payload: @payload
@@ -309,6 +317,7 @@ impl GraphService {
                      UPDATE {
                         _from: @from,
                         _to: @to,
+                        library_id: @library_id,
                         updated_at: @updated_at,
                         payload: @payload
                      }
@@ -319,6 +328,7 @@ impl GraphService {
             "key": key,
             "from": format!("{from_collection}/{from_id}"),
             "to": format!("{to_collection}/{to_id}"),
+            "library_id": library_id.to_string(),
             "created_at": Utc::now(),
             "updated_at": Utc::now(),
             "payload": extra_fields,

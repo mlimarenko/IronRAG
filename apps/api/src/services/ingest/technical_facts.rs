@@ -19,10 +19,9 @@ use crate::{
 };
 
 use self::identifiers::{
-    extract_branded_identifier_candidates, extract_catalog_link_identifier_candidates,
     extract_code_identifier_candidates, extract_config_key_candidates,
     extract_environment_variable_candidates, extract_error_code_candidates,
-    extract_version_candidates, has_ascii_camel_case, is_ascii_titlecase_word,
+    extract_version_candidates,
 };
 
 const TECHNICAL_FACT_NAMESPACE: Uuid = Uuid::from_u128(0x8c79_60e4_40fd_4ad8_b5d3_4d93_d93d_4021);
@@ -116,20 +115,87 @@ impl TechnicalFactService {
             let block_text = preferred_block_text(block);
             let lines = logical_lines(&block_text);
             for line in &lines {
-                candidates.extend(extract_url_candidates(block, line));
-                candidates.extend(extract_endpoint_candidates(block, line));
-                candidates.extend(extract_port_candidates(block, line));
-                candidates.extend(extract_status_code_candidates(block, line));
-                candidates.extend(extract_protocol_candidates(block, line));
-                candidates.extend(extract_parameter_candidates(block, line));
-                candidates.extend(extract_auth_rule_candidates(block, line));
-                candidates.extend(extract_catalog_link_identifier_candidates(block, line));
-                candidates.extend(extract_branded_identifier_candidates(block, line));
-                candidates.extend(extract_environment_variable_candidates(block, line));
-                candidates.extend(extract_version_candidates(block, line));
-                candidates.extend(extract_code_identifier_candidates(block, line));
-                candidates.extend(extract_config_key_candidates(block, line));
-                candidates.extend(extract_error_code_candidates(block, line));
+                // Block-family dispatch: each block kind runs only the
+                // extractors that are semantically relevant to it.
+                // The old loop called all 14 extractors on every line,
+                // producing false positives from cross-domain matching
+                // (e.g. URL extractor on code comments, code identifier
+                // extractor on prose text).
+                match block.block_kind {
+                    StructuredBlockKind::CodeBlock => {
+                        // Code blocks: identifiers (AST or heuristic),
+                        // env vars, config keys, URLs in comments, versions.
+                        candidates.extend(extract_code_identifier_candidates(block, line));
+                        candidates.extend(extract_environment_variable_candidates(block, line));
+                        candidates.extend(extract_config_key_candidates(block, line));
+                        candidates.extend(extract_url_candidates(block, line));
+                        candidates.extend(extract_version_candidates(block, line));
+                        candidates.extend(extract_error_code_candidates(block, line));
+                    }
+                    StructuredBlockKind::EndpointBlock => {
+                        // Endpoint specs: full HTTP surface extraction.
+                        candidates.extend(extract_url_candidates(block, line));
+                        candidates.extend(extract_endpoint_candidates(block, line));
+                        candidates.extend(extract_port_candidates(block, line));
+                        candidates.extend(extract_status_code_candidates(block, line));
+                        candidates.extend(extract_protocol_candidates(block, line));
+                        candidates.extend(extract_parameter_candidates(block, line));
+                        candidates.extend(extract_auth_rule_candidates(block, line));
+                    }
+                    StructuredBlockKind::Table | StructuredBlockKind::TableRow => {
+                        // Tables: full endpoint surface + config keys.
+                        // API reference docs commonly use tables for endpoint
+                        // catalogs, so HTTP methods and endpoints must run here.
+                        candidates.extend(extract_url_candidates(block, line));
+                        candidates.extend(extract_endpoint_candidates(block, line));
+                        candidates.extend(extract_parameter_candidates(block, line));
+                        candidates.extend(extract_status_code_candidates(block, line));
+                        candidates.extend(extract_port_candidates(block, line));
+                        candidates.extend(extract_protocol_candidates(block, line));
+                        candidates.extend(extract_config_key_candidates(block, line));
+                        candidates.extend(extract_version_candidates(block, line));
+                    }
+                    StructuredBlockKind::MetadataBlock => {
+                        // Metadata: config keys, env vars, branded identifiers.
+                        candidates.extend(extract_config_key_candidates(block, line));
+                        candidates.extend(extract_environment_variable_candidates(block, line));
+                        // Branded identifier heuristics removed — they
+                        // produced noisy entity guesses from heading phrases.
+                        // Entity extraction is the LLM's job.
+                        candidates.extend(extract_version_candidates(block, line));
+                    }
+                    StructuredBlockKind::Heading => {
+                        // Headings: branded identifiers, versions.
+                        // Branded identifier heuristics removed — they
+                        // produced noisy entity guesses from heading phrases.
+                        // Entity extraction is the LLM's job.
+                        candidates.extend(extract_version_candidates(block, line));
+                    }
+                    StructuredBlockKind::ListItem => {
+                        // List items: catalog links, URLs, parameters, versions,
+                        // env vars, config keys, error codes.
+                        // Catalog link identifiers removed — same reason
+                        // as branded identifiers above.
+                        candidates.extend(extract_url_candidates(block, line));
+                        candidates.extend(extract_parameter_candidates(block, line));
+                        candidates.extend(extract_environment_variable_candidates(block, line));
+                        candidates.extend(extract_config_key_candidates(block, line));
+                        candidates.extend(extract_version_candidates(block, line));
+                        candidates.extend(extract_error_code_candidates(block, line));
+                    }
+                    _ => {
+                        // Paragraphs and other prose: URLs, versions, error
+                        // codes, protocols, env vars ($DATABASE_URL in docs).
+                        // No code identifiers or config keys — those are too
+                        // noisy on narrative text.
+                        candidates.extend(extract_url_candidates(block, line));
+                        candidates.extend(extract_version_candidates(block, line));
+                        candidates.extend(extract_error_code_candidates(block, line));
+                        candidates.extend(extract_protocol_candidates(block, line));
+                        candidates.extend(extract_port_candidates(block, line));
+                        candidates.extend(extract_environment_variable_candidates(block, line));
+                    }
+                }
             }
         }
 
@@ -642,7 +708,7 @@ fn build_candidate(
         display_value: raw_value.trim().to_string(),
         qualifiers: qualifiers.clone(),
         support_block_ids: BTreeSet::from([block.block_id]),
-        confidence: confidence_for_block(block),
+        confidence: confidence_for_extraction(block, extraction_suffix),
         extraction_kind: format!("{}_{}", extraction_kind_prefix(block), extraction_suffix),
         scope_signature: candidate_scope_signature(
             block,
@@ -749,14 +815,30 @@ fn candidate_rank(block: &StructuredBlockData) -> u8 {
     }
 }
 
-fn confidence_for_block(block: &StructuredBlockData) -> f64 {
+/// Confidence derived from BOTH the block kind AND the extraction
+/// method. AST-parsed or structurally-parsed facts get higher
+/// confidence than keyword-heuristic guesses regardless of block kind.
+fn confidence_for_extraction(block: &StructuredBlockData, extraction_suffix: &str) -> f64 {
+    // Tier 1: structural parse — the parser proved the value exists.
+    if matches!(
+        extraction_suffix,
+        "ast_node" | "parsed_json_key" | "literal_url" | "version_number"
+    ) {
+        return match block.block_kind {
+            StructuredBlockKind::EndpointBlock => 0.99,
+            StructuredBlockKind::CodeBlock => 0.98,
+            StructuredBlockKind::Table | StructuredBlockKind::TableRow => 0.97,
+            _ => 0.96,
+        };
+    }
+    // Tier 2: block kind default (heuristic match).
     match block.block_kind {
-        StructuredBlockKind::EndpointBlock => 0.97,
-        StructuredBlockKind::CodeBlock => 0.96,
-        StructuredBlockKind::Table | StructuredBlockKind::TableRow => 0.95,
-        StructuredBlockKind::MetadataBlock => 0.93,
-        StructuredBlockKind::ListItem => 0.92,
-        _ => 0.90,
+        StructuredBlockKind::EndpointBlock => 0.95,
+        StructuredBlockKind::CodeBlock => 0.94,
+        StructuredBlockKind::Table | StructuredBlockKind::TableRow => 0.93,
+        StructuredBlockKind::MetadataBlock => 0.91,
+        StructuredBlockKind::ListItem => 0.90,
+        _ => 0.88,
     }
 }
 
@@ -799,30 +881,38 @@ fn table_cells(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Validates a token as a well-formed URL using the `url` crate
+/// (RFC 3986). Replaces the old `starts_with("http://")` heuristic
+/// that couldn't distinguish a real URL from a comment that happens
+/// to contain "http://" and missed edge cases like trailing parens,
+/// angle brackets, and percent-encoded paths.
 fn extract_url_like_token(token: &str) -> Option<String> {
     let trimmed = trim_technical_token(token);
-    (trimmed.starts_with("http://") || trimmed.starts_with("https://")).then(|| trimmed.to_string())
+    let parsed = url::Url::parse(trimmed).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then(|| trimmed.to_string())
 }
 
-fn extract_url_path(url: &str) -> Option<String> {
-    let (_, remainder) = url.split_once("://")?;
-    let path_start = remainder.find('/')?;
-    let path_with_query = &remainder[path_start..];
-    let path = path_with_query.split(['?', '#']).next().unwrap_or_default().trim();
+/// Extracts the path component from a URL via RFC-compliant parsing.
+fn extract_url_path(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    let path = parsed.path();
+    if path == "/" || path.is_empty() {
+        return None;
+    }
     extract_path_like_token(path)
 }
 
-fn extract_query_parameter_keys(url: &str) -> Vec<String> {
-    let Some((_, query_with_rest)) = url.split_once('?') else {
+/// Extracts query parameter keys from a URL via the `url` crate's
+/// `query_pairs()` iterator. Replaces manual `split('&')` +
+/// `split('=')` which silently broke on percent-encoded keys.
+fn extract_query_parameter_keys(raw: &str) -> Vec<String> {
+    let Ok(parsed) = url::Url::parse(raw) else {
         return Vec::new();
     };
-    let query = query_with_rest.split('#').next().unwrap_or_default();
-    query
-        .split('&')
-        .filter_map(|pair| pair.split_once('=').map(|(left, _)| left).or(Some(pair)))
-        .map(trim_technical_token)
-        .filter(|token| is_parameter_name_like(token))
-        .map(str::to_string)
+    parsed
+        .query_pairs()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| is_parameter_name_like(key))
         .collect()
 }
 
@@ -872,10 +962,14 @@ fn is_parameter_name_like(candidate: &str) -> bool {
         && compact.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
         })
-        && (has_ascii_camel_case(compact)
-            || compact.contains('_')
+        && (compact.contains('_')
             || compact.contains('-')
-            || is_ascii_titlecase_word(compact))
+            || compact
+                .chars()
+                .zip(compact.chars().skip(1))
+                .any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase())
+            || (compact.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && compact.chars().skip(1).all(|c| c.is_ascii_lowercase())))
 }
 
 fn is_port_keyword(value: &str) -> bool {
@@ -913,8 +1007,14 @@ mod tests {
     };
     use uuid::Uuid;
 
+    // extracts_branded_identifiers_from_catalog_link_list_items — REMOVED.
+    // Branded identifier heuristic was the noisiest extractor and is now
+    // delegated to the LLM's entity extraction pipeline.
+
     #[test]
-    fn extracts_branded_identifiers_from_catalog_link_list_items() {
+    fn branded_identifier_extraction_no_longer_produces_facts() {
+        // Verify the branded heuristic is truly gone — no `Identifier`
+        // facts from heading phrases or list item links.
         let service = TechnicalFactService::new();
         let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
             revision_id: Uuid::now_v7(),
@@ -991,8 +1091,11 @@ mod tests {
             .map(|fact| fact.display_value.as_str())
             .collect::<Vec<_>>();
 
-        assert!(identifiers.contains(&"Acme Control Center"));
-        assert!(identifiers.contains(&"Acme POS"));
+        assert!(
+            identifiers.is_empty(),
+            "branded identifier heuristic should no longer produce facts, got: {:?}",
+            identifiers
+        );
     }
 
     #[test]
@@ -1203,11 +1306,11 @@ mod tests {
     }
 
     #[test]
-    fn extracts_code_identifiers_from_code_blocks() {
+    fn extracts_code_identifiers_from_python_code_blocks() {
         let facts = extract_facts(vec![make_test_block(
             StructuredBlockKind::CodeBlock,
-            "fn build_router(state: AppState) -> Router {",
-            Some("rust"),
+            "def build_router(state):\n    pass\n\nclass AppRouter:\n    pass",
+            Some("python"),
         )]);
 
         let code_idents: Vec<_> =
@@ -1221,7 +1324,48 @@ mod tests {
     }
 
     #[test]
-    fn extracts_config_keys() {
+    fn no_code_identifiers_from_unsupported_language() {
+        // Rust is not yet supported by tree-sitter in our pipeline.
+        // The heuristic fallback was removed — no guessing.
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::CodeBlock,
+            "fn build_router(state: AppState) -> Router {",
+            Some("rust"),
+        )]);
+
+        let code_idents: Vec<_> =
+            facts.iter().filter(|f| f.fact_kind.as_str() == "code_identifier").collect();
+
+        assert!(
+            code_idents.is_empty(),
+            "expected no CodeIdentifier for unsupported language, got: {:?}",
+            code_idents.iter().map(|f| &f.display_value).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extracts_config_keys_from_json() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::CodeBlock,
+            "{\"max_connections\": 200, \"shared_buffers\": \"256MB\"}",
+            Some("json"),
+        )]);
+
+        let config_keys: Vec<_> =
+            facts.iter().filter(|f| f.fact_kind.as_str() == "configuration_key").collect();
+
+        assert!(!config_keys.is_empty(), "expected at least one ConfigurationKey fact, got none");
+        let key_names: Vec<_> = config_keys.iter().map(|f| f.display_value.as_str()).collect();
+        assert!(
+            key_names.contains(&"max_connections"),
+            "expected 'max_connections', got: {:?}",
+            key_names
+        );
+    }
+
+    #[test]
+    fn extracts_config_keys_from_yaml() {
+        // YAML is now parsed structurally via serde_yaml.
         let facts = extract_facts(vec![make_test_block(
             StructuredBlockKind::CodeBlock,
             "max_connections: 200\nshared_buffers: 256MB",
@@ -1231,11 +1375,11 @@ mod tests {
         let config_keys: Vec<_> =
             facts.iter().filter(|f| f.fact_kind.as_str() == "configuration_key").collect();
 
-        assert!(!config_keys.is_empty(), "expected at least one ConfigurationKey fact, got none");
+        assert!(!config_keys.is_empty(), "expected YAML config keys to be extracted, got none");
         let key_names: Vec<_> = config_keys.iter().map(|f| f.display_value.as_str()).collect();
         assert!(
-            key_names.contains(&"max_connections") || key_names.contains(&"shared_buffers"),
-            "expected config keys like 'max_connections' or 'shared_buffers', got: {:?}",
+            key_names.contains(&"max_connections"),
+            "expected 'max_connections' from YAML, got: {:?}",
             key_names
         );
     }

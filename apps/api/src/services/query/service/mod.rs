@@ -92,6 +92,8 @@ pub(crate) struct ExecutionPreparedReferenceContext {
     pub(crate) structured_block_rows:
         Vec<crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow>,
     pub(crate) segment_revision_info: HashMap<Uuid, PreparedSegmentRevisionInfo>,
+    pub(crate) assistant_document_references:
+        Vec<crate::services::query::assistant_grounding::AssistantGroundingDocumentReference>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +139,26 @@ pub struct QueryTurnExecutionResult {
 pub enum QueryTurnProgressEvent {
     Runtime(RuntimeExecutionSummary),
     AnswerDelta(String),
+    /// The assistant agent started a tool call. Emitted immediately
+    /// before dispatch so the UI can render "searching documents..." /
+    /// "reading Frontol 6 manual..." live while the LLM iterates, instead
+    /// of sitting under keep-alive frames for 100 s.
+    AssistantToolCallStarted {
+        iteration: usize,
+        call_id: String,
+        name: String,
+        arguments_preview: String,
+    },
+    /// The assistant agent finished a tool call. Carries a short preview
+    /// of the result (truncated) plus the error flag so the UI can show a
+    /// checkmark / warning per step.
+    AssistantToolCallCompleted {
+        iteration: usize,
+        call_id: String,
+        name: String,
+        is_error: bool,
+        result_preview: String,
+    },
 }
 
 #[derive(Clone, Default)]

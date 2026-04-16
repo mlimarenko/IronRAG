@@ -1,3 +1,4 @@
+use super::provider_validation::sync_provider_model_catalog;
 use super::*;
 
 impl AiCatalogService {
@@ -84,7 +85,9 @@ impl AiCatalogService {
         )
         .await
         .map_err(map_ai_write_error)?;
-        Ok(map_provider_credential_row(row))
+        let credential = map_provider_credential_row(row);
+        sync_provider_model_catalog_after_credential_save(state, provider, &credential).await;
+        Ok(credential)
     }
 
     pub async fn update_provider_credential(
@@ -122,7 +125,9 @@ impl AiCatalogService {
         .ok_or_else(|| {
             ApiError::resource_not_found("provider_credential", command.credential_id)
         })?;
-        Ok(map_provider_credential_row(row))
+        let credential = map_provider_credential_row(row);
+        sync_provider_model_catalog_after_credential_save(state, provider, &credential).await;
+        Ok(credential)
     }
 }
 
@@ -139,5 +144,41 @@ fn map_provider_credential_row(row: ai_repository::AiProviderCredentialRow) -> P
         credential_state: row.credential_state,
         created_at: row.created_at,
         updated_at: row.updated_at,
+    }
+}
+
+async fn sync_provider_model_catalog_after_credential_save(
+    state: &AppState,
+    provider: &ProviderCatalogEntry,
+    credential: &ProviderCredential,
+) {
+    if credential.credential_state != "active" {
+        return;
+    }
+
+    match sync_provider_model_catalog(
+        state,
+        provider,
+        credential.api_key.as_deref(),
+        credential.base_url.as_deref(),
+    )
+    .await
+    {
+        Ok(model_names) => {
+            tracing::info!(
+                provider_kind = %provider.provider_kind,
+                credential_id = %credential.id,
+                model_count = model_names.len(),
+                "synced provider model catalog after credential save"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                provider_kind = %provider.provider_kind,
+                credential_id = %credential.id,
+                error = %error,
+                "failed to sync provider model catalog after credential save"
+            );
+        }
     }
 }

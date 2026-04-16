@@ -80,11 +80,18 @@ pub fn router() -> Router<AppState> {
         .route("/ingest/attempts/{attempt_id}/stages", get(list_stage_events))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_jobs",
+    skip_all,
+    fields(library_id = ?query.library_id, item_count)
+)]
 async fn list_jobs(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListIngestJobsQuery>,
 ) -> Result<Json<Vec<IngestJobResponse>>, ApiError> {
+    let span = tracing::Span::current();
     let library_id = query
         .library_id
         .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
@@ -106,9 +113,16 @@ async fn list_jobs(
             responses.push(map_job_handle(&state, handle).await?);
         }
     }
+    span.record("item_count", responses.len());
     Ok(Json(responses))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_job",
+    skip_all,
+    fields(job_id = %job_id)
+)]
 async fn get_job(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -124,6 +138,12 @@ async fn get_job(
     Ok(Json(map_job_handle(&state, handle).await?))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_attempt",
+    skip_all,
+    fields(attempt_id = %attempt_id)
+)]
 async fn get_attempt(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -139,6 +159,12 @@ async fn get_attempt(
     Ok(Json(map_attempt_handle(&state, handle).await?))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_stage_events",
+    skip_all,
+    fields(attempt_id = %attempt_id)
+)]
 async fn list_stage_events(
     auth: AuthContext,
     State(state): State<AppState>,

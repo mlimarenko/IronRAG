@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use uuid::Uuid;
 
 use crate::{

@@ -336,11 +336,9 @@ impl ExtractGraphFixture {
 }
 
 async fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
-    let persistence = ironrag_backend::infra::persistence::Persistence {
-        postgres,
-        redis: redis::Client::open(settings.redis_url.clone())
-            .context("failed to create redis client for extract_graph test state")?,
-    };
+    let redis = redis::Client::open(settings.redis_url.clone())
+        .context("failed to create redis client for extract_graph test state")?;
+    let persistence = ironrag_backend::infra::persistence::Persistence::for_tests(postgres, redis);
     let arango_client = Arc::new(
         ArangoClient::from_settings(&settings)
             .context("failed to build Arango client for extract_graph test state")?,

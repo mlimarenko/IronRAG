@@ -176,11 +176,9 @@ impl WebIngestFixture {
         .await
         .context("failed to bootstrap Arango knowledge plane")?;
 
-        let persistence = Persistence {
-            postgres,
-            redis: redis::Client::open(settings.redis_url.clone())
-                .context("failed to build redis client")?,
-        };
+        let redis = redis::Client::open(settings.redis_url.clone())
+            .context("failed to build redis client")?;
+        let persistence = Persistence::for_tests(postgres, redis);
         let state = AppState::from_dependencies(settings, persistence, arango_client)?;
         let workspace = state
             .canonical_services

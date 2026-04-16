@@ -22,9 +22,9 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Load the canonical runtime lifecycle summary for one runtime execution ID. Use this when a IronRAG payload already includes runtimeExecutionId and you need the authoritative lifecycle, active stage, or failure code.",
             input_schema: json!({
                 "type": "object",
-                "required": ["executionId"],
+                "required": ["runtimeExecutionId"],
                 "properties": {
-                    "executionId": {
+                    "runtimeExecutionId": {
                         "type": "string",
                         "format": "uuid",
                         "description": "Canonical runtime execution UUID."
@@ -37,9 +37,9 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Load the canonical runtime stage, action, and policy trace for one runtime execution ID. Use this for debugging or automation that must inspect what the runtime actually did.",
             input_schema: json!({
                 "type": "object",
-                "required": ["executionId"],
+                "required": ["runtimeExecutionId"],
                 "properties": {
-                    "executionId": {
+                    "runtimeExecutionId": {
                         "type": "string",
                         "format": "uuid",
                         "description": "Canonical runtime execution UUID."
@@ -69,7 +69,7 @@ async fn get_runtime_execution(context: ToolCallContext<'_>, arguments: &Value) 
         Ok(args) => match crate::services::mcp::access::get_runtime_execution(
             context.auth,
             context.state,
-            args.execution_id,
+            args.runtime_execution_id,
         )
         .await
         {
@@ -111,7 +111,7 @@ async fn get_runtime_execution(context: ToolCallContext<'_>, arguments: &Value) 
                     &error,
                     json!({
                         "tool": "get_runtime_execution",
-                        "executionId": args.execution_id,
+                        "runtimeExecutionId": args.runtime_execution_id,
                     }),
                 )
                 .await;
@@ -146,7 +146,7 @@ async fn get_runtime_execution_trace(
         Ok(args) => match crate::services::mcp::access::get_runtime_execution_trace(
             context.auth,
             context.state,
-            args.execution_id,
+            args.runtime_execution_id,
         )
         .await
         {
@@ -191,7 +191,7 @@ async fn get_runtime_execution_trace(
                     &error,
                     json!({
                         "tool": "get_runtime_execution_trace",
-                        "executionId": args.execution_id,
+                        "runtimeExecutionId": args.runtime_execution_id,
                     }),
                 )
                 .await;

@@ -1,3 +1,4 @@
+use super::provider_validation::sync_provider_model_catalog;
 use super::*;
 use std::collections::{BTreeSet, HashMap};
 
@@ -37,67 +38,73 @@ impl AiCatalogService {
             providers.iter().map(|provider| (provider.id, provider)).collect::<HashMap<_, _>>();
         let visible_credentials =
             self.list_visible_provider_credentials(state, workspace_id, library_id).await?;
-        let discovery_credentials = match credential_id {
-            Some(credential_id) => vec![
+        let scoped_credentials = match credential_id {
+            Some(target_credential_id) => vec![
                 visible_credentials
                     .iter()
-                    .find(|credential| credential.id == credential_id)
+                    .find(|credential| credential.id == target_credential_id)
                     .cloned()
                     .ok_or_else(|| {
-                        ApiError::resource_not_found("provider_credential", credential_id)
+                        ApiError::resource_not_found("provider_credential", target_credential_id)
                     })?,
             ],
-            None => visible_credentials.clone(),
+            None => visible_credentials,
         };
 
-        let mut availability_by_model = HashMap::<(Uuid, String), BTreeSet<Uuid>>::new();
-        let mut checked_ollama_providers = BTreeSet::<Uuid>::new();
-
-        for credential in discovery_credentials
-            .iter()
-            .filter(|credential| credential.credential_state == "active")
+        let mut available_credential_ids_by_provider = HashMap::<Uuid, BTreeSet<Uuid>>::new();
+        for credential in
+            scoped_credentials.iter().filter(|credential| credential.credential_state == "active")
         {
-            let Some(provider) = provider_by_id.get(&credential.provider_catalog_id) else {
-                continue;
-            };
-            if provider.provider_kind != "ollama" {
+            if provider_catalog_id.is_some_and(|value| value != credential.provider_catalog_id) {
                 continue;
             }
-            if provider_catalog_id.is_some_and(|value| value != provider.id) {
-                continue;
-            }
-            let Some(base_url) =
-                credential.base_url.as_deref().or(provider.default_base_url.as_deref())
-            else {
-                continue;
-            };
-            let model_names =
-                match fetch_provider_model_names(provider, credential.api_key.as_deref(), base_url)
-                    .await
-                {
-                    Ok(model_names) => model_names,
-                    Err(error) => {
-                        tracing::warn!(
-                            provider_kind = %provider.provider_kind,
-                            credential_id = %credential.id,
-                            error = %error,
-                            "failed to discover provider models"
-                        );
-                        continue;
+            available_credential_ids_by_provider
+                .entry(credential.provider_catalog_id)
+                .or_default()
+                .insert(credential.id);
+        }
+
+        let mut explicitly_available_credential_ids =
+            HashMap::<(Uuid, String), BTreeSet<Uuid>>::new();
+        let mut explicitly_checked_providers = BTreeSet::<Uuid>::new();
+        if let Some(target_credential_id) = credential_id {
+            if let Some(credential) = scoped_credentials.iter().find(|credential| {
+                credential.id == target_credential_id && credential.credential_state == "active"
+            }) {
+                if let Some(provider) = provider_by_id.get(&credential.provider_catalog_id) {
+                    let should_refresh = !provider_catalog_id
+                        .is_some_and(|value| value != provider.id)
+                        && provider_credential_policy(&provider.provider_kind).validation_mode
+                            == ProviderCredentialValidationMode::ModelList;
+                    if should_refresh {
+                        match sync_provider_model_catalog(
+                            state,
+                            provider,
+                            credential.api_key.as_deref(),
+                            credential.base_url.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(model_names) => {
+                                explicitly_checked_providers.insert(provider.id);
+                                for model_name in model_names {
+                                    explicitly_available_credential_ids
+                                        .entry((provider.id, model_name))
+                                        .or_default()
+                                        .insert(credential.id);
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    provider_kind = %provider.provider_kind,
+                                    credential_id = %credential.id,
+                                    error = %error,
+                                    "failed to refresh provider models for credential-specific request"
+                                );
+                            }
+                        }
                     }
-                };
-            checked_ollama_providers.insert(provider.id);
-            for model_name in model_names {
-                ensure_discovered_ollama_model_catalog_entry(
-                    state,
-                    provider.id,
-                    model_name.as_str(),
-                )
-                .await?;
-                availability_by_model
-                    .entry((provider.id, model_name))
-                    .or_default()
-                    .insert(credential.id);
+                }
             }
         }
 
@@ -105,16 +112,25 @@ impl AiCatalogService {
         Ok(models
             .into_iter()
             .map(|model| {
-                let available_credential_ids = availability_by_model
-                    .get(&(model.provider_catalog_id, model.model_name.clone()))
-                    .map(|credential_ids| credential_ids.iter().copied().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                let available_credential_ids = if explicitly_checked_providers
+                    .contains(&model.provider_catalog_id)
+                {
+                    explicitly_available_credential_ids
+                        .get(&(model.provider_catalog_id, model.model_name.clone()))
+                        .map(|credential_ids| credential_ids.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                } else {
+                    available_credential_ids_by_provider
+                        .get(&model.provider_catalog_id)
+                        .map(|credential_ids| credential_ids.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                };
                 let availability_state = match provider_by_id
                     .get(&model.provider_catalog_id)
                     .map(|provider| provider.provider_kind.as_str())
                 {
                     Some("ollama")
-                        if checked_ollama_providers.contains(&model.provider_catalog_id) =>
+                        if explicitly_checked_providers.contains(&model.provider_catalog_id) =>
                     {
                         if available_credential_ids.is_empty() {
                             ModelAvailabilityState::Unavailable
@@ -123,7 +139,8 @@ impl AiCatalogService {
                         }
                     }
                     Some("ollama") => ModelAvailabilityState::Unknown,
-                    _ => ModelAvailabilityState::Available,
+                    Some(_) => ModelAvailabilityState::Available,
+                    None => ModelAvailabilityState::Unknown,
                 };
                 ResolvedModelCatalogEntry { model, availability_state, available_credential_ids }
             })

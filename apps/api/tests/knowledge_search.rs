@@ -662,12 +662,12 @@ impl KnowledgeSearchHttpFixture {
             .context("failed to insert knowledge search relation")?;
         state
             .arango_graph_store
-            .upsert_relation_subject_edge(relation_id, entity_id)
+            .upsert_relation_subject_edge(relation_id, entity_id, library.id)
             .await
             .context("failed to link knowledge search relation subject")?;
         state
             .arango_graph_store
-            .upsert_relation_object_edge(relation_id, entity_id)
+            .upsert_relation_object_edge(relation_id, entity_id, library.id)
             .await
             .context("failed to link knowledge search relation object")?;
         state
@@ -737,6 +737,7 @@ impl KnowledgeSearchHttpFixture {
                 Some(entity_id),
                 Some(relation_id),
                 None,
+                library.id,
             )
             .await
             .context("failed to insert knowledge search evidence")?;

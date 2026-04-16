@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use std::collections::HashMap;
 
 use anyhow::Context;
@@ -7,10 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::{
-        content::ContentDocumentSummary,
-        query::{GroupedReferenceKind, RuntimeQueryMode},
-    },
+    domains::query::{GroupedReferenceKind, RuntimeQueryMode},
     infra::arangodb::document_store::KnowledgeDocumentRow,
     services::query::support::{
         ContextAssemblyRequest, GroupedReferenceCandidate, assemble_context_metadata,
@@ -256,20 +252,100 @@ pub(crate) async fn load_query_execution_library_context(
 ) -> anyhow::Result<RuntimeQueryLibraryContext> {
     let generation = load_latest_library_generation(state, library_id).await?;
     let graph_status = query_graph_status(generation.as_ref());
-    let documents = state
-        .canonical_services
-        .content
-        .list_documents(state, library_id)
+
+    // Canonical O(1) path — no more `list_documents` N+1 storm. Three
+    // bounded queries: one Postgres aggregate for the summary counts,
+    // one `runtime_graph_snapshot` point lookup, and one keyset page
+    // (limit 12) for the recent-documents section fed into the prompt.
+    // The previous implementation enumerated every document + 6 Arango
+    // prefetches per call, which on a 5k-doc library burned ~180 s per
+    // query turn before the outer timeout cut it off.
+    let readiness =
+        crate::infra::repositories::content_repository::aggregate_library_document_readiness(
+            &state.persistence.postgres,
+            library_id,
+        )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .context("failed to load canonical document summaries for query readiness")?;
-    let backlog_count = runtime_query_backlog_count(&documents);
+        .context("failed to aggregate library readiness for query context")?;
+    let recent_page = crate::infra::repositories::content_repository::list_document_page_rows(
+        &state.persistence.postgres,
+        library_id,
+        false,
+        None,
+        12,
+        None,
+        crate::infra::repositories::content_repository::DocumentListSortColumn::CreatedAt,
+        true,
+        &[],
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.to_string()))
+    .context("failed to load recent document rows for query context")?;
+
+    let backlog_count = readiness.processing_count;
     let convergence_status = query_execution_convergence_status(graph_status, backlog_count);
+    let summary = RuntimeQueryLibrarySummary {
+        document_count: usize::try_from(readiness.active_count).unwrap_or(0),
+        // Approximation: without a per-document Arango scan we can't
+        // split `graph_ready` from `readable`, so we surface the
+        // whole readable bucket as the graph-ready prompt hint. This
+        // over-counts docs that are readable-but-graph-sparse, which
+        // is a benign prompt signal.
+        graph_ready_count: usize::try_from(readiness.readable_count).unwrap_or(0),
+        processing_count: usize::try_from(readiness.processing_count).unwrap_or(0),
+        failed_count: usize::try_from(readiness.failed_count).unwrap_or(0),
+        graph_status,
+    };
+    let recent_documents =
+        summarize_recent_query_documents_from_rows(&recent_page.rows, graph_status);
     Ok(RuntimeQueryLibraryContext {
-        summary: summarize_query_library(graph_status, &documents),
-        recent_documents: summarize_recent_query_documents(state, &documents, 12).await,
+        summary,
+        recent_documents,
         warning: query_execution_convergence_warning(state, convergence_status, backlog_count),
     })
+}
+
+fn summarize_recent_query_documents_from_rows(
+    rows: &[crate::infra::repositories::content_repository::ContentDocumentListRow],
+    graph_status: &'static str,
+) -> Vec<RuntimeQueryRecentDocument> {
+    rows.iter()
+        .map(|row| {
+            let title = row
+                .revision_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| row.external_key.clone());
+            let pipeline_state =
+                match (row.job_queue_state.as_deref(), row.mutation_state.as_deref()) {
+                    (Some("failed"), _) | (_, Some("failed" | "conflicted" | "canceled")) => {
+                        "failed"
+                    }
+                    (Some("leased"), _) => "processing",
+                    (Some("queued"), _) | (_, Some("accepted" | "running")) => "queued",
+                    _ if row.readable_revision_id.is_some() => "ready",
+                    _ => "pending",
+                };
+            let graph_state = if pipeline_state == "ready" && graph_status == "current" {
+                "ready"
+            } else if pipeline_state == "failed" {
+                "failed"
+            } else {
+                "pending"
+            };
+            RuntimeQueryRecentDocument {
+                title,
+                uploaded_at: row.created_at.to_rfc3339(),
+                mime_type: row.revision_mime_type.clone(),
+                pipeline_state,
+                graph_state,
+                preview_excerpt: None,
+            }
+        })
+        .collect()
 }
 
 fn query_execution_convergence_status(graph_status: &str, backlog_count: i64) -> &'static str {
@@ -301,70 +377,6 @@ fn query_execution_convergence_warning(
         ),
         warning_kind: "partial_convergence",
     })
-}
-
-fn summarize_query_library(
-    graph_status: &'static str,
-    documents: &[ContentDocumentSummary],
-) -> RuntimeQueryLibrarySummary {
-    let mut graph_ready_count = 0usize;
-    let mut processing_count = 0usize;
-    let mut failed_count = 0usize;
-
-    for summary in documents {
-        if document_has_query_failure(summary) {
-            failed_count += 1;
-            continue;
-        }
-        if document_requires_query_backlog(summary) {
-            processing_count += 1;
-        }
-        if summary.readiness.as_ref().is_some_and(|readiness| readiness.graph_state == "ready") {
-            graph_ready_count += 1;
-        }
-    }
-
-    RuntimeQueryLibrarySummary {
-        document_count: documents.len(),
-        graph_ready_count,
-        processing_count,
-        failed_count,
-        graph_status,
-    }
-}
-
-async fn summarize_recent_query_documents(
-    state: &AppState,
-    documents: &[ContentDocumentSummary],
-    limit: usize,
-) -> Vec<RuntimeQueryRecentDocument> {
-    let mut ranked_documents = documents.iter().collect::<Vec<_>>();
-    ranked_documents.sort_by(|left, right| {
-        query_prompt_document_uploaded_at(right)
-            .cmp(&query_prompt_document_uploaded_at(left))
-            .then_with(|| {
-                query_prompt_document_title(left).cmp(&query_prompt_document_title(right))
-            })
-    });
-    ranked_documents.truncate(limit);
-
-    let previews = join_all(
-        ranked_documents.iter().map(|summary| load_query_prompt_document_preview(state, summary)),
-    )
-    .await;
-
-    ranked_documents
-        .into_iter()
-        .zip(previews)
-        .map(|(summary, preview_excerpt)| RuntimeQueryRecentDocument {
-            title: query_prompt_document_title(summary),
-            uploaded_at: query_prompt_document_uploaded_at(summary).to_rfc3339(),
-            mime_type: summary.active_revision.as_ref().map(|revision| revision.mime_type.clone()),
-            pipeline_state: query_prompt_pipeline_state(summary),
-            graph_state: query_prompt_graph_state(summary),
-            preview_excerpt,
-        })
-        .collect()
 }
 
 pub(crate) fn assemble_answer_context(
@@ -440,75 +452,6 @@ fn query_graph_status_prompt_label(graph_status: &str) -> &'static str {
     }
 }
 
-pub(crate) fn runtime_query_backlog_count(documents: &[ContentDocumentSummary]) -> i64 {
-    documents.iter().filter(|summary| document_requires_query_backlog(summary)).count() as i64
-}
-
-pub(crate) fn document_requires_query_backlog(summary: &ContentDocumentSummary) -> bool {
-    let latest_mutation = summary.pipeline.latest_mutation.as_ref();
-    let latest_job = summary.pipeline.latest_job.as_ref();
-
-    let mutation_inflight = latest_mutation
-        .is_some_and(|mutation| matches!(mutation.mutation_state.as_str(), "accepted" | "running"));
-    let job_inflight =
-        latest_job.is_some_and(|job| matches!(job.queue_state.as_str(), "queued" | "running"));
-    let graph_pending =
-        summary.readiness.as_ref().is_some_and(|readiness| readiness.graph_state != "ready")
-            && !document_has_query_failure(summary);
-
-    mutation_inflight || job_inflight || graph_pending
-}
-
-pub(crate) fn document_has_query_failure(summary: &ContentDocumentSummary) -> bool {
-    let latest_mutation = summary.pipeline.latest_mutation.as_ref();
-    let latest_job = summary.pipeline.latest_job.as_ref();
-
-    latest_mutation.is_some_and(|mutation| mutation.mutation_state == "failed")
-        || latest_job
-            .is_some_and(|job| matches!(job.queue_state.as_str(), "failed" | "retryable_failed"))
-}
-
-fn query_prompt_document_title(summary: &ContentDocumentSummary) -> String {
-    summary
-        .active_revision
-        .as_ref()
-        .and_then(|revision| revision.title.as_deref())
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| summary.document.external_key.clone())
-}
-
-fn query_prompt_document_uploaded_at(
-    summary: &ContentDocumentSummary,
-) -> chrono::DateTime<chrono::Utc> {
-    summary
-        .active_revision
-        .as_ref()
-        .map(|revision| revision.created_at)
-        .unwrap_or(summary.document.created_at)
-}
-
-fn query_prompt_pipeline_state(summary: &ContentDocumentSummary) -> &'static str {
-    if document_has_query_failure(summary) {
-        return "failed";
-    }
-    if document_requires_query_backlog(summary) {
-        return "processing";
-    }
-    "ready"
-}
-
-fn query_prompt_graph_state(summary: &ContentDocumentSummary) -> &'static str {
-    match summary.readiness.as_ref().map(|readiness| readiness.graph_state.as_str()) {
-        Some("ready") => "ready",
-        Some("failed") => "failed",
-        Some("queued" | "running") => "processing",
-        Some(_) => "partial",
-        None => "unknown",
-    }
-}
-
 pub(crate) async fn load_retrieved_document_briefs(
     state: &AppState,
     chunks: &[RuntimeMatchedChunk],
@@ -559,22 +502,6 @@ pub(crate) async fn load_retrieved_document_briefs(
         .await;
 
     previews.into_iter().flatten().collect()
-}
-
-async fn load_query_prompt_document_preview(
-    state: &AppState,
-    summary: &ContentDocumentSummary,
-) -> Option<String> {
-    let revision_id = summary.active_revision.as_ref()?.id;
-    let chunks = state.canonical_services.content.list_chunks(state, revision_id).await.ok()?;
-    chunks.into_iter().find_map(|chunk| {
-        let repaired = repair_technical_layout_noise(&chunk.normalized_text);
-        let normalized = repaired.trim();
-        if normalized.is_empty() {
-            return None;
-        }
-        Some(excerpt_for(normalized, 180))
-    })
 }
 
 async fn load_retrieved_document_preview(

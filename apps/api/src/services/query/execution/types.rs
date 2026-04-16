@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use std::collections::HashMap;
 
 use uuid::Uuid;
@@ -15,6 +14,7 @@ use crate::{
         },
         graph_store::{GraphViewEdgeWrite, GraphViewNodeWrite},
     },
+    services::query::assistant_grounding::AssistantGroundingEvidence,
     services::query::planner::{QueryIntentProfile, RuntimeQueryPlan},
 };
 
@@ -137,6 +137,7 @@ pub(crate) struct AnswerGenerationStage {
     pub(crate) intent_profile: QueryIntentProfile,
     pub(crate) canonical_answer_chunks: Vec<RuntimeMatchedChunk>,
     pub(crate) canonical_evidence: CanonicalAnswerEvidence,
+    pub(crate) assistant_grounding: AssistantGroundingEvidence,
     pub(crate) answer: String,
     pub(crate) provider: ProviderModelSelection,
     pub(crate) usage_json: serde_json::Value,
@@ -171,7 +172,7 @@ pub(crate) struct PreparedAnswerQueryResult {
 #[derive(Debug, Clone)]
 pub(crate) struct QueryGraphIndex {
     pub(crate) nodes: HashMap<Uuid, GraphViewNodeWrite>,
-    pub(crate) edges: Vec<GraphViewEdgeWrite>,
+    pub(crate) edges: HashMap<Uuid, GraphViewEdgeWrite>,
 }
 
 #[derive(Debug, Clone)]

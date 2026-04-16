@@ -523,6 +523,7 @@ impl GraphService {
                     chunk_id,
                     entity_row.entity_id,
                     candidate_row.confidence,
+                    revision.library_id,
                 )
                 .await?;
             }

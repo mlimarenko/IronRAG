@@ -122,8 +122,8 @@ pub async fn append_audit_event(
     .fetch_one(postgres)
     .await?;
 
-    for subject in subjects {
-        sqlx::query(
+    if !subjects.is_empty() {
+        let mut builder = QueryBuilder::<Postgres>::new(
             "insert into audit_event_subject (
                 audit_event_id,
                 subject_kind,
@@ -131,17 +131,17 @@ pub async fn append_audit_event(
                 workspace_id,
                 library_id,
                 document_id
-            )
-            values ($1, $2, $3, $4, $5, $6)",
-        )
-        .bind(audit_event.id)
-        .bind(&subject.subject_kind)
-        .bind(subject.subject_id)
-        .bind(subject.workspace_id)
-        .bind(subject.library_id)
-        .bind(subject.document_id)
-        .execute(postgres)
-        .await?;
+            ) ",
+        );
+        builder.push_values(subjects.iter(), |mut row, subject| {
+            row.push_bind(audit_event.id)
+                .push_bind(&subject.subject_kind)
+                .push_bind(subject.subject_id)
+                .push_bind(subject.workspace_id)
+                .push_bind(subject.library_id)
+                .push_bind(subject.document_id);
+        });
+        builder.build().execute(postgres).await?;
     }
 
     Ok(audit_event)

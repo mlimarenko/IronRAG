@@ -199,7 +199,7 @@ impl OpsStateFixture {
             .context("failed to create redis client for ops_state")?;
         let state = AppState::from_dependencies(
             settings,
-            Persistence { postgres, redis },
+            Persistence::for_tests(postgres, redis),
             Arc::clone(&arango_client),
         )?;
 

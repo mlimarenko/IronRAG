@@ -5,6 +5,7 @@ use anyhow::{Context, anyhow};
 use tokio::time::sleep;
 use uuid::Uuid;
 
+use crate::domains::ops::{GRAPH_STATUS_EMPTY, GRAPH_STATUS_READY};
 use crate::services::graph::projection_guard::GraphWriteFailureDecision;
 use crate::{
     app::state::AppState,
@@ -15,8 +16,24 @@ use crate::{
         repositories::{self, RuntimeGraphSnapshotRow},
     },
     services::graph::summary::GraphSummaryRefreshRequest,
+    services::knowledge::graph_stream::invalidate_graph_topology_cache,
     shared::json_coercion::from_value_or_default,
 };
+
+/// Best-effort wipe of the compact graph topology cache for one library.
+/// Called after every `upsert_runtime_graph_snapshot` so the next topology
+/// request rebuilds against the freshly admitted projection. Cache failures
+/// must not block the projection pipeline — log and continue.
+async fn invalidate_topology_cache(state: &AppState, library_id: Uuid) {
+    if let Err(error) = invalidate_graph_topology_cache(&state.persistence.redis, library_id).await
+    {
+        tracing::warn!(
+            %library_id,
+            error = format!("{error:#}"),
+            "graph topology cache invalidation failed",
+        );
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GraphProjectionScope {
@@ -38,7 +55,7 @@ pub struct GraphProjectionOutcome {
 impl GraphProjectionOutcome {
     #[must_use]
     pub fn has_materialized_graph(&self) -> bool {
-        self.graph_status == "ready" && (self.node_count > 0 || self.edge_count > 0)
+        self.graph_status == GRAPH_STATUS_READY && (self.node_count > 0 || self.edge_count > 0)
     }
 }
 
@@ -63,13 +80,15 @@ impl GraphProjectionScope {
     #[must_use]
     pub fn with_targeted_refresh(
         mut self,
-        targeted_node_ids: Vec<Uuid>,
-        targeted_edge_ids: Vec<Uuid>,
+        mut targeted_node_ids: Vec<Uuid>,
+        mut targeted_edge_ids: Vec<Uuid>,
     ) -> Self {
-        self.targeted_node_ids =
-            targeted_node_ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
-        self.targeted_edge_ids =
-            targeted_edge_ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+        targeted_node_ids.sort_unstable();
+        targeted_node_ids.dedup();
+        targeted_edge_ids.sort_unstable();
+        targeted_edge_ids.dedup();
+        self.targeted_node_ids = targeted_node_ids;
+        self.targeted_edge_ids = targeted_edge_ids;
         self
     }
 
@@ -117,6 +136,7 @@ pub async fn ensure_empty_graph_snapshot(
     )
     .await
     .context("failed to persist empty graph snapshot")?;
+    invalidate_topology_cache(state, library_id).await;
 
     Ok(GraphProjectionOutcome {
         projection_version,
@@ -161,6 +181,7 @@ pub async fn project_canonical_graph(
     )
     .await
     .context("failed to mark graph snapshot as building")?;
+    invalidate_topology_cache(state, scope.library_id).await;
 
     if nodes.is_empty() && edges.is_empty() {
         let outcome =
@@ -169,35 +190,52 @@ pub async fn project_canonical_graph(
         return Ok(outcome);
     }
 
-    let node_writes = nodes
-        .iter()
-        .map(|node| GraphViewNodeWrite {
-            node_id: node.id,
-            canonical_key: node.canonical_key.clone(),
-            label: node.label.clone(),
-            node_type: node.node_type.clone(),
-            support_count: node.support_count,
-            summary: node.summary.clone(),
-            aliases: from_value_or_default("runtime_graph_node.aliases_json", &node.aliases_json),
-            metadata_json: node.metadata_json.clone(),
-        })
-        .collect::<Vec<_>>();
-    let edge_writes = edges
-        .iter()
-        .map(|edge| GraphViewEdgeWrite {
-            edge_id: edge.id,
-            from_node_id: edge.from_node_id,
-            to_node_id: edge.to_node_id,
-            relation_type: edge.relation_type.clone(),
-            canonical_key: edge.canonical_key.clone(),
-            support_count: edge.support_count,
-            summary: edge.summary.clone(),
-            weight: edge.weight,
-            metadata_json: edge.metadata_json.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (node_writes, edge_writes, _skipped_edge_count) =
-        sanitize_graph_view_writes(&node_writes, &edge_writes);
+    // Node/edge write construction + sanitization is the single biggest
+    // synchronous CPU hot spot of the extract_graph stage: for a prod
+    // reference library (25k nodes, 80k edges) this clones ~105k rows with
+    // `serde_json::Value` payloads, sorts 80k edges, and walks a 25k
+    // BTreeSet — all on the tokio worker thread. Hand it to
+    // `spawn_blocking` so the runtime can service the heartbeat and
+    // cancel poll tasks while the CPU work happens on the blocking
+    // thread pool. The move-in transfers ownership of the freshly
+    // loaded rows; the move-out returns the sanitized writes.
+    let sanitize_task = tokio::task::spawn_blocking(move || {
+        let node_writes = nodes
+            .iter()
+            .map(|node| GraphViewNodeWrite {
+                node_id: node.id,
+                canonical_key: node.canonical_key.clone(),
+                label: node.label.clone(),
+                node_type: node.node_type.clone(),
+                support_count: node.support_count,
+                summary: node.summary.clone(),
+                aliases: from_value_or_default(
+                    "runtime_graph_node.aliases_json",
+                    &node.aliases_json,
+                ),
+                metadata_json: node.metadata_json.clone(),
+            })
+            .collect::<Vec<_>>();
+        let edge_writes = edges
+            .iter()
+            .map(|edge| GraphViewEdgeWrite {
+                edge_id: edge.id,
+                from_node_id: edge.from_node_id,
+                to_node_id: edge.to_node_id,
+                relation_type: edge.relation_type.clone(),
+                canonical_key: edge.canonical_key.clone(),
+                support_count: edge.support_count,
+                summary: edge.summary.clone(),
+                weight: edge.weight,
+                metadata_json: edge.metadata_json.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (node_writes, edge_writes, _skipped_edge_count) =
+            sanitize_graph_view_writes(&node_writes, &edge_writes);
+        (nodes, edges, node_writes, edge_writes)
+    });
+    let (nodes, edges, node_writes, edge_writes) =
+        sanitize_task.await.context("graph projection sanitize task panicked")?;
 
     if let Err(error) =
         execute_projection_write_with_guard(state, scope, "library_projection", || {
@@ -223,6 +261,7 @@ pub async fn project_canonical_graph(
         )
         .await
         .context("failed to mark graph snapshot as failed after graph-store refresh error")?;
+        invalidate_topology_cache(state, scope.library_id).await;
         return Err(error).context("failed to refresh the canonical graph view");
     }
 
@@ -238,6 +277,7 @@ pub async fn project_canonical_graph(
     )
     .await
     .context("failed to mark graph snapshot as ready")?;
+    invalidate_topology_cache(state, scope.library_id).await;
     maybe_apply_summary_refresh(state, scope).await?;
 
     Ok(GraphProjectionOutcome {
@@ -347,35 +387,46 @@ async fn project_targeted_canonical_graph(
     .await
     .context("failed to load targeted graph nodes for projection refresh")?;
 
-    let node_writes = refreshed_nodes
-        .iter()
-        .map(|node| GraphViewNodeWrite {
-            node_id: node.id,
-            canonical_key: node.canonical_key.clone(),
-            label: node.label.clone(),
-            node_type: node.node_type.clone(),
-            support_count: node.support_count,
-            summary: node.summary.clone(),
-            aliases: from_value_or_default("runtime_graph_node.aliases_json", &node.aliases_json),
-            metadata_json: node.metadata_json.clone(),
-        })
-        .collect::<Vec<_>>();
-    let edge_writes = refreshed_edges
-        .iter()
-        .map(|edge| GraphViewEdgeWrite {
-            edge_id: edge.id,
-            from_node_id: edge.from_node_id,
-            to_node_id: edge.to_node_id,
-            relation_type: edge.relation_type.clone(),
-            canonical_key: edge.canonical_key.clone(),
-            support_count: edge.support_count,
-            summary: edge.summary.clone(),
-            weight: edge.weight,
-            metadata_json: edge.metadata_json.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (node_writes, edge_writes, _skipped_edge_count) =
-        sanitize_graph_view_writes(&node_writes, &edge_writes);
+    // Same rationale as in `project_canonical_graph`: hand the
+    // synchronous clone/sort/sanitize hot path to `spawn_blocking` so
+    // the heartbeat loop keeps getting scheduled during reconcile.
+    let targeted_sanitize_task = tokio::task::spawn_blocking(move || {
+        let node_writes = refreshed_nodes
+            .iter()
+            .map(|node| GraphViewNodeWrite {
+                node_id: node.id,
+                canonical_key: node.canonical_key.clone(),
+                label: node.label.clone(),
+                node_type: node.node_type.clone(),
+                support_count: node.support_count,
+                summary: node.summary.clone(),
+                aliases: from_value_or_default(
+                    "runtime_graph_node.aliases_json",
+                    &node.aliases_json,
+                ),
+                metadata_json: node.metadata_json.clone(),
+            })
+            .collect::<Vec<_>>();
+        let edge_writes = refreshed_edges
+            .iter()
+            .map(|edge| GraphViewEdgeWrite {
+                edge_id: edge.id,
+                from_node_id: edge.from_node_id,
+                to_node_id: edge.to_node_id,
+                relation_type: edge.relation_type.clone(),
+                canonical_key: edge.canonical_key.clone(),
+                support_count: edge.support_count,
+                summary: edge.summary.clone(),
+                weight: edge.weight,
+                metadata_json: edge.metadata_json.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (node_writes, edge_writes, _skipped_edge_count) =
+            sanitize_graph_view_writes(&node_writes, &edge_writes);
+        (node_writes, edge_writes)
+    });
+    let (node_writes, edge_writes) =
+        targeted_sanitize_task.await.context("targeted graph projection sanitize task panicked")?;
 
     execute_projection_write_with_guard(state, scope, "targeted_projection", || {
         state.arango_graph_store.refresh_library_projection_targets(
@@ -399,7 +450,8 @@ async fn project_targeted_canonical_graph(
     .context("failed to count admitted graph rows after targeted projection refresh")?;
     let node_count = usize::try_from(counts.node_count).unwrap_or_default();
     let edge_count = usize::try_from(counts.edge_count).unwrap_or_default();
-    let graph_status = if node_count == 0 && edge_count == 0 { "empty" } else { "ready" };
+    let graph_status =
+        if node_count == 0 && edge_count == 0 { GRAPH_STATUS_EMPTY } else { GRAPH_STATUS_READY };
 
     repositories::upsert_runtime_graph_snapshot(
         &state.persistence.postgres,
@@ -413,6 +465,7 @@ async fn project_targeted_canonical_graph(
     )
     .await
     .context("failed to persist targeted graph snapshot state")?;
+    invalidate_topology_cache(state, scope.library_id).await;
     maybe_apply_summary_refresh(state, scope).await?;
 
     Ok(GraphProjectionOutcome {

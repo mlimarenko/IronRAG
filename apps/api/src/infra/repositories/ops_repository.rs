@@ -12,9 +12,21 @@ pub struct OpsAsyncOperationRow {
     pub status: String,
     pub subject_kind: String,
     pub subject_id: Option<Uuid>,
+    pub parent_async_operation_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_code: Option<String>,
+}
+
+/// Aggregated child-operation progress for a parent `ops_async_operation`.
+/// Populated via a single grouped count query over `parent_async_operation_id`
+/// — canonical progress source for any batch-ops endpoint.
+#[derive(Debug, Clone, FromRow)]
+pub struct OpsAsyncOperationProgressRow {
+    pub total: i64,
+    pub completed: i64,
+    pub failed: i64,
+    pub in_flight: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +39,7 @@ pub struct NewOpsAsyncOperation<'a> {
     pub status: &'a str,
     pub subject_kind: &'a str,
     pub subject_id: Option<Uuid>,
+    pub parent_async_operation_id: Option<Uuid>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_code: Option<&'a str>,
 }
@@ -79,6 +92,7 @@ pub async fn get_async_operation_by_id(
             status::text as status,
             subject_kind,
             subject_id,
+            parent_async_operation_id,
             created_at,
             completed_at,
             failure_code
@@ -108,6 +122,7 @@ pub async fn list_async_operations_by_ids(
             status::text as status,
             subject_kind,
             subject_id,
+            parent_async_operation_id,
             created_at,
             completed_at,
             failure_code
@@ -134,6 +149,7 @@ pub async fn get_latest_async_operation_by_subject(
             status::text as status,
             subject_kind,
             subject_id,
+            parent_async_operation_id,
             created_at,
             completed_at,
             failure_code
@@ -164,11 +180,12 @@ pub async fn create_async_operation(
             status,
             subject_kind,
             subject_id,
+            parent_async_operation_id,
             created_at,
             completed_at,
             failure_code
         )
-        values ($1, $2, $3, $4, $5::surface_kind, $6, $7::ops_async_operation_status, $8, $9, now(), $10, $11)
+        values ($1, $2, $3, $4, $5::surface_kind, $6, $7::ops_async_operation_status, $8, $9, $10, now(), $11, $12)
         returning
             id,
             workspace_id,
@@ -178,6 +195,7 @@ pub async fn create_async_operation(
             status::text as status,
             subject_kind,
             subject_id,
+            parent_async_operation_id,
             created_at,
             completed_at,
             failure_code",
@@ -191,8 +209,27 @@ pub async fn create_async_operation(
     .bind(input.status)
     .bind(input.subject_kind)
     .bind(input.subject_id)
+    .bind(input.parent_async_operation_id)
     .bind(input.completed_at)
     .bind(input.failure_code)
+    .fetch_one(postgres)
+    .await
+}
+
+pub async fn get_async_operation_progress(
+    postgres: &PgPool,
+    parent_id: Uuid,
+) -> Result<OpsAsyncOperationProgressRow, sqlx::Error> {
+    sqlx::query_as::<_, OpsAsyncOperationProgressRow>(
+        "select
+            count(*)::bigint as total,
+            count(*) filter (where status = 'ready')::bigint as completed,
+            count(*) filter (where status = 'failed')::bigint as failed,
+            count(*) filter (where status in ('accepted', 'processing'))::bigint as in_flight
+         from ops_async_operation
+         where parent_async_operation_id = $1",
+    )
+    .bind(parent_id)
     .fetch_one(postgres)
     .await
 }
@@ -217,6 +254,7 @@ pub async fn update_async_operation(
             status::text as status,
             subject_kind,
             subject_id,
+            parent_async_operation_id,
             created_at,
             completed_at,
             failure_code",

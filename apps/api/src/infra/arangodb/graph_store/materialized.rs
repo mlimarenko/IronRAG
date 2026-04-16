@@ -8,10 +8,12 @@ impl ArangoGraphStore {
         supporting_entity_id: Option<Uuid>,
         supporting_relation_id: Option<Uuid>,
         supporting_fact_id: Option<Uuid>,
+        library_id: Uuid,
     ) -> anyhow::Result<KnowledgeEvidenceRow> {
         let evidence = self.upsert_evidence(input).await?;
         if let Some(source_revision_id) = source_revision_id {
-            self.upsert_evidence_source_edge(evidence.evidence_id, source_revision_id).await?;
+            self.upsert_evidence_source_edge(evidence.evidence_id, source_revision_id, library_id)
+                .await?;
         }
         if let Some(supporting_entity_id) = supporting_entity_id {
             self.upsert_evidence_supports_entity_edge(
@@ -20,6 +22,7 @@ impl ArangoGraphStore {
                 None,
                 None,
                 None,
+                library_id,
             )
             .await?;
         }
@@ -30,12 +33,17 @@ impl ArangoGraphStore {
                 None,
                 None,
                 None,
+                library_id,
             )
             .await?;
         }
         if let Some(supporting_fact_id) = supporting_fact_id {
-            self.upsert_fact_supports_evidence_edge(supporting_fact_id, evidence.evidence_id)
-                .await?;
+            self.upsert_fact_supports_evidence_edge(
+                supporting_fact_id,
+                evidence.evidence_id,
+                library_id,
+            )
+            .await?;
         }
         Ok(evidence)
     }
@@ -310,13 +318,16 @@ impl ArangoGraphStore {
         input: &NewKnowledgeRelation,
         subject_entity_id: Option<Uuid>,
         object_entity_id: Option<Uuid>,
+        library_id: Uuid,
     ) -> anyhow::Result<KnowledgeRelationRow> {
         let relation = self.upsert_relation(input).await?;
         if let Some(subject_entity_id) = subject_entity_id {
-            self.upsert_relation_subject_edge(relation.relation_id, subject_entity_id).await?;
+            self.upsert_relation_subject_edge(relation.relation_id, subject_entity_id, library_id)
+                .await?;
         }
         if let Some(object_entity_id) = object_entity_id {
-            self.upsert_relation_object_edge(relation.relation_id, object_entity_id).await?;
+            self.upsert_relation_object_edge(relation.relation_id, object_entity_id, library_id)
+                .await?;
         }
         Ok(relation)
     }

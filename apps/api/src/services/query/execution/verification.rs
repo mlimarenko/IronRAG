@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::Context;
@@ -8,28 +7,27 @@ use crate::{
     app::state::AppState,
     domains::query::{QueryVerificationState, QueryVerificationWarning},
     infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    services::query::assistant_grounding::AssistantGroundingEvidence,
     services::query::planner::QueryIntentProfile,
 };
 
-use super::answer::{
-    canonical_target_subject_label, extract_multi_document_role_clauses,
-    role_clause_canonical_target,
-};
 use super::types::{CanonicalAnswerEvidence, RuntimeMatchedChunk};
+use super::{CanonicalTarget, extract_multi_document_role_clauses, role_clause_canonical_target};
 
 #[derive(Debug, Clone)]
-pub(super) struct RuntimeAnswerVerification {
-    pub(super) state: QueryVerificationState,
-    pub(super) warnings: Vec<QueryVerificationWarning>,
+pub(crate) struct RuntimeAnswerVerification {
+    pub(crate) state: QueryVerificationState,
+    pub(crate) warnings: Vec<QueryVerificationWarning>,
 }
 
-pub(super) fn verify_answer_against_canonical_evidence(
+pub(crate) fn verify_answer_against_canonical_evidence(
     question: &str,
     answer: &str,
     intent_profile: &QueryIntentProfile,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     prompt_context: &str,
+    assistant_grounding: &AssistantGroundingEvidence,
 ) -> RuntimeAnswerVerification {
     if answer.trim().is_empty() {
         return RuntimeAnswerVerification {
@@ -44,7 +42,7 @@ pub(super) fn verify_answer_against_canonical_evidence(
     }
 
     let backticked_literals = extract_backticked_literals(answer);
-    let mut normalized_corpus = build_verification_corpus(evidence, chunks);
+    let mut normalized_corpus = build_verification_corpus(evidence, chunks, assistant_grounding);
     // Library summary, document file names, document titles and other prompt
     // metadata are part of what the LLM saw — include the whole rendered
     // prompt context so file-name backticks like `customers.csv` are not
@@ -95,14 +93,12 @@ pub(super) fn verify_answer_against_canonical_evidence(
 
     let lower_answer = answer.to_ascii_lowercase();
     for expected_target in expected_cross_document_answer_targets(question) {
-        if !lower_answer
-            .contains(&canonical_target_subject_label(expected_target).to_ascii_lowercase())
-        {
+        if !lower_answer.contains(&expected_target.subject_label().to_ascii_lowercase()) {
             warnings.push(QueryVerificationWarning {
                 code: "wrong_canonical_target".to_string(),
                 message: format!(
                     "Answer does not name the grounded target {} for this question.",
-                    canonical_target_subject_label(expected_target)
+                    expected_target.subject_label()
                 ),
                 related_segment_id: None,
                 related_fact_id: None,
@@ -168,7 +164,7 @@ fn question_specific_verification_warnings(
     warnings
 }
 
-fn expected_cross_document_answer_targets(question: &str) -> Vec<&'static str> {
+fn expected_cross_document_answer_targets(question: &str) -> Vec<CanonicalTarget> {
     let clauses = extract_multi_document_role_clauses(question);
     if !clauses.is_empty() {
         return clauses
@@ -183,7 +179,7 @@ fn expected_cross_document_answer_targets(question: &str) -> Vec<&'static str> {
         && lowered.contains("cypher")
         && lowered.contains("2019")
     {
-        return vec!["graph_database"];
+        return vec![CanonicalTarget::GraphDatabase];
     }
 
     Vec::new()
@@ -208,6 +204,7 @@ fn extract_backticked_literals(answer: &str) -> Vec<String> {
 fn build_verification_corpus(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
+    assistant_grounding: &AssistantGroundingEvidence,
 ) -> Vec<String> {
     let mut corpus = Vec::<String>::new();
     for fact in &evidence.technical_facts {
@@ -234,6 +231,9 @@ fn build_verification_corpus(
     for chunk in chunks {
         corpus.push(normalize_verification_literal(&chunk.source_text));
         corpus.push(normalize_verification_literal(&chunk.excerpt));
+    }
+    for fragment in &assistant_grounding.verification_corpus {
+        corpus.push(normalize_verification_literal(fragment));
     }
     corpus.retain(|value| !value.is_empty());
     corpus
@@ -284,19 +284,17 @@ fn collect_conflicting_fact_groups(
         let Some(group_id) = fact.conflict_group_id.as_ref() else {
             continue;
         };
-        groups
-            .entry(group_id.clone())
-            .or_insert_with(BTreeSet::new)
-            .insert(fact.canonical_value_text.clone());
+        groups.entry(group_id.clone()).or_default().insert(fact.canonical_value_text.clone());
     }
     groups.into_iter().filter(|(_, values)| values.len() > 1).collect()
 }
 
-pub(super) async fn persist_query_verification(
+pub(crate) async fn persist_query_verification(
     state: &AppState,
     execution_id: Uuid,
     verification: &RuntimeAnswerVerification,
     canonical_evidence: &CanonicalAnswerEvidence,
+    assistant_grounding: &AssistantGroundingEvidence,
 ) -> anyhow::Result<()> {
     let Some(bundle) =
         state.arango_context_store.get_bundle_by_query_execution(execution_id).await.with_context(
@@ -307,12 +305,16 @@ pub(super) async fn persist_query_verification(
     };
     let warnings_json = serde_json::to_value(&verification.warnings)
         .context("failed to serialize verification warnings")?;
-    let candidate_summary =
-        enrich_query_candidate_summary(bundle.candidate_summary.clone(), canonical_evidence);
+    let candidate_summary = enrich_query_candidate_summary(
+        bundle.candidate_summary.clone(),
+        canonical_evidence,
+        assistant_grounding,
+    );
     let assembly_diagnostics = enrich_query_assembly_diagnostics(
         bundle.assembly_diagnostics.clone(),
         verification,
         &candidate_summary,
+        assistant_grounding,
     );
     let _ = state
         .arango_context_store
@@ -342,9 +344,10 @@ fn verification_state_label(state: QueryVerificationState) -> &'static str {
     }
 }
 
-pub(super) fn enrich_query_candidate_summary(
+pub(crate) fn enrich_query_candidate_summary(
     candidate_summary: serde_json::Value,
     canonical_evidence: &CanonicalAnswerEvidence,
+    assistant_grounding: &AssistantGroundingEvidence,
 ) -> serde_json::Value {
     let mut summary = candidate_summary;
     let Some(object) = summary.as_object_mut() else {
@@ -362,13 +365,18 @@ pub(super) fn enrich_query_candidate_summary(
         "finalChunkReferences".to_string(),
         serde_json::json!(canonical_evidence.chunk_rows.len()),
     );
+    object.insert(
+        "finalAssistantDocumentReferences".to_string(),
+        serde_json::json!(assistant_grounding.document_references.len()),
+    );
     summary
 }
 
-pub(super) fn enrich_query_assembly_diagnostics(
+pub(crate) fn enrich_query_assembly_diagnostics(
     assembly_diagnostics: serde_json::Value,
     verification: &RuntimeAnswerVerification,
     candidate_summary: &serde_json::Value,
+    assistant_grounding: &AssistantGroundingEvidence,
 ) -> serde_json::Value {
     let mut diagnostics = assembly_diagnostics;
     let Some(object) = diagnostics.as_object_mut() else {
@@ -397,8 +405,18 @@ pub(super) fn enrich_query_assembly_diagnostics(
             "preparedSegmentReferenceCount": json_count(candidate_summary, "finalPreparedSegmentReferences"),
             "technicalFactReferenceCount": json_count(candidate_summary, "finalTechnicalFactReferences"),
             "chunkReferenceCount": json_count(candidate_summary, "finalChunkReferences"),
+            "assistantDocumentReferenceCount": json_count(candidate_summary, "finalAssistantDocumentReferences"),
         }),
     );
+    if !assistant_grounding.document_references.is_empty() {
+        object.insert(
+            "assistantGrounding".to_string(),
+            serde_json::json!({
+                "documentReferenceCount": assistant_grounding.document_references.len(),
+                "documentReferences": assistant_grounding.document_references,
+            }),
+        );
+    }
     diagnostics
 }
 

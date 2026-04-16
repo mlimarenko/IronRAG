@@ -22,6 +22,11 @@ use crate::{
     services::knowledge::service::RefreshKnowledgeLibraryGenerationCommand,
 };
 
+const VECTOR_KIND_CHUNK: &str = "chunk_embedding";
+const VECTOR_KIND_ENTITY: &str = "entity_embedding";
+const FACT_FETCH_MULTIPLIER: usize = 2;
+const FACT_FETCH_MIN: usize = 6;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkEmbeddingWrite {
     pub chunk_id: Uuid,
@@ -71,7 +76,7 @@ impl SearchService {
         let normalized_limit = limit.max(1);
         let exact_literal_bias = self.is_exact_literal_technical_query(query);
         let fact_limit = if exact_literal_bias {
-            normalized_limit.saturating_mul(2).max(6)
+            normalized_limit.saturating_mul(FACT_FETCH_MULTIPLIER).max(FACT_FETCH_MIN)
         } else {
             normalized_limit
         };
@@ -166,7 +171,7 @@ impl SearchService {
                 chunk_id: chunk.chunk_id,
                 revision_id: chunk.revision_id,
                 embedding_model_key: write.model_catalog_id.to_string(),
-                vector_kind: "chunk_embedding".to_string(),
+                vector_kind: VECTOR_KIND_CHUNK.to_string(),
                 dimensions: embedding_dimensions(&vector).with_context(|| {
                     format!("failed to resolve chunk embedding dimensions for {}", write.chunk_id)
                 })?,
@@ -221,7 +226,7 @@ impl SearchService {
                 library_id: entity.library_id,
                 entity_id: entity.entity_id,
                 embedding_model_key: write.model_catalog_id.to_string(),
-                vector_kind: "entity_embedding".to_string(),
+                vector_kind: VECTOR_KIND_ENTITY.to_string(),
                 dimensions: embedding_dimensions(&vector).with_context(|| {
                     format!("failed to resolve entity embedding dimensions for {}", write.node_id)
                 })?,
@@ -355,7 +360,7 @@ impl SearchService {
                     chunk_id: chunk.chunk_id,
                     revision_id: chunk.revision_id,
                     embedding_model_key: model_catalog_id.to_string(),
-                    vector_kind: "chunk_embedding".to_string(),
+                    vector_kind: VECTOR_KIND_CHUNK.to_string(),
                     dimensions: embedding_dimensions(embedding.as_slice()).with_context(|| {
                         format!(
                             "failed to resolve rebuilt chunk vector dimensions for {}",
@@ -461,7 +466,7 @@ impl SearchService {
                     library_id: entity.library_id,
                     entity_id: entity.entity_id,
                     embedding_model_key: model_catalog_id.to_string(),
-                    vector_kind: "entity_embedding".to_string(),
+                    vector_kind: VECTOR_KIND_ENTITY.to_string(),
                     dimensions: embedding_dimensions(embedding.as_slice()).with_context(|| {
                         format!(
                             "failed to resolve rebuilt entity vector dimensions for {}",

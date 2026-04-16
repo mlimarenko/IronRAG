@@ -18,6 +18,8 @@ const { useAppMock, documentsApiMock, billingApiMock, apiFetchMock } = vi.hoiste
     replace: vi.fn(),
     getPreparedSegments: vi.fn(),
     getTechnicalFacts: vi.fn(),
+    listWebRuns: vi.fn(),
+    listWebRunPages: vi.fn(),
   },
   billingApiMock: {
     getLibraryDocumentCosts: vi.fn(),
@@ -40,11 +42,12 @@ vi.mock('@/pages/documents/DocumentsPageHeader', () => ({
 }));
 
 vi.mock('@/pages/documents/DocumentsInspectorPanel', () => ({
-  DocumentsInspectorPanel: (props: { selectedDoc?: { fileName?: string } | null; onEdit: () => void }) =>
+  DocumentsInspectorPanel: (props: {
+    selectedDoc?: { fileName?: string } | null;
+    onEdit: () => void;
+  }) =>
     props.selectedDoc ? (
-      <button onClick={() => props.onEdit()}>
-        Edit {props.selectedDoc.fileName}
-      </button>
+      <button onClick={() => props.onEdit()}>Edit {props.selectedDoc.fileName}</button>
     ) : null,
 }));
 
@@ -53,7 +56,11 @@ vi.mock('@/pages/documents/DocumentsOverlays', () => ({
 }));
 
 vi.mock('@/pages/documents/editor/DocumentEditorShell', () => ({
-  DocumentEditorShell: (props: { open: boolean; documentName: string; onSave: (markdown: string) => void }) =>
+  DocumentEditorShell: (props: {
+    open: boolean;
+    documentName: string;
+    onSave: (markdown: string) => void;
+  }) =>
     props.open ? (
       <div data-testid="document-editor-shell">
         <span>{props.documentName}</span>
@@ -63,6 +70,46 @@ vi.mock('@/pages/documents/editor/DocumentEditorShell', () => ({
       </div>
     ) : null,
 }));
+
+/**
+ * Build a `DocumentListPageResponse`-shaped payload. The real backend emits a
+ * rich object per row; these fixtures include every field the page actually
+ * reads so we never test stubs that silently drop attributes.
+ */
+function listPage(
+  items: Array<{
+    id: string;
+    fileName: string;
+    fileType?: string;
+    status?: 'ready' | 'processing' | 'queued' | 'failed' | 'canceled';
+    readiness?: 'processing' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed';
+    sourceKind?: string;
+    sourceUri?: string;
+    sourceAccess?: { kind: 'stored_document' | 'external_url'; href: string };
+  }>,
+) {
+  return {
+    items: items.map((raw) => ({
+      id: raw.id,
+      libraryId: 'library-1',
+      workspaceId: 'ws-1',
+      fileName: raw.fileName,
+      fileType: raw.fileType ?? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      fileSize: 2048,
+      uploadedAt: '2026-04-10T12:00:00Z',
+      documentState: 'active',
+      status: raw.status ?? 'ready',
+      readiness: raw.readiness ?? 'graph_ready',
+      stage: 'finalizing',
+      retryable: false,
+      sourceKind: raw.sourceKind,
+      sourceUri: raw.sourceUri,
+      sourceAccess: raw.sourceAccess,
+    })),
+    nextCursor: null,
+    totalCount: items.length,
+  };
+}
 
 describe('DocumentsPage', () => {
   let container: HTMLDivElement;
@@ -79,58 +126,10 @@ describe('DocumentsPage', () => {
       locale: 'en',
     });
 
-    documentsApiMock.list.mockResolvedValue([
-      {
-        fileName: 'inventory.xlsx',
-        document: {
-          id: 'doc-1',
-          external_key: 'inventory',
-          created_at: '2026-04-10T12:00:00Z',
-        },
-        activeRevision: {
-          title: 'inventory.xlsx',
-          mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          byte_size: 2048,
-          content_source_kind: 'upload',
-        },
-        readinessSummary: {
-          readinessKind: 'graph_ready',
-          activityStatus: 'completed',
-        },
-        pipeline: {
-          latest_job: {
-            queue_state: 'completed',
-            current_stage: 'extracting_graph',
-            retryable: false,
-          },
-        },
-      },
-    ]);
-    documentsApiMock.get.mockResolvedValue({
-      fileName: 'inventory.xlsx',
-      document: {
-        id: 'doc-1',
-        external_key: 'inventory',
-        created_at: '2026-04-10T12:00:00Z',
-      },
-      activeRevision: {
-        title: 'inventory.xlsx',
-        mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        byte_size: 2048,
-        content_source_kind: 'upload',
-      },
-      readinessSummary: {
-        readinessKind: 'graph_ready',
-        activityStatus: 'completed',
-      },
-      pipeline: {
-        latest_job: {
-          queue_state: 'completed',
-          current_stage: 'extracting_graph',
-          retryable: false,
-        },
-      },
-    });
+    documentsApiMock.list.mockResolvedValue(
+      listPage([{ id: 'doc-1', fileName: 'inventory.xlsx', sourceKind: 'upload' }]),
+    );
+    documentsApiMock.get.mockResolvedValue({ id: 'doc-1', lifecycle: null });
     documentsApiMock.getPreparedSegments.mockResolvedValue([
       {
         segment: { ordinal: 0, blockKind: 'heading', headingTrail: ['Sheet1'] },
@@ -144,6 +143,8 @@ describe('DocumentsPage', () => {
     documentsApiMock.getTechnicalFacts.mockResolvedValue([]);
     documentsApiMock.getSourceText.mockResolvedValue('def run():\n\treturn 42\n');
     documentsApiMock.edit.mockResolvedValue({ documentId: 'doc-1' });
+    documentsApiMock.listWebRuns.mockResolvedValue([]);
+    documentsApiMock.listWebRunPages.mockResolvedValue([]);
     billingApiMock.getLibraryDocumentCosts.mockResolvedValue([]);
     apiFetchMock.mockResolvedValue([]);
   });
@@ -159,7 +160,7 @@ describe('DocumentsPage', () => {
 
   async function flushUi() {
     await act(async () => {
-      await new Promise(resolve => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
 
@@ -180,7 +181,7 @@ describe('DocumentsPage', () => {
   it('opens the editor from the table action', async () => {
     await renderPage();
 
-    const documentRow = Array.from(container.querySelectorAll('tr')).find(row =>
+    const documentRow = Array.from(container.querySelectorAll('tr')).find((row) =>
       row.textContent?.includes('inventory.xlsx'),
     );
     expect(documentRow).toBeTruthy();
@@ -191,7 +192,7 @@ describe('DocumentsPage', () => {
 
     await flushUi();
 
-    const editButton = Array.from(container.querySelectorAll('button')).find(button =>
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Edit inventory.xlsx'),
     );
     expect(editButton).toBeTruthy();
@@ -209,7 +210,7 @@ describe('DocumentsPage', () => {
   it('saves edited markdown through the edit mutation and refreshes the document', async () => {
     await renderPage();
 
-    const documentRow = Array.from(container.querySelectorAll('tr')).find(row =>
+    const documentRow = Array.from(container.querySelectorAll('tr')).find((row) =>
       row.textContent?.includes('inventory.xlsx'),
     );
     expect(documentRow).toBeTruthy();
@@ -220,7 +221,7 @@ describe('DocumentsPage', () => {
 
     await flushUi();
 
-    const editButton = Array.from(container.querySelectorAll('button')).find(button =>
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Edit inventory.xlsx'),
     );
     expect(editButton).toBeTruthy();
@@ -231,7 +232,7 @@ describe('DocumentsPage', () => {
 
     await flushUi();
 
-    const saveButton = Array.from(container.querySelectorAll('button')).find(button =>
+    const saveButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Save Editor'),
     );
     expect(saveButton).toBeTruthy();
@@ -262,66 +263,24 @@ describe('DocumentsPage', () => {
   });
 
   it('loads code-like documents from raw source text instead of prepared segments', async () => {
-    documentsApiMock.list.mockResolvedValue([
-      {
-        fileName: 'script.py',
-        document: {
+    documentsApiMock.list.mockResolvedValue(
+      listPage([
+        {
           id: 'doc-code',
-          external_key: 'script',
-          created_at: '2026-04-10T12:00:00Z',
-        },
-        activeRevision: {
-          title: 'script.py',
-          mime_type: 'text/x-python',
-          byte_size: 512,
-          content_source_kind: 'upload',
-          source_uri: '/v1/content/documents/doc-code/source',
-        },
-        sourceAccess: { kind: 'stored_document', href: '/v1/content/documents/doc-code/source' },
-        readinessSummary: {
-          readinessKind: 'graph_ready',
-          activityStatus: 'completed',
-        },
-        pipeline: {
-          latest_job: {
-            queue_state: 'completed',
-            current_stage: 'extracting_graph',
-            retryable: false,
+          fileName: 'script.py',
+          fileType: 'text/x-python',
+          sourceKind: 'upload',
+          sourceAccess: {
+            kind: 'stored_document',
+            href: '/v1/content/documents/doc-code/source',
           },
         },
-      },
-    ]);
-    documentsApiMock.get.mockResolvedValue({
-      fileName: 'script.py',
-      document: {
-        id: 'doc-code',
-        external_key: 'script',
-        created_at: '2026-04-10T12:00:00Z',
-      },
-      activeRevision: {
-        title: 'script.py',
-        mime_type: 'text/x-python',
-        byte_size: 512,
-        content_source_kind: 'upload',
-        source_uri: '/v1/content/documents/doc-code/source',
-      },
-      sourceAccess: { kind: 'stored_document', href: '/v1/content/documents/doc-code/source' },
-      readinessSummary: {
-        readinessKind: 'graph_ready',
-        activityStatus: 'completed',
-      },
-      pipeline: {
-        latest_job: {
-          queue_state: 'completed',
-          current_stage: 'extracting_graph',
-          retryable: false,
-        },
-      },
-    });
+      ]),
+    );
 
     await renderPage();
 
-    const documentRow = Array.from(container.querySelectorAll('tr')).find(row =>
+    const documentRow = Array.from(container.querySelectorAll('tr')).find((row) =>
       row.textContent?.includes('script.py'),
     );
     expect(documentRow).toBeTruthy();
@@ -332,7 +291,7 @@ describe('DocumentsPage', () => {
 
     await flushUi();
 
-    const editButton = Array.from(container.querySelectorAll('button')).find(button =>
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Edit script.py'),
     );
     expect(editButton).toBeTruthy();
@@ -348,34 +307,17 @@ describe('DocumentsPage', () => {
   });
 
   it('shows web page as the document type for web-ingested documents', async () => {
-    documentsApiMock.list.mockResolvedValue([
-      {
-        fileName: 'https://ru.wikipedia.org/wiki/Test',
-        document: {
+    documentsApiMock.list.mockResolvedValue(
+      listPage([
+        {
           id: 'doc-web',
-          external_key: 'https://ru.wikipedia.org/wiki/Test',
-          created_at: '2026-04-10T12:00:00Z',
+          fileName: 'https://ru.wikipedia.org/wiki/Test',
+          fileType: 'text/html',
+          sourceKind: 'web_page',
+          sourceUri: 'https://ru.wikipedia.org/wiki/Test',
         },
-        activeRevision: {
-          title: 'index.php',
-          mime_type: 'text/html',
-          byte_size: 2048,
-          content_source_kind: 'web_page',
-          source_uri: 'https://ru.wikipedia.org/wiki/Test',
-        },
-        readinessSummary: {
-          readinessKind: 'graph_ready',
-          activityStatus: 'completed',
-        },
-        pipeline: {
-          latest_job: {
-            queue_state: 'completed',
-            current_stage: 'extracting_graph',
-            retryable: false,
-          },
-        },
-      },
-    ]);
+      ]),
+    );
 
     await renderPage();
 

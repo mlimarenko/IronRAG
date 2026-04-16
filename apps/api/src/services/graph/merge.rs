@@ -72,7 +72,10 @@ impl GraphMergeOutcome {
 
     #[must_use]
     pub fn changed_edge_ids(&self) -> Vec<uuid::Uuid> {
-        self.edges.iter().map(|edge| edge.id).collect::<BTreeSet<_>>().into_iter().collect()
+        let mut ids: Vec<uuid::Uuid> = self.edges.iter().map(|edge| edge.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     #[must_use]

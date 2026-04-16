@@ -1,4 +1,4 @@
-import type { RawPreparedSegmentItem } from "@/api/documents";
+import type { PreparedSegmentItem } from "@/api/documents";
 
 import {
   codeLanguageForSourceFormat,
@@ -39,7 +39,7 @@ type NormalizedSegment = {
 };
 
 export function buildEditorBlocks(
-  items: RawPreparedSegmentItem[],
+  items: PreparedSegmentItem[],
   sourceFormat?: string,
 ): DocumentEditorBlock[] {
   const normalized = items.map(normalizeSegment);
@@ -153,7 +153,7 @@ export function serializeSourceTextForEditor(
   });
 }
 
-function normalizeSegment(item: RawPreparedSegmentItem): NormalizedSegment {
+function normalizeSegment(item: PreparedSegmentItem): NormalizedSegment {
   const segment = item.segment ?? {};
   const tableCoordinates =
     item.tableCoordinates ?? item.table_coordinates ?? null;

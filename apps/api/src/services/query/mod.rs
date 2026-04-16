@@ -1,5 +1,8 @@
 pub(crate) mod agent_loop;
+pub(crate) mod assistant_grounding;
+pub mod assistant_prompt;
 pub(super) mod execution;
+pub mod llm_context_debug;
 pub(crate) mod planner;
 pub mod search;
 pub mod service;

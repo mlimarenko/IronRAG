@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Context;
@@ -20,13 +19,16 @@ use crate::{
         },
         query::planner::RuntimeQueryPlan,
     },
-    shared::extraction::table_summary::is_table_summary_text,
     shared::extraction::text_render::repair_technical_layout_noise,
 };
 
-use super::question_asks_table_aggregation;
 use super::technical_literals::technical_literal_focus_keyword_segments;
 use super::types::*;
+use super::{
+    load_initial_table_rows_for_documents, load_table_rows_for_documents,
+    load_table_summary_chunks_for_documents, merge_canonical_table_aggregation_chunks,
+    question_asks_table_aggregation, requested_initial_table_row_count,
+};
 
 const DIRECT_TABLE_AGGREGATION_SUMMARY_LIMIT: usize = 32;
 const DIRECT_TABLE_AGGREGATION_ROW_LIMIT: usize = 24;
@@ -45,7 +47,7 @@ pub(crate) async fn load_graph_index(
 
     Ok(QueryGraphIndex {
         nodes: admitted_projection.nodes.into_iter().map(|node| (node.node_id, node)).collect(),
-        edges: admitted_projection.edges,
+        edges: admitted_projection.edges.into_iter().map(|e| (e.edge_id, e)).collect(),
     })
 }
 
@@ -115,6 +117,9 @@ pub(crate) async fn retrieve_document_chunks(
     let plan_keywords = &plan.keywords;
 
     let vector_future = async {
+        if question_embedding.is_empty() {
+            return Ok::<Vec<RuntimeMatchedChunk>, anyhow::Error>(Vec::new());
+        }
         let context =
             resolve_runtime_vector_search_context(state, library_id, provider_profile).await?;
         let Some(context) = context else {
@@ -270,124 +275,6 @@ pub(crate) async fn resolve_runtime_vector_search_context(
     }))
 }
 
-pub(crate) async fn retrieve_entity_hits(
-    state: &AppState,
-    library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
-    plan: &RuntimeQueryPlan,
-    limit: usize,
-    question_embedding: &[f32],
-    graph_index: &QueryGraphIndex,
-) -> anyhow::Result<Vec<RuntimeMatchedEntity>> {
-    let mut hits = if let Some(context) =
-        resolve_runtime_vector_search_context(state, library_id, provider_profile).await?
-    {
-        state
-            .arango_search_store
-            .search_entity_vectors_by_similarity(
-                library_id,
-                &context.model_catalog_id.to_string(),
-                context.freshness_generation,
-                question_embedding,
-                limit.max(1),
-                Some(16),
-            )
-            .await
-            .context("failed to search canonical entity vectors for runtime query")?
-            .into_iter()
-            .filter_map(|hit| {
-                graph_index.nodes.get(&hit.entity_id).map(|node| RuntimeMatchedEntity {
-                    node_id: node.node_id,
-                    label: node.label.clone(),
-                    node_type: node.node_type.clone(),
-                    score: Some(hit.score as f32),
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    if hits.is_empty() {
-        hits = lexical_entity_hits(plan, graph_index);
-    }
-    hits.sort_by(score_desc_entities);
-    hits.truncate(limit);
-    Ok(hits)
-}
-
-pub(crate) async fn retrieve_relationship_hits(
-    state: &AppState,
-    library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
-    plan: &RuntimeQueryPlan,
-    limit: usize,
-    question_embedding: &[f32],
-    graph_index: &QueryGraphIndex,
-) -> anyhow::Result<Vec<RuntimeMatchedRelationship>> {
-    let entity_seed_limit = limit.saturating_mul(2).max(8);
-    let entity_hits = retrieve_entity_hits(
-        state,
-        library_id,
-        provider_profile,
-        plan,
-        entity_seed_limit,
-        question_embedding,
-        graph_index,
-    )
-    .await?;
-    let topology_hits =
-        related_edges_for_entities(&entity_hits, graph_index, entity_seed_limit.saturating_mul(2));
-    let lexical_hits = lexical_relationship_hits(plan, graph_index);
-    Ok(merge_relationships(topology_hits, lexical_hits, limit))
-}
-
-pub(crate) async fn retrieve_local_bundle(
-    state: &AppState,
-    library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
-    plan: &RuntimeQueryPlan,
-    limit: usize,
-    question_embedding: &[f32],
-    graph_index: &QueryGraphIndex,
-) -> anyhow::Result<RetrievalBundle> {
-    let entity_hits = retrieve_entity_hits(
-        state,
-        library_id,
-        provider_profile,
-        plan,
-        limit,
-        question_embedding,
-        graph_index,
-    )
-    .await?;
-    let relationships = related_edges_for_entities(&entity_hits, graph_index, limit);
-    Ok(RetrievalBundle { entities: entity_hits, relationships, chunks: Vec::new() })
-}
-
-pub(crate) async fn retrieve_global_bundle(
-    state: &AppState,
-    library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
-    plan: &RuntimeQueryPlan,
-    limit: usize,
-    question_embedding: &[f32],
-    graph_index: &QueryGraphIndex,
-) -> anyhow::Result<RetrievalBundle> {
-    let relationships = retrieve_relationship_hits(
-        state,
-        library_id,
-        provider_profile,
-        plan,
-        limit,
-        question_embedding,
-        graph_index,
-    )
-    .await?;
-    let entities = entities_from_relationships(&relationships, graph_index, limit);
-    Ok(RetrievalBundle { entities, relationships, chunks: Vec::new() })
-}
-
 pub(crate) fn expanded_candidate_limit(
     planned_mode: RuntimeQueryMode,
     top_k: usize,
@@ -402,6 +289,10 @@ pub(crate) fn expanded_candidate_limit(
         return intrinsic_limit;
     }
     top_k
+}
+
+pub(crate) const fn should_skip_vector_search(plan: &RuntimeQueryPlan) -> bool {
+    plan.intent_profile.exact_literal_technical
 }
 
 pub(crate) fn build_lexical_queries(question: &str, plan: &RuntimeQueryPlan) -> Vec<String> {
@@ -423,15 +314,15 @@ pub(crate) fn build_lexical_queries(question: &str, plan: &RuntimeQueryPlan) -> 
             push_query(segment.join(" "));
         }
     }
-    if super::answer::question_requests_multi_document_scope(question) {
-        for clause in super::answer::extract_multi_document_role_clauses(question) {
+    if super::question_requests_multi_document_scope(question) {
+        for clause in super::extract_multi_document_role_clauses(question) {
             push_query(clause.clone());
             let clause_keywords = crate::services::query::planner::extract_keywords(&clause);
             if !clause_keywords.is_empty() {
                 push_query(clause_keywords.join(" "));
             }
-            if let Some(target) = super::answer::role_clause_canonical_target(&clause) {
-                for alias in super::answer::canonical_target_query_aliases(target) {
+            if let Some(target) = super::role_clause_canonical_target(&clause) {
+                for alias in target.query_aliases() {
                     push_query(alias.to_string());
                 }
             }
@@ -532,497 +423,6 @@ pub(crate) fn canonical_document_revision_id(document: &KnowledgeDocumentRow) ->
     document.readable_revision_id.or(document.active_revision_id)
 }
 
-pub(crate) fn requested_initial_table_row_count(question: &str) -> Option<usize> {
-    let lowered = question.to_lowercase();
-    for marker in ["первые", "первых", "first"] {
-        let Some(start) = lowered.find(marker) else {
-            continue;
-        };
-        let tail = &lowered[start + marker.len()..];
-        if !(tail.contains("строк") || tail.contains("строки") || tail.contains("rows"))
-        {
-            continue;
-        }
-        let count = tail
-            .split(|ch: char| !ch.is_ascii_digit())
-            .find_map(|token| (!token.is_empty()).then(|| token.parse::<usize>().ok()).flatten());
-        if let Some(count) = count {
-            return Some(count.clamp(1, 32));
-        }
-    }
-    None
-}
-
-pub(crate) async fn load_initial_table_rows_for_documents(
-    state: &AppState,
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-    targeted_document_ids: &BTreeSet<Uuid>,
-    row_count: usize,
-    keywords: &[String],
-) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
-    load_table_rows_for_documents(state, document_index, targeted_document_ids, row_count, keywords)
-        .await
-}
-
-pub(crate) async fn load_table_rows_for_documents(
-    state: &AppState,
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-    targeted_document_ids: &BTreeSet<Uuid>,
-    limit_per_document: usize,
-    keywords: &[String],
-) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
-    if targeted_document_ids.is_empty() || limit_per_document == 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut chunks = Vec::new();
-    for document_id in targeted_document_ids {
-        let Some(document) = document_index.get(document_id) else {
-            continue;
-        };
-        let Some(revision_id) = canonical_document_revision_id(document) else {
-            continue;
-        };
-        let rows = state
-            .arango_document_store
-            .list_chunks_by_revision(revision_id)
-            .await
-            .with_context(|| format!("failed to load table rows for document {document_id}"))?;
-        let synthetic_base_score = 0.5_f32;
-        chunks.extend(
-            rows.into_iter()
-                .filter(|chunk| chunk.chunk_kind.as_deref() == Some("table_row"))
-                .take(limit_per_document)
-                .enumerate()
-                .filter_map(|(ordinal, chunk)| {
-                    map_chunk_hit(
-                        chunk,
-                        synthetic_base_score - ordinal as f32 * 0.0001,
-                        document_index,
-                        keywords,
-                    )
-                }),
-        );
-    }
-
-    Ok(chunks)
-}
-
-pub(crate) async fn load_table_summary_chunks_for_documents(
-    state: &AppState,
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-    targeted_document_ids: &BTreeSet<Uuid>,
-    limit_per_document: usize,
-    keywords: &[String],
-) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
-    if targeted_document_ids.is_empty() || limit_per_document == 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut chunks = Vec::new();
-    for document_id in targeted_document_ids {
-        let Some(document) = document_index.get(document_id) else {
-            continue;
-        };
-        let Some(revision_id) = canonical_document_revision_id(document) else {
-            continue;
-        };
-        let revision_chunks =
-            state.arango_document_store.list_chunks_by_revision(revision_id).await.with_context(
-                || format!("failed to load table summaries for document {document_id}"),
-            )?;
-        let synthetic_base_score = 0.01_f32;
-        chunks.extend(
-            revision_chunks
-                .into_iter()
-                .filter(|chunk| {
-                    chunk.chunk_kind.as_deref() == Some("metadata_block")
-                        && is_table_summary_text(&chunk.normalized_text)
-                })
-                .take(limit_per_document)
-                .enumerate()
-                .filter_map(|(ordinal, chunk)| {
-                    map_chunk_hit(
-                        chunk,
-                        synthetic_base_score - ordinal as f32 * 0.0001,
-                        document_index,
-                        keywords,
-                    )
-                }),
-        );
-    }
-
-    Ok(chunks)
-}
-
-pub(crate) fn is_table_analytics_chunk(chunk: &RuntimeMatchedChunk) -> bool {
-    let text = chunk.source_text.trim();
-    is_table_summary_text(text) || (text.starts_with("Sheet: ") && text.contains(" | Row "))
-}
-
-pub(crate) fn merge_canonical_table_aggregation_chunks(
-    existing_chunks: Vec<RuntimeMatchedChunk>,
-    direct_summary_chunks: Vec<RuntimeMatchedChunk>,
-    direct_row_chunks: Vec<RuntimeMatchedChunk>,
-    top_k: usize,
-) -> Vec<RuntimeMatchedChunk> {
-    if direct_summary_chunks.is_empty() && direct_row_chunks.is_empty() {
-        return existing_chunks;
-    }
-
-    let direct_chunks = merge_chunks(direct_summary_chunks, direct_row_chunks, top_k);
-    let mut merged = merge_chunks(direct_chunks, existing_chunks, top_k);
-    if merged.iter().any(is_table_analytics_chunk) {
-        merged.retain(is_table_analytics_chunk);
-    }
-    merged
-}
-
-pub(crate) fn map_edge_hit(
-    edge_id: Uuid,
-    score: Option<f32>,
-    graph_index: &QueryGraphIndex,
-    node_index: &HashMap<Uuid, crate::infra::arangodb::graph_store::GraphViewNodeWrite>,
-) -> Option<RuntimeMatchedRelationship> {
-    let edge = graph_index.edges.iter().find(|row| row.edge_id == edge_id)?;
-    let from_node = node_index.get(&edge.from_node_id)?;
-    let to_node = node_index.get(&edge.to_node_id)?;
-    Some(RuntimeMatchedRelationship {
-        edge_id: edge.edge_id,
-        relation_type: edge.relation_type.clone(),
-        from_node_id: edge.from_node_id,
-        from_label: from_node.label.clone(),
-        to_node_id: edge.to_node_id,
-        to_label: to_node.label.clone(),
-        score,
-    })
-}
-
-pub(crate) fn merge_entities(
-    left: Vec<RuntimeMatchedEntity>,
-    right: Vec<RuntimeMatchedEntity>,
-    top_k: usize,
-) -> Vec<RuntimeMatchedEntity> {
-    let mut merged = HashMap::new();
-    for item in left.into_iter().chain(right) {
-        merged
-            .entry(item.node_id)
-            .and_modify(|existing: &mut RuntimeMatchedEntity| {
-                if score_value(item.score) > score_value(existing.score) {
-                    *existing = item.clone();
-                }
-            })
-            .or_insert(item);
-    }
-    let mut values = merged.into_values().collect::<Vec<_>>();
-    values.sort_by(score_desc_entities);
-    values.truncate(top_k);
-    values
-}
-
-pub(crate) fn merge_relationships(
-    left: Vec<RuntimeMatchedRelationship>,
-    right: Vec<RuntimeMatchedRelationship>,
-    top_k: usize,
-) -> Vec<RuntimeMatchedRelationship> {
-    let mut merged = HashMap::new();
-    for item in left.into_iter().chain(right) {
-        merged
-            .entry(item.edge_id)
-            .and_modify(|existing: &mut RuntimeMatchedRelationship| {
-                if score_value(item.score) > score_value(existing.score) {
-                    *existing = item.clone();
-                }
-            })
-            .or_insert(item);
-    }
-    let mut values = merged.into_values().collect::<Vec<_>>();
-    values.sort_by(score_desc_relationships);
-    values.truncate(top_k);
-    values
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::{BTreeSet, HashMap};
-
-    use chrono::Utc;
-    use uuid::Uuid;
-
-    use super::{
-        canonical_document_revision_id, chunk_answer_source_text, explicit_target_document_ids,
-        is_table_analytics_chunk, map_chunk_hit, merge_canonical_table_aggregation_chunks,
-        requested_initial_table_row_count,
-    };
-    use crate::infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow};
-    use crate::services::query::execution::{
-        RuntimeMatchedChunk, normalized_document_target_candidates,
-    };
-
-    #[test]
-    fn table_row_answer_context_uses_semantic_row_text() {
-        let chunk = KnowledgeChunkRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
-            chunk_id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index: 1,
-            chunk_kind: Some("table_row".to_string()),
-            content_text: "| 1 |".to_string(),
-            normalized_text: "Sheet: test1 | Row 1 | col_1: 1".to_string(),
-            span_start: Some(0),
-            span_end: Some(5),
-            token_count: Some(4),
-            support_block_ids: Vec::new(),
-            section_path: vec!["test1".to_string()],
-            heading_trail: vec!["test1".to_string()],
-            literal_digest: None,
-            chunk_state: "ready".to_string(),
-            text_generation: Some(1),
-            vector_generation: Some(1),
-            quality_score: Some(1.0),
-        };
-
-        assert_eq!(chunk_answer_source_text(&chunk), "Sheet: test1 | Row 1 | col_1: 1");
-    }
-
-    #[test]
-    fn metadata_summary_answer_context_uses_normalized_text_when_content_is_empty() {
-        let chunk = KnowledgeChunkRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
-            chunk_id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index: 1,
-            chunk_kind: Some("metadata_block".to_string()),
-            content_text: String::new(),
-            normalized_text: "Table Summary | Sheet: products | Column: Stock | Value Kind: numeric | Value Shape: label | Aggregation Priority: 3 | Row Count: 3 | Non-empty Count: 3 | Distinct Count: 3 | Average: 20 | Min: 10 | Max: 30".to_string(),
-            span_start: None,
-            span_end: None,
-            token_count: Some(16),
-            support_block_ids: Vec::new(),
-            section_path: vec!["products".to_string()],
-            heading_trail: vec!["products".to_string()],
-            literal_digest: None,
-            chunk_state: "ready".to_string(),
-            text_generation: Some(1),
-            vector_generation: Some(1),
-            quality_score: Some(1.0),
-        };
-
-        assert!(chunk_answer_source_text(&chunk).starts_with("Table Summary |"));
-    }
-
-    #[test]
-    fn non_table_chunk_answer_context_preserves_raw_content_text() {
-        let chunk = KnowledgeChunkRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
-            chunk_id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index: 0,
-            chunk_kind: Some("heading".to_string()),
-            content_text: "test1".to_string(),
-            normalized_text: "test1".to_string(),
-            span_start: Some(0),
-            span_end: Some(5),
-            token_count: Some(1),
-            support_block_ids: Vec::new(),
-            section_path: vec!["test1".to_string()],
-            heading_trail: vec!["test1".to_string()],
-            literal_digest: None,
-            chunk_state: "ready".to_string(),
-            text_generation: Some(1),
-            vector_generation: Some(1),
-            quality_score: Some(1.0),
-        };
-
-        assert_eq!(chunk_answer_source_text(&chunk), "test1");
-    }
-
-    #[test]
-    fn explicit_target_document_ids_match_exact_file_name() {
-        let document = sample_document_row("people-100.csv", "people-100.csv");
-        let document_index = HashMap::from([(document.document_id, document.clone())]);
-
-        let targeted = explicit_target_document_ids(
-            "В people-100.csv какая должность у Shelby Terrell?",
-            &document_index,
-        );
-
-        assert_eq!(targeted, BTreeSet::from([document.document_id]));
-    }
-
-    #[test]
-    fn document_target_candidates_include_extensionless_stem() {
-        let document = sample_document_row("sample-heavy-1.xls", "sample-heavy-1.xls");
-
-        let candidates = normalized_document_target_candidates(
-            [
-                document.file_name.as_deref(),
-                document.title.as_deref(),
-                Some(document.external_key.as_str()),
-            ]
-            .into_iter()
-            .flatten(),
-        );
-
-        assert!(candidates.contains(&"sample-heavy-1.xls".to_string()));
-        assert!(candidates.contains(&"sample-heavy-1".to_string()));
-    }
-
-    #[test]
-    fn requested_initial_table_row_count_detects_russian_row_ranges() {
-        assert_eq!(
-            requested_initial_table_row_count(
-                "Покажи значения из первых 5 строк sample-heavy-1.xls."
-            ),
-            Some(5)
-        );
-    }
-
-    #[test]
-    fn requested_initial_table_row_count_detects_english_row_ranges() {
-        assert_eq!(
-            requested_initial_table_row_count("Show the first 7 rows from people-100.csv."),
-            Some(7)
-        );
-    }
-
-    #[test]
-    fn map_chunk_hit_skips_noncanonical_revision_chunks() {
-        let document = sample_document_row("people-100.csv", "people-100.csv");
-        let canonical_revision_id = canonical_document_revision_id(&document).unwrap();
-        let stale_revision_id = Uuid::now_v7();
-        assert_ne!(canonical_revision_id, stale_revision_id);
-        let document_index = HashMap::from([(document.document_id, document.clone())]);
-        let chunk = KnowledgeChunkRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
-            chunk_id: Uuid::now_v7(),
-            workspace_id: document.workspace_id,
-            library_id: document.library_id,
-            document_id: document.document_id,
-            revision_id: stale_revision_id,
-            chunk_index: 0,
-            chunk_kind: Some("table_row".to_string()),
-            content_text: "stale".to_string(),
-            normalized_text: "Sheet: people | Row 1 | Name: Stale".to_string(),
-            span_start: None,
-            span_end: None,
-            token_count: Some(4),
-            support_block_ids: Vec::new(),
-            section_path: vec!["people".to_string()],
-            heading_trail: vec!["people".to_string()],
-            literal_digest: None,
-            chunk_state: "ready".to_string(),
-            text_generation: Some(1),
-            vector_generation: Some(1),
-            quality_score: Some(1.0),
-        };
-
-        assert!(map_chunk_hit(chunk, 1.0, &document_index, &[]).is_none());
-    }
-
-    #[test]
-    fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
-        let document_id = Uuid::now_v7();
-        let heading = RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id,
-            document_label: "customers-100.xlsx".to_string(),
-            excerpt: "customers-100".to_string(),
-            score: Some(1.0),
-            source_text: "customers-100".to_string(),
-        };
-        let summary = RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id,
-            document_label: "customers-100.xlsx".to_string(),
-            excerpt: "City".to_string(),
-            score: Some(1.0),
-            source_text: "Table Summary | Sheet: customers-100 | Column: City | Value Kind: categorical | Value Shape: label | Aggregation Priority: 2 | Row Count: 100 | Non-empty Count: 100 | Distinct Count: 100 | Most Frequent Count: 1 | Most Frequent Tie Count: 100".to_string(),
-        };
-        let row = RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id,
-            document_label: "customers-100.xlsx".to_string(),
-            excerpt: "Row 1".to_string(),
-            score: Some(1.0),
-            source_text: "Sheet: customers-100 | Row 1 | City: Acevedoville".to_string(),
-        };
-
-        let merged = merge_canonical_table_aggregation_chunks(
-            vec![heading],
-            vec![summary.clone()],
-            vec![row.clone()],
-            8,
-        );
-
-        assert_eq!(merged.len(), 2);
-        assert!(merged.iter().all(is_table_analytics_chunk));
-        let merged_ids = merged.into_iter().map(|chunk| chunk.chunk_id).collect::<BTreeSet<_>>();
-        assert_eq!(merged_ids, BTreeSet::from([summary.chunk_id, row.chunk_id]));
-    }
-
-    #[test]
-    fn merge_canonical_table_aggregation_chunks_keeps_existing_when_no_direct_analytics_exist() {
-        let heading = RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            document_label: "customers-100.xlsx".to_string(),
-            excerpt: "customers-100".to_string(),
-            score: Some(1.0),
-            source_text: "customers-100".to_string(),
-        };
-
-        let merged = merge_canonical_table_aggregation_chunks(
-            vec![heading.clone()],
-            Vec::new(),
-            Vec::new(),
-            8,
-        );
-
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].chunk_id, heading.chunk_id);
-    }
-
-    fn sample_document_row(file_name: &str, title: &str) -> KnowledgeDocumentRow {
-        let document_id = Uuid::now_v7();
-        KnowledgeDocumentRow {
-            key: document_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
-            document_id,
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            external_key: document_id.to_string(),
-            file_name: Some(file_name.to_string()),
-            title: Some(title.to_string()),
-            document_state: "active".to_string(),
-            active_revision_id: Some(Uuid::now_v7()),
-            readable_revision_id: Some(Uuid::now_v7()),
-            latest_revision_no: Some(1),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        }
-    }
-}
-
 pub(crate) fn merge_chunks(
     left: Vec<RuntimeMatchedChunk>,
     right: Vec<RuntimeMatchedChunk>,
@@ -1072,20 +472,6 @@ fn rrf_merge_chunks(
     values
 }
 
-pub(crate) fn score_desc_entities(
-    left: &RuntimeMatchedEntity,
-    right: &RuntimeMatchedEntity,
-) -> std::cmp::Ordering {
-    score_value(right.score).total_cmp(&score_value(left.score))
-}
-
-pub(crate) fn score_desc_relationships(
-    left: &RuntimeMatchedRelationship,
-    right: &RuntimeMatchedRelationship,
-) -> std::cmp::Ordering {
-    score_value(right.score).total_cmp(&score_value(left.score))
-}
-
 pub(crate) fn score_desc_chunks(
     left: &RuntimeMatchedChunk,
     right: &RuntimeMatchedChunk,
@@ -1101,112 +487,6 @@ pub(crate) fn truncate_bundle(bundle: &mut RetrievalBundle, top_k: usize) {
     bundle.entities.truncate(top_k);
     bundle.relationships.truncate(top_k);
     bundle.chunks.truncate(top_k);
-}
-
-fn lexical_entity_hits(
-    plan: &RuntimeQueryPlan,
-    graph_index: &QueryGraphIndex,
-) -> Vec<RuntimeMatchedEntity> {
-    // Prefer entity_keywords for entity search when available; fall back to all keywords.
-    let search_keywords: &[String] =
-        if plan.entity_keywords.is_empty() { &plan.keywords } else { &plan.entity_keywords };
-    let mut hits = graph_index
-        .nodes
-        .values()
-        .filter(|node| node.node_type != "document")
-        .filter(|node| {
-            search_keywords.iter().any(|keyword| {
-                node.label.to_ascii_lowercase().contains(keyword)
-                    || node.aliases.iter().any(|alias| alias.to_ascii_lowercase().contains(keyword))
-            })
-        })
-        .map(|node| RuntimeMatchedEntity {
-            node_id: node.node_id,
-            label: node.label.clone(),
-            node_type: node.node_type.clone(),
-            score: Some(0.2),
-        })
-        .collect::<Vec<_>>();
-    hits.sort_by(score_desc_entities);
-    hits
-}
-
-fn lexical_relationship_hits(
-    plan: &RuntimeQueryPlan,
-    graph_index: &QueryGraphIndex,
-) -> Vec<RuntimeMatchedRelationship> {
-    let mut hits = graph_index
-        .edges
-        .iter()
-        .filter(|edge| {
-            plan.keywords
-                .iter()
-                .any(|keyword| edge.relation_type.to_ascii_lowercase().contains(keyword))
-        })
-        .filter_map(|edge| map_edge_hit(edge.edge_id, Some(0.2), graph_index, &graph_index.nodes))
-        .collect::<Vec<_>>();
-    hits.sort_by(score_desc_relationships);
-    hits
-}
-
-pub(crate) fn related_edges_for_entities(
-    entities: &[RuntimeMatchedEntity],
-    graph_index: &QueryGraphIndex,
-    top_k: usize,
-) -> Vec<RuntimeMatchedRelationship> {
-    let entity_ids = entities.iter().map(|entity| entity.node_id).collect::<BTreeSet<_>>();
-    let entity_scores = entities
-        .iter()
-        .map(|entity| (entity.node_id, score_value(entity.score)))
-        .collect::<HashMap<_, _>>();
-    let mut relationships = graph_index
-        .edges
-        .iter()
-        .filter(|edge| {
-            entity_ids.contains(&edge.from_node_id) || entity_ids.contains(&edge.to_node_id)
-        })
-        .filter_map(|edge| {
-            let relevance = match (
-                entity_scores.get(&edge.from_node_id).copied(),
-                entity_scores.get(&edge.to_node_id).copied(),
-            ) {
-                (Some(left), Some(right)) => left.max(right),
-                (Some(score), None) | (None, Some(score)) => score,
-                (None, None) => 0.5,
-            };
-            map_edge_hit(edge.edge_id, Some(relevance), graph_index, &graph_index.nodes)
-        })
-        .collect::<Vec<_>>();
-    relationships.sort_by(score_desc_relationships);
-    relationships.truncate(top_k);
-    relationships
-}
-
-pub(crate) fn entities_from_relationships(
-    relationships: &[RuntimeMatchedRelationship],
-    graph_index: &QueryGraphIndex,
-    top_k: usize,
-) -> Vec<RuntimeMatchedEntity> {
-    let mut seen = BTreeSet::new();
-    let mut entities = Vec::new();
-    for relationship in relationships {
-        for node_id in [relationship.from_node_id, relationship.to_node_id] {
-            if !seen.insert(node_id) {
-                continue;
-            }
-            if let Some(node) = graph_index.nodes.get(&node_id) {
-                entities.push(RuntimeMatchedEntity {
-                    node_id,
-                    label: node.label.clone(),
-                    node_type: node.node_type.clone(),
-                    score: relationship.score.map(|score| score * 0.9),
-                });
-            }
-        }
-    }
-    entities.sort_by(score_desc_entities);
-    entities.truncate(top_k);
-    entities
 }
 
 pub(crate) fn excerpt_for(content: &str, max_chars: usize) -> String {
@@ -1288,3 +568,7 @@ pub(crate) fn focused_excerpt_for(content: &str, keywords: &[String], max_chars:
         radius += 1;
     }
 }
+
+#[cfg(test)]
+#[path = "retrieve_tests.rs"]
+mod tests;

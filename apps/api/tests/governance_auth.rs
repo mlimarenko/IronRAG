@@ -446,11 +446,9 @@ impl GovernanceAuthFixture {
 
 fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
     let bootstrap_settings = settings.bootstrap_settings();
-    let persistence = Persistence {
-        postgres,
-        redis: redis::Client::open(settings.redis_url.clone())
-            .context("failed to create redis client for governance auth test state")?,
-    };
+    let redis = redis::Client::open(settings.redis_url.clone())
+        .context("failed to create redis client for governance auth test state")?;
+    let persistence = Persistence::for_tests(postgres, redis);
     let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
 
     AppState::from_dependencies(

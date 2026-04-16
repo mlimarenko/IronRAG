@@ -91,11 +91,18 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/audit/events", get(list_audit_events))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_audit_events",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id, item_count)
+)]
 async fn list_audit_events(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AuditEventsQuery>,
 ) -> Result<Json<AuditEventPageResponse>, ApiError> {
+    let span = tracing::Span::current();
     let internal = query.internal.unwrap_or(false);
     if internal && !auth.is_system_admin {
         return Err(ApiError::forbidden(
@@ -176,6 +183,7 @@ async fn list_audit_events(
         total
     };
 
+    span.record("item_count", response_items.len());
     Ok(Json(AuditEventPageResponse {
         items: response_items,
         total,

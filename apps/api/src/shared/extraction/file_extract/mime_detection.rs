@@ -68,16 +68,6 @@ fn normalized_upload_mime_essence(mime_type: Option<&str>) -> Option<String> {
         .and_then(|value| value.split(';').next().map(str::trim).map(str::to_string))
 }
 
-fn is_supported_upload_extension(extension: &str) -> bool {
-    extension == "pdf"
-        || TEXT_LIKE_EXTENSIONS.contains(&extension)
-        || HTML_EXTENSIONS.contains(&extension)
-        || IMAGE_EXTENSIONS.contains(&extension)
-        || DOCX_EXTENSIONS.contains(&extension)
-        || SPREADSHEET_EXTENSIONS.contains(&extension)
-        || PPTX_EXTENSIONS.contains(&extension)
-}
-
 fn is_supported_upload_mime_type(mime_type: &str) -> bool {
     mime_type == "application/pdf"
         || mime_type.starts_with("image/")
@@ -105,12 +95,13 @@ pub(super) fn payload_looks_like_html(file_bytes: &[u8]) -> bool {
         .is_ok_and(extraction::html_main_content::payload_looks_like_html_document)
 }
 
-fn declares_unsupported_upload_format(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
-    if let Some(extension) = normalized_upload_extension(file_name)
-        && !is_supported_upload_extension(&extension)
-    {
-        return true;
-    }
+fn declares_unsupported_mime_type(mime_type: Option<&str>) -> bool {
+    // Unknown extensions alone never reject — foldered uploads routinely include
+    // files like `.env.backup.20260116-162838` whose extension is meaningless.
+    // Content sniffing (`utf8_payload_looks_binary`) is the authority for text
+    // admission. An explicit non-generic MIME type that names an unsupported
+    // format still short-circuits, so declared binaries like `video/mp4` are
+    // still rejected without a UTF-8 decode pass.
     if let Some(mime_type) = normalized_upload_mime_essence(mime_type)
         && !mime_type_is_generic_binary(&mime_type)
         && !is_supported_upload_mime_type(&mime_type)
@@ -128,7 +119,7 @@ pub fn detect_upload_file_kind(
     if let Some(file_kind) = detect_declared_upload_file_kind(file_name, mime_type) {
         return file_kind;
     }
-    if declares_unsupported_upload_format(file_name, mime_type) {
+    if declares_unsupported_mime_type(mime_type) {
         return UploadFileKind::Binary;
     }
     if let Ok(decoded_text) = std::str::from_utf8(file_bytes)

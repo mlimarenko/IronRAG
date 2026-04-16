@@ -132,25 +132,15 @@ async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
             )
             .await
             {
-                Ok(()) => match context
-                    .state
-                    .arango_search_store
-                    .search_entities(library_id, &args.query, limit)
-                    .await
+                Ok(()) => match crate::services::mcp::access::search_entities(
+                    context.state,
+                    library_id,
+                    &args.query,
+                    limit,
+                )
+                .await
                 {
-                    Ok(hits) => {
-                        let entities: Vec<Value> = hits
-                            .iter()
-                            .map(|hit| {
-                                json!({
-                                    "entityId": hit.entity_id,
-                                    "label": hit.canonical_label,
-                                    "entityType": hit.entity_type,
-                                    "summary": hit.summary,
-                                    "score": hit.score,
-                                })
-                            })
-                            .collect();
+                    Ok(entities) => {
                         record_canonical_mcp_audit(
                             context.state,
                             context.auth,

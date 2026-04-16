@@ -30,16 +30,30 @@ export type AIPurpose =
   | "query_answer"
   | "vision";
 
+/**
+ * Canonical document status emitted by the backend list/detail endpoints.
+ *
+ * Values are derived server-side in `content_document_head` and map onto a
+ * coarse user-visible state machine:
+ *
+ * - `in_progress` — worker is (or is about to be) moving the document forward.
+ * - `attention`   — job is held but not progressing and needs an operator.
+ * - `ready`       — document is usable for retrieval to some degree.
+ * - `failed`      — terminal failure nothing will retry from automatically.
+ * - `canceled`    — operator cancelled the job before it could produce output.
+ */
+/**
+ * Canonical document status enum — mirrors the backend `derived_status`
+ * CASE expression in `list_document_page_rows`. These are the only
+ * values the list API will ever emit; the UI stays 1:1 with the server
+ * so nothing has to re-derive buckets client-side.
+ */
 export type DocumentStatus =
-  | "queued"
-  | "processing"
-  | "retrying"
-  | "blocked"
-  | "stalled"
-  | "canceled"
   | "ready"
-  | "ready_no_graph"
-  | "failed";
+  | "processing"
+  | "queued"
+  | "failed"
+  | "canceled";
 export type DocumentReadiness =
   | "processing"
   | "readable"
@@ -290,15 +304,27 @@ export interface AssistantSession {
 
 export type AssistantStage = "planning" | "grounding" | "response";
 
+export interface AssistantToolCallStep {
+  iteration: number;
+  callId: string;
+  name: string;
+  argumentsPreview: string;
+  resultPreview?: string;
+  isError?: boolean;
+  status: "running" | "done" | "error";
+}
+
 export interface AssistantMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   timestamp: string;
+  executionId?: string | null;
   attachments?: FileAttachment[];
   stage?: AssistantStage;
   isStreaming?: boolean;
   evidence?: EvidenceBundle;
+  toolSteps?: AssistantToolCallStep[];
 }
 
 export interface FileAttachment {

@@ -10,10 +10,13 @@ use axum::{
     extract::{DefaultBodyLimit, MatchedPath},
     http::{Method, Request, header},
     middleware,
+    routing::get,
 };
+use axum_prometheus::PrometheusMetricLayer;
 use std::{net::SocketAddr, time::Duration};
 use tower_http::{
     classify::ServerErrorsFailureClass,
+    compression::CompressionLayer,
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
@@ -102,8 +105,24 @@ fn build_http_router(
     let public_origin_settings = config.public_origin_settings();
     let max_request_body_bytes = state.mcp_memory.max_request_body_bytes();
     let api_router = if probe_only { http::probe_router() } else { http::router() };
+    let (prometheus_layer, prometheus_handle) = PrometheusMetricLayer::pair();
     Router::new()
         .nest("/v1", api_router)
+        .route(
+            "/metrics",
+            get(move || {
+                let handle = prometheus_handle.clone();
+                async move { handle.render() }
+            }),
+        )
+        .layer(prometheus_layer)
+        .layer(
+            CompressionLayer::new()
+                .gzip(true)
+                .br(true)
+                .zstd(true)
+                .no_deflate(),
+        )
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .layer(middleware::map_request(inject_request_id))
         .layer(middleware::map_response(propagate_request_id))

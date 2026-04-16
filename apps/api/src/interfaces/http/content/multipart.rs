@@ -11,6 +11,7 @@ use crate::{
 #[derive(Debug)]
 pub(super) struct ParsedUploadMultipart {
     pub library_id: Uuid,
+    pub external_key: Option<String>,
     pub idempotency_key: Option<String>,
     pub title: Option<String>,
     pub file_name: String,
@@ -37,6 +38,7 @@ pub(super) async fn parse_upload_multipart(
     mut multipart: Multipart,
 ) -> Result<ParsedUploadMultipart, ApiError> {
     let mut library_id = None;
+    let mut external_key = None;
     let mut idempotency_key = None;
     let mut title = None;
     let mut file_name = None;
@@ -57,6 +59,14 @@ pub(super) async fn parse_upload_multipart(
                     Some(raw.parse().map_err(|_| {
                         ApiError::BadRequest("library_id must be uuid".to_string())
                     })?);
+            }
+            "external_key" => {
+                external_key = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| ApiError::BadRequest("invalid external_key".to_string()))?,
+                );
             }
             "idempotency_key" => {
                 idempotency_key =
@@ -85,6 +95,7 @@ pub(super) async fn parse_upload_multipart(
     Ok(ParsedUploadMultipart {
         library_id: library_id
             .ok_or_else(|| ApiError::BadRequest("missing library_id".to_string()))?,
+        external_key: external_key.and_then(normalize_optional_text),
         idempotency_key: idempotency_key.and_then(normalize_optional_text),
         title: title.and_then(normalize_optional_text),
         file_name: file_name.unwrap_or_else(|| format!("upload-{}", Uuid::now_v7())),
@@ -193,4 +204,39 @@ fn map_content_multipart_file_body_error(
 fn normalize_optional_text(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+pub(super) fn resolve_upload_external_key(
+    explicit_external_key: Option<String>,
+    file_name: &str,
+) -> Option<String> {
+    explicit_external_key
+        .and_then(normalize_optional_text)
+        .or_else(|| normalize_optional_text(file_name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_upload_external_key;
+
+    #[test]
+    fn upload_external_key_prefers_explicit_value() {
+        assert_eq!(
+            resolve_upload_external_key(Some("folder/spec.md".to_string()), "spec.md"),
+            Some("folder/spec.md".to_string())
+        );
+    }
+
+    #[test]
+    fn upload_external_key_falls_back_to_multipart_file_name() {
+        assert_eq!(
+            resolve_upload_external_key(None, "foo1/path/bar/file.txt"),
+            Some("foo1/path/bar/file.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn upload_external_key_rejects_empty_values() {
+        assert_eq!(resolve_upload_external_key(Some("   ".to_string()), "   "), None);
+    }
 }

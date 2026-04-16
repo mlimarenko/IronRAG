@@ -53,7 +53,8 @@ struct ListSessionsQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateSessionRequest {
-    workspace_id: Uuid,
+    /// When omitted, inferred from the library's parent workspace.
+    workspace_id: Option<Uuid>,
     library_id: Uuid,
     title: Option<String>,
 }
@@ -80,6 +81,25 @@ struct QueryTurnStreamDeltaPayload {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct QueryTurnStreamToolCallStartedPayload {
+    iteration: usize,
+    call_id: String,
+    name: String,
+    arguments_preview: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryTurnStreamToolCallCompletedPayload {
+    iteration: usize,
+    call_id: String,
+    name: String,
+    is_error: bool,
+    result_preview: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct QueryTurnStreamErrorPayload {
     error: String,
     error_kind: &'static str,
@@ -91,22 +111,98 @@ pub fn router() -> Router<AppState> {
         .route("/query/sessions/{session_id}", get(get_session))
         .route("/query/sessions/{session_id}/turns", axum::routing::post(create_session_turn))
         .route("/query/executions/{execution_id}", get(get_execution))
+        .route("/query/executions/{execution_id}/llm-context", get(get_execution_llm_context))
+        .route("/query/assistant/system-prompt", get(get_assistant_system_prompt))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistantSystemPromptQuery {
+    library_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistantSystemPromptResponse {
+    /// Raw template with the `{LIBRARY_ID}` placeholder. This is what
+    /// external MCP clients (Claude Desktop, Codex, Cursor, Continue.dev,
+    /// …) should paste into their own system prompt when attaching
+    /// IronRAG's MCP server, so every agent — in-app or external — shares
+    /// the same grounding discipline.
+    template: String,
+    /// Template rendered with the requested `libraryId` substituted in,
+    /// when one was passed. Same text the in-app assistant agent uses for
+    /// that library.
+    rendered: Option<String>,
+    library_id: Option<Uuid>,
+}
+
+/// Publish the canonical MCP assistant system prompt.
+///
+/// This is the single source of truth for two surfaces:
+///   * our in-app assistant (`agent_loop::run_assistant_turn`);
+///   * the admin UI's "MCP client setup" card, which serves the same
+///     text verbatim for operators to copy into their own agents.
+///
+/// Any drift between the in-app agent and external agents would
+/// silently change grounding behavior per client — so the text lives
+/// in `services::query::assistant_prompt` and every consumer reads
+/// from there.
+#[tracing::instrument(
+    level = "info",
+    name = "http.query.get_assistant_system_prompt",
+    skip_all,
+    fields(library_id = ?query.library_id)
+)]
+async fn get_assistant_system_prompt(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Query(query): Query<AssistantSystemPromptQuery>,
+) -> Result<Json<AssistantSystemPromptResponse>, ApiError> {
+    let rendered = if let Some(library_id) = query.library_id {
+        let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_QUERY_READ).await?;
+        Some(crate::services::query::assistant_prompt::render(library_id, None))
+    } else {
+        None
+    };
+    Ok(Json(AssistantSystemPromptResponse {
+        template: crate::services::query::assistant_prompt::ASSISTANT_SYSTEM_PROMPT_TEMPLATE
+            .to_string(),
+        rendered,
+        library_id: query.library_id,
+    }))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.query.list_sessions",
+    skip_all,
+    fields(library_id = ?query.library_id, item_count)
+)]
 async fn list_sessions(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Vec<ironrag_contracts::assistant::AssistantSessionListItem>>, ApiError> {
+    let span = tracing::Span::current();
     let library_id = query
         .library_id
         .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_QUERY_READ).await?;
     let conversations =
         state.canonical_services.query.list_conversations(&state, library_id).await?;
-    Ok(Json(conversations.into_iter().map(map_session_list_item_with_defaults).collect()))
+    let items: Vec<_> =
+        conversations.into_iter().map(map_session_list_item_with_defaults).collect();
+    span.record("item_count", items.len());
+    Ok(Json(items))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.query.create_session",
+    skip_all,
+    fields(library_id = %payload.library_id)
+)]
 async fn create_session(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -114,7 +210,9 @@ async fn create_session(
 ) -> Result<Json<QueryConversation>, ApiError> {
     let library =
         load_library_and_authorize(&auth, &state, payload.library_id, POLICY_QUERY_RUN).await?;
-    if library.workspace_id != payload.workspace_id {
+    // workspace_id is now optional — infer from the library when omitted.
+    let workspace_id = payload.workspace_id.unwrap_or(library.workspace_id);
+    if library.workspace_id != workspace_id {
         return Err(ApiError::BadRequest(
             "workspaceId does not match the target library".to_string(),
         ));
@@ -125,7 +223,7 @@ async fn create_session(
         .create_conversation(
             &state,
             CreateConversationCommand {
-                workspace_id: payload.workspace_id,
+                workspace_id,
                 library_id: payload.library_id,
                 created_by_principal_id: Some(auth.principal_id),
                 title: payload.title,
@@ -163,6 +261,12 @@ async fn create_session(
     Ok(Json(conversation))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.query.get_session",
+    skip_all,
+    fields(session_id = %session_id)
+)]
 async fn get_session(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -173,6 +277,12 @@ async fn get_session(
     Ok(Json(map_session_detail(detail)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_session_turn",
+    skip_all,
+    fields(session_id = %session_id, elapsed_ms)
+)]
 async fn create_session_turn(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -180,6 +290,8 @@ async fn create_session_turn(
     headers: HeaderMap,
     Json(payload): Json<CreateSessionTurnRequest>,
 ) -> Result<Response, ApiError> {
+    let started_at = std::time::Instant::now();
+    let span = tracing::Span::current();
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
     if accepts_event_stream(&headers) {
         return Ok(create_session_turn_stream(auth, state, session_id, payload).into_response());
@@ -199,10 +311,22 @@ async fn create_session_turn(
             },
         )
         .await?;
-    append_query_execution_audit(&state, auth.principal_id, &outcome).await;
+    append_query_execution_audit(
+        state.clone(),
+        auth.principal_id,
+        QueryExecutionAuditEnvelope::from(&outcome),
+    )
+    .await;
+    span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
     Ok(Json(map_turn_execution_response(outcome)).into_response())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_execution",
+    skip_all,
+    fields(execution_id = %execution_id)
+)]
 async fn get_execution(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -212,6 +336,31 @@ async fn get_execution(
         load_query_execution_and_authorize(&auth, &state, execution_id, POLICY_QUERY_READ).await?;
     let detail = state.canonical_services.query.get_execution(&state, execution_id).await?;
     Ok(Json(map_execution_detail(detail)))
+}
+
+/// Returns the raw LLM request/response chain that was sent to the
+/// provider for this assistant execution, if it is still in the
+/// in-memory debug cache. The cache is volatile (bounded FIFO) so old
+/// executions return 404 — that is by design, not an error the UI
+/// should treat as fatal.
+#[tracing::instrument(
+    level = "info",
+    name = "http.query.get_execution_llm_context",
+    skip_all,
+    fields(execution_id = %execution_id)
+)]
+async fn get_execution_llm_context(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(execution_id): Path<Uuid>,
+) -> Result<Json<crate::services::query::llm_context_debug::LlmContextSnapshot>, ApiError> {
+    let _ =
+        load_query_execution_and_authorize(&auth, &state, execution_id, POLICY_QUERY_READ).await?;
+    state
+        .llm_context_debug
+        .get(execution_id)
+        .map(Json)
+        .ok_or_else(|| ApiError::resource_not_found("llm_context_snapshot", execution_id))
 }
 
 fn map_session_list_item_with_defaults(
@@ -581,48 +730,71 @@ const fn map_graph_edge_reference(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct QueryExecutionAuditEnvelope {
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    context_bundle_id: Uuid,
+}
+
+impl From<&crate::services::query::service::QueryTurnExecutionResult>
+    for QueryExecutionAuditEnvelope
+{
+    fn from(value: &crate::services::query::service::QueryTurnExecutionResult) -> Self {
+        Self {
+            conversation_id: value.conversation.id,
+            execution_id: value.execution.id,
+            workspace_id: value.execution.workspace_id,
+            library_id: value.execution.library_id,
+            context_bundle_id: value.context_bundle_id,
+        }
+    }
+}
+
 async fn append_query_execution_audit(
-    state: &AppState,
+    state: AppState,
     principal_id: Uuid,
-    outcome: &crate::services::query::service::QueryTurnExecutionResult,
+    outcome: QueryExecutionAuditEnvelope,
 ) {
     let Ok(async_operation) = state
         .canonical_services
         .ops
-        .get_latest_async_operation_by_subject(state, "query_execution", outcome.execution.id)
+        .get_latest_async_operation_by_subject(&state, "query_execution", outcome.execution_id)
         .await
     else {
         return;
     };
     let mut subjects = vec![
         state.canonical_services.audit.query_session_subject(
-            outcome.conversation.id,
-            outcome.conversation.workspace_id,
-            outcome.conversation.library_id,
+            outcome.conversation_id,
+            outcome.workspace_id,
+            outcome.library_id,
         ),
         state.canonical_services.audit.query_execution_subject(
-            outcome.execution.id,
-            outcome.execution.workspace_id,
-            outcome.execution.library_id,
+            outcome.execution_id,
+            outcome.workspace_id,
+            outcome.library_id,
         ),
         state.canonical_services.audit.knowledge_bundle_subject(
             outcome.context_bundle_id,
-            outcome.execution.workspace_id,
-            outcome.execution.library_id,
+            outcome.workspace_id,
+            outcome.library_id,
         ),
     ];
     if let Some(operation) = async_operation {
         subjects.push(state.canonical_services.audit.async_operation_subject(
             operation.id,
-            outcome.execution.workspace_id,
-            outcome.execution.library_id,
+            outcome.workspace_id,
+            outcome.library_id,
         ));
     }
     if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
-            state,
+            &state,
             AppendAuditEventCommand {
                 actor_principal_id: Some(principal_id),
                 surface_kind: "rest".to_string(),
@@ -634,8 +806,8 @@ async fn append_query_execution_audit(
                 internal_message: Some(format!(
                     "principal {} executed query session {}, execution {}, bundle {}",
                     principal_id,
-                    outcome.conversation.id,
-                    outcome.execution.id,
+                    outcome.conversation_id,
+                    outcome.execution_id,
                     outcome.context_bundle_id
                 )),
                 subjects,
@@ -687,7 +859,12 @@ fn create_session_turn_stream(
 
         match outcome {
             Ok(outcome) => {
-                append_query_execution_audit(&state_for_task, principal_id, &outcome).await;
+                append_query_execution_audit(
+                    state_for_task.clone(),
+                    principal_id,
+                    QueryExecutionAuditEnvelope::from(&outcome),
+                )
+                .await;
                 let _ = sender
                     .send(QueryTurnStreamFrame::Completed(map_turn_execution_response(outcome)));
             }
@@ -711,6 +888,8 @@ fn create_session_turn_stream(
 enum QueryTurnStreamFrame {
     Runtime(QueryTurnStreamRuntimePayload),
     Delta(QueryTurnStreamDeltaPayload),
+    ToolCallStarted(QueryTurnStreamToolCallStartedPayload),
+    ToolCallCompleted(QueryTurnStreamToolCallCompletedPayload),
     Completed(ironrag_contracts::assistant::AssistantExecutionDetail),
     Error(QueryTurnStreamErrorPayload),
 }
@@ -724,6 +903,30 @@ impl From<QueryTurnProgressEvent> for QueryTurnStreamFrame {
             QueryTurnProgressEvent::AnswerDelta(delta) => {
                 Self::Delta(QueryTurnStreamDeltaPayload { delta })
             }
+            QueryTurnProgressEvent::AssistantToolCallStarted {
+                iteration,
+                call_id,
+                name,
+                arguments_preview,
+            } => Self::ToolCallStarted(QueryTurnStreamToolCallStartedPayload {
+                iteration,
+                call_id,
+                name,
+                arguments_preview,
+            }),
+            QueryTurnProgressEvent::AssistantToolCallCompleted {
+                iteration,
+                call_id,
+                name,
+                is_error,
+                result_preview,
+            } => Self::ToolCallCompleted(QueryTurnStreamToolCallCompletedPayload {
+                iteration,
+                call_id,
+                name,
+                is_error,
+                result_preview,
+            }),
         }
     }
 }
@@ -733,6 +936,10 @@ impl QueryTurnStreamFrame {
         match self {
             Self::Runtime(payload) => serialize_sse_event("runtime", &payload),
             Self::Delta(payload) => serialize_sse_event("delta", &payload),
+            Self::ToolCallStarted(payload) => serialize_sse_event("tool_call_started", &payload),
+            Self::ToolCallCompleted(payload) => {
+                serialize_sse_event("tool_call_completed", &payload)
+            }
             Self::Completed(payload) => serialize_sse_event("completed", &payload),
             Self::Error(payload) => serialize_sse_event("error", &payload),
         }

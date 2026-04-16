@@ -1,5 +1,7 @@
 # IronRAG CLI
 
+[Обзор](./README.md) | [IAM](./IAM.md) | [MCP](./MCP.md)
+
 Инструмент командной строки для административных операций IronRAG. Подключается напрямую к PostgreSQL.
 
 ## Сборка
@@ -81,6 +83,7 @@ ironrag-cli create-token <LOGIN> [--label "my-token"] [--workspace "my-workspace
 - `query_run` -- выполнение запросов (ask)
 - `ops_read`, `audit_read` -- операционные и аудит данные
 - `credential_admin`, `binding_admin` -- управление интеграциями
+- `connector_admin` -- управление коннекторами
 
 Разрешение скоупа (когда `--scope` не указан):
 - Системные права (`iam_admin`, `ops_read`, `audit_read`) → скоуп `system`

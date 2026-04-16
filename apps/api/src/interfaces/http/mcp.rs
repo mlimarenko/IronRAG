@@ -155,19 +155,31 @@ async fn capability_snapshot(
     auth: &AuthContext,
     state: &AppState,
 ) -> Result<McpCapabilitySnapshot, ApiError> {
-    let workspaces = crate::services::mcp::access::visible_workspaces(auth, state).await?;
-    let libraries = crate::services::mcp::access::visible_libraries(auth, state, None).await?;
+    // Issue the workspace and library queries concurrently and derive
+    // BOTH snapshots from one library load. The old path did:
+    //   1. visible_workspaces (internally loops N times over libs)
+    //   2. visible_libraries(None) — a second full load
+    // For a stack with 2 workspaces and ~10 libraries that was 4-5
+    // serialized Postgres round-trips per capability probe. This
+    // collapses to exactly 2 concurrent queries.
+    let (workspaces, libraries) =
+        crate::services::mcp::access::visible_catalog(auth, state).await?;
     Ok(McpCapabilitySnapshot {
-        token_id: auth.token_id,
+        // Full detail for the HTTP capabilities endpoint; the
+        // initialize handler strips token_id / tools / generated_at
+        // before embedding the snapshot in the JSON-RPC response so
+        // the LLM context stays minimal.
+        token_id: Some(auth.token_id),
         token_kind: auth.token_kind().to_string(),
         workspace_scope: auth.workspace_id,
         visible_workspace_count: workspaces.len(),
         visible_library_count: libraries.len(),
         tools: tools::visible_tool_names(auth),
-        generated_at: Utc::now(),
+        generated_at: Some(Utc::now()),
     })
 }
 
+#[tracing::instrument(level = "info", name = "http.mcp.get_capabilities", skip_all)]
 async fn get_capabilities(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -214,6 +226,7 @@ async fn get_capabilities(
     response
 }
 
+#[tracing::instrument(level = "info", name = "http.mcp.handle_jsonrpc", skip_all)]
 async fn handle_jsonrpc(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -394,7 +407,7 @@ async fn handle_initialize(
     id: Option<Value>,
 ) -> McpJsonRpcResponse {
     match capability_snapshot(auth, state).await {
-        Ok(capabilities) => {
+        Ok(mut capabilities) => {
             audit::record_canonical_mcp_audit(
                 state,
                 auth,
@@ -406,6 +419,12 @@ async fn handle_initialize(
                 Vec::new(),
             )
             .await;
+            // Strip fields the LLM doesn't need. The full tool name
+            // list is already in `tools/list`; token_id and
+            // generated_at are pure noise in the agent's context.
+            capabilities.token_id = None;
+            capabilities.tools.clear();
+            capabilities.generated_at = None;
             success_response(
                 id,
                 json!({

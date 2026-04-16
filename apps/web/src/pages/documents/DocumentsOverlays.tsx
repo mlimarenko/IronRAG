@@ -16,7 +16,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { DocumentItem } from '@/types';
 
-import { formatSize } from './mappers';
+import { formatSize } from '@/adapters/documents';
 import { DOCUMENT_FILE_INPUT_ACCEPT } from './uploadAccept';
 
 type DocumentsOverlaysProps = {

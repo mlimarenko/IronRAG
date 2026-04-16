@@ -42,7 +42,9 @@ use self::{
     web_jobs::{run_canonical_web_discovery_job, run_canonical_web_materialize_page_job},
 };
 
+/// How often each worker polls the ingest queue for new jobs.
 const WORKER_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the lease-recovery sweep runs to reclaim stale leases.
 const CANONICAL_LEASE_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
 // Steady-state stale-lease threshold. Was 120s; that is 8× the heartbeat
 // interval and lets the dispatcher self-deadlock for two minutes after a
@@ -226,12 +228,14 @@ async fn execute_canonical_ingest_job(
     // bounded by `CANONICAL_HEARTBEAT_INTERVAL` (≤15s), which is tight enough
     // for an interactive "Cancel Processing" button.
     let heartbeat_flag = Arc::clone(&heartbeat_running);
-    let heartbeat_pg = state.persistence.postgres.clone();
+    // Dedicated tiny pool — never competes with the main working pool
+    // for connections, so `touch_attempt_heartbeat` always succeeds even
+    // while ingest stages hold every slot in `persistence.postgres`.
+    let heartbeat_pg = state.persistence.heartbeat_postgres.clone();
     let heartbeat_cancellation = cancellation.clone();
     let heartbeat_job_id = job.id;
-    let heartbeat_interval = Duration::from_secs(
-        state.settings.ingestion_worker_heartbeat_interval_seconds.max(1),
-    );
+    let heartbeat_interval =
+        Duration::from_secs(state.settings.ingestion_worker_heartbeat_interval_seconds.max(1));
     tokio::spawn(async move {
         // The cancel poll only runs until we observe the first `canceled`
         // signal: after that we know the pipeline is cooperatively unwinding,
@@ -909,11 +913,18 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record extract_graph start stage event")?;
 
     let extract_graph_start = Instant::now();
+    // Canonical wall-clock cap on the entire extract_graph stage. Guards
+    // against stages that silently monopolize the tokio runtime and
+    // starve heartbeat/cancel polling. On timeout we fall through to the
+    // same "degraded to readable" path the downstream match uses for
+    // other graph extraction failures, so the attempt still finalizes
+    // instead of leaking a `leased` row until the reaper catches it.
+    let stage_timeout =
+        Duration::from_secs(state.settings.runtime_graph_extract_stage_timeout_seconds.max(1));
 
-    let graph_materialization = state
-        .canonical_services
-        .content
-        .materialize_revision_graph_candidates(
+    let graph_materialization = match time::timeout(
+        stage_timeout,
+        state.canonical_services.content.materialize_revision_graph_candidates(
             state,
             MaterializeRevisionGraphCandidatesCommand {
                 workspace_id: revision.workspace_id,
@@ -921,23 +932,38 @@ async fn run_canonical_ingest_pipeline(
                 revision_id,
                 attempt_id: Some(attempt_id),
             },
-        )
-        .await;
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(crate::interfaces::http::router_support::ApiError::Conflict(format!(
+            "stage_timeout: extract_graph stage exceeded canonical timeout of {}s during graph candidate materialization",
+            stage_timeout.as_secs()
+        ))),
+    };
     let mut graph_ready = false;
 
     match graph_materialization {
         Ok(graph_materialization) => {
-            let graph_outcome = state
-                .canonical_services
-                .graph
-                .reconcile_revision_graph(
+            let graph_outcome = match time::timeout(
+                stage_timeout,
+                state.canonical_services.graph.reconcile_revision_graph(
                     state,
                     job.library_id,
                     document_id,
                     revision_id,
                     Some(attempt_id),
-                )
-                .await;
+                ),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!(
+                    "extract_graph stage exceeded canonical timeout of {}s during revision graph reconcile",
+                    stage_timeout.as_secs()
+                )),
+            };
             graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
 
             match graph_outcome {

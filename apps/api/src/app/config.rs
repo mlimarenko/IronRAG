@@ -191,6 +191,13 @@ pub struct Settings {
     pub query_balanced_context_enabled: bool,
     pub runtime_graph_extract_recovery_enabled: bool,
     pub runtime_graph_extract_recovery_max_attempts: usize,
+    /// Hard wall-clock cap on a single `extract_graph` stage run
+    /// (candidate materialization + revision graph reconcile combined).
+    /// Guards against stages that silently stall the tokio runtime and
+    /// starve the heartbeat loop: when exceeded the attempt finalizes
+    /// with `stage_timeout` so the queue can move forward instead of
+    /// waiting on a steady-state lease reaper.
+    pub runtime_graph_extract_stage_timeout_seconds: u64,
     pub runtime_graph_extract_resume_downgrade_level_one_after_replays: usize,
     pub runtime_graph_extract_resume_downgrade_level_two_after_replays: usize,
     pub runtime_graph_summary_refresh_batch_size: usize,
@@ -407,22 +414,22 @@ impl Settings {
 
     #[must_use]
     pub fn runs_http_api(&self) -> bool {
-        matches!(self.service_role.as_str(), "api")
+        self.service_role_kind().ok() == Some(ServiceRole::Api)
     }
 
     #[must_use]
     pub fn runs_probe_http_api(&self) -> bool {
-        matches!(self.service_role.as_str(), "worker")
+        self.service_role_kind().ok() == Some(ServiceRole::Worker)
     }
 
     #[must_use]
     pub fn runs_ingestion_workers(&self) -> bool {
-        matches!(self.service_role.as_str(), "worker")
+        self.service_role_kind().ok() == Some(ServiceRole::Worker)
     }
 
     #[must_use]
     pub fn runs_startup_authority(&self) -> bool {
-        matches!(self.service_role.as_str(), "startup")
+        self.service_role_kind().ok() == Some(ServiceRole::Startup)
     }
 
     pub fn service_role_kind(&self) -> Result<ServiceRole, String> {
@@ -527,6 +534,7 @@ fn settings_config_builder()
         .set_default("query_balanced_context_enabled", true)?
         .set_default("runtime_graph_extract_recovery_enabled", true)?
         .set_default("runtime_graph_extract_recovery_max_attempts", 4)?
+        .set_default("runtime_graph_extract_stage_timeout_seconds", 600)?
         .set_default("runtime_graph_extract_resume_downgrade_level_one_after_replays", 3)?
         .set_default("runtime_graph_extract_resume_downgrade_level_two_after_replays", 5)?
         .set_default("runtime_graph_summary_refresh_batch_size", 64)?
@@ -546,8 +554,8 @@ fn settings_config_builder()
         .set_default("runtime_graph_filter_empty_relations", true)?
         .set_default("runtime_graph_filter_degenerate_self_loops", true)?
         .set_default("runtime_graph_convergence_warning_backlog_threshold", 1)?
-        .set_default("mcp_memory_default_read_window_chars", 12_000)?
-        .set_default("mcp_memory_max_read_window_chars", 50_000)?
+        .set_default("mcp_memory_default_read_window_chars", 48_000)?
+        .set_default("mcp_memory_max_read_window_chars", 192_000)?
         .set_default("mcp_memory_default_search_limit", 10)?
         .set_default("mcp_memory_max_search_limit", 25)?
         .set_default("mcp_memory_idempotency_retention_hours", 72)?

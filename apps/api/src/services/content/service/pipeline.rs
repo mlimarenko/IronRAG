@@ -351,6 +351,7 @@ impl ContentService {
                         )),
                         storage_key: None,
                     }),
+                    parent_async_operation_id: None,
                 },
             )
             .await?;
@@ -424,6 +425,7 @@ impl ContentService {
                     source_uri: Some(source_uri),
                     storage_key: Some(storage_key),
                 }),
+                parent_async_operation_id: None,
             },
         )
         .await
@@ -512,6 +514,7 @@ impl ContentService {
                     )),
                     storage_key: Some(storage_key),
                 }),
+                parent_async_operation_id: None,
             },
         )
         .await
@@ -1077,9 +1080,7 @@ impl ContentService {
                                     attempt_id,
                                     stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
                                     stage_state: "failed".to_string(),
-                                    message: Some(
-                                        "graph reconcile/embedding failed".to_string(),
-                                    ),
+                                    message: Some("graph reconcile/embedding failed".to_string()),
                                     details_json: serde_json::json!({
                                         "error": format!("{error:#}"),
                                     }),
@@ -1109,9 +1110,7 @@ impl ContentService {
                             attempt_id,
                             stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                             stage_state: "failed".to_string(),
-                            message: Some(
-                                "inline graph candidate extraction failed".to_string(),
-                            ),
+                            message: Some("inline graph candidate extraction failed".to_string()),
                             details_json: serde_json::json!({
                                 "graphReady": false,
                                 "error": error.to_string(),
@@ -1136,9 +1135,8 @@ impl ContentService {
         // Anything else is a hard failure for this pipeline — there is no
         // half-complete state and no silent degradation to readable.
         if !graph_ready && graph_failure.is_none() {
-            graph_failure = Some(
-                "graph reconcile produced no contributions for this revision".to_string(),
-            );
+            graph_failure =
+                Some("graph reconcile produced no contributions for this revision".to_string());
         }
 
         let revision = state

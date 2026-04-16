@@ -44,12 +44,7 @@ pub fn current_process_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest
-                .trim()
-                .split_whitespace()
-                .next()?
-                .parse()
-                .ok()?;
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
             return Some(kb * 1024);
         }
     }
@@ -98,7 +93,7 @@ pub fn detect_container_memory_limit_bytes() -> Option<u64> {
     if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
         for line in meminfo.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
-                if let Some(kb_str) = rest.trim().split_whitespace().next() {
+                if let Some(kb_str) = rest.split_whitespace().next() {
                     if let Ok(kb) = kb_str.parse::<u64>() {
                         return Some(kb * 1024);
                     }

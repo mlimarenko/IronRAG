@@ -179,6 +179,37 @@ pub async fn list_ingest_attempts_by_job(
     .await
 }
 
+/// Batch variant: loads attempts for ALL given job IDs in one query.
+/// Eliminates the N+1 pattern in document lifecycle assembly.
+pub async fn list_ingest_attempts_by_jobs(
+    postgres: &PgPool,
+    job_ids: &[Uuid],
+) -> Result<Vec<IngestAttemptRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestAttemptRow>(
+        "select
+            id,
+            job_id,
+            attempt_number,
+            worker_principal_id,
+            lease_token,
+            knowledge_generation_id,
+            attempt_state::text as attempt_state,
+            current_stage,
+            started_at,
+            heartbeat_at,
+            finished_at,
+            failure_class,
+            failure_code,
+            retryable
+         from ingest_attempt
+         where job_id = ANY($1)
+         order by job_id, attempt_number asc, started_at asc, id asc",
+    )
+    .bind(job_ids)
+    .fetch_all(postgres)
+    .await
+}
+
 pub async fn get_latest_ingest_attempt_by_job(
     postgres: &PgPool,
     job_id: Uuid,

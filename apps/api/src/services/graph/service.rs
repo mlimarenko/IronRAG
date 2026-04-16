@@ -105,8 +105,14 @@ impl GraphService {
     }
 
     fn library_merge_lock(&self, library_id: Uuid) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        // Poisoned-mutex recovery: the inner state is a simple HashMap of
+        // `Uuid -> Arc<Mutex>` and a previous panic while holding the guard
+        // cannot leave it in a semantically broken state — the worst case is
+        // a partially-inserted entry which the `entry(...).or_insert_with` on
+        // the next line reconciles. Recovering via `into_inner` is strictly
+        // safer than panicking on every subsequent merge.
         let mut guard =
-            self.library_merge_locks.lock().expect("library merge lock registry poisoned");
+            self.library_merge_locks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .entry(library_id)
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))

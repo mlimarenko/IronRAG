@@ -10,6 +10,7 @@ use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
     domains::content::{ContentDocument, ContentDocumentHead, ContentRevision},
+    domains::ops::ASYNC_OP_STATUS_READY,
     domains::provider_profiles::ProviderModelSelection,
     infra::arangodb::document_store::{
         KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
@@ -97,22 +98,16 @@ impl ContentService {
         file_bytes: &[u8],
     ) -> Result<FileExtractionPlan, UploadAdmissionError> {
         let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
+        // Vision binding is only needed for image/PDF files that might
+        // contain images. For text/markdown/CSV/code files, the absence
+        // of a vision binding should NOT block extraction — the pipeline
+        // just skips the image description step.
         let vision_binding = state
             .canonical_services
             .ai_catalog
             .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::Vision)
             .await
-            .map_err(|_| {
-                UploadAdmissionError::from_file_extract_error(
-                    file_name,
-                    mime_type,
-                    file_size_bytes,
-                    &FileExtractError::ExtractionFailed {
-                        file_kind: UploadFileKind::Image,
-                        message: "failed to resolve active vision binding".to_string(),
-                    },
-                )
-            })?;
+            .unwrap_or(None);
         let vision_provider = vision_binding.as_ref().and_then(|binding| {
             binding.provider_kind.parse().ok().map(|provider_kind| ProviderModelSelection {
                 provider_kind,
@@ -955,8 +950,7 @@ impl ContentService {
                 .ok()
                 .flatten()
                 .and_then(|row| row.extraction_prompt);
-        let sub_type_hints =
-            load_sub_type_hints_for_extraction(state, command.library_id).await;
+        let sub_type_hints = load_sub_type_hints_for_extraction(state, command.library_id).await;
         let chunk_count = all_chunks.len();
         let graph_extract_parallelism =
             state.settings.ingestion_graph_extract_parallelism_per_doc.max(1);
@@ -1012,9 +1006,7 @@ impl ContentService {
             // point at the current revision before persisting.
             let mut raw_output_json = old_record.raw_output_json.clone();
             if let Some(obj) = raw_output_json.as_object_mut() {
-                let lifecycle = obj
-                    .entry("lifecycle")
-                    .or_insert_with(|| serde_json::json!({}));
+                let lifecycle = obj.entry("lifecycle").or_insert_with(|| serde_json::json!({}));
                 if let Some(lifecycle_obj) = lifecycle.as_object_mut() {
                     lifecycle_obj.insert(
                         "revision_id".to_string(),
@@ -1222,8 +1214,10 @@ impl ContentService {
         let aggregate = per_chunk_stream
             .buffer_unordered(graph_extract_parallelism)
             .try_fold(ChunkExtractAggregate::default(), |mut acc, item| async move {
-                acc.extracted_entities = acc.extracted_entities.saturating_add(item.extracted_entities);
-                acc.extracted_relations = acc.extracted_relations.saturating_add(item.extracted_relations);
+                acc.extracted_entities =
+                    acc.extracted_entities.saturating_add(item.extracted_entities);
+                acc.extracted_relations =
+                    acc.extracted_relations.saturating_add(item.extracted_relations);
                 acc.prompt_tokens += item.prompt_tokens;
                 acc.completion_tokens += item.completion_tokens;
                 acc.total_tokens += item.total_tokens;
@@ -1237,12 +1231,8 @@ impl ContentService {
         // provider/model on this stage. Per-chunk responses always echo the
         // same binding, so we read it directly from the runtime context
         // instead of carrying it through the per-chunk aggregate.
-        let provider_kind = graph_runtime_context
-            .provider_profile
-            .indexing
-            .provider_kind
-            .as_str()
-            .to_string();
+        let provider_kind =
+            graph_runtime_context.provider_profile.indexing.provider_kind.as_str().to_string();
         let model_name = graph_runtime_context.provider_profile.indexing.model_name.clone();
         let agg_prompt = aggregate.prompt_tokens;
         let agg_completion = aggregate.completion_tokens;
@@ -1333,7 +1323,7 @@ impl ContentService {
             std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
         > = HashMap::new();
         for record in all_records {
-            if record.status != "ready" {
+            if record.status != ASYNC_OP_STATUS_READY {
                 continue;
             }
             if !parent_chunk_ids.contains(&record.chunk_id) {

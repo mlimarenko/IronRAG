@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { errorMessage } from '@/lib/errorMessage';
 
 const NAV_KEYS = [
   { key: 'nav.home', path: '/dashboard', icon: Home },
@@ -66,8 +67,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       await adminApi.createWorkspace(newWsName.trim());
       toast.success(t('shell.workspaceCreated'));
       await refreshSession();
-    } catch (err: any) {
-      toast.error(err?.message || t('shell.workspaceCreateFailed'));
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('shell.workspaceCreateFailed')));
     }
     setNewWsName('');
     setCreateWsOpen(false);
@@ -79,8 +80,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       await adminApi.createLibrary(activeWorkspace.id, newLibName.trim());
       toast.success(t('shell.libraryCreated'));
       await refreshSession();
-    } catch (err: any) {
-      toast.error(err?.message || t('shell.libraryCreateFailed'));
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('shell.libraryCreateFailed')));
     }
     setNewLibName('');
     setCreateLibOpen(false);
@@ -92,8 +93,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       await apiFetch(`/catalog/workspaces/${activeWorkspace.id}`, { method: 'DELETE' });
       toast.success(t('shell.workspaceDeleted'));
       await refreshSession();
-    } catch (err: any) {
-      toast.error(err?.message || t('shell.workspaceDeleteFailed'));
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('shell.workspaceDeleteFailed')));
     }
     setDeleteConfirmName('');
     setDeleteWsOpen(false);
@@ -105,8 +106,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       await apiFetch(`/catalog/workspaces/${activeWorkspace.id}/libraries/${activeLibrary.id}`, { method: 'DELETE' });
       toast.success(t('shell.libraryDeleted'));
       await refreshSession();
-    } catch (err: any) {
-      toast.error(err?.message || t('shell.libraryDeleteFailed'));
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, t('shell.libraryDeleteFailed')));
     }
     setDeleteConfirmName('');
     setDeleteLibOpen(false);

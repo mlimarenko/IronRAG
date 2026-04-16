@@ -684,7 +684,7 @@ impl QueryGroundingAppFixture {
                 .collect::<Vec<_>>();
             self.state
                 .arango_context_store
-                .replace_bundle_chunk_edges(bundle_id, &chunk_edges)
+                .replace_bundle_chunk_edges(bundle_id, self.library_id, &chunk_edges)
                 .await
                 .context("failed to persist grounding chunk edges")?;
         }
@@ -695,7 +695,7 @@ impl QueryGroundingAppFixture {
                 .collect::<Vec<_>>();
             self.state
                 .arango_context_store
-                .replace_bundle_entity_edges(bundle_id, &entity_edges)
+                .replace_bundle_entity_edges(bundle_id, self.library_id, &entity_edges)
                 .await
                 .context("failed to persist grounding entity edges")?;
         }
@@ -706,7 +706,7 @@ impl QueryGroundingAppFixture {
                 .collect::<Vec<_>>();
             self.state
                 .arango_context_store
-                .replace_bundle_relation_edges(bundle_id, &relation_edges)
+                .replace_bundle_relation_edges(bundle_id, self.library_id, &relation_edges)
                 .await
                 .context("failed to persist grounding relation edges")?;
         }
@@ -922,6 +922,7 @@ fn sample_async_operation(
         surface_kind: Some("rest".to_string()),
         subject_kind: Some("query_execution".to_string()),
         subject_id: Some(execution_id),
+        parent_async_operation_id: None,
         failure_code: failure_code.map(ToString::to_string),
         created_at: Utc::now(),
         completed_at: matches!(status, "ready" | "failed" | "canceled").then(Utc::now),
@@ -1471,6 +1472,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
             .context_store
             .replace_bundle_chunk_edges(
                 bundle.bundle_id,
+                library_id,
                 &[sample_chunk_edge(bundle.bundle_id, chunk_id)],
             )
             .await
@@ -1479,6 +1481,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
             .context_store
             .replace_bundle_entity_edges(
                 bundle.bundle_id,
+                library_id,
                 &[sample_entity_edge(bundle.bundle_id, entity_id)],
             )
             .await
@@ -1487,6 +1490,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
             .context_store
             .replace_bundle_relation_edges(
                 bundle.bundle_id,
+                library_id,
                 &[sample_relation_edge(bundle.bundle_id, relation_id)],
             )
             .await
@@ -1495,6 +1499,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
             .context_store
             .replace_bundle_evidence_edges(
                 bundle.bundle_id,
+                library_id,
                 &[sample_evidence_edge(bundle.bundle_id, evidence_id)],
             )
             .await
@@ -1645,6 +1650,7 @@ async fn entity_neighborhood_filters_out_context_bundle_vertices() -> Result<()>
             .context_store
             .replace_bundle_entity_edges(
                 bundle.bundle_id,
+                library_id,
                 &[sample_entity_edge(bundle.bundle_id, entity_id)],
             )
             .await

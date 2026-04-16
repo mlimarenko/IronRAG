@@ -21,6 +21,13 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 300s;
+        # Stream upstream responses verbatim. Backend returns
+        # chunked+gzip/zstd streaming bodies (graph topology NDJSON,
+        # snapshot export); nginx default buffering re-frames those
+        # and truncates the trailing zero-length chunk, producing
+        # ERR_INCOMPLETE_CHUNKED_ENCODING in the browser.
+        proxy_buffering off;
+        proxy_request_buffering off;
         proxy_pass ${IRONRAG_API_UPSTREAM};
     }
 

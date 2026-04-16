@@ -52,25 +52,40 @@ pub(super) struct KnowledgeDocumentDetailResponse {
     graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.knowledge.list_context_bundles",
+    skip_all,
+    fields(library_id = %library_id, item_count)
+)]
 pub(super) async fn list_context_bundles(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
 ) -> Result<Json<Vec<KnowledgeContextBundleRow>>, ApiError> {
+    let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let bundles = state
         .arango_context_store
         .list_bundles_by_library(library_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    span.record("item_count", bundles.len());
     Ok(Json(bundles))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.knowledge.list_documents",
+    skip_all,
+    fields(library_id = %library_id, item_count)
+)]
 pub(super) async fn list_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
 ) -> Result<Json<Vec<KnowledgeDocumentRow>>, ApiError> {
+    let span = tracing::Span::current();
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let documents = state
@@ -78,9 +93,16 @@ pub(super) async fn list_documents(
         .list_documents_by_library(library.workspace_id, library.id, false)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    span.record("item_count", documents.len());
     Ok(Json(documents))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.knowledge.get_library_summary",
+    skip_all,
+    fields(library_id = %library_id)
+)]
 pub(super) async fn get_library_summary(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -103,6 +125,12 @@ pub(super) async fn get_library_summary(
     }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.knowledge.get_document",
+    skip_all,
+    fields(library_id = %library_id, document_id = %document_id)
+)]
 pub(super) async fn get_document(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -162,6 +190,12 @@ pub(super) async fn get_document(
     }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_context_bundle",
+    skip_all,
+    fields(bundle_id = %bundle_id)
+)]
 pub(super) async fn get_context_bundle(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -195,13 +229,21 @@ pub(super) async fn get_context_bundle(
     }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_library_generations",
+    skip_all,
+    fields(library_id = %library_id, item_count)
+)]
 pub(super) async fn list_library_generations(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
 ) -> Result<Json<Vec<KnowledgeLibraryGeneration>>, ApiError> {
+    let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let generations =
         state.canonical_services.knowledge.list_library_generations(&state, library_id).await?;
+    span.record("item_count", generations.len());
     Ok(Json(generations))
 }

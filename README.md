@@ -7,7 +7,7 @@
 </p>
 
 <h1 align="center">IronRAG</h1>
-<p align="center">One-click knowledge system for documents, internal bots, and AI agents</p>
+<p align="center">Production-grade knowledge memory for AI agents and teams</p>
 
 <p align="center">
   <a href="https://github.com/mlimarenko/IronRAG/stargazers"><img src="https://img.shields.io/github/stars/mlimarenko/IronRAG?style=flat-square" alt="Stars"></a>
@@ -17,7 +17,8 @@
 </p>
 
 <p align="center">
-  <a href="./README-RU.md">README-RU</a> &bull;
+  <a href="./docs/en/README.md">English docs</a> &bull;
+  <a href="./docs/ru/README.md">Документация</a> &bull;
   <a href="./docs/en/MCP.md">MCP</a> &bull;
   <a href="./docs/en/CLI.md">CLI</a> &bull;
   <a href="./docs/en/IAM.md">IAM</a>
@@ -25,213 +26,117 @@
 
 ---
 
-Load files, links, and images into one knowledge base, turn them into searchable text, embeddings, and graph relations, then expose the same memory in the operator UI and over MCP.
+IronRAG turns documents, code, PDFs, spreadsheets, and web pages into a structured knowledge base with a typed knowledge graph. AI agents query it over MCP; humans use the built-in UI. One self-hosted system -- your data stays on your infrastructure.
 
-## Architecture
+### Why IronRAG
 
-One public port on **web**. The frontend container serves the **React + Vite** SPA and proxies `/v1/*` to the **Rust / Axum** API. The same backend image also runs as the **worker** and the one-shot **startup authority** responsible for migrations, Arango bootstrap, and storage initialization. `s4core` is optional and is only used by the S3 compose/Helm profiles.
+- **Knowledge graph, not just vectors.** Entities, typed relationships, evidence chains, and document links -- agents reason over structure, not noisy similarity hits.
+- **MCP server out of the box.** 21 tools for search, document reading, graph traversal, and web ingestion. Connect Claude, Cursor, VS Code, or any MCP client in one line.
+- **Any provider.** OpenAI, DeepSeek, Qwen, or Ollama for fully local inference. Mix freely -- DeepSeek for reasoning, OpenAI for embeddings, Ollama for air-gapped environments.
+- **Cost tracking.** Per-document extraction cost and per-query execution cost. Workspace-level price overrides.
+- **Fine-grained IAM.** Scoped tokens at system, workspace, or library level. Permission groups control who reads, writes, or connects agents.
+- **Code-aware.** 15-language AST parsing via tree-sitter. Config parsers for JSON, YAML, TOML. Technical fact extraction for endpoints, env vars, error codes.
+- **Scales.** Tested on 5000+ documents, 25k+ graph nodes, 82k+ edges. Batched DB operations, streaming exports, memory-aware worker throttling.
+- **Full backup/restore.** One-click tar.zst archive. Selective export (data only or with source files). Restore to the same or different deployment.
 
-```text
-                         ┌─────────────────────────┐
-                         │    web (SPA + /v1)      │
-                         └───────────┬─────────────┘
-               ┌─────────────────────┴─────────────────────┐
-        GET /* (SPA)                                 /v1/* (API + MCP)
-      ┌────────▼─────────┐                       ┌─────────▼──────────┐
-      │    frontend      │                       │      backend       │
-      │  React + Vite    │                       │   Rust / Axum      │
-      └──────────────────┘                       └─────────┬──────────┘
-                         ┌─────────────────────────────────┼────────────────────┐
-                  ┌──────▼──────┐                  ┌───────▼───────┐    ┌───────▼───────┐
-                  │  ArangoDB   │                  │   Postgres    │    │    Redis      │
-                  │ graph+vector│                  │ IAM + control │    │ worker queue  │
-                  └─────────────┘                  └───────────────┘    └───────┬───────┘
-                                           ┌────────────────────────────┴───────┬───────────────┐
-                                           │                                    │               │
-                                     ┌─────▼─────┐                        ┌─────▼─────┐   ┌────▼────┐
-                                     │  startup  │                        │  worker   │   │ s4core  │
-                                     └───────────┘                        └───────────┘   └─────────┘
-```
-
-## Pipeline
-
-```text
-upload / URL → extract text → structured blocks → boilerplate filter
-  → semantic chunking (2800 chars, 10% overlap, heading-aware)
-  → embed chunks → graph extraction (v6: 10 entity types, 88 relation types)
-  → entity resolution (alias/acronym merge) → document summary
-  → quality scoring → hybrid index (BM25 + vector) → UI + MCP + API
-```
-
-### Table Pipeline
-
-- **One canonical path** -- `csv`, `xls`, `xlsx`, `xlsb`, `ods`, and table blocks extracted from `docx`/`pdf` are normalized into the same markdown-table representation before ingest.
-- **Row-first retrieval** -- each table row is stored as self-describing normalized text (`Sheet: ... | Row N | Header: value | ...`), so row-level questions work without relying on the whole table being co-retrieved.
-- **Summary-grounded analytics** -- per-column table summaries persist `average`, `min/max`, `distinct count`, and `most frequent` signals, and aggregate questions are answered from those summaries instead of ad hoc LLM guessing.
-- **Sparse graph by default for low-signal sheets** -- pure numeric or headerless tables stay retrieval-friendly but graph-sparse; semantic business rows remain graph-eligible and can still build useful entities and relations.
-
-## Deploy
-
-Prerequisite: Docker with Compose v2, or Kubernetes with Helm.
+## Quick start
 
 ```bash
-# Install without cloning
+# One-line install (Docker required)
 curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh | bash
+```
 
-# Or from a cloned repo
-cp .env.example .env
+Or from source:
+
+```bash
+git clone https://github.com/mlimarenko/IronRAG.git
+cd IronRAG/ironrag
+cp .env.example .env          # add IRONRAG_OPENAI_API_KEY=sk-...
 docker compose up -d
 ```
 
-Compose profiles:
+Open [http://127.0.0.1:19000](http://127.0.0.1:19000), create an admin account, upload a document, ask a question.
 
-- `docker-compose.yml` — bundled Postgres/Redis/ArangoDB + filesystem storage
-- `docker-compose-s4.yml` — bundled Postgres/Redis/ArangoDB + bundled `s4core` + S3 storage
-- `docker-compose-local.yml` — source build for local development
+For fully local inference without cloud providers -- configure Ollama in Admin > AI.
 
-Examples:
+### Other deployment options
 
 ```bash
-docker compose up -d
+# With S3-compatible storage (bundled s4core)
 docker compose -f docker-compose-s4.yml up -d
+
+# Local source build for development
 docker compose -f docker-compose-local.yml up --build -d
 ```
 
-Default UI URL: [http://127.0.0.1:19000](http://127.0.0.1:19000)
-
-Helm:
+Helm (Kubernetes):
 
 ```bash
-OPENAI_API_KEY=... \
 helm upgrade --install ironrag charts/ironrag \
-  --namespace ironrag \
-  --create-namespace \
-  --values charts/ironrag/values/examples/bundled-s3.yaml \
-  --set-string app.frontendOrigin=https://ironrag.example.com \
+  --namespace ironrag --create-namespace \
   --set-string app.providerSecrets.openaiApiKey="${OPENAI_API_KEY}" \
-  --wait \
-  --wait-for-jobs \
-  --timeout 20m
+  --wait --timeout 20m
 ```
 
-External dependencies:
+## How it works
 
-```bash
-helm upgrade --install ironrag charts/ironrag \
-  --namespace ironrag \
-  --create-namespace \
-  --values charts/ironrag/values/examples/external-services.yaml
+```
+Documents ──> Parsing ──> Chunking ──> Embedding ──> Vector Index
+                 |                        |
+                 └──> Graph Extraction ──> Knowledge Graph
+                         (LLM)              (ArangoDB)
+                                               |
+Query ──> Hybrid Search ──> Graph Traversal ──> Context Assembly ──> LLM Answer
+           (BM25 + Vector)                        |
+                                          Verification ──> Grounded Response
 ```
 
-Chart profiles:
-
-- `bundled-s3.yaml` — bundled Postgres/Redis/ArangoDB + bundled `s4core`
-- `external-services.yaml` — external Postgres/Redis/ArangoDB/S3
-- `filesystem-single-node.yaml` — single-node filesystem mode only
-
-Minikube is used only for local chart validation. It is not a deployment profile.
-
-Full runtime reference: [apps/api/.env.example](./apps/api/.env.example)
-
-## Features
-
-- **Document ingestion** -- text, code (50+ extensions), PDF, DOCX, PPTX, HTML, images, and web links with boilerplate filtering and quality scoring
-- **Typed knowledge graph** -- 10 universal entity types (person, organization, location, event, artifact, natural, process, concept, attribute, entity), 88 relation types, entity resolution, and document summaries
-- **Hybrid search** -- BM25 + vector cosine via Reciprocal Rank Fusion, field-weighted scoring (heading matches boosted 1.5x)
-- **Grounded assistant** -- built-in chat UI with answer verification and evidence panel
-- **21 MCP tools** -- search, read, upload, graph exploration, web crawl, and admin (the in-app assistant uses these tools as a normal MCP client)
-- **Smart chunking** -- 2800-char semantic chunks with 10% overlap, heading-aware splitting, code-aware boundaries, boilerplate detection
-- **Access control** -- API tokens with 13 permission kinds, hierarchical scopes (system/workspace/library/document), and grant-based MCP tool filtering
-- **Admin CLI** -- `ironrag-cli` for user/token management, workspace/library provisioning, and data export/import without HTTP
-- **Spending tracking** -- per-document and per-library cost visibility
-- **Model selection** -- configurable providers and models per pipeline stage
-
-## MCP
-
-21 tools out of the box. Create a token in **Admin > Access**, attach grants, copy the snippet from **Admin > MCP**.
-
-| Category | Tools |
-|----------|-------|
-| **Documents** | `search_documents`, `read_document`, `list_documents`, `upload_documents`, `update_document`, `delete_document` |
-| **Graph** | `search_entities`, `get_graph_topology`, `list_relations` |
-| **Web Crawl** | `submit_web_ingest_run`, `get_web_ingest_run`, `cancel_web_ingest_run` |
-| **Discovery** | `list_workspaces`, `list_libraries` |
-
-Search and read responses default to `includeReferences=false` to minimize token usage. Full guide: [MCP](./docs/en/MCP.md) | [IAM & Tokens](./docs/en/IAM.md) | [CLI](./docs/en/CLI.md)
-
-## Tech Stack
+## Tech stack
 
 | Layer | Technology |
 |-------|-----------|
-| API + Worker | Rust, Axum, SQLx |
-| Frontend | React, Vite, Tailwind, shadcn/ui |
-| Graph + Vector | ArangoDB 3.12 |
-| Control Plane | PostgreSQL 18 |
-| Worker Queue | Redis 8 |
-| Edge / SPA | nginx 1.28 inside `web` |
-| Deployment | Helm, Docker Compose, Ansible |
+| Backend | Rust, Axum, tokio, SQLx |
+| Frontend | React, Vite, TypeScript, Tailwind, shadcn/ui |
+| Graph rendering | Sigma.js + Graphology (WebGL, Web Worker layout) |
+| Knowledge graph | ArangoDB |
+| Document store | PostgreSQL |
+| Job queue | Redis |
+| Code parsing | tree-sitter (15 languages) |
+| Deployment | Docker Compose, Helm |
 
-## Configuration
+## MCP tools
 
-All variables use `IRONRAG_*` prefix. Key files:
+21 tools out of the box. Create a token in **Admin > Access**, copy the snippet from **Admin > MCP**.
 
-| File | Purpose |
-|------|---------|
-| `.env.example` | Compose variables |
-| `apps/api/.env.example` | Full runtime config reference |
-| `apps/api/src/app/config.rs` | Built-in defaults |
+| Category | Tools |
+|----------|-------|
+| Documents | `search_documents`, `read_document`, `list_documents`, `upload_documents`, `update_document`, `delete_document` |
+| Graph | `search_entities`, `get_graph_topology`, `list_relations` |
+| Web crawl | `submit_web_ingest_run`, `get_web_ingest_run`, `cancel_web_ingest_run` |
+| Q&A | `ask` (grounded answer in a single call) |
+| Discovery | `list_workspaces`, `list_libraries` |
 
-## Benchmarks
+## Documentation
 
-Two golden datasets: Wikipedia corpus (30 questions) and code corpus (20 questions across Go/TS/Python/Rust/Terraform/React/K8s/Docker).
-
-```bash
-export IRONRAG_SESSION_COOKIE="..."
-export IRONRAG_BENCHMARK_WORKSPACE_ID="workspace-uuid"
-make benchmark-grounded-seed   # upload corpus
-make benchmark-grounded-all    # run QA matrix
-make benchmark-golden          # golden dataset
-```
-
-## Roadmap
-
-### 0.2.0 -- Quality & Performance (done)
-
-- [x] Hybrid search (BM25 + vector RRF fusion)
-- [x] Graph extraction v6 (few-shot, 10 entity types, 88 relation types)
-- [x] Semantic chunking (2800 chars, overlap, heading-aware, code-aware)
-- [x] Boilerplate detection, quality scoring, entity resolution
-- [x] 21 MCP tools for search, read, upload, and graph navigation
-- [x] Typed entity coloring and edge labels in graph UI
-- [x] Parallel graph extraction (up to 8 concurrent chunks)
-- [x] SSE streaming for query answers
-- [x] Conversation context in multi-turn queries
-- [x] Incremental re-processing (diff-aware ingest)
-- [x] Export/import libraries
-- [x] Admin CLI (`ironrag-cli`) with granular token permissions
-- [x] Ollama/local model support, verified live with Ollama `qwen3:4b`; stale-model detection verified against missing `qwen3:0.6b`.
-
-### Next up
-
-- [ ] Managed connectors for project workspaces: GitHub repositories, S3 buckets, and durable web sources with scoped grants and explicit sync lifecycle.
+| | English | Russian |
+|--|---------|---------|
+| Overview | [README](./docs/en/README.md) | [README](./docs/ru/README.md) |
+| Pipeline | [PIPELINE](./docs/en/PIPELINE.md) | [PIPELINE](./docs/ru/PIPELINE.md) |
+| MCP | [MCP](./docs/en/MCP.md) | [MCP](./docs/ru/MCP.md) |
+| IAM | [IAM](./docs/en/IAM.md) | [IAM](./docs/ru/IAM.md) |
+| CLI | [CLI](./docs/en/CLI.md) | [CLI](./docs/ru/CLI.md) |
 
 ## Star History
 
 <p align="center">
-## Star History
-
-  <a href="https://www.star-history.com/?repos=mlimarenko%2FIronRAG&type=date&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=mlimarenko/IronRAG&type=date&theme=dark&legend=top-left" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=mlimarenko/IronRAG&type=date&legend=top-left" />
-    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=mlimarenko/IronRAG&type=date&legend=top-left" />
-  </picture>
+  <a href="https://star-history.com/#mlimarenko/IronRAG&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" width="700" />
+    </picture>
   </a>
 </p>
-
-## Contributing
-
-PRs welcome. Prefer the one canonical path over compatibility layers.
 
 ## License
 

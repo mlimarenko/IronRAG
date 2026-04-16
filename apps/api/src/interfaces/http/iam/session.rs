@@ -31,6 +31,7 @@ use super::{
     },
 };
 
+#[tracing::instrument(level = "info", name = "http.resolve_session", skip_all)]
 pub(super) async fn resolve_session(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -98,6 +99,7 @@ pub(super) async fn resolve_session(
     }
 }
 
+#[tracing::instrument(level = "info", name = "http.get_bootstrap_status", skip_all)]
 pub(super) async fn get_bootstrap_status(
     State(state): State<AppState>,
 ) -> Result<Json<BootstrapStatusResponse>, ApiError> {
@@ -108,6 +110,7 @@ pub(super) async fn get_bootstrap_status(
     }))
 }
 
+#[tracing::instrument(level = "info", name = "http.setup_bootstrap_admin", skip_all)]
 pub(super) async fn setup_bootstrap_admin(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -200,6 +203,7 @@ pub(super) async fn setup_bootstrap_admin(
     ))
 }
 
+#[tracing::instrument(level = "info", name = "http.login_session", skip_all)]
 pub(super) async fn login_session(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -288,6 +292,7 @@ pub(super) async fn login_session(
     ))
 }
 
+#[tracing::instrument(level = "info", name = "http.get_session", skip_all)]
 pub(super) async fn get_session(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -296,6 +301,7 @@ pub(super) async fn get_session(
     Ok(Json(map_contract_session_response(session)))
 }
 
+#[tracing::instrument(level = "info", name = "http.logout_session", skip_all)]
 pub(super) async fn logout_session(
     auth: AuthContext,
     State(state): State<AppState>,

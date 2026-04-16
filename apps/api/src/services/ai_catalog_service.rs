@@ -30,6 +30,7 @@ mod shared;
 mod tests;
 
 use bootstrap::{
+    BOOTSTRAPPED_PROVIDER_KINDS, bootstrap_bundle_has_required_fallback_credentials,
     bootstrap_credential_source, bootstrap_preset_inputs_cover_canonical_purposes,
     bootstrap_preset_profile_for_purpose, bootstrap_provider_credential_map,
     ensure_bootstrap_binding_assignment, ensure_bootstrap_model_preset,
@@ -41,9 +42,10 @@ use bootstrap::{
 use catalog::parse_allowed_binding_purposes;
 use catalog::validate_model_binding_purpose;
 #[cfg(test)]
-use provider_validation::{canonicalize_provider_base_url, is_loopback_base_url};
 use provider_validation::{
-    ensure_discovered_ollama_model_catalog_entry, fetch_provider_model_names,
+    canonicalize_provider_base_url, discovered_provider_model_signature, is_loopback_base_url,
+};
+use provider_validation::{
     normalize_provider_base_url_input, resolve_provider_base_url, validate_provider_access,
 };
 use shared::{
@@ -167,6 +169,8 @@ pub enum BootstrapAiCredentialSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BootstrapAiPresetDescriptor {
     pub binding_purpose: AiBindingPurpose,
+    pub owner_provider_catalog_id: Uuid,
+    pub owner_provider_kind: String,
     pub model_catalog_id: Uuid,
     pub model_name: String,
     pub preset_name: String,
@@ -411,8 +415,10 @@ impl AiCatalogService {
         &self,
         state: &AppState,
     ) -> Result<BootstrapAiSetupDescriptor, ApiError> {
-        let providers = self.list_provider_catalog(state).await?;
-        let models = self.list_model_catalog(state, None).await?;
+        let (providers, models) = tokio::try_join!(
+            self.list_provider_catalog(state),
+            self.list_model_catalog(state, None),
+        )?;
         let configured_ai = state.ui_bootstrap_ai_setup.as_ref();
         let mut preset_bundles = Vec::new();
         for provider in &providers {
@@ -422,6 +428,13 @@ impl AiCatalogService {
                 &models,
                 bootstrap_credential_source(configured_ai, &provider.provider_kind),
             )? {
+                if !bootstrap_bundle_has_required_fallback_credentials(
+                    &bundle,
+                    &providers,
+                    configured_ai,
+                ) {
+                    continue;
+                }
                 preset_bundles.push(bundle);
             }
         }
@@ -459,7 +472,7 @@ impl AiCatalogService {
             .into_iter()
             .map(|preset| BootstrapAiPresetInput {
                 binding_purpose: preset.binding_purpose,
-                provider_kind: bundle.provider_kind.clone(),
+                provider_kind: preset.owner_provider_kind,
                 model_catalog_id: preset.model_catalog_id,
                 preset_name: preset.preset_name,
                 system_prompt: preset.system_prompt,
@@ -482,6 +495,69 @@ impl AiCatalogService {
             },
         )
         .await
+    }
+
+    /// Pre-creates model presets for every provider that ships a
+    /// bootstrap profile (OpenAI, DeepSeek, Qwen, Ollama), regardless
+    /// of whether the operator has configured a credential or API key.
+    /// Presets are cheap — they are just named configurations over a
+    /// model catalog entry. Having them ready means that when the
+    /// operator later adds a credential, they can immediately assign
+    /// bindings to existing presets instead of creating them from
+    /// scratch.
+    ///
+    /// Runs idempotently at startup. Each preset is looked up by its
+    /// canonical name before creation, so re-running does not duplicate.
+    pub async fn seed_all_provider_presets(&self, state: &AppState) -> Result<usize, ApiError> {
+        let providers = self.list_provider_catalog(state).await?;
+        let models = self.list_model_catalog(state, None).await?;
+        let instance_scope =
+            AiScopeRef { scope_kind: AiScopeKind::Instance, workspace_id: None, library_id: None };
+        let mut presets = self.list_model_presets_exact(state, instance_scope).await?;
+        let mut created_count = 0usize;
+
+        for provider_kind in BOOTSTRAPPED_PROVIDER_KINDS {
+            let Some(bundle) =
+                providers.iter().find(|p| p.provider_kind == *provider_kind).and_then(|provider| {
+                    resolve_bootstrap_provider_preset_bundle(
+                        provider,
+                        &providers,
+                        &models,
+                        BootstrapAiCredentialSource::Missing,
+                    )
+                    .ok()
+                    .flatten()
+                })
+            else {
+                continue;
+            };
+
+            for descriptor in &bundle.presets {
+                let input = BootstrapAiPresetInput {
+                    binding_purpose: descriptor.binding_purpose,
+                    provider_kind: descriptor.owner_provider_kind.clone(),
+                    model_catalog_id: descriptor.model_catalog_id,
+                    preset_name: descriptor.preset_name.clone(),
+                    system_prompt: descriptor.system_prompt.clone(),
+                    temperature: descriptor.temperature,
+                    top_p: descriptor.top_p,
+                    max_output_tokens_override: descriptor.max_output_tokens_override,
+                    extra_parameters_json: serde_json::json!({}),
+                };
+                let _ =
+                    ensure_bootstrap_model_preset(self, state, &input, &mut presets, None).await?;
+                created_count += 1;
+            }
+        }
+
+        if created_count > 0 {
+            tracing::info!(
+                stage = "bootstrap",
+                presets = created_count,
+                "seeded model presets for all providers",
+            );
+        }
+        Ok(created_count)
     }
 
     pub async fn apply_configured_bootstrap_ai_setup(
@@ -565,6 +641,7 @@ impl AiCatalogService {
                 command.updated_by_principal_id,
             )
             .await?;
+            // Clone required: the HashMap outlives the `providers` borrow used later.
             credentials_by_provider.insert(provider.provider_kind.clone(), credential);
         }
 

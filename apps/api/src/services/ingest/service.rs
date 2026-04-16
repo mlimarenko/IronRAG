@@ -6,7 +6,10 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ingest::{IngestAttempt, IngestJob, IngestStageEvent},
-    domains::ops::OpsAsyncOperation,
+    domains::ops::{
+        ASYNC_OP_STATUS_FAILED, ASYNC_OP_STATUS_PROCESSING, ASYNC_OP_STATUS_READY,
+        OpsAsyncOperation,
+    },
     infra::repositories::{
         ingest_repository::{
             self, NewIngestAttempt, NewIngestJob, NewIngestStageEvent, UpdateIngestAttempt,
@@ -515,15 +518,16 @@ impl IngestService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
         let operation_status = match next_queue_state {
-            "completed" => "ready",
-            "failed" => "failed",
+            "completed" => ASYNC_OP_STATUS_READY,
+            "failed" => ASYNC_OP_STATUS_FAILED,
             "queued" => "accepted",
-            _ => "processing",
+            _ => ASYNC_OP_STATUS_PROCESSING,
         };
-        let operation_completed_at =
-            (operation_status == "ready" || operation_status == "failed").then(Utc::now);
+        let operation_completed_at = (operation_status == ASYNC_OP_STATUS_READY
+            || operation_status == ASYNC_OP_STATUS_FAILED)
+            .then(Utc::now);
         let operation_failure_code =
-            (operation_status == "failed").then(|| failure_code.clone()).flatten();
+            (operation_status == ASYNC_OP_STATUS_FAILED).then(|| failure_code.clone()).flatten();
         update_linked_async_operation(
             state,
             job.async_operation_id,
@@ -834,6 +838,7 @@ fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyn
         surface_kind: Some(row.surface_kind),
         subject_kind: Some(row.subject_kind),
         subject_id: row.subject_id,
+        parent_async_operation_id: row.parent_async_operation_id,
         failure_code: row.failure_code,
         created_at: row.created_at,
         completed_at: row.completed_at,

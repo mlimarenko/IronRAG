@@ -34,17 +34,39 @@ pub async fn visible_workspaces(
     auth: &AuthContext,
     state: &AppState,
 ) -> Result<Vec<McpWorkspaceDescriptor>, ApiError> {
-    let rows = load_visible_workspace_rows(auth, state).await?;
-    let mut items = Vec::with_capacity(rows.len());
-    for workspace in rows {
-        let libraries = visible_libraries(auth, state, Some(workspace.id)).await?;
-        let can_write_any_library = libraries.iter().any(|item| item.supports_write);
+    // Load every visible workspace row and every visible library row
+    // in two concurrent queries instead of one workspace load followed
+    // by N per-workspace library loads. The earlier loop issued
+    // `load_visible_library_contexts(Some(ws_id))` once per workspace,
+    // which turned the MCP capability read into an N+1 — every
+    // capability probe and every `initialize` call paid for it.
+    let (workspace_rows, libraries) = tokio::try_join!(
+        load_visible_workspace_rows(auth, state),
+        load_visible_library_contexts(auth, state, None),
+    )?;
+
+    // Group library descriptors by workspace once so per-workspace
+    // counts and the `can_write_any_library` flag are derived in
+    // memory instead of via another query.
+    let mut libs_by_workspace: std::collections::HashMap<Uuid, Vec<&McpLibraryDescriptor>> =
+        std::collections::HashMap::with_capacity(workspace_rows.len());
+    for library in &libraries {
+        libs_by_workspace
+            .entry(library.descriptor.workspace_id)
+            .or_default()
+            .push(&library.descriptor);
+    }
+
+    let mut items = Vec::with_capacity(workspace_rows.len());
+    for workspace in workspace_rows {
+        let workspace_libraries = libs_by_workspace.remove(&workspace.id).unwrap_or_default();
+        let can_write_any_library = workspace_libraries.iter().any(|item| item.supports_write);
         items.push(McpWorkspaceDescriptor {
             workspace_id: workspace.id,
             slug: workspace.slug,
             name: workspace.display_name,
             status: workspace.lifecycle_state,
-            visible_library_count: libraries.len(),
+            visible_library_count: workspace_libraries.len(),
             can_write_any_library,
         });
     }
@@ -58,6 +80,52 @@ pub async fn visible_libraries(
 ) -> Result<Vec<McpLibraryDescriptor>, ApiError> {
     let libraries = load_visible_library_contexts(auth, state, workspace_filter).await?;
     Ok(libraries.into_iter().map(|item| item.descriptor).collect())
+}
+
+/// Concurrent (workspaces, libraries) load for MCP capability snapshots.
+///
+/// Used by the hot capability/initialize path to avoid issuing two
+/// sequential round-trips and the old workspace-level N+1 library
+/// fetch. Both lists are derived from the same underlying queries
+/// `load_visible_workspace_rows` and `load_visible_library_contexts`,
+/// which are run in parallel via `tokio::try_join!`.
+pub async fn visible_catalog(
+    auth: &AuthContext,
+    state: &AppState,
+) -> Result<(Vec<McpWorkspaceDescriptor>, Vec<McpLibraryDescriptor>), ApiError> {
+    let (workspace_rows, libraries) = tokio::try_join!(
+        load_visible_workspace_rows(auth, state),
+        load_visible_library_contexts(auth, state, None),
+    )?;
+
+    // Group library descriptors by workspace so per-workspace counts
+    // are derived in memory rather than via additional queries.
+    let mut libs_by_workspace: std::collections::HashMap<Uuid, Vec<&McpLibraryDescriptor>> =
+        std::collections::HashMap::with_capacity(workspace_rows.len());
+    for library in &libraries {
+        libs_by_workspace
+            .entry(library.descriptor.workspace_id)
+            .or_default()
+            .push(&library.descriptor);
+    }
+
+    let mut workspaces = Vec::with_capacity(workspace_rows.len());
+    for workspace in workspace_rows {
+        let workspace_libs = libs_by_workspace.remove(&workspace.id).unwrap_or_default();
+        let can_write_any_library = workspace_libs.iter().any(|item| item.supports_write);
+        workspaces.push(McpWorkspaceDescriptor {
+            workspace_id: workspace.id,
+            slug: workspace.slug,
+            name: workspace.display_name,
+            status: workspace.lifecycle_state,
+            visible_library_count: workspace_libs.len(),
+            can_write_any_library,
+        });
+    }
+
+    let library_descriptors: Vec<McpLibraryDescriptor> =
+        libraries.into_iter().map(|item| item.descriptor).collect();
+    Ok((workspaces, library_descriptors))
 }
 
 pub async fn create_workspace(

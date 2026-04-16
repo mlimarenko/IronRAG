@@ -59,6 +59,16 @@ pub struct KnowledgeRevisionRow {
     pub created_at: DateTime<Utc>,
 }
 
+/// Slim AQL projection used by the prepared-segments inspector to
+/// map `support_block_ids` back to chunk ids without pulling the
+/// full chunk text over the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeChunkSupportReferenceRow {
+    pub chunk_id: Uuid,
+    #[serde(default)]
+    pub support_block_ids: Vec<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeChunkRow {
     #[serde(rename = "_key")]

@@ -91,6 +91,7 @@ fn sample_settings() -> Settings {
         query_balanced_context_enabled: true,
         runtime_graph_extract_recovery_enabled: true,
         runtime_graph_extract_recovery_max_attempts: 4,
+        runtime_graph_extract_stage_timeout_seconds: 600,
         runtime_graph_extract_resume_downgrade_level_one_after_replays: 3,
         runtime_graph_extract_resume_downgrade_level_two_after_replays: 5,
         runtime_graph_summary_refresh_batch_size: 64,
@@ -101,8 +102,8 @@ fn sample_settings() -> Settings {
         runtime_graph_filter_empty_relations: true,
         runtime_graph_filter_degenerate_self_loops: true,
         runtime_graph_convergence_warning_backlog_threshold: 1,
-        mcp_memory_default_read_window_chars: 12_000,
-        mcp_memory_max_read_window_chars: 50_000,
+        mcp_memory_default_read_window_chars: 48_000,
+        mcp_memory_max_read_window_chars: 192_000,
         mcp_memory_default_search_limit: 10,
         mcp_memory_max_search_limit: 25,
         mcp_memory_idempotency_retention_hours: 72,
@@ -178,8 +179,8 @@ fn from_env_has_sane_local_defaults() {
     assert!(settings.runtime_graph_filter_empty_relations);
     assert!(settings.runtime_graph_filter_degenerate_self_loops);
     assert_eq!(settings.runtime_graph_convergence_warning_backlog_threshold, 1);
-    assert_eq!(settings.mcp_memory_default_read_window_chars, 12_000);
-    assert_eq!(settings.mcp_memory_max_read_window_chars, 50_000);
+    assert_eq!(settings.mcp_memory_default_read_window_chars, 48_000);
+    assert_eq!(settings.mcp_memory_max_read_window_chars, 192_000);
     assert_eq!(settings.mcp_memory_default_search_limit, 10);
     assert_eq!(settings.mcp_memory_max_search_limit, 25);
     assert_eq!(settings.mcp_memory_idempotency_retention_hours, 72);

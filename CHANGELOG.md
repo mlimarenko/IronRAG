@@ -1,5 +1,128 @@
 # Changelog
 
+## 0.3.0 — 2026-04-16
+
+Large-library performance release. On a 4900-document reference library the documents page drops from 26 MB / 1.2 s to 3 KB gzip / 50 ms per page, graph from 60 MB / 1.7 s to 2 MB zstd / 60 ms on Redis hit, `get_library_summary` from a broken 11 s to a correct 1.3 s, and batch rerun moves from a 5 s sync handler that timed out beyond a hundred docs to an async job with polling.
+
+### AI catalog & admin UX
+
+- AI model compatibility is now classified canonically across OpenAI, Qwen, DeepSeek, and Ollama from one binding-purpose model. Hosted DeepSeek remains text-only; multimodal and embedding roles are exposed only where the provider or discovered model family actually supports them.
+- `GET /v1/ai/models` no longer performs live provider `/models` discovery on every admin-page load. Generic reads now resolve against the persisted catalog plus visible credentials, while provider discovery sync runs on credential save and on narrow credential-specific refreshes only. In local profiling the AI admin read path dropped from multi-second stalls to low-millisecond responses.
+- The Admin `AI` tab was redesigned for high-cardinality catalogs: scope cards, provider inventory, binding cards, searchable credentials and presets, and lazy Ollama model checks in the editor. Fixed the library-override crash caused by the missing `selectedCredentialModelSet` binding state.
+
+### Document operations & ingest hardening
+
+- `GET /v1/content/documents` now honors the documents UI's largest page size: the hard clamp moved from 200 to 1000 rows so bulk-selection and batch actions no longer silently operate on only the first 200 matches of a filtered result set.
+- The documents surface now supports true "select all matching" expansion across paginated filtered results, keeps failed uploads visible after a batch completes, and avoids clearing operator-visible per-file errors immediately after acceptance.
+- Upload MIME admission is now sniffing-first for unknown text filenames: generic binary MIME plus unknown suffixes like `.env.backup.20260116-162838` are accepted when the payload is clearly text, while explicitly unsupported declared formats such as `video/mp4` still fail fast.
+
+### Documents list
+
+- `GET /v1/content/documents` is now keyset-paginated: `cursor`, `limit` (50/200), `search` (ILIKE), `sortBy`, `sortOrder`, opt-in `includeTotal`. Response is a slim `ContentDocumentListItem` with server-derived `status` and `readiness`; heavy fields moved to the per-document detail endpoint used by the inspector.
+- Backend list path is a single Postgres CTE with LATERAL joins replacing the previous 6-call batch prefetch. The `(library_id, created_at DESC, id DESC)` keyset index and a GIN trigram index for `search` over `lower(external_key)` are part of the canonical `0001_init.sql` baseline.
+- `get_library_summary` now uses a single aggregate SQL (`aggregate_library_document_readiness`) instead of iterating the document list. Fixed a Cartesian `LEFT JOIN ingest_job` that was inflating counts ~4000× during integration.
+- Frontend `DocumentsPage` rewritten around server pagination + `IntersectionObserver` infinite scroll. Debounced server search and sort. Client-side status/readiness filters and local `slice()` paging removed — no mixed client/server filtering.
+
+### Graph topology
+
+- New `GET /v1/knowledge/libraries/{id}/graph` replaces `/graph-topology`. Wire format is compact NDJSON: sections `meta → id_map → docs → nodes → edges → doc_links → end`, UUIDs emitted once through a `u32` id map, nodes use short field keys, edges are 4-tuples `[from, to, rel, support]`. Fields the frontend never reads (`metadata_json`, workspace/library/timestamp columns, `normalized_assertion`, …) are stripped from the wire. No truncation — the full graph is always delivered.
+- Redis cache by `graph:{library_id}:v{projection_version}` with a 24 h TTL, invalidated from every `upsert_runtime_graph_snapshot` call site in `projection.rs` and `rebuild.rs`.
+- Frontend `getGraphTopologyStream` parses the NDJSON through a `ReadableStream` and surfaces `onProgress` to `GraphPage` for a live loading indicator.
+
+### Observability
+
+- `/metrics` Prometheus endpoint via `axum-prometheus` (`axum_http_requests_total`, `axum_http_requests_duration_seconds` labelled by `method`, `endpoint`, `status`). Published on `127.0.0.1:9464` in the local dev compose; in prod compose it stays off the host and is scraped via `docker exec`.
+- `#[tracing::instrument]` on the hot paths: `list_documents`, `prefetch_document_summary_data`, `get_graph_topology`, the runtime-graph repository functions, `batch_reprocess_documents`, `reprocess_single_document`. Spans carry `library_id`, relevant counts, and `elapsed_ms`.
+
+### Worker — heartbeat starvation fix
+
+- Root cause of the repeated `lease_expired / stale_heartbeat` failures: `projection::project_canonical_graph`, `projection::project_targeted_canonical_graph`, and the per-chunk `serde_json::from_value::<GraphExtractionCandidateSet>` inside `rebuild.rs`'s `buffer_unordered(8)` were fully synchronous CPU-bound paths on tokio worker threads with no yield points. They pegged every tokio worker at 100 %, starving the heartbeat task so leases expired while the worker was still alive.
+- Fix: those CPU hot spots now run inside `tokio::task::spawn_blocking`. The heartbeat task moved onto a dedicated `heartbeat_postgres: PgPool` (`min_connections=1`, `max_connections=2`) so the main pool can be fully checked out without blocking heartbeats. New stage-level timeout `IRONRAG_RUNTIME_GRAPH_EXTRACT_STAGE_TIMEOUT_SECONDS` (default 600) wraps `materialize_revision_graph_candidates` + `reconcile_revision_graph` via `tokio::time::timeout`, surfacing `stage_timeout` failures through the existing "degraded to readable" branch instead of silently holding a lease.
+
+### Batch rerun — async job with polling
+
+- `POST /v1/content/documents/batch-reprocess` now returns `202 Accepted` with `{ batchOperationId, total, libraryId, workspaceId }`. A spawned task admits the child mutations via `buffer_unordered(N)` (default 4, `IRONRAG_BATCH_REPROCESS_PARALLELISM`) bounded by `IRONRAG_BATCH_REPROCESS_TIMEOUT_SECS` (default 3600). Library consistency is enforced up front — every `documentId` must belong to the same library.
+- `ops_async_operation` carries a nullable `parent_async_operation_id` FK directly in the canonical `0001_init.sql` baseline. This is the canonical single-table batch-ops mechanism — any future batch endpoint reuses the same parent/child shape.
+- `GET /v1/ops/operations/{id}` returns the parent row plus `progress { total, completed, failed, inFlight }` via a single `LEFT JOIN` + FILTER aggregate. For any parent with children, `status` and `completedAt` are derived on read from progress counts (`processing` while any child pending, `failed` on any child failure, else `ready`) — no race between the spawned admit phase and child lifecycle.
+- Old `BATCH_MAX_DOCUMENTS = 1000` cap replaced by a DoS sanity cap of 100 000 ids.
+- Frontend shows a progress banner that polls `opsApi.getAsyncOperation(id)` with 1.5 s → 5 s adaptive backoff, refreshes the document list on terminal states, and auto-dismisses 4 s after completion.
+
+### Library backup / restore (tar.zst)
+
+- **Format redesign: NDJSON → tar.zst.** The old NDJSON stream truncated in browsers because the frontend buffered the entire response via `fetch().blob()`. The new format is a streaming tar archive compressed with zstd level 3 (~13× on NDJSON text). Archive layout: `manifest.json` → chunked NDJSON per table/collection (64 MiB soft cap per part) → raw blob entries → `summary.json`. `tokio-tar` + `async-compression` write into a `tokio::io::duplex` pair piped into `Body::from_stream` with natural back-pressure.
+- **Streaming Arango cursor.** New `ArangoClient::query_json_batches` yields cursor batches via an async callback instead of merging the entire result into memory. The old path OOM-killed the backend on `knowledge_structured_block` (545 k rows / ~1 GB JSON). Export now streams through a bounded `mpsc` channel (depth 2) between the cursor producer task and the tar writer.
+- **Edge `library_id` propagation.** Every Arango edge insert now carries `library_id` (10 wrapper methods, 12 call sites, 8 files). Persistent indexes on `library_id` for all 15 edge collections. Snapshot export edge query uses `FILTER edge.library_id == @lid` instead of the old per-edge `DOCUMENT()` lookup — edge export stage dropped from **11.3 s → <2 ms** on the Artix fixture.
+- **Batched import.** `PgBatcher` flushes every 1 000 rows via `jsonb_populate_recordset`; `ArangoBatcher` flushes via `FOR doc IN @docs INSERT`. Artix full restore (107 k pg + 466 k arango rows) dropped from **>5 min (nginx 504)** to **~78 s**.
+- **Bulk Arango timeout.** `query_json_bulk` and `query_json_batches` carry a 10-minute per-request timeout override. The canonical 15 s client timeout was truncating edge cleanup and large-batch inserts.
+- **Replace mode.** `POST /snapshot?overwrite=replace` clears the library footprint (reverse-FK Postgres delete, Arango edge/doc purge, blob stash) before restoring. Import trusts the archive manifest for include kinds — no duplicate selector on the request.
+- **Simplified include scope.** `IncludeKind` collapsed from `content / runtime_graph / knowledge / blobs` to **`library_data` + `blobs`**. A library is one atomic domain unit; the old split leaked storage tiers into the UI. Back-compat shim maps old tokens to `library_data`. UI dialog: one always-on "Library data" card + one "Include source files" checkbox.
+- Export throughput on Artix (24 k nodes, 82 k edges, 445 k structured blocks): **6.1 s / 42 MiB** (was 17.4 s before edge indexes, truncated before tar.zst).
+
+### Graph rendering performance
+
+- **Web Worker layout offload.** `applyGraphLayout` runs in a dedicated module worker (`graphLayout.worker.ts`, ~70 KB chunk) for graphs ≥ 3 000 nodes. The main thread builds Graphology + inits Sigma while the worker computes coordinates off-thread; positions are returned via a `Float32Array` transferable buffer (zero-copy). Artix first canvas paint: **~1.6 s** (was browser "page is slowing down" warning).
+- **Hidden-edge precompute.** The `hiddenIds → hiddenEdgeIds` derivation moved from the per-hover reducer effect (O(M) on every hover commit) to a dedicated effect keyed only on `hiddenIds` change. Hover branches read a pre-built `Set<edgeId>` ref — O(1) per edge per frame.
+- **O(degree) selection.** Click-mode connected-edge lookup uses `graph.edges(selectedId)` (O(degree)) instead of `graph.forEachEdge` (O(M)). On Artix: ~8 edges vs 82 k scan per click.
+- **Instant layout at density.** Layout transitions skip the 280 ms per-frame interpolation at ≥ 5 000 nodes — the animation burned 1.5 M `setNodeAttribute` calls/sec with no visual value at that density.
+- **Labels disabled at extreme density.** `renderLabels: false` at > 15 000 nodes eliminates Sigma's label collision pass (the dominant per-frame cost). `selectProminentGraphLabelIds` O(N log N) sort also skipped in that regime.
+- **Byte-buffered NDJSON parser.** `getGraphTopologyStream` uses a `Uint8Array` ring buffer with direct 0x0A scan instead of the old `pending += chunk; pending.slice()` pattern, preventing O(N²) string churn at 100 k+ node topologies.
+
+### MCP performance
+
+- **N+1 eliminated from capability snapshot.** `visible_workspaces` used to loop N workspaces issuing one `load_visible_library_contexts` per workspace. New `visible_catalog` loads workspaces + all libraries in 2 concurrent queries via `tokio::try_join!` and groups in memory. `mcp.capabilities`: 132 ms → **50 ms**; `mcp.initialize`: 116 ms → **53 ms**.
+
+### Release-readiness tooling
+
+- **`scripts/ops/release-check.py`** — consolidated pre-release smoke + perf suite. 24 checks covering auth, catalog, content, knowledge, snapshot export, and MCP tools. Per-check latency budgets with pass/warn/fail verdicts, top-10 latency table, machine-readable JSON output. Replaces ad-hoc curl scripts.
+
+### Extraction pipeline refactor
+
+- **tree-sitter AST extraction for 15 languages.** Code identifier extraction switched from substring heuristics (`"fn "`, `"class "`, `"const "`) to real AST parsing via tree-sitter. Supported: Python, JavaScript, TypeScript, Bash, Rust, Go, Java, C, C#, Ruby, PHP, Swift, Scala, YAML, Proto. Each grammar tested with per-language unit tests. Heuristic fallbacks removed entirely — if tree-sitter doesn't support the language, no code identifier fact is produced.
+- **Structural config parsing (JSON, YAML, TOML).** Config key extraction via `serde_json`, `serde_yaml`, `toml_edit` replaces the old `split_once(':')` / `split_once('=')` heuristic that produced false positives on prose. Only declared config-language blocks are parsed.
+- **URL and version parsing via real crates.** `url::Url::parse` (RFC 3986) replaces `starts_with("http://")`. `semver::Version::parse` replaces manual digit splitting.
+- **Block-family dispatch.** The extraction loop dispatches extractors by block kind instead of running all 14 on every line. CodeBlock → identifiers + env vars + config keys; EndpointBlock → full HTTP surface; Table → endpoints + config + params; Prose → URLs + versions + error codes.
+- **Parser-derived confidence.** Confidence now derived from the parser that produced the fact (AST node → 0.98, structural parse → 0.97, keyword heuristic → 0.94) instead of hardcoded values per block kind.
+- **Typed QuestionIntent.** `QuestionIntent` enum with 10 intents (Endpoint, Parameter, HttpMethod, Version, ErrorCode, EnvVar, ConfigKey, Protocol, BasePrefix, Port) and a canonical bilingual keyword table. Replaces scattered `contains()` chains across 4 files.
+- **Fact-grounded deterministic answers.** Endpoint and parameter answers now require matching technical facts in the evidence store, not substring parsing of chunk text.
+- **Branded identifier heuristics removed.** Heading phrase matching and catalog link guessing deleted from the pipeline — entity extraction is the LLM's job, not the fact store's.
+
+### Token scopes & MCP
+
+- **System-scope tokens.** New scope level for tokens with no workspace restriction — full admin across all workspaces. UI scope selector: System / Workspace / Library.
+- **Auto-inference of workspace_id / library_id.** MCP tools and the query API auto-fill IDs from the token scope when exactly one workspace or library is accessible. `list_documents.libraryId` is now optional; query session `workspaceId` is optional.
+- **Leaner MCP initialize response.** Removed `tokenId`, `tools` list (duplicate of tools/list), `generatedAt` from the initialize JSON-RPC response. 833 → 270 chars.
+- **Permission hierarchy in token mint UI.** Grouped cards (Admin, Workspace, Library & Content, Operations) with lucide icons and human-readable labels. Implied permissions show as checked+disabled. `connector_admin` added. Labels explicitly mention import/export capabilities.
+
+### Query execution performance
+
+- **O(1) edge lookup.** `QueryGraphIndex.edges` switched from `Vec` with linear `.find()` to `HashMap<Uuid, GraphViewEdgeWrite>`. On the Artix fixture (82 k edges), `map_edge_hit` dropped from ~41 M comparisons to ~500 hash lookups per query.
+- **Batched extract candidate inserts.** `replace_extract_node_candidates` and `replace_extract_edge_candidates` switched from per-row INSERT to `QueryBuilder::push_values()` bulk INSERT … RETURNING. On a 5 k-doc library with ~50 candidates per chunk, this eliminates millions of sequential round-trips during ingest.
+- **Batched audit subject inserts.** `append_audit_event` subject loop switched to single-statement `push_values` INSERT.
+- **Extract candidate indexes.** New migration `0003_extract_candidate_indexes.sql` adds `CREATE INDEX CONCURRENTLY` on `extract_node_candidate(chunk_result_id)` and `extract_edge_candidate(chunk_result_id)` — the tables lacked FK indexes and every per-chunk DELETE/SELECT was a full table scan.
+
+### AI catalog bootstrap
+
+- **Pre-seeded model presets for all providers.** `seed_all_provider_presets` runs at bootstrap and creates presets for OpenAI, DeepSeek, Qwen, and Ollama (4 purposes × 4 providers = 16 presets) regardless of whether API keys are configured. Operators can immediately assign bindings after adding a credential — no manual preset creation required.
+- **Preset lookup fix.** `select_runtime_preset` no longer falls back to a single-model match when the canonical name doesn't match. The old behavior returned the wrong preset when two purposes (e.g. ExtractGraph + QueryAnswer) shared the same model (qwen3:0.6b), preventing the second preset from being created.
+
+### Code quality
+
+- **Named constants for vector kinds.** `VECTOR_KIND_CHUNK` / `VECTOR_KIND_ENTITY` (8 sites). `FACT_FETCH_MULTIPLIER` / `FACT_FETCH_MIN`. Domain status constants `ASYNC_OP_STATUS_*`, `MUTATION_KIND_*`, `GRAPH_STATUS_*` (15+ sites).
+- **`execution_id_of()` helper.** Deduplicates 5-site `.expect(...)` pattern.
+- **ServiceRole enum dispatch.** Config string matching replaced with existing `ServiceRole::Api/Worker/Startup` enum.
+- **N+1 query eliminated in document lifecycle.** Batch `list_ingest_attempts_by_jobs` / `list_ingest_stage_events_by_jobs` via `WHERE job_id = ANY($1)` — 2 queries regardless of job count.
+- **Sequential awaits → `tokio::try_join!`** in AI catalog service.
+- **Dead code removal.** Query execution scaffolding, branded identifier heuristics, unused types.
+- **In-place dedup.** BTreeSet roundtrip pattern (4 sites) → `sort_unstable() + dedup()`.
+- **MCP library_ids capped** at 50 per request.
+
+### Platform bits
+
+- `tower-http::compression` layer (gzip + br + zstd) added globally.
+- `nginx.conf.template`: `proxy_buffering off` and `proxy_request_buffering off`.
+- New deps: `tokio-tar`, `async-compression`, `tokio-util`, `tree-sitter` 0.25 + 15 grammar crates, `serde_yaml`, `toml_edit`.
+- All backend + frontend deps updated to latest compatible versions.
+
 ## 0.2.3 — 2026-04-14
 
 ### Diff-aware reuse correctness & graph fail-fast
@@ -26,7 +149,7 @@
 ### Dashboard / documents page consolidation
 
 - **Single source of truth for "Failed" counts**. The dashboard `failed_documents` and the documents-page filter pill used different mappers and disagreed by an order of magnitude (dashboard reported 142 failed, the documents page reported 4829 for the same library). The backend `map_document_status` in `interfaces/http/ops.rs` now mirrors the frontend `mapApiDocument` rules: `queue_state='canceled'` and zombie completions (`queue_state='completed'` with no readable / sparse readiness) both map to `DocumentStatus::Failed`, matching the frontend bucket. Both surfaces now report the same count.
-- **Empty graph view fix**. `get_graph_workbench` and the graph topology endpoint relied on `runtime_graph_state` to derive an entity's `entity_state`, but the function read `metadata.extraction_recovery_status` first — which contains values like `clean`, `recovered`, `partial` describing how the node was extracted, **not** whether it is admitted. With "active" hard-coded as the filter target, ~99 % of nodes were dropped: a 25 000-node Artix graph displayed as "0 nodes / Graph is empty". Fixed by removing `extraction_recovery_status` from the state derivation chain — entity_state now resolves from `metadata.entity_state` / `metadata.relation_state` and falls back to `"active"`.
+- **Empty graph view fix**. `get_graph_workbench` and the graph topology endpoint relied on `runtime_graph_state` to derive an entity's `entity_state`, but the function read `metadata.extraction_recovery_status` first — which contains values like `clean`, `recovered`, `partial` describing how the node was extracted, **not** whether it is admitted. With "active" hard-coded as the filter target, ~99 % of nodes were dropped: a large library's graph displayed as "0 nodes / Graph is empty". Fixed by removing `extraction_recovery_status` from the state derivation chain — entity_state now resolves from `metadata.entity_state` / `metadata.relation_state` and falls back to `"active"`.
 
 ### Graph viewer interactivity (frontend)
 
@@ -41,7 +164,7 @@
 
 ### Local profiling environment
 
-- Pulled a 1.5 GB pg_dump of the production Artix postgres (4 928 docs, 24 982 graph nodes, 78 599 edges, 230 860 evidence rows) into the local stack. `tmp/prod-0.2.2-perf-analysis.md` captures the root-cause analysis behind the 0.2.3 changes plus the reproduction harness used to validate the merge-loop and viewer fixes (Playwright + Chromium hover-FPS measurement).
+- Reproduced the 0.2.2 symptoms on a local stack seeded from a production pg_dump of a large reference library (~5 k docs, ~25 k graph nodes, ~80 k edges, ~230 k evidence rows). Root-cause analysis behind the 0.2.3 changes and the reproduction harness used to validate the merge-loop and viewer fixes (Playwright + Chromium hover-FPS measurement) captured in `tmp/prod-0.2.2-perf-analysis.md`.
 
 ## 0.2.2 — 2026-04-13
 
@@ -103,7 +226,7 @@
 
 - **Schema reset**: the database baseline was consolidated to one canonical `0001_init.sql`; legacy execution and accounting paths were removed.
 - **Assistant/MCP cutover**: the standalone `ask` shortcut and parallel special-case assistant flow were removed; assistant Q&A now runs only through the canonical MCP tool loop.
-- **IRONRAG rename**: release-facing configuration now uses `IRONRAG_*` naming instead of `RUSTRAG_*`.
+- **IRONRAG rename**: release-facing configuration now uses `IRONRAG_`* naming instead of `RUSTRAG_*`.
 
 ### Platform
 
@@ -146,7 +269,7 @@
 - `**shared/` restructure**: 7 files moved into `shared/extraction/` (chunking, file_extract, structured_document, text_render, technical_facts) and `shared/web/` (ingest, url_identity). Root keeps only canonical primitives.
 - `**services/` restructure**: 43 flat files reorganized into 8 domain folders — `graph/`, `query/`, `content/`, `ingest/`, `mcp/`, `ops/`, `iam/`, `knowledge/`. ~80 import sites updated.
 - `**query/execution.rs` split started**: 7909-line megafile reduced to 6346 in `mod.rs` plus 5 extracted submodules — `embed`, `hyde_crag`, `technical_literals`, `verification`, `port_answer` (-20%, 1631 lines moved out).
-- **Dead `legacy_`* bootstrap flags removed**: `legacy_ui_bootstrap_enabled`, `legacy_bootstrap_token_endpoint_enabled`, `allow_legacy_startup_side_effects` deleted from config and 5 integration tests. `legacy_ui_bootstrap_admin` renamed to `ui_bootstrap_admin`.
+- *Dead `legacy`_ bootstrap flags removed**: `legacy_ui_bootstrap_enabled`, `legacy_bootstrap_token_endpoint_enabled`, `allow_legacy_startup_side_effects` deleted from config and 5 integration tests. `legacy_ui_bootstrap_admin` renamed to `ui_bootstrap_admin`.
 - **Silent error swallowing fixed**: 14 `let _ = state...` audit/append sites converted to explicit `if let Err(e) = ... { warn!(stage=..., error=%e, ...); }` with structured logging. 31 cosmetic `let _ = HashSet::insert()` cleaned up.
 - **Frontend `any` elimination**: 52 `any` removed from `pages/{Documents,Graph,Assistant,Admin}.tsx`, all `apiFetch<any>` calls in `api/*.ts` typed against `Raw`* interfaces, `ApiError.body` typed as `ApiErrorBody`. Added 11 new typed interfaces.
 - **Observability**: HyDE/CRAG/multimodal extraction stages emit structured `stage=` tracing per the constitution severity convention.
@@ -431,3 +554,4 @@
 ## 0.0.1
 
 - Initial release.
+

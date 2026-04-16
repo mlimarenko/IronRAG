@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -271,36 +271,41 @@ pub async fn replace_extract_node_candidates(
         .execute(&mut *transaction)
         .await?;
 
-    let mut rows = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let row = sqlx::query_as::<_, ExtractNodeCandidateRow>(
-            "insert into extract_node_candidate (
-                id,
-                chunk_result_id,
-                canonical_key,
-                node_kind,
-                display_label,
-                summary
-            )
-            values ($1, $2, $3, $4, $5, $6)
-            returning
-                id,
-                chunk_result_id,
-                canonical_key,
-                node_kind,
-                display_label,
-                summary",
-        )
-        .bind(Uuid::now_v7())
-        .bind(chunk_result_id)
-        .bind(candidate.canonical_key)
-        .bind(candidate.node_kind)
-        .bind(candidate.display_label)
-        .bind(candidate.summary)
-        .fetch_one(&mut *transaction)
-        .await?;
-        rows.push(row);
+    if candidates.is_empty() {
+        transaction.commit().await?;
+        return Ok(Vec::new());
     }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "insert into extract_node_candidate (
+            id,
+            chunk_result_id,
+            canonical_key,
+            node_kind,
+            display_label,
+            summary
+        ) ",
+    );
+    builder.push_values(candidates.iter(), |mut row, candidate| {
+        row.push_bind(Uuid::now_v7())
+            .push_bind(chunk_result_id)
+            .push_bind(candidate.canonical_key)
+            .push_bind(candidate.node_kind)
+            .push_bind(candidate.display_label)
+            .push_bind(candidate.summary);
+    });
+    builder.push(
+        " returning
+            id,
+            chunk_result_id,
+            canonical_key,
+            node_kind,
+            display_label,
+            summary",
+    );
+
+    let rows =
+        builder.build_query_as::<ExtractNodeCandidateRow>().fetch_all(&mut *transaction).await?;
 
     transaction.commit().await?;
     Ok(rows)
@@ -340,39 +345,44 @@ pub async fn replace_extract_edge_candidates(
         .execute(&mut *transaction)
         .await?;
 
-    let mut rows = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let row = sqlx::query_as::<_, ExtractEdgeCandidateRow>(
-            "insert into extract_edge_candidate (
-                id,
-                chunk_result_id,
-                canonical_key,
-                edge_kind,
-                from_canonical_key,
-                to_canonical_key,
-                summary
-            )
-            values ($1, $2, $3, $4, $5, $6, $7)
-            returning
-                id,
-                chunk_result_id,
-                canonical_key,
-                edge_kind,
-                from_canonical_key,
-                to_canonical_key,
-                summary",
-        )
-        .bind(Uuid::now_v7())
-        .bind(chunk_result_id)
-        .bind(candidate.canonical_key)
-        .bind(candidate.edge_kind)
-        .bind(candidate.from_canonical_key)
-        .bind(candidate.to_canonical_key)
-        .bind(candidate.summary)
-        .fetch_one(&mut *transaction)
-        .await?;
-        rows.push(row);
+    if candidates.is_empty() {
+        transaction.commit().await?;
+        return Ok(Vec::new());
     }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "insert into extract_edge_candidate (
+            id,
+            chunk_result_id,
+            canonical_key,
+            edge_kind,
+            from_canonical_key,
+            to_canonical_key,
+            summary
+        ) ",
+    );
+    builder.push_values(candidates.iter(), |mut row, candidate| {
+        row.push_bind(Uuid::now_v7())
+            .push_bind(chunk_result_id)
+            .push_bind(candidate.canonical_key)
+            .push_bind(candidate.edge_kind)
+            .push_bind(candidate.from_canonical_key)
+            .push_bind(candidate.to_canonical_key)
+            .push_bind(candidate.summary);
+    });
+    builder.push(
+        " returning
+            id,
+            chunk_result_id,
+            canonical_key,
+            edge_kind,
+            from_canonical_key,
+            to_canonical_key,
+            summary",
+    );
+
+    let rows =
+        builder.build_query_as::<ExtractEdgeCandidateRow>().fetch_all(&mut *transaction).await?;
 
     transaction.commit().await?;
     Ok(rows)

@@ -268,6 +268,7 @@ pub fn router() -> Router<AppState> {
         .route("/ai/bindings/{binding_id}/validate", post(validate_binding_assignment))
 }
 
+#[tracing::instrument(level = "info", name = "http.list_providers", skip_all)]
 async fn list_providers(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -277,6 +278,12 @@ async fn list_providers(
     Ok(Json(entries.into_iter().map(map_provider).collect()))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_models",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
+)]
 async fn list_models(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -305,6 +312,12 @@ async fn list_models(
     Ok(Json(entries.into_iter().map(map_model).collect()))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_prices",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id)
+)]
 async fn list_prices(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -326,6 +339,12 @@ async fn list_prices(
     Ok(Json(entries.into_iter().map(map_price).collect()))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_model_presets",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
+)]
 async fn list_model_presets(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -354,6 +373,12 @@ async fn list_model_presets(
     Ok(Json(entries.into_iter().map(map_model_preset).collect()))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_credentials",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
+)]
 async fn list_credentials(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -382,6 +407,12 @@ async fn list_credentials(
     Ok(Json(entries.into_iter().map(map_provider_credential).collect()))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_binding_assignments",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
+)]
 async fn list_binding_assignments(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -398,6 +429,12 @@ async fn list_binding_assignments(
     Ok(Json(entries.into_iter().map(map_binding_assignment).collect()))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_credential",
+    skip_all,
+    fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
+)]
 async fn create_credential(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -454,6 +491,12 @@ async fn create_credential(
     Ok(Json(map_provider_credential(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_credential",
+    skip_all,
+    fields(credential_id = %credential_id)
+)]
 async fn update_credential(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -509,6 +552,12 @@ async fn update_credential(
     Ok(Json(map_provider_credential(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_price_override",
+    skip_all,
+    fields(workspace_id = %payload.workspace_id)
+)]
 async fn create_price_override(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -555,6 +604,12 @@ async fn create_price_override(
     Ok(Json(map_price(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_price_override",
+    skip_all,
+    fields(price_id = %price_id)
+)]
 async fn update_price_override(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -610,6 +665,12 @@ async fn update_price_override(
     Ok(Json(map_price(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_model_preset",
+    skip_all,
+    fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
+)]
 async fn create_model_preset(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -663,6 +724,12 @@ async fn create_model_preset(
     Ok(Json(map_model_preset(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_model_preset",
+    skip_all,
+    fields(preset_id = %preset_id)
+)]
 async fn update_model_preset(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -714,6 +781,12 @@ async fn update_model_preset(
     Ok(Json(map_model_preset(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_binding_assignment",
+    skip_all,
+    fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
+)]
 async fn create_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -768,6 +841,12 @@ async fn create_binding_assignment(
     Ok(Json(map_binding_assignment(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_binding_assignment",
+    skip_all,
+    fields(binding_id = %binding_id)
+)]
 async fn update_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -823,6 +902,12 @@ async fn update_binding_assignment(
     Ok(Json(map_binding_assignment(entry)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.delete_binding_assignment",
+    skip_all,
+    fields(binding_id = %binding_id)
+)]
 async fn delete_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -864,6 +949,12 @@ async fn delete_binding_assignment(
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.validate_binding_assignment",
+    skip_all,
+    fields(binding_id = %binding_id)
+)]
 async fn validate_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,

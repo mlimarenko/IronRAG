@@ -178,7 +178,7 @@ impl KnowledgeLifecycleFixture {
 
         let state = AppState::from_dependencies(
             settings,
-            Persistence { postgres: postgres_pool, redis },
+            Persistence::for_tests(postgres_pool, redis),
             arango_client,
         )?;
 

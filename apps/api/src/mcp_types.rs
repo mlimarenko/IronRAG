@@ -16,13 +16,24 @@ use crate::domains::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCapabilitySnapshot {
-    pub token_id: Uuid,
+    /// Omitted from the `initialize` response because agents never
+    /// need the raw token UUID — it would only bloat the LLM context.
+    /// Still populated for the HTTP capabilities endpoint used by
+    /// admin dashboards.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<Uuid>,
     pub token_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_scope: Option<Uuid>,
     pub visible_workspace_count: usize,
     pub visible_library_count: usize,
+    /// The full tool name list is already in the `tools/list` response.
+    /// Repeating it in `initialize` doubles the context cost for zero
+    /// information gain. Skipped when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    pub generated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,10 +91,22 @@ pub struct McpSearchDocumentsRequest {
     pub include_references: Option<bool>,
 }
 
+/// Hard cap on library IDs per MCP request. Prevents an unbounded
+/// clone + a fan-out that would turn one search call into an O(N)
+/// database scatter. Agents rarely reference more than 5 libraries
+/// in a single tool call; 50 gives headroom for batch-style scripts.
+const MCP_MAX_LIBRARY_IDS: usize = 50;
+
 impl McpSearchDocumentsRequest {
     #[must_use]
     pub fn requested_library_ids(&self) -> Option<Vec<Uuid>> {
-        self.library_ids.clone()
+        self.library_ids.as_ref().map(|ids| {
+            if ids.len() > MCP_MAX_LIBRARY_IDS {
+                ids[..MCP_MAX_LIBRARY_IDS].to_vec()
+            } else {
+                ids.clone()
+            }
+        })
     }
 }
 
@@ -167,27 +190,49 @@ pub struct McpTechnicalFactReference {
     pub inclusion_reason: Option<String>,
 }
 
+/// One search hit returned to an agent. Every optional/empty field is
+/// elided from the serialized JSON so the agent's context window stays
+/// tight — on a typical 3-hit response the bloated shape used to carry
+/// ~1 KB of `null` / `[]` padding per hit. `logicalDocumentId` has been
+/// dropped because it has always equaled `documentId`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpDocumentHit {
     pub document_id: Uuid,
-    pub logical_document_id: Uuid,
     pub library_id: Uuid,
     pub workspace_id: Uuid,
     pub document_title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_revision_id: Option<Uuid>,
     pub score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excerpt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excerpt_start_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excerpt_end_offset: Option<usize>,
+    /// Character offset of the best-matching chunk inside the full
+    /// normalized document. Callers should pass this back to
+    /// `read_document` as `startOffset` so the very first read window
+    /// already lands on real content instead of the document's table
+    /// of contents / front matter. `None` means the source chunks
+    /// lack span info (legacy data) or no chunk matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_start_offset: Option<usize>,
     pub readability_state: McpReadabilityState,
     pub readiness_kind: String,
     pub graph_coverage_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chunk_references: Vec<McpChunkReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub technical_fact_references: Vec<McpTechnicalFactReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entity_references: Vec<McpEntityReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relation_references: Vec<McpRelationReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_references: Vec<McpEvidenceReference>,
 }
 
@@ -268,13 +313,13 @@ pub struct McpGetMutationStatusRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetRuntimeExecutionRequest {
-    pub execution_id: Uuid,
+    pub runtime_execution_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetRuntimeExecutionTraceRequest {
-    pub execution_id: Uuid,
+    pub runtime_execution_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -318,7 +363,8 @@ pub struct McpSearchEntitiesRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListDocumentsRequest {
-    pub library_id: Uuid,
+    /// When omitted, auto-filled from the token's sole library grant.
+    pub library_id: Option<Uuid>,
     pub limit: Option<usize>,
     pub status_filter: Option<String>,
 }
@@ -417,26 +463,40 @@ pub struct McpReadDocumentResponse {
     pub document_title: String,
     pub library_id: Uuid,
     pub workspace_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_revision_id: Option<Uuid>,
     pub read_mode: McpReadMode,
     pub readability_state: McpReadabilityState,
     pub readiness_kind: String,
     pub graph_coverage_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_access: Option<McpContentSourceAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     pub slice_start_offset: usize,
     pub slice_end_offset: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_content_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_token: Option<String>,
     pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chunk_references: Vec<McpChunkReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub technical_fact_references: Vec<McpTechnicalFactReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entity_references: Vec<McpEntityReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relation_references: Vec<McpRelationReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_references: Vec<McpEvidenceReference>,
 }
 
@@ -618,24 +678,24 @@ mod tests {
 
     #[test]
     fn runtime_execution_request_accepts_canonical_field() {
-        let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
         let request: McpGetRuntimeExecutionRequest = serde_json::from_value(json!({
-            "executionId": execution_id
+            "runtimeExecutionId": runtime_execution_id
         }))
         .expect("request should deserialize");
 
-        assert_eq!(request.execution_id, execution_id);
+        assert_eq!(request.runtime_execution_id, runtime_execution_id);
     }
 
     #[test]
     fn runtime_execution_trace_request_accepts_canonical_field() {
-        let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
         let request: McpGetRuntimeExecutionTraceRequest = serde_json::from_value(json!({
-            "executionId": execution_id
+            "runtimeExecutionId": runtime_execution_id
         }))
         .expect("request should deserialize");
 
-        assert_eq!(request.execution_id, execution_id);
+        assert_eq!(request.runtime_execution_id, runtime_execution_id);
     }
 
     #[test]

@@ -500,7 +500,7 @@ async fn cmd_list_users(pool: &PgPool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<20} {:<24} {:<10} {}", "LOGIN", "DISPLAY NAME", "STATUS", "CREATED");
+    println!("{:<20} {:<24} {:<10} CREATED", "LOGIN", "DISPLAY NAME", "STATUS");
     println!("{}", "-".repeat(78));
     for user in &users {
         println!(
@@ -649,8 +649,8 @@ async fn cmd_list_tokens(pool: &PgPool) -> Result<()> {
     }
 
     println!(
-        "{:<38} {:<16} {:<14} {:<10} {:<20} {:<14} {}",
-        "PRINCIPAL ID", "LABEL", "PREFIX", "STATUS", "ISSUED", "OWNER", "WORKSPACE"
+        "{:<38} {:<16} {:<14} {:<10} {:<20} {:<14} WORKSPACE",
+        "PRINCIPAL ID", "LABEL", "PREFIX", "STATUS", "ISSUED", "OWNER"
     );
     println!("{}", "-".repeat(125));
     for t in &tokens {
@@ -718,7 +718,7 @@ async fn cmd_list_workspaces(pool: &PgPool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<38} {:<20} {:<24} {:<10} {}", "ID", "SLUG", "DISPLAY NAME", "STATE", "CREATED");
+    println!("{:<38} {:<20} {:<24} {:<10} CREATED", "ID", "SLUG", "DISPLAY NAME", "STATE");
     println!("{}", "-".repeat(110));
     for w in &rows {
         println!(
@@ -772,7 +772,7 @@ async fn cmd_list_libraries(pool: &PgPool, workspace: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<38} {:<20} {:<24} {:<10} {}", "ID", "SLUG", "DISPLAY NAME", "STATE", "CREATED");
+    println!("{:<38} {:<20} {:<24} {:<10} CREATED", "ID", "SLUG", "DISPLAY NAME", "STATE");
     println!("{}", "-".repeat(110));
     for lib in &rows {
         println!(

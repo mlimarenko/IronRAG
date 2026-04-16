@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::ops::{ASYNC_OP_STATUS_READY, GRAPH_STATUS_READY},
     infra::repositories::{self, ChunkRow, DocumentRow, content_repository},
     services::{
         graph::extract::{
@@ -25,6 +26,7 @@ use crate::{
             RuntimeStageUsageSummary, embed_runtime_graph_edges, embed_runtime_graph_nodes,
             resolve_effective_provider_profile,
         },
+        knowledge::graph_stream::invalidate_graph_topology_cache,
     },
 };
 
@@ -54,7 +56,7 @@ pub async fn rebuild_library_graph(
     let mut changed_edge_ids = BTreeSet::new();
 
     for record in extractions {
-        if record.status != "ready" {
+        if record.status != ASYNC_OP_STATUS_READY {
             continue;
         }
 
@@ -297,7 +299,8 @@ pub async fn reconcile_revision_graph(
     let mut latest_records_by_chunk =
         BTreeMap::<Uuid, repositories::RuntimeGraphExtractionRecordRow>::new();
     for record in extraction_records {
-        if record.status != "ready" || !revision_chunk_ids.contains(&record.chunk_id) {
+        if record.status != ASYNC_OP_STATUS_READY || !revision_chunk_ids.contains(&record.chunk_id)
+        {
             continue;
         }
         let extraction_lifecycle = extraction_lifecycle_from_record(&record);
@@ -330,7 +333,18 @@ pub async fn reconcile_revision_graph(
     // `normalized_output_json` `serde_json::Value` straight into the
     // deserializer — eliminating the per-chunk deep clone that previously
     // dominated allocator pressure on documents with many chunks.
-    const MERGE_PARALLELISM: usize = 8;
+    // Lowered from 8 to 2 after a hot-stuck incident on the reference
+    // library: 16 concurrent documents × 8 parallel chunk merges each
+    // fan out into ~128 concurrent graph-merge operations, each of
+    // which does many small sequential DB round-trips plus non-trivial
+    // CPU work between them. Under load this was enough to saturate
+    // the tokio runtime hard enough that heartbeat and stage timeout
+    // tasks starved, and the worker pegged all cores for >15 minutes
+    // with no observable progress. Parallelism 2 keeps throughput
+    // reasonable while leaving the runtime responsive. Revisit once
+    // the per-chunk merge body is profiled and the CPU hot spot is
+    // explicitly offloaded into `spawn_blocking`.
+    const MERGE_PARALLELISM: usize = 2;
     let pool = state.persistence.postgres.clone();
     let quality_guard = state.bulk_ingest_hardening_services.graph_quality_guard.clone();
     let document_arc = Arc::new(document.clone());
@@ -351,21 +365,62 @@ pub async fn reconcile_revision_graph(
         let document = Arc::clone(&document_arc);
         let chunk_rows_by_id = Arc::clone(&chunk_rows_by_id_arc);
         let merge_scope = Arc::clone(&merge_scope);
+        let doc_id = document_arc.id;
         async move {
             let chunk_id = record.chunk_id;
+            let merge_started = std::time::Instant::now();
+            // Per-chunk entry trace so the next hot-stuck incident can
+            // be traced down to the exact chunk id that entered merge
+            // but never exited. When the worker goes CPU-dead we lose
+            // visibility from that point on, so logging entry + exit
+            // with elapsed gives the "last known good chunk" needed to
+            // isolate the bad payload later.
+            tracing::info!(%doc_id, %chunk_id, "graph merge chunk start");
             let Some(chunk_row) = chunk_rows_by_id.get(&chunk_id).cloned() else {
+                tracing::info!(
+                    %doc_id,
+                    %chunk_id,
+                    "graph merge chunk skipped — no chunk row"
+                );
                 return Ok::<ChunkMergeOutcome, anyhow::Error>(ChunkMergeOutcome::default());
             };
             let mut record = record;
             let normalized = std::mem::take(&mut record.normalized_output_json);
             let recovery = extraction_recovery_summary_from_record(&record);
-            let candidates =
+            // Large LLM normalized outputs can make this
+            // `serde_json::from_value` into a multi-megabyte CPU-bound
+            // deserialization. Running it inside `buffer_unordered`
+            // on the tokio worker threads is enough to starve the
+            // heartbeat/cancel tasks on a small runtime. Offload to the
+            // blocking pool so the async runtime keeps servicing
+            // control-plane traffic while the deserializer works.
+            let candidates = tokio::task::spawn_blocking(move || {
                 serde_json::from_value::<GraphExtractionCandidateSet>(normalized)
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
             if candidates.entities.is_empty() && candidates.relations.is_empty() {
+                tracing::info!(
+                    %doc_id,
+                    %chunk_id,
+                    elapsed_ms = merge_started.elapsed().as_millis() as u64,
+                    "graph merge chunk done — no candidates"
+                );
                 return Ok(ChunkMergeOutcome::default());
             }
-            let merge_outcome = merge_chunk_graph_candidates(
+            let entity_count = candidates.entities.len();
+            let relation_count = candidates.relations.len();
+            // Wall-clock cap per chunk. If the merge body spins for
+            // longer than this, abort the chunk (the chunk-level
+            // failure degrades to an ingest error at the outer layer).
+            // This is an additional safety net on top of the stage
+            // timeout — that one can itself starve if the runtime is
+            // saturated, but the `tokio::time::timeout` combinator
+            // still fires eventually once this future gets polled.
+            const PER_CHUNK_MERGE_TIMEOUT: std::time::Duration =
+                std::time::Duration::from_secs(180);
+            let merge_fut = merge_chunk_graph_candidates(
                 &pool,
                 &quality_guard,
                 &merge_scope,
@@ -373,14 +428,40 @@ pub async fn reconcile_revision_graph(
                 &chunk_row,
                 &candidates,
                 recovery.as_ref(),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to merge graph candidates for document {} chunk {}",
-                    document.id, chunk_id
-                )
-            })?;
+            );
+            let merge_outcome = match tokio::time::timeout(PER_CHUNK_MERGE_TIMEOUT, merge_fut).await {
+                Ok(result) => result.with_context(|| {
+                    format!(
+                        "failed to merge graph candidates for document {} chunk {}",
+                        document.id, chunk_id
+                    )
+                })?,
+                Err(_) => {
+                    tracing::error!(
+                        %doc_id,
+                        %chunk_id,
+                        entity_count,
+                        relation_count,
+                        timeout_secs = PER_CHUNK_MERGE_TIMEOUT.as_secs(),
+                        "graph merge chunk exceeded per-chunk timeout — aborting chunk"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "graph merge chunk {chunk_id} exceeded {}s per-chunk timeout on document {}",
+                        PER_CHUNK_MERGE_TIMEOUT.as_secs(),
+                        document.id
+                    ));
+                }
+            };
+            let elapsed_ms = merge_started.elapsed().as_millis() as u64;
+            tracing::info!(
+                %doc_id,
+                %chunk_id,
+                entity_count,
+                relation_count,
+                elapsed_ms,
+                contribution = merge_outcome.nodes.len() + merge_outcome.edges.len(),
+                "graph merge chunk done"
+            );
             Ok(ChunkMergeOutcome {
                 contribution: merge_outcome.nodes.len() + merge_outcome.edges.len(),
                 follow_up: merge_outcome.has_projection_follow_up(),
@@ -519,6 +600,15 @@ pub async fn reconcile_revision_graph(
         )
         .await
         .context("failed to preserve ready graph snapshot during no-op revision reconcile")?;
+        if let Err(error) =
+            invalidate_graph_topology_cache(&state.persistence.redis, library_id).await
+        {
+            tracing::warn!(
+                %library_id,
+                error = format!("{error:#}"),
+                "graph topology cache invalidation failed during no-op reconcile",
+            );
+        }
         GraphProjectionOutcome {
             projection_version: projection_scope.projection_version,
             node_count: usize::try_from(snapshot.node_count).unwrap_or_default(),
@@ -532,7 +622,7 @@ pub async fn reconcile_revision_graph(
     };
 
     Ok(RevisionGraphReconcileOutcome {
-        graph_ready: graph_contribution_count > 0 && projection.graph_status == "ready",
+        graph_ready: graph_contribution_count > 0 && projection.graph_status == GRAPH_STATUS_READY,
         graph_contribution_count,
         projection,
         embedding_usage,

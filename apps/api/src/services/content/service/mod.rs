@@ -2,6 +2,12 @@ mod document;
 mod mutation;
 mod pipeline;
 mod revision;
+pub mod snapshot;
+
+pub use document::{
+    ContentDocumentListEntry, ContentDocumentListPageResult, DocumentListCursorValue,
+    ListDocumentsPageCommand,
+};
 
 use std::collections::HashMap;
 
@@ -151,6 +157,12 @@ pub struct AdmitMutationCommand {
     pub request_surface: String,
     pub source_identity: Option<String>,
     pub revision: Option<RevisionAdmissionMetadata>,
+    /// When this mutation is part of a canonical batch operation, carries
+    /// the parent batch `ops_async_operation.id`. The child mutation's own
+    /// `ops_async_operation` row is linked to the parent via
+    /// `parent_async_operation_id`, which lets progress polling aggregate
+    /// child counts with a single indexed query.
+    pub parent_async_operation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]

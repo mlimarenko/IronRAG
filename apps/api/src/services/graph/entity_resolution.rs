@@ -471,7 +471,36 @@ async fn execute_merge(
     .execute(pool)
     .await?;
 
-    // 7. Recalculate canonical_key for edges that now reference the kept node,
+    // 7. Collapse any parallel edges that step 1-2 just created on the kept
+    //    node. Without this, two rows can share `(from_node_id,
+    //    relation_type, to_node_id)` with different stale canonical_keys, and
+    //    step 9 below would try to rename both to the same canonical_key,
+    //    tripping the `runtime_graph_edge_..._canonical_key_..._key` unique
+    //    constraint and silently aborting the rest of the merge.
+    let collapsed_survivor_ids = collapse_parallel_edges_for_node(
+        pool,
+        library_id,
+        projection_version,
+        candidate.keep_node_id,
+    )
+    .await?;
+
+    // 8. Re-derive `support_count` on every survivor that just absorbed a
+    //    duplicate. `support_count` is denormalized from active evidence —
+    //    after step 7 repoints evidence onto the survivor, the canonical
+    //    counter must be recomputed instead of summed (a sum would
+    //    double-count any evidence already attached to the survivor).
+    if !collapsed_survivor_ids.is_empty() {
+        repositories::recalculate_runtime_graph_edge_support_counts_by_ids(
+            pool,
+            library_id,
+            projection_version,
+            &collapsed_survivor_ids,
+        )
+        .await?;
+    }
+
+    // 9. Recalculate canonical_key for edges that now reference the kept node,
     //    to avoid stale keys containing the removed node's identity.
     recalculate_edge_canonical_keys(pool, library_id, projection_version, candidate.keep_node_id)
         .await?;
@@ -484,6 +513,108 @@ async fn execute_merge(
     );
 
     Ok(true)
+}
+
+/// Collapses parallel edges that share `(from_node_id, relation_type,
+/// to_node_id)` after a node merge re-pointed one side onto the kept node.
+///
+/// For each duplicate group, the oldest row (by `created_at`, then `id`)
+/// survives. Every soft reference to a loser edge id is repointed at the
+/// survivor (`runtime_graph_evidence`) or deleted (`runtime_graph_canonical_summary`,
+/// `runtime_vector_target`), then the loser rows are dropped.
+///
+/// `support_count` is intentionally **not** summed onto the survivor here
+/// — it is denormalized from active evidence and any drift would be wrong.
+/// The caller follows up with the canonical
+/// `recalculate_runtime_graph_edge_support_counts_by_ids` so the survivor
+/// reflects the true count of active evidence after repointing.
+///
+/// All mutations across `runtime_graph_edge`,
+/// `runtime_graph_evidence`, `runtime_graph_canonical_summary`, and
+/// `runtime_vector_target` run inside one SQL statement using Postgres
+/// data-modifying CTEs, which guarantees they execute exactly once against
+/// a single snapshot of `runtime_graph_edge`.
+///
+/// Returns the surviving edge ids that absorbed at least one duplicate, so
+/// the caller can target the support-count recompute precisely.
+async fn collapse_parallel_edges_for_node(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    kept_node_id: Uuid,
+) -> Result<Vec<Uuid>> {
+    let survivor_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        with grouped as (
+            select id,
+                   from_node_id,
+                   relation_type,
+                   to_node_id,
+                   row_number() over w as rn,
+                   first_value(id) over w as survivor_id
+              from runtime_graph_edge
+             where library_id = $1
+               and projection_version = $2
+               and (from_node_id = $3 or to_node_id = $3)
+            window w as (
+                partition by from_node_id, relation_type, to_node_id
+                order by created_at asc, id asc
+            )
+        ),
+        losers as (
+            select id as loser_id, survivor_id
+              from grouped
+             where rn > 1
+        ),
+        repoint_evidence as (
+            update runtime_graph_evidence ev
+               set target_id = losers.survivor_id
+              from losers
+             where ev.target_kind = 'edge'
+               and ev.library_id = $1
+               and ev.target_id = losers.loser_id
+            returning 1
+        ),
+        drop_summaries as (
+            delete from runtime_graph_canonical_summary s
+             using losers
+             where s.library_id = $1
+               and s.target_kind = 'edge'
+               and s.target_id = losers.loser_id
+            returning 1
+        ),
+        drop_vectors as (
+            delete from runtime_vector_target v
+             using losers
+             where v.library_id = $1
+               and v.target_kind = 'edge'
+               and v.target_id = losers.loser_id
+            returning 1
+        ),
+        delete_losers as (
+            delete from runtime_graph_edge
+             using losers
+             where runtime_graph_edge.id = losers.loser_id
+            returning 1
+        )
+        select distinct survivor_id
+          from grouped
+         where rn = 1
+           and exists (
+               select 1 from grouped g2
+                where g2.from_node_id = grouped.from_node_id
+                  and g2.relation_type = grouped.relation_type
+                  and g2.to_node_id = grouped.to_node_id
+                  and g2.rn > 1
+           )
+        "#,
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(kept_node_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(survivor_ids)
 }
 
 /// Recalculates canonical_key for every edge touching a given node, using the

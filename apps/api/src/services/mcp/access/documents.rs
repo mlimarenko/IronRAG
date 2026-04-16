@@ -55,6 +55,14 @@ pub async fn search_documents(
     let mut hits = Vec::new();
     for library in libraries {
         let lexical_limit = limit.saturating_mul(3).max(6);
+        let metadata_hits = content_repository::search_document_metadata_rows(
+            &state.persistence.postgres,
+            library.library.id,
+            query,
+            lexical_limit as u32,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
         let lexical_chunk_hits = state
             .arango_search_store
             .search_chunks(library.library.id, query, lexical_limit)
@@ -104,27 +112,46 @@ pub async fn search_documents(
         let mut document_accumulators =
             std::collections::HashMap::<Uuid, McpDocumentAccumulator>::new();
 
+        for metadata_hit in &metadata_hits {
+            let accumulator = document_accumulators
+                .entry(metadata_hit.document_id)
+                .or_insert_with(|| McpDocumentAccumulator::from_metadata(metadata_hit));
+            accumulator.bump_score(metadata_hit.metadata_score);
+            accumulator.populate_excerpt_from_text(&metadata_hit.matched_text, query);
+        }
+
         for (index, hit) in lexical_chunk_hits.iter().enumerate() {
             let Some(chunk) = chunk_map.get(&hit.chunk_id) else {
                 continue;
             };
-            let document = state
+            // Search index can legitimately hold chunks whose parent
+            // document or revision has been tombstoned / drifted out of
+            // the knowledge store (crashed ingest, manual cleanup). A
+            // drift like that used to fail the whole search call with
+            // `resource_not_found`; canonically it is just a stale hit
+            // we should drop and move on.
+            let Some(document) = state
                 .arango_document_store
                 .get_document(chunk.document_id)
                 .await
                 .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("document", chunk.document_id))?;
-            let revision = state
+            else {
+                continue;
+            };
+            let Some(revision) = state
                 .arango_document_store
                 .get_revision(chunk.revision_id)
                 .await
                 .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("revision", chunk.revision_id))?;
+            else {
+                continue;
+            };
             let accumulator =
                 document_accumulators.entry(document.document_id).or_insert_with(|| {
                     McpDocumentAccumulator::from_knowledge(&document, &revision, hit)
                 });
             accumulator.bump_score(hit.score);
+            accumulator.merge_chunk_span_anchor(chunk.span_start, hit.score);
             accumulator.merge_chunk_reference(
                 chunk.chunk_id,
                 saturating_rank(index),
@@ -138,18 +165,25 @@ pub async fn search_documents(
             let Some(chunk) = chunk_map.get(&hit.chunk_id) else {
                 continue;
             };
-            let document = state
+            // Same drift-tolerance as the lexical branch above: skip
+            // hits pointing at tombstoned / missing documents and
+            // revisions instead of failing the whole search.
+            let Some(document) = state
                 .arango_document_store
                 .get_document(chunk.document_id)
                 .await
                 .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("document", chunk.document_id))?;
-            let revision = state
+            else {
+                continue;
+            };
+            let Some(revision) = state
                 .arango_document_store
                 .get_revision(chunk.revision_id)
                 .await
                 .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("revision", chunk.revision_id))?;
+            else {
+                continue;
+            };
             let accumulator =
                 document_accumulators.entry(document.document_id).or_insert_with(|| {
                     McpDocumentAccumulator::from_knowledge(
@@ -170,6 +204,7 @@ pub async fn search_documents(
                     )
                 });
             accumulator.bump_score(hit.score);
+            accumulator.merge_chunk_span_anchor(chunk.span_start, hit.score);
             accumulator.merge_chunk_reference(
                 chunk.chunk_id,
                 saturating_rank(index),
@@ -200,7 +235,6 @@ pub async fn search_documents(
             let status_reason = readable_status_reason(&readiness_summary, &grounding);
             hits.push(McpDocumentHit {
                 document_id: accumulator.document_id,
-                logical_document_id: accumulator.document_id,
                 library_id: accumulator.library_id,
                 workspace_id: accumulator.workspace_id,
                 document_title: accumulator.document_title,
@@ -209,6 +243,7 @@ pub async fn search_documents(
                 excerpt: accumulator.excerpt,
                 excerpt_start_offset: accumulator.excerpt_start_offset,
                 excerpt_end_offset: accumulator.excerpt_end_offset,
+                suggested_start_offset: accumulator.suggested_start_offset,
                 readability_state: readability_state_from_kind(&readiness_summary.readiness_kind),
                 readiness_kind: readiness_summary.readiness_kind.clone(),
                 graph_coverage_kind: readiness_summary.graph_coverage_kind.clone(),
@@ -456,6 +491,7 @@ pub async fn delete_document(
                 request_surface: "mcp".to_string(),
                 source_identity: None,
                 revision: None,
+                parent_async_operation_id: None,
             },
         )
         .await?;

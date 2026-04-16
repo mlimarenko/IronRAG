@@ -1,6 +1,6 @@
 [package]
 name = "ironrag-backend"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 build = "build.rs"
@@ -54,8 +54,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "macros", "rust_decimal"] }
 thiserror = "2.0"
-tokio = { version = "1.51", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tokio = { version = "1.51", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip", "compression-br", "compression-zstd"] }
+axum-prometheus = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
 uuid = { version = "1.23", features = ["v5", "v7", "serde"] }
@@ -75,6 +77,33 @@ calamine = "0.34.0"
 csv = "1.4.0"
 roxmltree = "0.21.1"
 zip = { version = "8.5.0", default-features = false, features = ["deflate"] }
+tree-sitter = "0.25"
+# Tier 1: mainstream languages
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-bash = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.23"
+# Tier 2: common in technical docs
+tree-sitter-swift = "0.7"
+# tree-sitter-kotlin removed: depends on tree-sitter 0.20, incompatible with 0.25
+tree-sitter-scala = "0.23"
+tree-sitter-sql = "0.0.2"
+tree-sitter-yaml = "0.7"
+tree-sitter-toml = "0.20"
+tree-sitter-dockerfile = "0.2"
+tree-sitter-proto = "0.4"
+# Config parsing (structural, not tree-sitter)
+serde_yaml = "0.9"
+toml_edit = { version = "0.22", features = ["serde"] }
+tokio-tar = "0.3"
+async-compression = { version = "0.4", features = ["zstd", "tokio"] }
 base64 = "0.22.1"
 tempfile = "3.27.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }

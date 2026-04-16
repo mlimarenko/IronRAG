@@ -175,4 +175,34 @@ describe('DocumentsInspectorPanel', () => {
     expect(container.textContent).toContain('Web page');
     expect(container.textContent).not.toContain('PHP');
   });
+
+  it('collapses long inspector titles behind an explicit toggle', async () => {
+    const fullUrl =
+      'https://passport.yandex.ru/showcaptcha?cc=1&from=fb-hint=8.191&mt=895CC538B346D26B47C082D2499B07E478D7FB2AE8D408D1DE014386C74C5D639';
+
+    await renderPanel({
+      selectedDoc: buildSelectedDoc({
+        fileName: fullUrl,
+        fileType: 'php',
+        sourceKind: 'web_page',
+      }),
+    });
+
+    expect(container.textContent).toContain('Show full name');
+    expect(container.textContent).toContain('https://passport.yandex.ru/showcaptcha?');
+    expect(container.textContent).not.toContain(fullUrl);
+
+    const toggleButton = Array.from(container.querySelectorAll('button')).find(button =>
+      button.textContent?.includes('Show full name'),
+    );
+
+    expect(toggleButton).toBeTruthy();
+
+    await act(async () => {
+      toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain('Show less');
+    expect(container.textContent).toContain(fullUrl);
+  });
 });

@@ -105,6 +105,12 @@ struct RuntimeExecutionTraceResponse {
     policy_decisions: Vec<RuntimePolicyDecisionResponse>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_runtime_execution",
+    skip_all,
+    fields(execution_id = %execution_id)
+)]
 async fn get_runtime_execution(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -130,6 +136,12 @@ async fn get_runtime_execution(
     )))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_runtime_execution_trace",
+    skip_all,
+    fields(execution_id = %execution_id)
+)]
 async fn get_runtime_execution_trace(
     auth: AuthContext,
     State(state): State<AppState>,

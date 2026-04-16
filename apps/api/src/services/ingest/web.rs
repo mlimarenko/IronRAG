@@ -207,8 +207,7 @@ impl WebIngestService {
                 ApiError::BadRequest(format!("failed to read body of {trimmed}: {error}"))
             })?
             .to_vec();
-        let byte_size =
-            i64::try_from(payload_bytes.len()).unwrap_or(i64::MAX);
+        let byte_size = i64::try_from(payload_bytes.len()).unwrap_or(i64::MAX);
         let checksum = format!(
             "sha256:{}",
             hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&payload_bytes))
@@ -286,6 +285,7 @@ impl WebIngestService {
                     status: "accepted".to_string(),
                     subject_kind: "content_web_ingest_run".to_string(),
                     subject_id: Some(run_id),
+                    parent_async_operation_id: None,
                     completed_at: None,
                     failure_code: None,
                 },

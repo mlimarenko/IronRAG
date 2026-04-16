@@ -53,6 +53,18 @@ pub(super) async fn run_ingestion_worker_pool(
     let lease_recovery_handle =
         tokio::spawn(run_canonical_lease_recovery_loop(state.clone(), shutdown.resubscribe()));
 
+    // Canonical out-of-band stale-lease reaper. Unlike the in-tokio
+    // recovery loop above, this runs on a dedicated OS thread with its
+    // own mini tokio runtime and its own pg pool handle. Whenever the
+    // main runtime becomes saturated by CPU-bound ingest work (graph
+    // reconcile, merge loop, large JSON parse) the in-tokio reaper
+    // starves together with the heartbeat task — the whole point of
+    // this sentinel is to still fire reliably in that failure mode and
+    // unstick the system by releasing orphaned leases. It also writes
+    // to the heartbeat-dedicated postgres pool so it never contends
+    // with the main connection pool that the stuck worker is holding.
+    spawn_external_stale_lease_reaper(state.persistence.heartbeat_postgres.clone());
+
     loop {
         fill_available_job_slots(
             state.clone(),
@@ -253,11 +265,8 @@ async fn handle_job_outcome(state: &Arc<AppState>, outcome: CanonicalJobOutcome)
 /// evidence that the old owner is gone.
 async fn reclaim_orphaned_leases_on_startup(state: &Arc<AppState>) {
     let threshold = chrono::Duration::seconds(CANONICAL_STARTUP_LEASE_RECOVERY_SECONDS);
-    match ingest_repository::recover_stale_canonical_leases(
-        &state.persistence.postgres,
-        threshold,
-    )
-    .await
+    match ingest_repository::recover_stale_canonical_leases(&state.persistence.postgres, threshold)
+        .await
     {
         Ok(0) => {
             info!("startup lease sweep: no orphaned canonical leases to reclaim");
@@ -305,5 +314,70 @@ async fn run_canonical_lease_recovery_loop(
                 }
             }
         }
+    }
+}
+
+/// External stale-lease reaper running on a dedicated OS thread with a
+/// minimal `current_thread` tokio runtime. This exists to survive the
+/// failure mode where the main runtime becomes fully saturated by
+/// CPU-bound ingest work and every in-tokio control task (heartbeat,
+/// cancellation poll, periodic recovery loop above) starves. Because
+/// this thread is an OS thread outside the main runtime, the scheduler
+/// always gives it CPU and it always gets to run its reaper query —
+/// releasing orphaned leases even when the worker has gone hot-stuck
+/// in `merge_chunk_graph_candidates` or similar.
+///
+/// Uses the dedicated `heartbeat_postgres` pool so it never contends
+/// with the main pool the stuck worker is holding.
+fn spawn_external_stale_lease_reaper(heartbeat_pool: sqlx::PgPool) {
+    const REAP_TICK: std::time::Duration = std::time::Duration::from_secs(15);
+    const REAP_THRESHOLD_SECS: i64 = 90;
+    let spawn_result = std::thread::Builder::new()
+        .name("ironrag-lease-reaper".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(error) => {
+                    error!(%error, "external stale-lease reaper failed to start runtime");
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                info!(
+                    tick_secs = REAP_TICK.as_secs(),
+                    threshold_secs = REAP_THRESHOLD_SECS,
+                    "external stale-lease reaper running on dedicated OS thread",
+                );
+                loop {
+                    tokio::time::sleep(REAP_TICK).await;
+                    let threshold = chrono::Duration::seconds(REAP_THRESHOLD_SECS);
+                    match ingest_repository::recover_stale_canonical_leases(
+                        &heartbeat_pool,
+                        threshold,
+                    )
+                    .await
+                    {
+                        Ok(0) => {}
+                        Ok(recovered) => {
+                            warn!(
+                                recovered,
+                                "external reaper released stale canonical ingest job leases — the main tokio runtime was likely saturated, investigate merge/reconcile for hot loops"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(?error, "external stale-lease reaper query failed");
+                        }
+                    }
+                }
+            });
+        });
+    if let Err(error) = spawn_result {
+        error!(
+            %error,
+            "failed to spawn external stale-lease reaper thread; canonical lease recovery will still run on the tokio side, but the dedicated OS-thread safety net is disabled until the worker restarts"
+        );
     }
 }

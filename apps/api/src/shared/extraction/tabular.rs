@@ -334,7 +334,7 @@ fn table_to_extracted_table(sheet_name: &str, table: &Table<Data>) -> Option<Ext
         .map(|row| row.iter().map(spreadsheet_cell_to_text).collect::<Vec<_>>())
         .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
         .collect::<Vec<_>>();
-    let headers = table.columns().iter().cloned().collect::<Vec<_>>();
+    let headers = table.columns().to_vec();
     if headers.is_empty() && rows.is_empty() {
         return None;
     }

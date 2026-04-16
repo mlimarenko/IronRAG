@@ -281,18 +281,26 @@ function layoutClusters(graph: Graph): void {
 function findConnectedComponents(graph: Graph): string[][] {
   const visited = new Set<string>();
   const components: string[][] = [];
+  // Reused across seeds to avoid reallocating a fresh queue for every
+  // component. At 25k nodes this matters because V8 allocates a new
+  // backing buffer per array.
+  const queue: string[] = [];
 
   graph.forEachNode((node) => {
     if (visited.has(node)) return;
 
-    const queue = [node];
+    // Head-pointer BFS. `queue.shift()` is O(n) per pop in V8, which
+    // turned a 25k-node BFS into an O(N²) stall (minutes on the main
+    // thread). Incrementing a head index is O(1).
+    queue.length = 0;
+    queue.push(node);
     const component: string[] = [];
     visited.add(node);
+    let head = 0;
 
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (!current) continue;
-
+    while (head < queue.length) {
+      const current = queue[head];
+      head += 1;
       component.push(current);
 
       graph.forEachNeighbor(current, (neighbor) => {
@@ -373,13 +381,95 @@ function layoutComponentNodes(graph: Graph, nodes: string[], centerX: number, ce
 function layoutComponents(graph: Graph): void {
   if (graph.order === 0) return;
 
+  // `findConnectedComponents` already returns components sorted by size
+  // desc. We only need to enrich them with radius. The downstream
+  // `layoutComponentNodes` already calls `sortNodesByImportance` on the
+  // nodes it receives — do it once there, not twice.
   const components = findConnectedComponents(graph).map((nodes) => ({
-    nodes: sortNodesByImportance(graph, nodes),
+    nodes,
     radius: componentRadius(nodes.length),
   }));
 
-  const packedCircles: PackedCircle[] = [];
+  // Two packing strategies by component count:
+  //
+  // * Small count (≤ 200): the spiral-pack `packComponentCircle` gives
+  //   the tightest visually-balanced layout. Cost is O(C² * 3200) per
+  //   component in the worst case, which is fine at C ≤ 200.
+  //
+  // * Large count (> 200): a graph with thousands of tiny disconnected
+  //   components (a prod reference library has ~800 doc islands + many
+  //   singleton entities) makes the spiral packer O(C³)-ish AND silently falls
+  //   through into `(placed.length * r, placed.length * r * 0.15)` when
+  //   the 3200-step spiral exhausts — which literally stacked all
+  //   overflow components along a diagonal line at slope 0.15. Users
+  //   saw that as a rainbow streak across the canvas. We drop into a
+  //   shelf-pack layout instead: rows of bubbles of varying size,
+  //   filled left-to-right, wrapping at a target width. Largest first
+  //   (components are already sorted desc in `findConnectedComponents`)
+  //   so the visually-anchoring ones land near the top-left and the
+  //   tail of singletons flows out to the edges. O(C) time, no
+  //   cascading fallback.
+  const LARGE_COMPONENT_COUNT = 200;
+  if (components.length > LARGE_COMPONENT_COUNT) {
+    const gapBetweenCells = 18;
+    // Aim for a square-ish aspect ratio. The total packed area (sum of
+    // bounding-box areas) gives a rough budget; rowWidth is the
+    // sqrt of that, plus padding for the largest cell.
+    const areaBudget = components.reduce((sum, component) => {
+      const side = component.radius * 2 + gapBetweenCells;
+      return sum + side * side;
+    }, 0);
+    const targetRowWidth = Math.sqrt(areaBudget * 1.2);
 
+    let cursorX = 0;
+    let cursorY = 0;
+    let rowHeight = 0;
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+
+    // First pass: assign world-space centers without committing to the
+    // graph yet, so we can center the whole pack afterwards.
+    const placements: { component: typeof components[number]; centerX: number; centerY: number }[] =
+      new Array(components.length);
+    for (let index = 0; index < components.length; index += 1) {
+      const component = components[index];
+      const side = component.radius * 2 + gapBetweenCells;
+      if (cursorX > 0 && cursorX + side > targetRowWidth) {
+        cursorX = 0;
+        cursorY += rowHeight;
+        rowHeight = 0;
+      }
+      const centerX = cursorX + component.radius;
+      const centerY = cursorY + component.radius;
+      placements[index] = { component, centerX, centerY };
+
+      cursorX += side;
+      if (side > rowHeight) rowHeight = side;
+
+      if (centerX - component.radius < minX) minX = centerX - component.radius;
+      if (centerX + component.radius > maxX) maxX = centerX + component.radius;
+      if (centerY - component.radius < minY) minY = centerY - component.radius;
+      if (centerY + component.radius > maxY) maxY = centerY + component.radius;
+    }
+
+    const offsetX = (minX + maxX) / 2;
+    const offsetY = (minY + maxY) / 2;
+
+    for (const placement of placements) {
+      layoutComponentNodes(
+        graph,
+        placement.component.nodes,
+        placement.centerX - offsetX,
+        placement.centerY - offsetY,
+        placement.component.radius,
+      );
+    }
+    return;
+  }
+
+  const packedCircles: PackedCircle[] = [];
   components.forEach((component) => {
     const packed = packComponentCircle(packedCircles, component.radius);
     packedCircles.push(packed);

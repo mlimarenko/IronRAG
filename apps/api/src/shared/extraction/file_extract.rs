@@ -435,22 +435,23 @@ pub async fn build_runtime_file_extraction_plan(
             // large document, which previously blocked concurrent ingest
             // futures from making progress on their own LLM calls.
             let mut output =
-                tokio::task::spawn_blocking(move || -> Result<ExtractionOutput, FileExtractError> {
-                    match file_kind {
-                        UploadFileKind::Pdf => extraction::pdf::extract_pdf(&file_bytes).map_err(
-                            |error| FileExtractError::ExtractionFailed {
-                                file_kind,
-                                message: error.to_string(),
-                            },
-                        ),
-                        UploadFileKind::Docx => extraction::docx::extract_docx(&file_bytes)
-                            .map_err(|error| FileExtractError::ExtractionFailed {
-                                file_kind,
-                                message: error.to_string(),
-                            }),
-                        _ => unreachable!(),
-                    }
-                })
+                tokio::task::spawn_blocking(
+                    move || -> Result<ExtractionOutput, FileExtractError> {
+                        match file_kind {
+                            UploadFileKind::Pdf => extraction::pdf::extract_pdf(&file_bytes)
+                                .map_err(|error| FileExtractError::ExtractionFailed {
+                                    file_kind,
+                                    message: error.to_string(),
+                                }),
+                            UploadFileKind::Docx => extraction::docx::extract_docx(&file_bytes)
+                                .map_err(|error| FileExtractError::ExtractionFailed {
+                                    file_kind,
+                                    message: error.to_string(),
+                                }),
+                            _ => unreachable!(),
+                        }
+                    },
+                )
                 .await
                 .map_err(|join_err| FileExtractError::ExtractionFailed {
                     file_kind,
@@ -1035,6 +1036,30 @@ mod tests {
     fn rejects_extensionless_utf8_payloads_with_nul_bytes_as_binary() {
         assert_eq!(
             detect_upload_file_kind(Some("payload.bin"), None, b"\0\x01\x02\x03\n"),
+            UploadFileKind::Binary
+        );
+    }
+
+    #[test]
+    fn accepts_unknown_extension_text_payload_via_content_sniffing() {
+        assert_eq!(
+            detect_upload_file_kind(
+                Some(".env.backup.20260116-162838"),
+                Some("application/octet-stream"),
+                b"DATABASE_URL=postgres://localhost:5432/app\nAPI_KEY=redacted\n",
+            ),
+            UploadFileKind::TextLike
+        );
+    }
+
+    #[test]
+    fn still_rejects_explicit_unsupported_mime_type() {
+        assert_eq!(
+            detect_upload_file_kind(
+                Some("clip.mp4"),
+                Some("video/mp4"),
+                b"plain text payload\n",
+            ),
             UploadFileKind::Binary
         );
     }

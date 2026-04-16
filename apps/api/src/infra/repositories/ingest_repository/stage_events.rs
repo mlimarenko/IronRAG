@@ -228,3 +228,38 @@ pub async fn list_ingest_stage_events_by_job(
     .fetch_all(postgres)
     .await
 }
+
+/// Batch variant: loads stage events for ALL given job IDs in one query.
+pub async fn list_ingest_stage_events_by_jobs(
+    postgres: &PgPool,
+    job_ids: &[Uuid],
+) -> Result<Vec<IngestStageEventRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestStageEventRow>(
+        "select
+            event.id,
+            event.attempt_id,
+            event.stage_name,
+            event.stage_state::text as stage_state,
+            event.ordinal,
+            event.message,
+            event.details_json,
+            event.recorded_at,
+            event.provider_kind,
+            event.model_name,
+            event.prompt_tokens,
+            event.completion_tokens,
+            event.total_tokens,
+            event.cached_tokens,
+            event.estimated_cost,
+            event.currency_code,
+            event.elapsed_ms,
+            event.started_at
+         from ingest_stage_event as event
+         join ingest_attempt as attempt on attempt.id = event.attempt_id
+         where attempt.job_id = ANY($1)
+         order by attempt.job_id, attempt.attempt_number asc, event.ordinal asc, event.recorded_at asc, event.id asc",
+    )
+    .bind(job_ids)
+    .fetch_all(postgres)
+    .await
+}

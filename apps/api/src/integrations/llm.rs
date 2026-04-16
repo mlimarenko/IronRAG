@@ -18,8 +18,8 @@ use self::{
         openai_compatible_token_limit_fields, retryable_openai_parse_failure_error,
     },
     streaming::{
-        drain_openai_compatible_stream, is_retryable_transport_error, is_retryable_upstream_status,
-        transport_retry_delay,
+        drain_openai_compatible_stream, drain_tool_use_stream, is_retryable_transport_error,
+        is_retryable_upstream_status, transport_retry_delay,
     },
 };
 
@@ -307,6 +307,24 @@ pub trait LlmGateway: Send + Sync {
     /// override it. Test fakes are free to keep the default.
     async fn generate_with_tools(&self, _request: ToolUseRequest) -> Result<ToolUseResponse> {
         Err(anyhow!("generate_with_tools is not implemented for this LlmGateway"))
+    }
+    /// Streaming variant of [`LlmGateway::generate_with_tools`]. When the
+    /// model emits assistant text (the final answer), `on_text_delta` is
+    /// invoked with each chunk immediately. Tool calls are buffered and
+    /// returned in the final [`ToolUseResponse`] — there is no sensible
+    /// way to react to a partial tool-call payload mid-stream. Default
+    /// implementation falls back to the non-streaming path so providers
+    /// that don't support streaming (or test fakes) still work.
+    async fn generate_with_tools_stream(
+        &self,
+        request: ToolUseRequest,
+        on_text_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolUseResponse> {
+        let response = self.generate_with_tools(request).await?;
+        if !response.output_text.is_empty() {
+            on_text_delta(response.output_text.clone());
+        }
+        Ok(response)
     }
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse>;
     async fn embed_many(&self, request: EmbeddingBatchRequest) -> Result<EmbeddingBatchResponse>;
@@ -749,6 +767,7 @@ impl LlmGateway for UnifiedGateway {
             max_completion_tokens,
             max_tokens,
             tool_choice: Some("auto"),
+            stream: false,
             extra: request.extra_parameters_json.clone(),
         };
         let request_body =
@@ -869,6 +888,113 @@ impl LlmGateway for UnifiedGateway {
 
         Err(last_error.unwrap_or_else(|| {
             anyhow!("tool-use request failed: provider={}", request.provider_kind)
+        }))
+    }
+
+    async fn generate_with_tools_stream(
+        &self,
+        request: ToolUseRequest,
+        on_text_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolUseResponse> {
+        let (api_key, base_url) = Self::resolve_provider(
+            &request.provider_kind,
+            request.api_key_override.as_deref(),
+            request.base_url_override.as_deref(),
+        )?;
+
+        let messages =
+            request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
+        let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
+        let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
+            &request.provider_kind,
+            request.max_output_tokens_override,
+        );
+
+        let payload = OpenAiCompatibleToolUseChatRequest {
+            model: &request.model_name,
+            messages,
+            tools,
+            temperature: request.temperature,
+            top_p: request.top_p,
+            max_completion_tokens,
+            max_tokens,
+            tool_choice: Some("auto"),
+            stream: true,
+            extra: request.extra_parameters_json.clone(),
+        };
+        let request_body = serde_json::to_vec(&payload)
+            .context("failed to serialize streaming tool-use request body")?;
+
+        let max_attempts = self.transport_retry_attempts.max(1);
+        let mut last_error: Option<anyhow::Error> = None;
+        for attempt in 1..=max_attempts {
+            let request_builder = self
+                .client
+                .post(format!("{}/chat/completions", base_url))
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "text/event-stream");
+            let request_builder = if let Some(api_key) = api_key.as_deref() {
+                request_builder.bearer_auth(api_key)
+            } else {
+                request_builder
+            };
+            let response = match request_builder.body(request_body.clone()).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    if attempt < max_attempts && is_retryable_transport_error(&error) {
+                        last_error = Some(anyhow!(
+                            "tool-use stream transport failed: provider={} attempt={}/{}: {error}",
+                            request.provider_kind,
+                            attempt,
+                            max_attempts
+                        ));
+                        tokio::time::sleep(transport_retry_delay(
+                            self.transport_retry_base_delay_ms,
+                            attempt,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let body_text = response.text().await?;
+                let body = serde_json::from_str::<serde_json::Value>(&body_text)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
+                last_error = Some(anyhow!(
+                    "tool-use stream request failed: provider={} status={status} body={body}",
+                    request.provider_kind
+                ));
+                if attempt < max_attempts && is_retryable_upstream_status(status.as_u16()) {
+                    tokio::time::sleep(transport_retry_delay(
+                        self.transport_retry_base_delay_ms,
+                        attempt,
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(last_error.take().unwrap_or_else(|| {
+                    anyhow!("tool-use stream request failed: provider={}", request.provider_kind)
+                }));
+            }
+
+            let stream_state = drain_tool_use_stream(response, on_text_delta).await?;
+            let (output_text, finish_reason, usage_json, tool_calls) = stream_state.finalize();
+            return Ok(ToolUseResponse {
+                provider_kind: request.provider_kind,
+                model_name: request.model_name,
+                output_text,
+                tool_calls,
+                finish_reason,
+                usage_json,
+            });
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            anyhow!("tool-use stream request failed: provider={}", request.provider_kind)
         }))
     }
 

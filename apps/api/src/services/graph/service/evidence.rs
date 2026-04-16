@@ -222,6 +222,7 @@ impl GraphService {
                 Some(entity.entity_id),
                 None,
                 evidence.fact_id,
+                revision.library_id,
             )
             .await
             .context("failed to upsert arango entity evidence")?;
@@ -231,6 +232,7 @@ impl GraphService {
                 chunk_id,
                 entity.entity_id,
                 candidate.confidence(),
+                revision.library_id,
             )
             .await?;
         }
@@ -297,6 +299,7 @@ impl GraphService {
                 None,
                 Some(relation.relation_id),
                 evidence.fact_id,
+                revision.library_id,
             )
             .await
             .context("failed to upsert arango relation evidence")?;

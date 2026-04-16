@@ -18,8 +18,9 @@ mod types;
 
 use self::decode::{decode_many_results, decode_optional_single_result, decode_single_result};
 pub use self::types::{
-    KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow, KnowledgeRevisionRow,
-    KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
+    KnowledgeChunkRow, KnowledgeChunkSupportReferenceRow, KnowledgeDocumentRow,
+    KnowledgeLibraryGenerationRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
+    KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
 };
 
 use crate::infra::arangodb::{
@@ -29,6 +30,37 @@ use crate::infra::arangodb::{
         KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION, KNOWLEDGE_STRUCTURED_REVISION_COLLECTION,
     },
 };
+
+/// Slim projection for the documents-page inspector counts.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StructuredRevisionCounts {
+    #[serde(default)]
+    pub block_count: i32,
+    #[serde(default)]
+    pub typed_fact_count: i32,
+}
+
+/// Output of [`ArangoDocumentStore::aggregate_library_generation_signals`].
+/// Mirrors the per-state aggregates used to derive the synthetic library
+/// generation row — one AQL round-trip instead of per-document fetches.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct LibraryGenerationSignals {
+    #[serde(default)]
+    pub active_text_generation: i64,
+    #[serde(default)]
+    pub active_vector_generation: i64,
+    #[serde(default)]
+    pub active_graph_generation: i64,
+    #[serde(default)]
+    pub has_ready_text: bool,
+    #[serde(default)]
+    pub has_ready_vector: bool,
+    #[serde(default)]
+    pub has_ready_graph: bool,
+    #[serde(default)]
+    pub latest_created_at: Option<DateTime<Utc>>,
+}
 
 #[derive(Clone)]
 pub struct ArangoDocumentStore {
@@ -408,6 +440,71 @@ impl ArangoDocumentStore {
             .await
             .context("failed to list knowledge revisions by document")?;
         decode_many_results(cursor)
+    }
+
+    /// Single-shot aggregate across every `knowledge_revision` row in a
+    /// library. Returns the max readable text/vector/graph revision
+    /// numbers plus the latest revision `created_at`. Used by the
+    /// knowledge service to derive the synthetic library generation row
+    /// without iterating 5k documents × N revisions sequentially —
+    /// replacing the old per-document `list_revisions_by_document` loop
+    /// that took 7+ seconds on a 5k-doc library.
+    pub async fn aggregate_library_generation_signals(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<LibraryGenerationSignals> {
+        let cursor = self
+            .client
+            .query_json(
+                "LET rows = (
+                     FOR revision IN @@collection
+                         FILTER revision.library_id == @library_id
+                         RETURN {
+                             revision_number: revision.revision_number,
+                             text_state: revision.text_state,
+                             vector_state: revision.vector_state,
+                             graph_state: revision.graph_state,
+                             created_at: revision.created_at
+                         }
+                 )
+                 LET text_ready_max = MAX(
+                     FOR r IN rows
+                         FILTER r.text_state IN [\"ready\", \"text_ready\", \"graph_ready\", \"vector_ready\"]
+                         RETURN r.revision_number
+                 )
+                 LET vector_ready_max = MAX(
+                     FOR r IN rows
+                         FILTER r.vector_state IN [\"ready\", \"vector_ready\", \"graph_ready\"]
+                         RETURN r.revision_number
+                 )
+                 LET graph_ready_max = MAX(
+                     FOR r IN rows
+                         FILTER r.graph_state IN [\"ready\", \"graph_ready\"]
+                         RETURN r.revision_number
+                 )
+                 LET latest_created = MAX(FOR r IN rows RETURN r.created_at)
+                 RETURN {
+                     active_text_generation: text_ready_max == null ? 0 : text_ready_max,
+                     active_vector_generation: vector_ready_max == null ? 0 : vector_ready_max,
+                     active_graph_generation: graph_ready_max == null ? 0 : graph_ready_max,
+                     has_ready_text: text_ready_max != null,
+                     has_ready_vector: vector_ready_max != null,
+                     has_ready_graph: graph_ready_max != null,
+                     latest_created_at: latest_created
+                 }",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "library_id": library_id.to_string(),
+                }),
+            )
+            .await
+            .context("failed to aggregate library generation signals")?;
+        let rows =
+            cursor.get("result").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let row = rows.into_iter().next().unwrap_or_else(|| serde_json::json!({}));
+        let signals: LibraryGenerationSignals =
+            serde_json::from_value(row).context("decode library generation signals aggregate")?;
+        Ok(signals)
     }
 
     pub async fn update_revision_readiness(
@@ -813,6 +910,40 @@ impl ArangoDocumentStore {
         decode_optional_single_result(cursor)
     }
 
+    /// Slim projection used by the documents-page inspector: returns only
+    /// `(block_count, typed_fact_count)` without touching `outline_json`.
+    /// The outline blob averages ~4 MB per PDF-ingested document and was
+    /// dominating detail-response latency even though the frontend reads
+    /// only these two scalars. Keep the full `get_structured_revision`
+    /// method for places that actually render the outline.
+    pub async fn get_structured_revision_counts(
+        &self,
+        revision_id: Uuid,
+    ) -> anyhow::Result<Option<StructuredRevisionCounts>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR revision IN @@collection
+                 FILTER revision.revision_id == @revision_id
+                 LIMIT 1
+                 RETURN { block_count: revision.block_count, typed_fact_count: revision.typed_fact_count }",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_STRUCTURED_REVISION_COLLECTION,
+                    "revision_id": revision_id,
+                }),
+            )
+            .await
+            .context("failed to get structured revision counts")?;
+        let rows =
+            cursor.get("result").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        match rows.into_iter().next() {
+            Some(row) => {
+                Ok(Some(serde_json::from_value(row).context("decode structured revision counts")?))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub async fn list_structured_revisions_by_revision_ids(
         &self,
         revision_ids: &[Uuid],
@@ -930,6 +1061,87 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to list structured blocks by revision")?;
+        decode_many_results(cursor)
+    }
+
+    /// Canonical paginated read for the inspector's "prepared segments"
+    /// tab. Returns the requested window plus the full count in a
+    /// single AQL round-trip — `total` is computed by `LENGTH(FOR …
+    /// RETURN 1)` which the `(revision_id, ordinal)` persistent index
+    /// can cover without loading any block documents. The slice uses
+    /// the same index for `LIMIT @offset, @limit`, so only the
+    /// requested page materializes full block rows. This is what
+    /// replaced the "load every block, slice in memory" path that
+    /// used to blow ~1.2 s of wall time on PDF-sized documents.
+    pub async fn list_structured_blocks_page_by_revision(
+        &self,
+        revision_id: Uuid,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<KnowledgeStructuredBlockRow>, usize)> {
+        let cursor = self
+            .client
+            .query_json(
+                "LET total = LENGTH(
+                     FOR block IN @@collection
+                     FILTER block.revision_id == @revision_id
+                     RETURN 1
+                 )
+                 LET page = (
+                     FOR block IN @@collection
+                     FILTER block.revision_id == @revision_id
+                     SORT block.ordinal ASC, block.block_id ASC
+                     LIMIT @offset, @limit
+                     RETURN block
+                 )
+                 RETURN { total, page }",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
+                    "revision_id": revision_id,
+                    "offset": offset as i64,
+                    "limit": limit as i64,
+                }),
+            )
+            .await
+            .context("failed to list structured block page by revision")?;
+        let result =
+            cursor.get("result").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let Some(envelope) = result.into_iter().next() else {
+            return Ok((Vec::new(), 0));
+        };
+        let total = envelope.get("total").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+        let page_value =
+            envelope.get("page").cloned().unwrap_or(serde_json::Value::Array(Vec::new()));
+        let rows: Vec<KnowledgeStructuredBlockRow> =
+            serde_json::from_value(page_value).context("failed to decode structured block page")?;
+        Ok((rows, total))
+    }
+
+    /// Slim projection of chunks for a revision used by the prepared
+    /// segments surface to build `support_chunk_ids` per block. Only
+    /// the id + the block back-references are returned — full chunk
+    /// text (which can be several MB on PDF docs) is never serialized
+    /// over the wire. The caller only needs to know which chunks
+    /// reference each block, not the chunk contents.
+    pub async fn list_chunk_support_references_by_revision(
+        &self,
+        revision_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeChunkSupportReferenceRow>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.revision_id == @revision_id
+                 SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT 2000
+                 RETURN { chunk_id: chunk.chunk_id, support_block_ids: chunk.support_block_ids }",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_id": revision_id,
+                }),
+            )
+            .await
+            .context("failed to list chunk support references by revision")?;
         decode_many_results(cursor)
     }
 

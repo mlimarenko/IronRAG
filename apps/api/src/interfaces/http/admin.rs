@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/admin/surface", get(get_admin_surface))
 }
 
+#[tracing::instrument(level = "info", name = "http.get_admin_surface", skip_all)]
 async fn get_admin_surface(
     auth: AuthContext,
     State(state): State<AppState>,

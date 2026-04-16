@@ -141,6 +141,8 @@ services:
       IRONRAG_SERVICE_NAME: ironrag-backend
     expose:
       - "8080"
+    ports:
+      - "127.0.0.1:9464:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

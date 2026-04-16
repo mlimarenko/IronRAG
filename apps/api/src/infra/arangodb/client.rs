@@ -525,6 +525,93 @@ impl ArangoClient {
         Ok(cursor)
     }
 
+    /// Streams query results batch-by-batch instead of buffering the
+    /// whole cursor in memory. The caller receives each batch via
+    /// `handle_batch`; rows are dropped between batches, so memory use
+    /// scales with batch size, not with total row count. Use this for
+    /// bulk exports where the result set can be hundreds of thousands
+    /// of rows. Each HTTP call carries a 10-minute timeout —
+    /// snapshot-style edge scans with DOCUMENT() lookups can
+    /// legitimately take tens of seconds, well beyond the 15-second
+    /// canonical query default.
+    pub async fn query_json_batches<F, Fut>(
+        &self,
+        query: &str,
+        bind_vars: serde_json::Value,
+        mut handle_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(Vec<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        const BULK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+        let body = serde_json::json!({
+            "query": query,
+            "bindVars": bind_vars,
+        });
+        let mut cursor = self
+            .send_cursor_request_with_timeout(
+                Method::POST,
+                "_api/cursor",
+                Some(&body),
+                "AQL query",
+                Some(BULK_TIMEOUT),
+            )
+            .await?;
+        let initial_rows = take_cursor_result_rows(&mut cursor)?;
+        handle_batch(initial_rows).await?;
+        while cursor.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+            let cursor_id = cursor
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .context("ArangoDB cursor reported hasMore=true without an id")?
+                .to_string();
+            let mut next_cursor = self
+                .send_cursor_request_with_timeout(
+                    Method::PUT,
+                    &format!("_api/cursor/{cursor_id}"),
+                    None,
+                    "ArangoDB cursor continuation",
+                    Some(BULK_TIMEOUT),
+                )
+                .await?;
+            let next_rows = take_cursor_result_rows(&mut next_cursor)?;
+            handle_batch(next_rows).await?;
+            cursor["hasMore"] =
+                next_cursor.get("hasMore").cloned().unwrap_or(serde_json::Value::Bool(false));
+            if let Some(id) = next_cursor.get("id").cloned() {
+                cursor["id"] = id;
+            } else if let Some(object) = cursor.as_object_mut() {
+                object.remove("id");
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs an AQL query with an explicit long timeout for bulk writes
+    /// (restore inserts, clear-library sweeps). Inherits the same
+    /// cursor payload semantics as `query_json`, but bypasses the
+    /// canonical 15-second timeout.
+    pub async fn query_json_bulk(
+        &self,
+        query: &str,
+        bind_vars: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        const BULK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+        let body = serde_json::json!({
+            "query": query,
+            "bindVars": bind_vars,
+        });
+        self.send_cursor_request_with_timeout(
+            Method::POST,
+            "_api/cursor",
+            Some(&body),
+            "AQL bulk query",
+            Some(BULK_TIMEOUT),
+        )
+        .await
+    }
+
     async fn send_cursor_request(
         &self,
         method: Method,
@@ -532,8 +619,27 @@ impl ArangoClient {
         body: Option<&serde_json::Value>,
         operation: &str,
     ) -> anyhow::Result<serde_json::Value> {
+        self.send_cursor_request_with_timeout(method, path, body, operation, None).await
+    }
+
+    /// Inner cursor request helper that accepts an optional per-request
+    /// timeout override. Used by bulk snapshot restore paths that need
+    /// headroom beyond the canonical 15-second query timeout.
+    async fn send_cursor_request_with_timeout(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        operation: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<serde_json::Value> {
         let request = self.request(method, path);
         let request = if let Some(payload) = body { request.json(payload) } else { request };
+        let request = if let Some(override_timeout) = timeout {
+            request.timeout(override_timeout)
+        } else {
+            request
+        };
         let response = request.send().await?;
         if !response.status().is_success() {
             let status = response.status();

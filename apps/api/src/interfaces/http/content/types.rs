@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -7,7 +8,7 @@ use crate::{
         ContentMutation, ContentMutationItem, ContentRevision, ContentRevisionReadiness,
         ContentSourceAccess, DocumentReadinessSummary, WebPageProvenance,
     },
-    domains::knowledge::{PreparedSegmentDetail, StructuredDocumentRevision, TypedTechnicalFact},
+    domains::knowledge::{PreparedSegmentDetail, TypedTechnicalFact},
     interfaces::http::router_support::ApiError,
     services::{
         content::{
@@ -18,11 +19,117 @@ use crate::{
     },
 };
 
+// ============================================================================
+// Canonical document-list surface.
+//
+// The list response is deliberately slim: one compact row per document with
+// *only* the fields the documents page actually renders (see the mapper in
+// apps/web/src/pages/documents/mappers.ts). Detail-only data such as
+// `readiness_summary`, `prepared_revision`, `pipeline.latest_job`,
+// `technical_fact_count`, `lifecycle`, and `web_page_provenance` is NOT
+// returned here — the inspector panel fetches them separately via
+// /content/documents/{id}. This keeps a reference ~5 k-document payload
+// under 3 MB instead of 26 MB.
+// ============================================================================
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ListDocumentsQuery {
     pub library_id: Option<Uuid>,
     pub include_deleted: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+    pub search: Option<String>,
+    pub sort_by: Option<DocumentListSortKey>,
+    pub sort_order: Option<DocumentListSortOrder>,
+    pub include_total: Option<bool>,
+    /// Comma-separated list of status buckets to keep. Accepted values:
+    /// `canceled`, `failed`, `processing`, `queued`, `ready`. Empty or
+    /// absent = no filter. Matches the canonical `derived_status` column
+    /// in the list CTE and the 5 status pills on the documents page.
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DocumentListSortKey {
+    UploadedAt,
+    FileName,
+    FileType,
+    FileSize,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DocumentListSortOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ContentDocumentListItem {
+    pub id: Uuid,
+    pub library_id: Uuid,
+    pub workspace_id: Uuid,
+    pub file_name: String,
+    pub file_type: Option<String>,
+    pub file_size: Option<i64>,
+    pub uploaded_at: DateTime<Utc>,
+    pub document_state: String,
+    /// Canonical status derived server-side. Mirrors the DocumentStatus enum
+    /// in apps/web/src/types/index.ts:
+    /// queued | processing | retrying | blocked | stalled | canceled |
+    /// ready | ready_no_graph | failed.
+    pub status: String,
+    /// Canonical readiness derived server-side. Mirrors DocumentReadiness:
+    /// processing | readable | graph_sparse | graph_ready | failed.
+    pub readiness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_finished_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_access: Option<ContentSourceAccess>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DocumentListPageResponse {
+    pub items: Vec<ContentDocumentListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_count: Option<i64>,
+    /// Per-bucket document counts, populated only when the caller sets
+    /// `includeTotal=true`. The counts are computed from the same
+    /// `derived_status` CASE expression the list CTE uses, so they stay
+    /// in sync with what the pills would show if you filtered on each
+    /// bucket individually. Used by the documents page filter strip to
+    /// render count badges on each pill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_counts: Option<DocumentListStatusCounts>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DocumentListStatusCounts {
+    pub total: i64,
+    pub ready: i64,
+    pub processing: i64,
+    pub queued: i64,
+    pub failed: i64,
+    pub canceled: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,8 +218,14 @@ pub(super) struct ContentDocumentDetailResponse {
     pub readiness: Option<ContentRevisionReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_summary: Option<DocumentReadinessSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prepared_revision: Option<StructuredDocumentRevision>,
+    // `prepared_revision` used to carry the entire parsed structured
+    // revision (every heading, paragraph, table, code block) on the
+    // detail response. On the reference library that was ~4 MB per
+    // document and the inspector polls it every 5 s, so it dominated
+    // bandwidth (~47 MB/min per open document) without the frontend
+    // reading anything from it beyond the two count fields below.
+    // Callers who need the actual prepared blocks use the paginated
+    // `/content/documents/{id}/prepared-segments` surface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepared_segment_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +295,8 @@ pub(super) fn map_document_summary(
         summary.prepared_revision.as_ref().map(|revision| revision.block_count);
     let technical_fact_count =
         summary.prepared_revision.as_ref().map(|revision| revision.typed_fact_count);
+    // `prepared_revision` is intentionally not copied onto the response
+    // — see the field removal above.
     ContentDocumentDetailResponse {
         document: summary.document,
         file_name: summary.file_name,
@@ -190,7 +305,6 @@ pub(super) fn map_document_summary(
         active_revision: summary.active_revision,
         readiness: summary.readiness,
         readiness_summary: summary.readiness_summary,
-        prepared_revision: summary.prepared_revision,
         prepared_segment_count,
         technical_fact_count,
         web_page_provenance: summary.web_page_provenance,
@@ -284,4 +398,43 @@ pub(super) fn normalize_page_window(offset: Option<usize>, limit: Option<usize>)
 
 pub(super) fn paginate_items<T>(items: Vec<T>, offset: usize, limit: usize) -> Vec<T> {
     items.into_iter().skip(offset).take(limit).collect()
+}
+
+// ============================================================================
+// Opaque cursor for /v1/content/documents keyset pagination.
+//
+// The cursor is base64(json({"t": "<rfc3339 created_at>", "i": "<uuid>"})).
+// It is opaque from the client's perspective and only valid against the
+// server version that produced it. Any decode failure is surfaced as a
+// `BadRequest` — callers are expected to drop the cursor and start from
+// the top instead of pretending the page succeeded.
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DocumentListCursor {
+    #[serde(rename = "t")]
+    pub created_at: DateTime<Utc>,
+    #[serde(rename = "i")]
+    pub document_id: Uuid,
+}
+
+pub(super) fn encode_document_list_cursor(cursor: &DocumentListCursor) -> String {
+    use base64::Engine;
+    // `DocumentListCursor` is a plain struct of `DateTime<Utc>` + `Uuid`, both
+    // of which have infallible `Serialize` impls — to_vec can only fail on
+    // I/O errors which `Vec<u8>` never produces. A failure here would mean a
+    // serde_json upstream regression, which is far out of scope for a cursor
+    // encoder; fall back to an empty token so the caller keeps paginating
+    // rather than panicking on the hot path.
+    let json = serde_json::to_vec(cursor).unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+pub(super) fn decode_document_list_cursor(token: &str) -> Result<DocumentListCursor, ApiError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|_| ApiError::BadRequest("invalid cursor encoding".to_string()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::BadRequest("invalid cursor payload".to_string()))
 }

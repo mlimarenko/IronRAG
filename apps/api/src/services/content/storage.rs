@@ -216,6 +216,27 @@ impl ContentStorageService {
         }
     }
 
+    /// Writes bytes to the exact `storage_key` supplied by the caller.
+    ///
+    /// This is used by the canonical library snapshot import path to
+    /// restore blobs under the storage keys recorded in the source
+    /// deployment, preserving referential integrity with the
+    /// `content_revision.storage_key` column. Callers outside the
+    /// snapshot path should use [`persist_revision_source`] which
+    /// computes the key deterministically.
+    pub async fn write_revision_source_raw(
+        &self,
+        storage_key: &str,
+        file_bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => {
+                provider.persist(storage_key, file_bytes).await
+            }
+            ContentStorageBackend::S3(provider) => provider.persist(storage_key, file_bytes).await,
+        }
+    }
+
     pub async fn resolve_download_redirect_url(
         &self,
         storage_key: &str,
@@ -464,7 +485,7 @@ mod tests {
         let storage = filesystem_storage(&tempdir);
         let workspace_id = Uuid::now_v7();
         let library_id = Uuid::now_v7();
-        let source_uri = "https://docs.artix.su/download/attachments/40468542/2023_09_01_%D0%BC%D0%B5%D1%82%D0%BE%D0%B4%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5_%D1%80%D0%B5%D0%BA%D0%BE%D0%BC%D0%B5%D0%BD%D0%B4%D0%B0%D1%86%D0%B8%D0%B8_%D0%B201_3_rev_%D0%B8_%D0%BE%D1%84%D0%BB%D0%B0%D0%B8%CC%86%D0%BD_2.pdf?version=1&modificationDate=1712205956919&api=v2";
+        let source_uri = "https://docs.example.com/download/attachments/40468542/2023_09_01_%D0%BC%D0%B5%D1%82%D0%BE%D0%B4%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5_%D1%80%D0%B5%D0%BA%D0%BE%D0%BC%D0%B5%D0%BD%D0%B4%D0%B0%D1%86%D0%B8%D0%B8_%D0%B201_3_rev_%D0%B8_%D0%BE%D1%84%D0%BB%D0%B0%D0%B8%CC%86%D0%BD_2.pdf?version=1&modificationDate=1712205956919&api=v2";
         let bytes = b"pdf bytes";
 
         let storage_key = storage
@@ -492,7 +513,7 @@ mod tests {
     #[test]
     fn build_web_snapshot_file_name_decodes_percent_encoded_segments() {
         let file_name = build_web_snapshot_file_name(
-            "https://docs.artix.su/download/attachments/40468542/2023_09_01_%D0%BC%D0%B5%D1%82%D0%BE%D0%B4%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5_%D1%80%D0%B5%D0%BA%D0%BE%D0%BC%D0%B5%D0%BD%D0%B4%D0%B0%D1%86%D0%B8%D0%B8_%D0%B201_3_rev_%D0%B8_%D0%BE%D1%84%D0%BB%D0%B0%D0%B8%CC%86%D0%BD_2.pdf?version=1&modificationDate=1712205956919&api=v2",
+            "https://docs.example.com/download/attachments/40468542/2023_09_01_%D0%BC%D0%B5%D1%82%D0%BE%D0%B4%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5_%D1%80%D0%B5%D0%BA%D0%BE%D0%BC%D0%B5%D0%BD%D0%B4%D0%B0%D1%86%D0%B8%D0%B8_%D0%B201_3_rev_%D0%B8_%D0%BE%D1%84%D0%BB%D0%B0%D0%B8%CC%86%D0%BD_2.pdf?version=1&modificationDate=1712205956919&api=v2",
         );
 
         assert_eq!(file_name, "2023_09_01_-_-_-01_3_rev_-_-_2.pdf");

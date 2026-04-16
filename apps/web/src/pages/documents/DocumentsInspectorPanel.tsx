@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { TFunction } from 'i18next';
 import {
   FilePenLine,
@@ -20,7 +21,8 @@ import {
   formatDate,
   formatDocumentTypeLabel,
   formatSize,
-} from './mappers';
+  isWebPageDocument,
+} from '@/adapters/documents';
 
 type DocumentsInspectorPanelProps = {
   canEdit: boolean;
@@ -55,9 +57,25 @@ export function DocumentsInspectorPanel({
   onEdit,
   onRetry,
 }: DocumentsInspectorPanelProps) {
-  const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t);
+  const isWebPage = isWebPageDocument(
+    selectedDoc.sourceKind,
+    selectedDoc.sourceUri,
+    selectedDoc.fileName,
+  );
+  const displayName =
+    isWebPage && selectedDoc.sourceUri ? selectedDoc.sourceUri : selectedDoc.fileName;
+  const [showFullName, setShowFullName] = useState(false);
+  const compactDisplayName = compactText(displayName, 96);
+  const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t, {
+    sourceUri: selectedDoc.sourceUri,
+    fileName: selectedDoc.fileName,
+  });
   const compactTypeLabel = compactText(typeLabel, 54);
   const statusBadge = buildDocumentStatusBadgeConfig(t)[selectedDoc.status];
+
+  useEffect(() => {
+    setShowFullName(false);
+  }, [selectedDoc.id]);
 
   const openSource = () => {
     const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri;
@@ -75,19 +93,25 @@ export function DocumentsInspectorPanel({
       }`}
     >
       <div className="p-4 border-b flex items-start justify-between gap-3">
-        {/* Full document title — the table column truncates aggressively
-            because horizontal space is tight; the inspector is the place to
-            show the unabbreviated name with natural wrapping so the operator
-            can read the whole URL or filename. For web-captured documents
-            the display label is the full `sourceUri` (the actual page URL),
-            not the path basename — Confluence in particular emits the CGI
-            handler name (`viewpage.action`, `viewlabel.action`) as the
-            "filename", which is meaningless to a human. */}
-        <h3 className="min-w-0 flex-1 text-sm font-bold tracking-tight leading-5 [overflow-wrap:anywhere]">
-          {selectedDoc.sourceKind === 'web_page' && selectedDoc.sourceUri
-            ? selectedDoc.sourceUri
-            : selectedDoc.fileName}
-        </h3>
+        <div className="min-w-0 flex-1">
+          <h3
+            className="text-sm font-bold tracking-tight leading-5 [overflow-wrap:anywhere]"
+            title={compactDisplayName.isTruncated && !showFullName ? displayName : undefined}
+          >
+            {showFullName || !compactDisplayName.isTruncated
+              ? displayName
+              : compactDisplayName.text}
+          </h3>
+          {compactDisplayName.isTruncated && (
+            <button
+              type="button"
+              className="mt-1 text-xs font-medium text-primary hover:text-primary/80"
+              onClick={() => setShowFullName((value) => !value)}
+            >
+              {showFullName ? t('documents.showLessName') : t('documents.showFullName')}
+            </button>
+          )}
+        </div>
         <button
           onClick={() => updateSearchParamState({ documentId: null })}
           className="shrink-0 p-1.5 rounded-lg hover:bg-muted transition-colors"
@@ -101,23 +125,21 @@ export function DocumentsInspectorPanel({
           <span className={`status-badge ${statusBadge.cls}`} title={selectedDoc.statusReason}>
             {statusBadge.label}
           </span>
-          {selectedDoc.stage && selectedDoc.status === 'processing' && (
-            <span className="text-xs text-muted-foreground ml-2">{selectedDoc.stage}</span>
-          )}
+          {selectedDoc.stage &&
+            (selectedDoc.status === 'processing' || selectedDoc.status === 'queued') && (
+              <span className="text-xs text-muted-foreground ml-2">{selectedDoc.stage}</span>
+            )}
         </div>
 
-        {selectedDoc.statusReason &&
-          (selectedDoc.status === 'stalled' || selectedDoc.status === 'blocked') && (
-            <div className="inline-error">
-              <div className="flex items-center gap-1.5 font-bold text-destructive mb-1.5">
-                <XCircle className="h-3.5 w-3.5" />
-                {selectedDoc.status === 'stalled'
-                  ? t('documents.stalled')
-                  : t('documents.blocked')}
-              </div>
-              {selectedDoc.statusReason}
+        {selectedDoc.statusReason && selectedDoc.status === 'failed' && (
+          <div className="inline-error">
+            <div className="flex items-center gap-1.5 font-bold text-destructive mb-1.5">
+              <XCircle className="h-3.5 w-3.5" />
+              {t('documents.attention')}
             </div>
-          )}
+            {selectedDoc.statusReason}
+          </div>
+        )}
 
         {selectedDoc.failureMessage && (
           <div className="inline-error">
@@ -153,7 +175,7 @@ export function DocumentsInspectorPanel({
 
         <div className="space-y-2.5">
           <div className="section-label">
-            {selectedDoc.sourceKind === 'web_page' ? t('documents.webSource') : t('documents.fileInfo')}
+            {isWebPage ? t('documents.webSource') : t('documents.fileInfo')}
           </div>
           {[
             [t('documents.type'), compactTypeLabel.text],
@@ -176,12 +198,19 @@ export function DocumentsInspectorPanel({
         {lifecycle?.attempts?.[0]?.stageEvents?.length != null && lifecycle.attempts[0].stageEvents.length > 0 && (
           <div className="space-y-2">
             <div className="section-label">{t('documents.pipeline')}</div>
+            {/* Column widths tuned for the canonical ~360 px inspector
+                panel. Model names like `qwen3-embedding:0.6b` or
+                `text-embedding-3-large` are the longest cell content,
+                so Model gets the biggest share and is allowed to wrap
+                via `break-words` instead of clipping with `truncate`.
+                The title attribute still shows the full name on hover
+                for the rare super-long variant. */}
             <table className="w-full text-[11px] table-fixed">
               <colgroup>
-                <col className="w-[35%]" />
-                <col className="w-[15%]" />
-                <col className="w-[30%]" />
-                <col className="w-[20%]" />
+                <col className="w-[28%]" />
+                <col className="w-[14%]" />
+                <col className="w-[42%]" />
+                <col className="w-[16%]" />
               </colgroup>
               <thead>
                 <tr className="text-left text-muted-foreground border-b">
@@ -194,14 +223,17 @@ export function DocumentsInspectorPanel({
               <tbody>
                 {lifecycle.attempts[0].stageEvents.map((se) => (
                   <tr key={se.stage} className="border-b border-border/30">
-                    <td className="py-1 capitalize truncate">{se.stage.replace(/_/g, ' ')}</td>
-                    <td className="py-1 text-right text-muted-foreground tabular-nums">
+                    <td className="py-1 capitalize break-words">{se.stage.replace(/_/g, ' ')}</td>
+                    <td className="py-1 text-right text-muted-foreground tabular-nums whitespace-nowrap">
                       {se.elapsedMs != null ? `${(se.elapsedMs / 1000).toFixed(1)}s` : '\u2014'}
                     </td>
-                    <td className="py-1 text-right text-muted-foreground truncate" title={se.modelName || undefined}>
+                    <td
+                      className="py-1 text-right text-muted-foreground font-mono text-[10px] [overflow-wrap:anywhere] leading-tight"
+                      title={se.modelName || undefined}
+                    >
                       {se.modelName ? se.modelName.replace('text-embedding-', 'embed-') : '\u2014'}
                     </td>
-                    <td className="py-1 text-right text-muted-foreground tabular-nums">
+                    <td className="py-1 text-right text-muted-foreground tabular-nums whitespace-nowrap">
                       {se.estimatedCost != null ? `$${Number(se.estimatedCost).toFixed(4)}` : '\u2014'}
                     </td>
                   </tr>

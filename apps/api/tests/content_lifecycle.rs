@@ -340,6 +340,7 @@ async fn canonical_content_lifecycle_edit_mutation_persists_source_for_reprocess
                         source_uri: edit_revision.source_uri.clone(),
                         storage_key: Some(storage_key),
                     }),
+                    parent_async_operation_id: None,
                 },
             )
             .await
@@ -821,6 +822,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     request_surface: "rest".to_string(),
                     source_identity: None,
                     revision: None,
+                    parent_async_operation_id: None,
                 },
             )
             .await
@@ -1038,6 +1040,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     request_surface: "rest".to_string(),
                     source_identity: None,
                     revision: None,
+                    parent_async_operation_id: None,
                 },
             )
             .await;
@@ -1198,6 +1201,7 @@ async fn canonical_content_delete_succeeds_when_post_commit_cleanup_fails() -> R
                     request_surface: "rest".to_string(),
                     source_identity: None,
                     revision: None,
+                    parent_async_operation_id: None,
                 },
             )
             .await

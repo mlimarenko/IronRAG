@@ -1,6 +1,6 @@
 import type { MintTokenRequest } from '@/api/admin';
 
-export type TokenScope = 'workspace' | 'library';
+export type TokenScope = 'system' | 'workspace' | 'library';
 
 export interface BuildMintTokenRequestInput {
   label: string;
@@ -27,7 +27,9 @@ export function resolveTokenExpiry(expiryDays: string): string | undefined {
 export function buildMintTokenRequest(input: BuildMintTokenRequestInput): MintTokenRequest {
   return {
     label: input.label.trim(),
-    workspaceId: input.workspaceId,
+    // System-scope tokens have no workspace restriction — the
+    // backend reads workspace_id=null as "all workspaces".
+    workspaceId: input.scope === 'system' ? undefined : input.workspaceId,
     expiresAt: resolveTokenExpiry(input.expiryDays),
     libraryIds: input.scope === 'library' ? input.libraryIds : [],
     permissionKinds: input.permissionKinds,

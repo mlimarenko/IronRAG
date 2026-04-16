@@ -54,6 +54,11 @@ def contains_any(haystack: str | None, needles: list[str]) -> bool:
     return any(canonical_match_text(needle) in normalized for needle in needles)
 
 
+def append_failure_if(condition: bool, failures: list[str], failure_code: str) -> None:
+    if condition:
+        failures.append(failure_code)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run live grounded QA benchmarks against a IronRAG deployment."
@@ -262,12 +267,12 @@ def snapshot_library_state(
     state = snapshot["state"]
     return {
         "elapsedSeconds": round(time.monotonic() - started_monotonic, 3),
-        "queueDepth": state["queue_depth"],
-        "runningAttempts": state["running_attempts"],
-        "readableDocumentCount": state["readable_document_count"],
-        "degradedState": state["degraded_state"],
-        "knowledgeGenerationState": state["knowledge_generation_state"],
-        "latestKnowledgeGenerationId": state["latest_knowledge_generation_id"],
+        "queueDepth": state["queueDepth"],
+        "runningAttempts": state["runningAttempts"],
+        "readableDocumentCount": state["readableDocumentCount"],
+        "degradedState": state["degradedState"],
+        "knowledgeGenerationState": state["knowledgeGenerationState"],
+        "latestKnowledgeGenerationId": state["latestKnowledgeGenerationId"],
     }
 
 
@@ -276,12 +281,38 @@ def fetch_library_summary(client: BenchmarkClient, library_id: str) -> dict[str,
 
 
 def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str, int]:
-    topology = client.get_json(f"/knowledge/libraries/{library_id}/graph-topology")
+    response = client.http.get(
+        f"{client.base_url}/knowledge/libraries/{library_id}/graph",
+        headers={"Accept": "application/x-ndjson"},
+        timeout=120,
+    )
+    response.raise_for_status()
+
+    documents = 0
+    entities = 0
+    relations = 0
+    document_links = 0
+    for line in response.text.splitlines():
+        payload = line.strip()
+        if not payload:
+            continue
+        frame = json.loads(payload)
+        section = frame.get("s")
+        rows = frame.get("d")
+        if section == "docs" and isinstance(rows, list):
+            documents += len(rows)
+        elif section == "nodes" and isinstance(rows, list):
+            entities += len(rows)
+        elif section == "edges" and isinstance(rows, list):
+            relations += len(rows)
+        elif section == "doc_links" and isinstance(rows, list):
+            document_links += len(rows)
+
     return {
-        "documents": len(topology.get("documents", [])),
-        "entities": len(topology.get("entities", [])),
-        "relations": len(topology.get("relations", [])),
-        "documentLinks": len(topology.get("documentLinks", [])),
+        "documents": documents,
+        "entities": entities,
+        "relations": relations,
+        "documentLinks": document_links,
     }
 
 
@@ -331,7 +362,13 @@ def summarize_search_hits(search_payload: dict[str, Any]) -> tuple[list[dict[str
         document = hit.get("document", {})
         chunk_summaries = []
         for chunk in hit.get("chunkHits", []):
-            content = chunk.get("content_text") or chunk.get("contentText") or ""
+            content = (
+                chunk.get("content_text")
+                or chunk.get("contentText")
+                or chunk.get("normalized_text")
+                or chunk.get("normalizedText")
+                or ""
+            )
             chunk_texts.append(content)
             chunk_summaries.append(
                 {
@@ -414,6 +451,33 @@ def run_case(
         and technical_fact_reference_count >= case.min_technical_fact_reference_count
     )
     verification_pass = verification_state in case.allowed_verification_states
+    failed_checks: list[str] = []
+    append_failure_if(not top_document_ok, failed_checks, "top_document")
+    append_failure_if(not retrieval_contains_required, failed_checks, "retrieval_contains_required")
+    append_failure_if(not answer_has_required, failed_checks, "answer_required")
+    append_failure_if(answer_has_forbidden, failed_checks, "answer_forbidden")
+    append_failure_if(chunk_reference_count < case.min_chunk_reference_count, failed_checks, "chunk_references")
+    append_failure_if(
+        prepared_segment_reference_count < case.min_prepared_segment_reference_count,
+        failed_checks,
+        "prepared_segment_references",
+    )
+    append_failure_if(
+        technical_fact_reference_count < case.min_technical_fact_reference_count,
+        failed_checks,
+        "technical_fact_references",
+    )
+    append_failure_if(
+        entity_reference_count < case.min_entity_reference_count,
+        failed_checks,
+        "entity_references",
+    )
+    append_failure_if(
+        relation_reference_count < case.min_relation_reference_count,
+        failed_checks,
+        "relation_references",
+    )
+    append_failure_if(not verification_pass, failed_checks, "verification_state")
     strict_case_pass = (
         top_document_ok
         and retrieval_contains_required
@@ -440,6 +504,7 @@ def run_case(
         "verificationWarnings": verification_warnings,
         "verificationPass": verification_pass,
         "strictCasePass": strict_case_pass,
+        "failedChecks": failed_checks,
         "searchResultCount": len(search_summaries),
         "searchResults": search_summaries,
         "answerLatencyMs": answer_latency_ms,
@@ -471,6 +536,10 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
     strict_case_pass = sum(1 for item in case_results if item["strictCasePass"])
     forbidden_failures = [item["caseId"] for item in case_results if item["answerHasForbidden"]]
     verification_failures = [item["caseId"] for item in case_results if not item["verificationPass"]]
+    failure_reason_counts: dict[str, int] = {}
+    for item in case_results:
+        for failure_code in item.get("failedChecks", []):
+            failure_reason_counts[failure_code] = failure_reason_counts.get(failure_code, 0) + 1
     return {
         "totalCases": total,
         "topDocumentPassCount": top_doc_pass,
@@ -489,6 +558,7 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
         "strictCasePassRate": round(strict_case_pass / total, 3) if total else 0.0,
         "forbiddenAnswerFailures": forbidden_failures,
         "verificationFailures": verification_failures,
+        "failureReasonCounts": failure_reason_counts,
     }
 
 

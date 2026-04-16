@@ -157,9 +157,7 @@ fn safe_html_truncation_boundary(source: &str, target_bytes: usize) -> usize {
     // Walk back up to 4 KiB looking for a `<` so we cut between elements
     // rather than mid-attribute. Keeps the truncated fragment parse-friendly.
     let window_start = boundary.saturating_sub(4096);
-    if let Some(offset) =
-        source[window_start..boundary].rfind('<').map(|rel| window_start + rel)
-    {
+    if let Some(offset) = source[window_start..boundary].rfind('<').map(|rel| window_start + rel) {
         boundary = offset;
         while boundary > 0 && !source.is_char_boundary(boundary) {
             boundary -= 1;
