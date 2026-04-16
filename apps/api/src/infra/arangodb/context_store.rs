@@ -565,60 +565,88 @@ impl ArangoContextStore {
     pub async fn replace_bundle_chunk_edges(
         &self,
         bundle_id: Uuid,
+        library_id: Uuid,
         edges: &[KnowledgeBundleChunkEdgeRow],
     ) -> anyhow::Result<Vec<KnowledgeBundleChunkEdgeRow>> {
         self.delete_bundle_chunk_edges(bundle_id).await?;
-        self.insert_bundle_edges(KNOWLEDGE_BUNDLE_CHUNK_EDGE, bundle_id, edges, |edge| {
-            arango_doc_id(
-                crate::infra::arangodb::collections::KNOWLEDGE_CHUNK_COLLECTION,
-                edge.chunk_id,
-            )
-        })
+        self.insert_bundle_edges(
+            KNOWLEDGE_BUNDLE_CHUNK_EDGE,
+            bundle_id,
+            library_id,
+            edges,
+            |edge| {
+                arango_doc_id(
+                    crate::infra::arangodb::collections::KNOWLEDGE_CHUNK_COLLECTION,
+                    edge.chunk_id,
+                )
+            },
+        )
         .await
     }
 
     pub async fn replace_bundle_entity_edges(
         &self,
         bundle_id: Uuid,
+        library_id: Uuid,
         edges: &[KnowledgeBundleEntityEdgeRow],
     ) -> anyhow::Result<Vec<KnowledgeBundleEntityEdgeRow>> {
         self.delete_bundle_entity_edges(bundle_id).await?;
-        self.insert_bundle_edges(KNOWLEDGE_BUNDLE_ENTITY_EDGE, bundle_id, edges, |edge| {
-            arango_doc_id(
-                crate::infra::arangodb::collections::KNOWLEDGE_ENTITY_COLLECTION,
-                edge.entity_id,
-            )
-        })
+        self.insert_bundle_edges(
+            KNOWLEDGE_BUNDLE_ENTITY_EDGE,
+            bundle_id,
+            library_id,
+            edges,
+            |edge| {
+                arango_doc_id(
+                    crate::infra::arangodb::collections::KNOWLEDGE_ENTITY_COLLECTION,
+                    edge.entity_id,
+                )
+            },
+        )
         .await
     }
 
     pub async fn replace_bundle_relation_edges(
         &self,
         bundle_id: Uuid,
+        library_id: Uuid,
         edges: &[KnowledgeBundleRelationEdgeRow],
     ) -> anyhow::Result<Vec<KnowledgeBundleRelationEdgeRow>> {
         self.delete_bundle_relation_edges(bundle_id).await?;
-        self.insert_bundle_edges(KNOWLEDGE_BUNDLE_RELATION_EDGE, bundle_id, edges, |edge| {
-            arango_doc_id(
-                crate::infra::arangodb::collections::KNOWLEDGE_RELATION_COLLECTION,
-                edge.relation_id,
-            )
-        })
+        self.insert_bundle_edges(
+            KNOWLEDGE_BUNDLE_RELATION_EDGE,
+            bundle_id,
+            library_id,
+            edges,
+            |edge| {
+                arango_doc_id(
+                    crate::infra::arangodb::collections::KNOWLEDGE_RELATION_COLLECTION,
+                    edge.relation_id,
+                )
+            },
+        )
         .await
     }
 
     pub async fn replace_bundle_evidence_edges(
         &self,
         bundle_id: Uuid,
+        library_id: Uuid,
         edges: &[KnowledgeBundleEvidenceEdgeRow],
     ) -> anyhow::Result<Vec<KnowledgeBundleEvidenceEdgeRow>> {
         self.delete_bundle_evidence_edges(bundle_id).await?;
-        self.insert_bundle_edges(KNOWLEDGE_BUNDLE_EVIDENCE_EDGE, bundle_id, edges, |edge| {
-            arango_doc_id(
-                crate::infra::arangodb::collections::KNOWLEDGE_EVIDENCE_COLLECTION,
-                edge.evidence_id,
-            )
-        })
+        self.insert_bundle_edges(
+            KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
+            bundle_id,
+            library_id,
+            edges,
+            |edge| {
+                arango_doc_id(
+                    crate::infra::arangodb::collections::KNOWLEDGE_EVIDENCE_COLLECTION,
+                    edge.evidence_id,
+                )
+            },
+        )
         .await
     }
 
@@ -985,6 +1013,7 @@ impl ArangoContextStore {
         &self,
         collection: &'static str,
         bundle_id: Uuid,
+        library_id: Uuid,
         edges: &[T],
         to_doc_id: F,
     ) -> anyhow::Result<Vec<T>>
@@ -1010,6 +1039,7 @@ impl ArangoContextStore {
             document.insert("_from".to_string(), serde_json::json!(from));
             document.insert("_to".to_string(), serde_json::json!(to));
             document.insert("bundle_id".to_string(), serde_json::json!(bundle_id));
+            document.insert("library_id".to_string(), serde_json::json!(library_id.to_string()));
             document.insert(
                 "created_at".to_string(),
                 edge_value

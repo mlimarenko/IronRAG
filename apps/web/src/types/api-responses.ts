@@ -225,6 +225,7 @@ export interface RawAssistantMessage {
   role: string;
   content?: string;
   timestamp: string;
+  executionId?: string | null;
 }
 
 /** Raw API token mint response (POST /v1/iam/tokens) */
@@ -305,31 +306,4 @@ export interface RawKnowledgeEntityDetail {
   properties?: Iterable<[string, unknown]>;
   relatedNodes?: unknown[];
   supportingDocuments?: RawSupportingDocument[];
-}
-
-/** Raw web ingest run list item */
-export interface RawWebIngestRunListItem {
-  runId: string;
-  seedUrl: string;
-  runState: string;
-  mode: string;
-  boundaryPolicy?: string;
-  maxDepth?: number;
-  maxPages?: number;
-  counts?: {
-    discovered?: number;
-    processed?: number;
-  };
-}
-
-/** Raw web ingest run page item */
-export interface RawWebIngestRunPage {
-  normalizedUrl?: string;
-  discoveredUrl?: string;
-  candidateState?: string;
-}
-
-/** Envelope for list endpoints that may return `{ items: [...] }` */
-export interface RawListEnvelope<T> {
-  items?: T[];
 }

@@ -191,11 +191,9 @@ impl IngestAttemptsFixture {
         .await
         .context("failed to bootstrap Arango knowledge plane for ingest_attempts")?;
 
-        let persistence = Persistence {
-            postgres,
-            redis: redis::Client::open(settings.redis_url.clone())
-                .context("failed to create redis client for ingest_attempts test state")?,
-        };
+        let redis = redis::Client::open(settings.redis_url.clone())
+            .context("failed to create redis client for ingest_attempts test state")?;
+        let persistence = Persistence::for_tests(postgres, redis);
         let state = AppState::from_dependencies(settings, persistence, arango_client)?;
         let workspace = state
             .canonical_services
@@ -388,6 +386,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     status: "accepted".to_string(),
                     subject_kind: "knowledge_revision".to_string(),
                     subject_id: Some(fixture.revision_id),
+                    parent_async_operation_id: None,
                     completed_at: None,
                     failure_code: None,
                 },

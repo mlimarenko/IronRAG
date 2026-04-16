@@ -1,3 +1,6 @@
+import type { GraphNode } from '@/types';
+import { compactText } from '@/lib/compactText';
+
 export const GRAPH_NODE_COLORS: Record<string, string> = {
   document: '#3b82f6',
   person: '#ec4899',
@@ -56,4 +59,41 @@ export type GraphLayoutType = (typeof GRAPH_LAYOUT_OPTIONS)[number]['id'];
 
 export function isGraphLayoutType(value: string | undefined | null): value is GraphLayoutType {
   return GRAPH_LAYOUT_OPTIONS.some((layout) => layout.id === value);
+}
+
+
+function graphLabelBudget(nodeCount: number): number {
+  if (nodeCount > 1200) return 6;
+  if (nodeCount > 700) return 8;
+  if (nodeCount > 350) return 10;
+  if (nodeCount > 180) return 14;
+  return 20;
+}
+
+function graphCanvasLabelLimit(nodeCount: number): number {
+  if (nodeCount > 900) return 16;
+  if (nodeCount > 450) return 18;
+  return 22;
+}
+
+export function selectProminentGraphLabelIds(nodes: GraphNode[]): Set<string> {
+  const ranked = [...nodes].sort((left, right) => {
+    const edgeCountDelta = right.edgeCount - left.edgeCount;
+    if (edgeCountDelta !== 0) return edgeCountDelta;
+
+    const typeDelta = left.type.localeCompare(right.type);
+    if (typeDelta !== 0) return typeDelta;
+
+    return left.label.localeCompare(right.label);
+  });
+
+  return new Set(ranked.slice(0, graphLabelBudget(nodes.length)).map((node) => node.id));
+}
+
+export function buildGraphCanvasLabel(label: string, nodeCount: number): string {
+  return compactText(label, graphCanvasLabelLimit(nodeCount)).text;
+}
+
+export function buildGraphFocusLabel(label: string): string {
+  return compactText(label, 30).text;
 }

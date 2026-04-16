@@ -96,6 +96,13 @@ pub struct RuntimeGraphDocumentLinkRow {
     pub support_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeGraphSubTypeHintRow {
+    pub node_type: String,
+    pub sub_type: String,
+    pub occurrences: i64,
+}
+
 fn runtime_graph_evidence_identity_key(
     target_kind: &str,
     target_id: Uuid,
@@ -169,6 +176,12 @@ pub async fn create_runtime_graph_filtered_artifact(
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while querying admitted graph nodes.
+#[tracing::instrument(
+    level = "debug",
+    name = "runtime_graph.list_admitted_nodes_by_library",
+    skip_all,
+    fields(%library_id, projection_version)
+)]
 pub async fn list_admitted_runtime_graph_nodes_by_library(
     pool: &PgPool,
     library_id: Uuid,
@@ -179,6 +192,56 @@ pub async fn list_admitted_runtime_graph_nodes_by_library(
         .bind(projection_version)
         .fetch_all(pool)
         .await
+}
+
+/// Counts admitted non-document runtime graph nodes for one projection version.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while counting graph nodes.
+pub async fn count_admitted_runtime_graph_entities_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and node_type <> 'document'",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_one(pool)
+    .await
+}
+
+/// Lists the strongest admitted non-document runtime graph nodes for one
+/// projection version, ranked by support count and label stability.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying ranked graph nodes.
+pub async fn list_top_admitted_runtime_graph_entities_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    limit: usize,
+) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "select id, library_id, canonical_key, label, node_type, aliases_json, summary,
+            metadata_json, support_count, projection_version, created_at, updated_at
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and node_type <> 'document'
+         order by support_count desc, label asc, created_at asc
+         limit $3",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
 }
 
 /// Lists admitted runtime graph nodes by id for one projection version.
@@ -209,6 +272,12 @@ pub async fn list_admitted_runtime_graph_nodes_by_ids(
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while querying admitted graph edges.
+#[tracing::instrument(
+    level = "debug",
+    name = "runtime_graph.list_admitted_edges_by_library",
+    skip_all,
+    fields(%library_id, projection_version)
+)]
 pub async fn list_admitted_runtime_graph_edges_by_library(
     pool: &PgPool,
     library_id: Uuid,
@@ -226,6 +295,80 @@ pub async fn list_admitted_runtime_graph_edges_by_library(
     )
     .bind(library_id)
     .bind(projection_version)
+        .fetch_all(pool)
+        .await
+}
+
+/// Counts admitted runtime graph relations whose endpoints are both non-document
+/// nodes for one projection version.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while counting graph edges.
+pub async fn count_admitted_runtime_graph_relations_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from runtime_graph_edge as edge
+         inner join runtime_graph_node as source
+            on source.library_id = edge.library_id
+           and source.id = edge.from_node_id
+           and source.projection_version = edge.projection_version
+           and source.node_type <> 'document'
+         inner join runtime_graph_node as target
+            on target.library_id = edge.library_id
+           and target.id = edge.to_node_id
+           and target.projection_version = edge.projection_version
+           and target.node_type <> 'document'
+         where edge.library_id = $1
+           and edge.projection_version = $2
+           and btrim(edge.relation_type) <> ''
+           and edge.from_node_id <> edge.to_node_id",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_one(pool)
+    .await
+}
+
+/// Lists the strongest admitted runtime graph relations whose endpoints are
+/// both non-document nodes.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying ranked graph edges.
+pub async fn list_top_admitted_runtime_graph_relations_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    limit: usize,
+) -> Result<Vec<RuntimeGraphEdgeRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEdgeRow>(
+        "select edge.id, edge.library_id, edge.from_node_id, edge.to_node_id, edge.relation_type,
+            edge.canonical_key, edge.summary, edge.weight, edge.support_count, edge.metadata_json,
+            edge.projection_version, edge.created_at, edge.updated_at
+         from runtime_graph_edge as edge
+         inner join runtime_graph_node as source
+            on source.library_id = edge.library_id
+           and source.id = edge.from_node_id
+           and source.projection_version = edge.projection_version
+           and source.node_type <> 'document'
+         inner join runtime_graph_node as target
+            on target.library_id = edge.library_id
+           and target.id = edge.to_node_id
+           and target.projection_version = edge.projection_version
+           and target.node_type <> 'document'
+         where edge.library_id = $1
+           and edge.projection_version = $2
+           and btrim(edge.relation_type) <> ''
+           and edge.from_node_id <> edge.to_node_id
+         order by edge.support_count desc, edge.relation_type asc, edge.created_at asc
+         limit $3",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(limit as i64)
     .fetch_all(pool)
     .await
 }
@@ -412,6 +555,39 @@ pub async fn list_runtime_graph_nodes_by_library(
     .await
 }
 
+/// Aggregates observed `sub_type` values per `node_type` for one library at a
+/// given projection version. Drives vocabulary-aware extraction: the returned
+/// rows feed the `sub_type_hints` prompt section so the LLM converges on terms
+/// already present in the graph instead of inventing fresh near-duplicates.
+///
+/// Rows are ordered by `node_type asc, occurrences desc, sub_type asc`. The
+/// caller (typically `revision.rs`) trims to top-N per `node_type`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while running the aggregation.
+pub async fn list_observed_sub_type_hints(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphSubTypeHintRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphSubTypeHintRow>(
+        "select node_type,
+                metadata_json->>'sub_type' as sub_type,
+                count(*)::bigint as occurrences
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and metadata_json ? 'sub_type'
+           and length(metadata_json->>'sub_type') > 0
+         group by node_type, metadata_json->>'sub_type'
+         order by node_type asc, occurrences desc, sub_type asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
 /// Upserts a canonical runtime graph edge.
 ///
 /// # Errors
@@ -590,6 +766,122 @@ pub async fn create_runtime_graph_evidence(
     .bind(confidence_score)
     .fetch_one(pool)
     .await
+}
+
+/// Single per-row payload for `bulk_create_runtime_graph_evidence_for_chunk`.
+/// All other evidence columns are constant per merge call (the chunk's
+/// document_id / revision_id / attempt_id / chunk_id / source_file_name /
+/// evidence_text), so the bulk insert sends N rows in one round-trip
+/// instead of N separate INSERTs.
+#[derive(Debug, Clone)]
+pub struct GraphEvidenceTarget {
+    pub target_kind: &'static str,
+    pub target_id: Uuid,
+    pub evidence_context_key: &'static str,
+}
+
+/// Bulk-inserts a batch of `runtime_graph_evidence` rows that share the same
+/// chunk-level context (library / document / revision / attempt / chunk /
+/// source_file_name / evidence_text). Replaces N sequential
+/// `create_runtime_graph_evidence` calls with a single `INSERT ... SELECT
+/// FROM unnest(...)` round-trip — for a typical chunk with 10 entities and
+/// 10 relations, that's ~50 round-trips collapsed into 1.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while running the bulk insert.
+#[allow(clippy::too_many_arguments)]
+pub async fn bulk_create_runtime_graph_evidence_for_chunk(
+    pool: &PgPool,
+    library_id: Uuid,
+    document_id: Option<Uuid>,
+    revision_id: Option<Uuid>,
+    activated_by_attempt_id: Option<Uuid>,
+    chunk_id: Option<Uuid>,
+    source_file_name: Option<&str>,
+    evidence_text: &str,
+    confidence_score: Option<f64>,
+    targets: &[GraphEvidenceTarget],
+) -> Result<(), sqlx::Error> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    // Postgres forbids `ON CONFLICT DO UPDATE` from touching the same
+    // conflict target twice in one statement. The chunk merge happily
+    // emits duplicate evidence rows when the same entity / edge gets
+    // mentioned multiple times inside one chunk (e.g. an entity appears
+    // both as itself and as the target of a relation), which produced
+    // the runtime error
+    //   ON CONFLICT DO UPDATE command cannot affect row a second time
+    // and broke the entire chunk merge. Dedupe by `evidence_identity_key`
+    // here so the bulk insert sees each unique row exactly once. Order
+    // is preserved so the first occurrence wins.
+    let count = targets.len();
+    let mut seen = std::collections::HashSet::with_capacity(count);
+    let mut ids = Vec::with_capacity(count);
+    let mut identity_keys = Vec::with_capacity(count);
+    let mut target_kinds = Vec::with_capacity(count);
+    let mut target_ids = Vec::with_capacity(count);
+    for target in targets {
+        let identity_key = runtime_graph_evidence_identity_key(
+            target.target_kind,
+            target.target_id,
+            document_id,
+            revision_id,
+            activated_by_attempt_id,
+            chunk_id,
+            None,
+            source_file_name,
+            target.evidence_context_key,
+        );
+        if !seen.insert(identity_key.clone()) {
+            continue;
+        }
+        ids.push(Uuid::now_v7());
+        identity_keys.push(identity_key);
+        target_kinds.push(target.target_kind.to_string());
+        target_ids.push(target.target_id);
+    }
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "insert into runtime_graph_evidence (
+            id, library_id, evidence_identity_key, target_kind, target_id,
+            document_id, revision_id, activated_by_attempt_id, chunk_id,
+            source_file_name, page_ref, evidence_text, confidence_score
+         )
+         select
+            ids.id, $2, ids.identity_key, ids.target_kind, ids.target_id,
+            $3, $4, $5, $6, $7, NULL, $8, $9
+         from unnest($1::uuid[], $10::text[], $11::text[], $12::uuid[])
+            as ids(id, identity_key, target_kind, target_id)
+         on conflict (library_id, evidence_identity_key) do update
+         set document_id = excluded.document_id,
+             revision_id = excluded.revision_id,
+             activated_by_attempt_id = excluded.activated_by_attempt_id,
+             chunk_id = excluded.chunk_id,
+             source_file_name = excluded.source_file_name,
+             page_ref = excluded.page_ref,
+             evidence_text = excluded.evidence_text,
+             confidence_score = excluded.confidence_score,
+             is_active = true",
+    )
+    .bind(&ids)
+    .bind(library_id)
+    .bind(document_id)
+    .bind(revision_id)
+    .bind(activated_by_attempt_id)
+    .bind(chunk_id)
+    .bind(source_file_name)
+    .bind(evidence_text)
+    .bind(confidence_score)
+    .bind(&identity_keys)
+    .bind(&target_kinds)
+    .bind(&target_ids)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
 /// Recalculates support counts for a targeted set of graph nodes.
@@ -810,6 +1102,81 @@ pub async fn list_runtime_graph_document_links_by_library(
     )
     .bind(library_id)
     .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists document-to-runtime-graph links for the active projection, filtered
+/// to one visible set of target ids.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying filtered document links.
+pub async fn list_runtime_graph_document_links_by_target_ids(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    target_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphDocumentLinkRow>, sqlx::Error> {
+    if target_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, RuntimeGraphDocumentLinkRow>(
+        "with active_node_links as (
+            select
+                evidence.document_id,
+                evidence.target_id as target_node_id,
+                'entity'::text as target_node_type,
+                'supports'::text as relation_type,
+                count(*)::bigint as support_count
+            from runtime_graph_evidence as evidence
+            inner join content_document as document
+                on document.id = evidence.document_id
+               and document.deleted_at is null
+            inner join runtime_graph_node as node
+                on node.library_id = evidence.library_id
+               and node.id = evidence.target_id
+               and node.projection_version = $2
+            where evidence.library_id = $1
+              and evidence.target_kind = 'node'
+              and evidence.is_active = true
+              and evidence.document_id is not null
+              and evidence.target_id = any($3)
+            group by evidence.document_id, evidence.target_id
+        ),
+        active_edge_links as (
+            select
+                evidence.document_id,
+                evidence.target_id as target_node_id,
+                'topic'::text as target_node_type,
+                'supports'::text as relation_type,
+                count(*)::bigint as support_count
+            from runtime_graph_evidence as evidence
+            inner join content_document as document
+                on document.id = evidence.document_id
+               and document.deleted_at is null
+            inner join runtime_graph_edge as edge
+                on edge.library_id = evidence.library_id
+               and edge.id = evidence.target_id
+               and edge.projection_version = $2
+            where evidence.library_id = $1
+              and evidence.target_kind = 'edge'
+              and evidence.is_active = true
+              and evidence.document_id is not null
+              and evidence.target_id = any($3)
+            group by evidence.document_id, evidence.target_id
+        )
+        select document_id, target_node_id, target_node_type, relation_type, support_count
+        from (
+            select * from active_node_links
+            union all
+            select * from active_edge_links
+        ) as links
+        order by support_count desc, document_id asc, target_node_id asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(target_ids)
     .fetch_all(pool)
     .await
 }
@@ -1132,6 +1499,94 @@ pub async fn search_runtime_graph_nodes_by_query_text(
     )
     .bind(library_id)
     .bind(query_text)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Searches admitted runtime graph entities for one projection version using
+/// label, aliases, and summary text.
+///
+/// Exact label matches rank above prefix and substring matches; ties break on
+/// `support_count` descending so the strongest canonical entity wins.
+///
+/// # Errors
+/// Returns any `SQLx` error raised during the query.
+pub async fn search_admitted_runtime_graph_entities_by_query_text(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    query_text: &str,
+    limit: i64,
+) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+    let normalized_query = query_text.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "select
+            n.id, n.library_id, n.canonical_key, n.label, n.node_type,
+            n.aliases_json, n.summary, n.metadata_json, n.support_count,
+            n.projection_version, n.created_at, n.updated_at
+         from runtime_graph_node n
+         where n.library_id = $1
+           and n.projection_version = $2
+           and n.node_type <> 'document'
+           and (
+                lower(n.label) like '%' || $3 || '%'
+                or coalesce(lower(n.summary), '') like '%' || $3 || '%'
+                or exists (
+                    select 1
+                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
+                    where lower(alias.value) like '%' || $3 || '%'
+                )
+                or exists (
+                    select 1
+                    from unnest(string_to_array($3, ' ')) as word
+                    where length(word) > 2
+                      and (
+                            lower(n.label) like '%' || word || '%'
+                            or coalesce(lower(n.summary), '') like '%' || word || '%'
+                            or exists (
+                                select 1
+                                from jsonb_array_elements_text(n.aliases_json) as alias(value)
+                                where lower(alias.value) like '%' || word || '%'
+                            )
+                      )
+                )
+           )
+         order by
+            case
+                when lower(n.label) = $3 then 0
+                when exists (
+                    select 1
+                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
+                    where lower(alias.value) = $3
+                ) then 1
+                when lower(n.label) like $3 || '%' then 2
+                when exists (
+                    select 1
+                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
+                    where lower(alias.value) like $3 || '%'
+                ) then 3
+                when lower(n.label) like '%' || $3 || '%' then 4
+                when exists (
+                    select 1
+                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
+                    where lower(alias.value) like '%' || $3 || '%'
+                ) then 5
+                when coalesce(lower(n.summary), '') like '%' || $3 || '%' then 6
+                else 7
+            end asc,
+            n.support_count desc,
+            n.label asc,
+            n.created_at asc
+         limit $4",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(normalized_query)
     .bind(limit)
     .fetch_all(pool)
     .await

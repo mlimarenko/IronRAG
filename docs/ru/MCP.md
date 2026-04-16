@@ -4,7 +4,7 @@
 
 ### Подключите Codex, Cursor, VS Code, Claude Code или любой HTTP MCP-клиент к той же базе знаний, что использует IronRAG
 
-[README-RU](../../README-RU.md) | [MCP (EN)](../en/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md)
+[Обзор](./README.md) | [MCP (EN)](../en/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md) | [Бенчмарки](./BENCHMARKS.md)
 
 </div>
 
@@ -60,7 +60,7 @@ curl -sS http://127.0.0.1:19000/v1/mcp/capabilities \
 |------------|----------|----------------------|
 | `search_documents` | Поиск по библиотеке: гибридный BM25 + вектор. Возвращает хиты на уровне документов. | `query` |
 | `read_document` | Прочитать документ полностью или частями (с continuation token). | `documentId` |
-| `list_documents` | Список документов в библиотеке с фильтрацией по статусу. | `libraryId` |
+| `list_documents` | Список документов в библиотеке с фильтрацией по статусу. | `libraryId` (опц.) |
 | `upload_documents` | Загрузить один или несколько документов. Поддерживает base64 и inline-текст. | `libraryId`, `documents` |
 | `update_document` | Дописать или заменить содержимое документа. | `libraryId`, `documentId`, `operationKind` |
 | `delete_document` | Удалить документ вместе с ревизиями, чанками и вкладом в граф. | `documentId` |
@@ -71,8 +71,9 @@ curl -sS http://127.0.0.1:19000/v1/mcp/capabilities \
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
 | `search_entities` | Поиск сущностей в графе знаний по имени или описанию. | `libraryId`, `query` |
-| `get_graph_topology` | Получить топологию графа (сущности, связи, документные привязки) с лимитом. | `libraryId` |
+| `get_graph_topology` | Получить support-ranked срез топологии графа (сущности, связи, документные привязки) с лимитом. | `libraryId` |
 | `list_relations` | Список связей в графе, упорядоченных по количеству подтверждений. | `libraryId` |
+| `get_communities` | Список graph communities с summary и top entities. | `libraryId` |
 
 ### Веб-краулинг
 
@@ -87,10 +88,19 @@ curl -sS http://127.0.0.1:19000/v1/mcp/capabilities \
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `get_runtime_execution` | Загрузить summary жизненного цикла runtime-исполнения. | `executionId` |
-| `get_runtime_execution_trace` | Полная трассировка стадий, действий и policy-решений. | `executionId` |
+| `get_runtime_execution` | Загрузить summary жизненного цикла runtime-исполнения. | `runtimeExecutionId` |
+| `get_runtime_execution_trace` | Полная трассировка стадий, действий и policy-решений. | `runtimeExecutionId` |
 
 Под капотом MCP использует те же канонические сервисы, что и веб-приложение: Postgres для control state, ArangoDB для графа и документной истины, Redis-backed workers для ingestion.
+
+## Quality-контракт graph tools
+
+- `get_graph_topology` не отдаёт сырой full-graph dump. Если срабатывает `limit`, IronRAG сначала оставляет самые подтверждённые сущности, затем только те связи, у которых обе вершины остались видимыми, и только потом документные привязки и документы, которые реально поддерживают этот видимый срез.
+- `search_entities` читает тот же admitted runtime graph snapshot, что и `get_graph_topology`. Если сущность видна в текущем runtime graph, `search_entities` должен находить ту же каноническую vocabulary, а не опираться на параллельный stale index.
+- `list_relations` ранжируется по `support_count`, а не по порядку вставки в таблицу.
+- Цель graph tools для агента — связный полезный subgraph, а не алфавитный или случайный фрагмент с orphaned edges и нерелевантными документами.
+- При проверке клиента оценивайте не только JSON shape, но и полезность результата: сильные сущности должны стабильно быть первыми, связи — идти по реальной поддержке, document links — указывать только на те узлы и рёбра, которые реально остались в ответе, а `list_relations` не должен деградировать до `unknown` labels.
+- Нормализованные дубликаты label у сущностей и дубликаты одной и той же `(source, relationType, target)` связи внутри одного top-slice — это quality regression, а не безобидный cosmetic noise.
 
 ## Модель доступа
 
@@ -98,6 +108,7 @@ curl -sS http://127.0.0.1:19000/v1/mcp/capabilities \
 - Read-only токены подходят для ассистентов, которым нужен только поиск, чтение и Q&A.
 - Write-enabled токены могут загружать, обновлять и удалять документы, если агенту нужно самому поддерживать knowledge base.
 - Видимость инструментов следует за грантами: клиент видит только то, что ему разрешено.
+- Если токен ограничен ровно одним workspace или library, MCP tools и query API автоматически подставляют `workspaceId` и `libraryId` из scope токена.
 
 ## Что получает клиент
 

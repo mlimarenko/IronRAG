@@ -1,5 +1,10 @@
 use super::*;
 
+/// Default `temperature` for generative (non-embedding) bootstrap presets.
+const DEFAULT_BOOTSTRAP_TEMPERATURE: f64 = 0.3;
+/// Default `top_p` for generative (non-embedding) bootstrap presets.
+const DEFAULT_BOOTSTRAP_TOP_P: f64 = 0.9;
+
 fn provider_id_for_kind(providers: &[ProviderCatalogEntry], provider_kind: &str) -> Option<Uuid> {
     providers
         .iter()
@@ -65,6 +70,30 @@ pub(super) fn bootstrap_provider_credential_map(
     credentials
 }
 
+pub(super) fn bootstrap_bundle_has_required_fallback_credentials(
+    bundle: &BootstrapAiProviderPresetBundle,
+    providers: &[ProviderCatalogEntry],
+    configured_ai: Option<&crate::app::config::UiBootstrapAiSetup>,
+) -> bool {
+    bundle
+        .presets
+        .iter()
+        .map(|preset| preset.owner_provider_kind.as_str())
+        .filter(|provider_kind| *provider_kind != bundle.provider_kind)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .all(|provider_kind| {
+            let Some(provider) =
+                providers.iter().find(|entry| entry.provider_kind == provider_kind)
+            else {
+                return false;
+            };
+            !provider.api_key_required
+                || bootstrap_credential_source(configured_ai, provider_kind)
+                    == BootstrapAiCredentialSource::Env
+        })
+}
+
 fn configured_binding_default_for_purpose<'a>(
     configured_ai: Option<&'a crate::app::config::UiBootstrapAiSetup>,
     purpose: AiBindingPurpose,
@@ -103,7 +132,14 @@ fn select_configured_bootstrap_model<'a>(
                 && model.allowed_binding_purposes.contains(&purpose)
         })),
         (Some(provider_catalog_id), None) => {
-            Ok(select_bootstrap_suggested_model_for_provider(provider_catalog_id, purpose, models))
+            Ok(binding_default.provider_kind.as_deref().and_then(|provider_kind| {
+                select_bootstrap_suggested_model_for_provider(
+                    provider_catalog_id,
+                    provider_kind,
+                    purpose,
+                    models,
+                )
+            }))
         }
         (None, Some(model_name)) => Ok(models.iter().find(|model| {
             model.model_name == model_name && model.allowed_binding_purposes.contains(&purpose)
@@ -114,9 +150,20 @@ fn select_configured_bootstrap_model<'a>(
 
 fn select_bootstrap_suggested_model_for_provider<'a>(
     provider_catalog_id: Uuid,
+    provider_kind: &str,
     purpose: AiBindingPurpose,
     models: &'a [ModelCatalogEntry],
 ) -> Option<&'a ModelCatalogEntry> {
+    if let Some(preferred_model_name) = bootstrap_preset_profile_for_purpose(provider_kind, purpose)
+        .map(|profile| profile.model_name)
+    {
+        return models.iter().find(|model| {
+            model.provider_catalog_id == provider_catalog_id
+                && model.model_name == preferred_model_name
+                && model.allowed_binding_purposes.contains(&purpose)
+        });
+    }
+
     models
         .iter()
         .filter(|model| {
@@ -146,8 +193,8 @@ const OPENAI_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::ExtractGraph,
         model_name: "gpt-5.4-nano",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
@@ -162,16 +209,16 @@ const OPENAI_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::QueryAnswer,
         model_name: "gpt-5.4-mini",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::Vision,
         model_name: "gpt-5.4-mini",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
@@ -181,8 +228,8 @@ const QWEN_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::ExtractGraph,
         model_name: "qwen-flash",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
@@ -197,16 +244,16 @@ const QWEN_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::QueryAnswer,
         model_name: "qwen3-max",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::Vision,
         model_name: "qwen-vl-max",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
@@ -216,8 +263,8 @@ const OLLAMA_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::ExtractGraph,
         model_name: "qwen3:0.6b",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
@@ -232,16 +279,16 @@ const OLLAMA_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::QueryAnswer,
         model_name: "qwen3:0.6b",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::Vision,
         model_name: "qwen3-vl:2b",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
@@ -255,8 +302,8 @@ const DEEPSEEK_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::ExtractGraph,
         model_name: "deepseek-chat",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
@@ -271,20 +318,25 @@ const DEEPSEEK_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::QueryAnswer,
         model_name: "deepseek-chat",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: None,
     },
     BootstrapProviderPresetProfile {
         purpose: AiBindingPurpose::Vision,
         model_name: "gpt-5.4-mini",
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
+        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
         max_output_tokens_override: None,
         fallback_provider_kind: Some("openai"),
     },
 ];
+
+/// All provider kinds that have a bootstrap preset profile. Used by
+/// `seed_all_provider_presets` to create presets for every provider at
+/// startup, even before the operator has configured a credential.
+pub(super) const BOOTSTRAPPED_PROVIDER_KINDS: &[&str] = &["openai", "ollama", "qwen", "deepseek"];
 
 fn bootstrap_provider_preset_profile(
     provider_kind: &str,
@@ -341,13 +393,19 @@ pub(super) fn resolve_bootstrap_provider_preset_bundle(
         // Preset display name uses the provider that owns the model so the
         // operator can see "OpenAI Embed Chunk · text-embedding-3-large"
         // even when they pick the DeepSeek bundle.
-        let model_owner_display = providers
-            .iter()
-            .find(|p| p.id == model.provider_catalog_id)
-            .map(|p| p.display_name.as_str())
+        let model_owner = providers.iter().find(|entry| entry.id == model.provider_catalog_id);
+        let model_owner_display = model_owner
+            .map(|entry| entry.display_name.as_str())
             .unwrap_or(provider.display_name.as_str());
+        let model_owner_provider_kind = model_owner
+            .map(|entry| entry.provider_kind.clone())
+            .unwrap_or_else(|| provider.provider_kind.clone());
+        let model_owner_provider_catalog_id =
+            model_owner.map(|entry| entry.id).unwrap_or(provider.id);
         presets.push(BootstrapAiPresetDescriptor {
             binding_purpose: preset_profile.purpose,
+            owner_provider_catalog_id: model_owner_provider_catalog_id,
+            owner_provider_kind: model_owner_provider_kind,
             model_catalog_id: model.id,
             model_name: model.model_name.clone(),
             preset_name: canonical_runtime_preset_name(
@@ -476,7 +534,7 @@ pub(super) fn resolve_configured_bootstrap_preset_inputs(
                     bundle.presets.into_iter().find(|preset| preset.binding_purpose == purpose).map(
                         |preset| BootstrapAiPresetInput {
                             binding_purpose: preset.binding_purpose,
-                            provider_kind: provider.provider_kind.clone(),
+                            provider_kind: preset.owner_provider_kind,
                             model_catalog_id: preset.model_catalog_id,
                             preset_name: preset.preset_name,
                             system_prompt: preset.system_prompt,
@@ -498,8 +556,13 @@ pub(super) fn resolve_configured_bootstrap_preset_inputs(
             .iter()
             .filter(|provider| env_provider_kinds.contains(provider.provider_kind.as_str()))
             .filter_map(|provider| {
-                select_bootstrap_suggested_model_for_provider(provider.id, purpose, models)
-                    .map(|model| build_bootstrap_preset_input(provider, model, purpose))
+                select_bootstrap_suggested_model_for_provider(
+                    provider.id,
+                    &provider.provider_kind,
+                    purpose,
+                    models,
+                )
+                .map(|model| build_bootstrap_preset_input(provider, model, purpose))
             })
             .min_by(|left, right| left.provider_kind.cmp(&right.provider_kind));
         if let Some(fallback) = fallback {

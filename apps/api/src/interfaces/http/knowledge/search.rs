@@ -343,13 +343,20 @@ fn document_matches_canonical_search_target(document: &KnowledgeDocumentRow, tar
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.search_documents",
+    skip_all,
+    fields(library_id = %library_id, elapsed_ms)
+)]
 pub(super) async fn search_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
     Query(query): Query<KnowledgeDocumentSearchQuery>,
 ) -> Result<Json<KnowledgeDocumentSearchResponse>, ApiError> {
-    search_documents_impl(
+    let started_at = std::time::Instant::now();
+    let result = search_documents_impl(
         auth,
         state,
         library_id,
@@ -358,15 +365,24 @@ pub(super) async fn search_documents(
         query.chunk_hit_limit_per_document,
         query.evidence_sample_limit,
     )
-    .await
+    .await;
+    tracing::Span::current().record("elapsed_ms", started_at.elapsed().as_millis() as u64);
+    result
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.search_documents_by_library_query",
+    skip_all,
+    fields(library_id = %query.library_id, elapsed_ms)
+)]
 pub(super) async fn search_documents_by_library_query(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<KnowledgeDocumentSearchRequest>,
 ) -> Result<Json<KnowledgeDocumentSearchResponse>, ApiError> {
-    search_documents_impl(
+    let started_at = std::time::Instant::now();
+    let result = search_documents_impl(
         auth,
         state,
         query.library_id,
@@ -375,7 +391,9 @@ pub(super) async fn search_documents_by_library_query(
         query.chunk_hit_limit_per_document,
         query.evidence_sample_limit,
     )
-    .await
+    .await;
+    tracing::Span::current().record("elapsed_ms", started_at.elapsed().as_millis() as u64);
+    result
 }
 
 async fn search_documents_impl(

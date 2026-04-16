@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use self::table_markdown::parse_markdown_table_row;
 
 pub mod chunking;
+pub mod document_summary;
 pub mod docx;
 pub mod file_extract;
 pub mod html_main_content;

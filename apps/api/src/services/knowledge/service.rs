@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::{
-        content::{LibraryKnowledgeCoverage, revision_text_state_is_readable},
+        content::LibraryKnowledgeCoverage,
         knowledge::{
             KnowledgeChunk, KnowledgeContextBundle, KnowledgeDocument, KnowledgeLibraryGeneration,
             KnowledgeLibrarySummary, KnowledgeRevision, StructuredBlock,
@@ -188,7 +188,11 @@ impl KnowledgeService {
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         state
             .arango_graph_store
-            .upsert_document_revision_edge(command.document_id, command.revision_id)
+            .upsert_document_revision_edge(
+                command.document_id,
+                command.revision_id,
+                command.library_id,
+            )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_revision_row(row))
@@ -358,7 +362,7 @@ impl KnowledgeService {
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         state
             .arango_graph_store
-            .upsert_revision_chunk_edge(command.revision_id, command.chunk_id)
+            .upsert_revision_chunk_edge(command.revision_id, command.chunk_id, command.library_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_chunk_row(row))
@@ -408,14 +412,18 @@ impl KnowledgeService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
-        let mut chunk_ids_by_revision = std::collections::BTreeMap::<Uuid, Vec<Uuid>>::new();
+        let mut chunk_ids_by_revision =
+            std::collections::BTreeMap::<Uuid, (Uuid, Vec<Uuid>)>::new();
         for command in &commands {
-            chunk_ids_by_revision.entry(command.revision_id).or_default().push(command.chunk_id);
+            let entry = chunk_ids_by_revision
+                .entry(command.revision_id)
+                .or_insert_with(|| (command.library_id, Vec::new()));
+            entry.1.push(command.chunk_id);
         }
-        for (revision_id, chunk_ids) in chunk_ids_by_revision {
+        for (revision_id, (library_id, chunk_ids)) in chunk_ids_by_revision {
             state
                 .arango_graph_store
-                .insert_revision_chunk_edges(revision_id, &chunk_ids)
+                .insert_revision_chunk_edges(revision_id, &chunk_ids, library_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         }
@@ -584,13 +592,24 @@ impl KnowledgeService {
         })
     }
 
+    /// Canonical library summary. Was previously enumerating every document
+    /// via `list_documents` (N × 6 prefetch round-trips — catastrophic on
+    /// a reference library with ~5 k documents). Now a single aggregate Postgres query
+    /// plus the graph-snapshot row plus the library generations list.
     pub async fn get_library_summary(
         &self,
         state: &AppState,
         library_id: Uuid,
     ) -> Result<KnowledgeLibrarySummary, ApiError> {
-        let (summaries, generations, graph_snapshot) = tokio::try_join!(
-            state.canonical_services.content.list_documents(state, library_id),
+        let (readiness, generations, graph_snapshot) = tokio::try_join!(
+            async {
+                repositories::content_repository::aggregate_library_document_readiness(
+                    &state.persistence.postgres,
+                    library_id,
+                )
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))
+            },
             self.list_library_generations(state, library_id),
             async {
                 repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
@@ -598,25 +617,58 @@ impl KnowledgeService {
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))
             },
         )?;
+
         let latest_generation = generations.into_iter().next();
-        let coverage = state.canonical_services.ops.derive_library_knowledge_coverage(
-            library_id,
-            &summaries,
-            latest_generation.as_ref().map(|generation| generation.id),
-        );
+
+        // The Postgres aggregate doesn't split graph_ready vs graph_sparse —
+        // that split lives in ArangoDB's per-revision graph_state and would
+        // require a second round-trip. For the summary card we approximate
+        // using the graph-snapshot presence: if the snapshot reports any
+        // nodes, the library has at least one graph-ready document.
+        let graph_ready_document_count =
+            if graph_snapshot.as_ref().is_some_and(|snapshot| snapshot.node_count > 0) {
+                readiness.readable_count
+            } else {
+                0
+            };
+        let graph_sparse_document_count =
+            readiness.readable_count.saturating_sub(graph_ready_document_count);
+
+        let mut document_counts_by_readiness = std::collections::BTreeMap::<String, i64>::new();
+        if readiness.failed_count > 0 {
+            document_counts_by_readiness.insert("failed".to_string(), readiness.failed_count);
+        }
+        if readiness.processing_count > 0 {
+            document_counts_by_readiness
+                .insert("processing".to_string(), readiness.processing_count);
+        }
+        if graph_ready_document_count > 0 {
+            document_counts_by_readiness
+                .insert("graph_ready".to_string(), graph_ready_document_count);
+        }
+        if graph_sparse_document_count > 0 {
+            document_counts_by_readiness
+                .insert("graph_sparse".to_string(), graph_sparse_document_count);
+        }
+
         Ok(KnowledgeLibrarySummary {
-            library_id: coverage.library_id,
-            document_counts_by_readiness: coverage.document_counts_by_readiness,
+            library_id,
+            document_counts_by_readiness,
             node_count: graph_snapshot
                 .as_ref()
                 .map_or(0, |snapshot| i64::from(snapshot.node_count)),
             edge_count: graph_snapshot
                 .as_ref()
                 .map_or(0, |snapshot| i64::from(snapshot.edge_count)),
-            graph_ready_document_count: coverage.graph_ready_document_count,
-            graph_sparse_document_count: coverage.graph_sparse_document_count,
-            typed_fact_document_count: coverage.typed_fact_document_count,
-            updated_at: coverage.updated_at,
+            graph_ready_document_count,
+            graph_sparse_document_count,
+            // typed_fact count is a refinement that lives in ArangoDB's
+            // structured revision rows; without enumerating documents we
+            // cannot derive it cheaply. Report 0 rather than N round-trips —
+            // clients that need the exact figure should hit the dedicated
+            // library coverage endpoint.
+            typed_fact_document_count: 0,
+            updated_at: chrono::Utc::now(),
             latest_generation,
         })
     }
@@ -629,64 +681,34 @@ impl KnowledgeService {
         library_id: Uuid,
     ) -> Result<Vec<crate::infra::arangodb::document_store::KnowledgeLibraryGenerationRow>, ApiError>
     {
+        // Canonical one-shot aggregate — the previous implementation
+        // iterated every document + fetched its revision list one
+        // document at a time, producing ~5k sequential Arango round-trips
+        // on a 5k-doc library and dominating dashboard latency. The
+        // aggregate returns the three readable revision numbers and a
+        // `latest_created_at` field in a single AQL call.
         let library = state.canonical_services.catalog.get_library(state, library_id).await?;
-        let documents = state
+        let signals = state
             .arango_document_store
-            .list_documents_by_library(library.workspace_id, library_id, false)
+            .aggregate_library_generation_signals(library_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
-        let mut active_text_generation = 0i64;
-        let mut active_vector_generation = 0i64;
-        let mut active_graph_generation = 0i64;
-        let mut has_ready_text = false;
-        let mut has_ready_vector = false;
-        let mut has_ready_graph = false;
-        let mut updated_at = None;
-
-        for document in documents {
-            let revisions = state
-                .arango_document_store
-                .list_revisions_by_document(document.document_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-            for revision in revisions {
-                updated_at = Some(updated_at.map_or(revision.created_at, |current| {
-                    if revision.created_at > current { revision.created_at } else { current }
-                }));
-                if revision_text_state_is_readable(&revision.text_state) {
-                    has_ready_text = true;
-                    active_text_generation = active_text_generation.max(revision.revision_number);
-                }
-                if matches!(
-                    revision.vector_state.as_str(),
-                    "ready" | "vector_ready" | "graph_ready"
-                ) {
-                    has_ready_vector = true;
-                    active_vector_generation =
-                        active_vector_generation.max(revision.revision_number);
-                }
-                if matches!(revision.graph_state.as_str(), "ready" | "graph_ready") {
-                    has_ready_graph = true;
-                    active_graph_generation = active_graph_generation.max(revision.revision_number);
-                }
-            }
-        }
-
-        if !has_ready_text && !has_ready_vector && !has_ready_graph {
+        if !signals.has_ready_text && !signals.has_ready_vector && !signals.has_ready_graph {
             return Ok(Vec::new());
         }
 
-        let degraded_state = if has_ready_text && has_ready_vector && has_ready_graph {
-            "ready"
-        } else {
-            "degraded"
-        };
+        let degraded_state =
+            if signals.has_ready_text && signals.has_ready_vector && signals.has_ready_graph {
+                "ready"
+            } else {
+                "degraded"
+            };
         let generation_id = derive_library_generation_id(
             library_id,
-            active_text_generation,
-            active_vector_generation,
-            active_graph_generation,
+            signals.active_text_generation,
+            signals.active_vector_generation,
+            signals.active_graph_generation,
             degraded_state,
         );
         Ok(vec![crate::infra::arangodb::document_store::KnowledgeLibraryGenerationRow {
@@ -696,11 +718,11 @@ impl KnowledgeService {
             generation_id,
             workspace_id: library.workspace_id,
             library_id,
-            active_text_generation,
-            active_vector_generation,
-            active_graph_generation,
+            active_text_generation: signals.active_text_generation,
+            active_vector_generation: signals.active_vector_generation,
+            active_graph_generation: signals.active_graph_generation,
             degraded_state: degraded_state.to_string(),
-            updated_at: updated_at.unwrap_or_else(chrono::Utc::now),
+            updated_at: signals.latest_created_at.unwrap_or_else(chrono::Utc::now),
         }])
     }
 }
@@ -779,7 +801,7 @@ fn map_structured_revision_row(
     })
 }
 
-fn map_structured_block_row(
+pub(crate) fn map_structured_block_row(
     row: crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow,
 ) -> Result<StructuredBlock, ApiError> {
     let block_kind =

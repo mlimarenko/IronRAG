@@ -6,7 +6,7 @@ fn sample_settings() -> Settings {
         bind_addr: "0.0.0.0:8080".into(),
         service_role: "api".into(),
         database_url: "postgres://postgres:postgres@127.0.0.1:5432/ironrag".into(),
-        database_max_connections: 20,
+        database_max_connections: 64,
         redis_url: "redis://127.0.0.1:6379".into(),
         arangodb_url: "http://127.0.0.1:8529".into(),
         arangodb_database: "ironrag".into(),
@@ -64,14 +64,17 @@ fn sample_settings() -> Settings {
         web_ingest_max_redirects: 10,
         web_ingest_user_agent: "IronRAG-WebIngest/0.1".into(),
         web_ingest_crawl_concurrency: 4,
-        ingestion_worker_concurrency: 4,
+        ingestion_max_parallel_jobs_global: 512,
+        ingestion_max_parallel_jobs_per_workspace: 128,
+        ingestion_max_parallel_jobs_per_library: 16,
+        ingestion_memory_soft_limit_mib: 0,
         ingestion_worker_lease_seconds: 300,
         ingestion_worker_heartbeat_interval_seconds: 15,
-        ingestion_max_jobs_per_library: 0,
         ingestion_embedding_parallelism: 4,
+        ingestion_graph_extract_parallelism_per_doc: 8,
         llm_http_timeout_seconds: 120,
-        llm_transport_retry_attempts: 3,
-        llm_transport_retry_base_delay_ms: 250,
+        llm_transport_retry_attempts: 5,
+        llm_transport_retry_base_delay_ms: 500,
         runtime_agent_max_turns: 4,
         runtime_agent_max_parallel_actions: 4,
         runtime_trace_payload_budget_bytes: DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES,
@@ -87,7 +90,8 @@ fn sample_settings() -> Settings {
         query_rerank_candidate_limit: 24,
         query_balanced_context_enabled: true,
         runtime_graph_extract_recovery_enabled: true,
-        runtime_graph_extract_recovery_max_attempts: 2,
+        runtime_graph_extract_recovery_max_attempts: 4,
+        runtime_graph_extract_stage_timeout_seconds: 600,
         runtime_graph_extract_resume_downgrade_level_one_after_replays: 3,
         runtime_graph_extract_resume_downgrade_level_two_after_replays: 5,
         runtime_graph_summary_refresh_batch_size: 64,
@@ -98,8 +102,8 @@ fn sample_settings() -> Settings {
         runtime_graph_filter_empty_relations: true,
         runtime_graph_filter_degenerate_self_loops: true,
         runtime_graph_convergence_warning_backlog_threshold: 1,
-        mcp_memory_default_read_window_chars: 12_000,
-        mcp_memory_max_read_window_chars: 50_000,
+        mcp_memory_default_read_window_chars: 48_000,
+        mcp_memory_max_read_window_chars: 192_000,
         mcp_memory_default_search_limit: 10,
         mcp_memory_max_search_limit: 25,
         mcp_memory_idempotency_retention_hours: 72,
@@ -129,6 +133,7 @@ fn settings_from_env_entries(entries: &[(&str, &str)]) -> Settings {
     validate_service_role(&settings).expect("role should validate");
     validate_service_name(&settings).expect("service name should validate");
     validate_arangodb_settings(&settings).expect("arangodb settings should validate");
+    validate_ingestion_settings(&settings).expect("ingestion settings should validate");
     validate_runtime_agent_settings(&settings).expect("runtime settings should validate");
     validate_release_monitor_settings(&settings).expect("release monitor settings should validate");
     validate_mcp_memory_settings(&settings).expect("mcp settings should validate");
@@ -143,12 +148,16 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.service_role, "api");
     assert_eq!(settings.service_name, "ironrag-backend");
     assert_eq!(settings.environment, "local");
-    assert_eq!(settings.database_max_connections, 20);
+    assert_eq!(settings.database_max_connections, 64);
+    assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 8);
     assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
     assert_eq!(settings.arangodb_url, "http://127.0.0.1:8529");
     assert_eq!(settings.arangodb_database, "ironrag");
     assert_eq!(settings.log_filter, "info");
-    assert_eq!(settings.ingestion_worker_concurrency, 4);
+    assert_eq!(settings.ingestion_max_parallel_jobs_global, 512);
+    assert_eq!(settings.ingestion_max_parallel_jobs_per_workspace, 128);
+    assert_eq!(settings.ingestion_max_parallel_jobs_per_library, 16);
+    assert_eq!(settings.ingestion_memory_soft_limit_mib, 0);
     assert_eq!(settings.runtime_agent_max_turns, 4);
     assert_eq!(settings.release_check_repository, "mlimarenko/IronRAG");
     assert_eq!(settings.release_check_interval_hours, 12);
@@ -165,13 +174,13 @@ fn from_env_has_sane_local_defaults() {
     assert!(settings.query_rerank_enabled);
     assert!(settings.runtime_graph_extract_recovery_enabled);
     assert_eq!(settings.content_storage_root, "/var/lib/ironrag/content-storage");
-    assert_eq!(settings.runtime_document_activity_freshness_seconds, 45);
-    assert_eq!(settings.runtime_document_stalled_after_seconds, 180);
+    assert_eq!(settings.runtime_document_activity_freshness_seconds, 90);
+    assert_eq!(settings.runtime_document_stalled_after_seconds, 240);
     assert!(settings.runtime_graph_filter_empty_relations);
     assert!(settings.runtime_graph_filter_degenerate_self_loops);
     assert_eq!(settings.runtime_graph_convergence_warning_backlog_threshold, 1);
-    assert_eq!(settings.mcp_memory_default_read_window_chars, 12_000);
-    assert_eq!(settings.mcp_memory_max_read_window_chars, 50_000);
+    assert_eq!(settings.mcp_memory_default_read_window_chars, 48_000);
+    assert_eq!(settings.mcp_memory_max_read_window_chars, 192_000);
     assert_eq!(settings.mcp_memory_default_search_limit, 10);
     assert_eq!(settings.mcp_memory_max_search_limit, 25);
     assert_eq!(settings.mcp_memory_idempotency_retention_hours, 72);
@@ -196,6 +205,45 @@ fn canonical_prefixed_flat_variables_override_defaults() {
     assert_eq!(settings.database_url, "postgres://postgres:postgres@postgres:5432/ironrag");
     assert_eq!(settings.service_role, "api");
     assert_eq!(settings.log_filter, "debug");
+}
+
+#[test]
+fn canonical_ingestion_limit_variables_override_defaults() {
+    let settings = settings_from_env_entries(&[
+        ("IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL", "600"),
+        ("IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE", "144"),
+        ("IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY", "24"),
+    ]);
+
+    assert_eq!(settings.ingestion_max_parallel_jobs_global, 600);
+    assert_eq!(settings.ingestion_max_parallel_jobs_per_workspace, 144);
+    assert_eq!(settings.ingestion_max_parallel_jobs_per_library, 24);
+}
+
+#[test]
+fn ingestion_limits_must_nest_from_library_to_global() {
+    let mut settings = sample_settings();
+    settings.ingestion_max_parallel_jobs_global = 64;
+    settings.ingestion_max_parallel_jobs_per_workspace = 96;
+
+    assert_eq!(
+        validate_ingestion_settings(&settings),
+        Err(
+            "ingestion_max_parallel_jobs_per_workspace must be less than or equal to ingestion_max_parallel_jobs_global"
+                .into(),
+        ),
+    );
+
+    settings.ingestion_max_parallel_jobs_per_workspace = 32;
+    settings.ingestion_max_parallel_jobs_per_library = 48;
+
+    assert_eq!(
+        validate_ingestion_settings(&settings),
+        Err(
+            "ingestion_max_parallel_jobs_per_library must be less than or equal to ingestion_max_parallel_jobs_per_workspace"
+                .into(),
+        ),
+    );
 }
 
 #[test]

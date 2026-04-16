@@ -93,21 +93,29 @@ pub fn router() -> Router<AppState> {
         .route("/catalog/libraries/{library_id}", get(get_library).put(update_library))
 }
 
+#[tracing::instrument(level = "info", name = "http.list_workspaces", skip_all, fields(item_count))]
 async fn list_workspaces(
     auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CatalogWorkspaceResponse>>, ApiError> {
+    let span = tracing::Span::current();
     auth.require_discover_any_workspace(POLICY_MCP_DISCOVERY)?;
     let workspaces = state.canonical_services.catalog.list_workspaces(&state, None).await?;
-    Ok(Json(
-        workspaces
-            .into_iter()
-            .filter(|workspace| authorize_workspace_discovery(&auth, workspace.id).is_ok())
-            .map(map_workspace)
-            .collect(),
-    ))
+    let items: Vec<_> = workspaces
+        .into_iter()
+        .filter(|workspace| authorize_workspace_discovery(&auth, workspace.id).is_ok())
+        .map(map_workspace)
+        .collect();
+    span.record("item_count", items.len());
+    Ok(Json(items))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_workspace",
+    skip_all,
+    fields(workspace_id = %workspace_id)
+)]
 async fn get_workspace(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -118,6 +126,7 @@ async fn get_workspace(
     Ok(Json(map_workspace(workspace)))
 }
 
+#[tracing::instrument(level = "info", name = "http.create_workspace", skip_all)]
 async fn create_workspace(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -173,6 +182,12 @@ async fn create_workspace(
     Ok(Json(map_workspace(workspace)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.delete_workspace",
+    skip_all,
+    fields(workspace_id = %workspace_id)
+)]
 async fn delete_workspace(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -217,24 +232,37 @@ async fn delete_workspace(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_libraries",
+    skip_all,
+    fields(workspace_id = %workspace_id, item_count)
+)]
 async fn list_libraries(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<Vec<CatalogLibraryResponse>>, ApiError> {
+    let span = tracing::Span::current();
     authorize_workspace_discovery(&auth, workspace_id)?;
     let libraries = state.canonical_services.catalog.list_libraries(&state, workspace_id).await?;
-    Ok(Json(
-        libraries
-            .into_iter()
-            .filter(|library| {
-                authorize_library_discovery(&auth, library.workspace_id, library.id).is_ok()
-            })
-            .map(map_library)
-            .collect(),
-    ))
+    let items: Vec<_> = libraries
+        .into_iter()
+        .filter(|library| {
+            authorize_library_discovery(&auth, library.workspace_id, library.id).is_ok()
+        })
+        .map(map_library)
+        .collect();
+    span.record("item_count", items.len());
+    Ok(Json(items))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_library",
+    skip_all,
+    fields(workspace_id = %workspace_id)
+)]
 async fn create_library(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -283,6 +311,12 @@ async fn create_library(
     Ok(Json(map_library(library)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.delete_library",
+    skip_all,
+    fields(workspace_id = %workspace_id, library_id = %library_id)
+)]
 async fn delete_library(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -322,6 +356,12 @@ async fn delete_library(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_library",
+    skip_all,
+    fields(library_id = %library_id)
+)]
 async fn get_library(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -332,6 +372,12 @@ async fn get_library(
     Ok(Json(map_library(library)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_library",
+    skip_all,
+    fields(library_id = %library_id)
+)]
 async fn update_library(
     auth: AuthContext,
     State(state): State<AppState>,

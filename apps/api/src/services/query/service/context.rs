@@ -31,6 +31,7 @@ use crate::{
     },
     integrations::llm::EmbeddingRequest,
     interfaces::http::router_support::ApiError,
+    services::query::assistant_grounding::AssistantGroundingDocumentReference,
 };
 
 use super::{
@@ -492,22 +493,22 @@ pub(crate) async fn assemble_context_bundle(
         .context("failed to upsert knowledge context bundle document")?;
     state
         .arango_context_store
-        .replace_bundle_chunk_edges(bundle_id, &chunk_edges)
+        .replace_bundle_chunk_edges(bundle_id, conversation.library_id, &chunk_edges)
         .await
         .context("failed to replace bundle chunk edges")?;
     state
         .arango_context_store
-        .replace_bundle_entity_edges(bundle_id, &entity_edges)
+        .replace_bundle_entity_edges(bundle_id, conversation.library_id, &entity_edges)
         .await
         .context("failed to replace bundle entity edges")?;
     state
         .arango_context_store
-        .replace_bundle_relation_edges(bundle_id, &relation_edges)
+        .replace_bundle_relation_edges(bundle_id, conversation.library_id, &relation_edges)
         .await
         .context("failed to replace bundle relation edges")?;
     state
         .arango_context_store
-        .replace_bundle_evidence_edges(bundle_id, &evidence_edges)
+        .replace_bundle_evidence_edges(bundle_id, conversation.library_id, &evidence_edges)
         .await
         .context("failed to replace bundle evidence edges")?;
 
@@ -1034,6 +1035,8 @@ pub(crate) async fn load_execution_prepared_reference_context(
     };
     let segment_revision_info =
         load_prepared_segment_revision_info(state, &structured_block_rows).await;
+    let assistant_document_references =
+        assistant_document_references_from_diagnostics(&bundle.bundle.assembly_diagnostics);
 
     Ok(ExecutionPreparedReferenceContext {
         bundle_refs,
@@ -1042,7 +1045,21 @@ pub(crate) async fn load_execution_prepared_reference_context(
         block_rank_refs,
         structured_block_rows,
         segment_revision_info,
+        assistant_document_references,
     })
+}
+
+fn assistant_document_references_from_diagnostics(
+    assembly_diagnostics: &serde_json::Value,
+) -> Vec<AssistantGroundingDocumentReference> {
+    assembly_diagnostics
+        .get("assistantGrounding")
+        .and_then(|value| value.get("documentReferences"))
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<Vec<AssistantGroundingDocumentReference>>(value).ok()
+        })
+        .unwrap_or_default()
 }
 
 async fn load_prepared_segment_revision_info(

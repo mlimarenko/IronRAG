@@ -20,12 +20,59 @@ use crate::{
     integrations::llm::{ChatMessage, ToolUseRequest},
     interfaces::http::auth::AuthContext,
     interfaces::http::mcp::agent_bridge::{dispatch_assistant_tool, list_assistant_tools},
+    services::query::assistant_grounding::AssistantGroundingEvidence,
 };
 
 /// Maximum number of LLM <-> tool round trips per turn. Each iteration is
 /// one LLM call. Real assistants almost never need more than 4–5; the cap
 /// exists purely as a runaway guard.
-const MAX_AGENT_ITERATIONS: usize = 10;
+/// Upper bound on tool-call rounds for the assistant agent loop.
+///
+/// A round is one LLM response + tool dispatch pair; the cap is a
+/// circuit-breaker against runaway planning, NOT a product budget.
+/// Empirically the old cap of 10 was not enough for grounded answers
+/// on large libraries that span many documents: the agent routinely
+/// needs 1 list + 2-3 search refinements + 4-6 read_document calls
+/// (with continuation tokens on long docs) before it has enough
+/// evidence. The per-result truncation below keeps the provider
+/// payload bounded regardless of how many iterations the agent runs.
+const MAX_AGENT_ITERATIONS: usize = 20;
+
+/// Per-tool-result character budget appended to the conversation.
+///
+/// A single `read_document` with `mode=full` can return tens of
+/// kilobytes of text; after 3-4 such reads the accumulated messages
+/// body blows past the provider's request entity limit (we saw
+/// `413 Payload Too Large` from DeepSeek after ~10 iterations). The
+/// agent already has `continuationToken` as a canonical mechanism
+/// for paging through long documents — when a tool result exceeds
+/// this budget we truncate and append an explicit notice telling the
+/// model to request the next window. 16 KB is enough for one dense
+/// PDF section, small enough that 20 tool calls × 16 KB still leave
+/// headroom for the system prompt, user question and assistant
+/// thoughts inside a 128 k token window.
+const MAX_TOOL_RESULT_CHARS: usize = 16 * 1024;
+
+/// Progress events emitted by the assistant agent loop while it is
+/// iterating through tool calls. Surfaced to the SSE stream so the UI
+/// can render "searching documents…" / "reading Frontol 6 manual…"
+/// live instead of sitting under keep-alive frames while the LLM
+/// grinds through 8-11 iterations.
+#[derive(Debug, Clone)]
+pub enum AgentProgressEvent {
+    /// Final assistant answer text. Emitted once, at the end.
+    AnswerDelta(String),
+    /// The agent just asked the runtime to dispatch a tool call.
+    ToolCallStarted { iteration: usize, call_id: String, name: String, arguments_preview: String },
+    /// The runtime returned from a tool dispatch.
+    ToolCallCompleted {
+        iteration: usize,
+        call_id: String,
+        name: String,
+        is_error: bool,
+        result_preview: String,
+    },
+}
 
 /// Final result of one assistant turn.
 #[derive(Debug, Clone)]
@@ -35,6 +82,11 @@ pub struct AgentTurnResult {
     pub usage_json: serde_json::Value,
     pub iterations: usize,
     pub tool_calls_total: usize,
+    pub assistant_grounding: AssistantGroundingEvidence,
+    /// Per-iteration capture of the exact LLM request/response chain,
+    /// for the assistant debug panel. Populated unconditionally — the
+    /// cost is a few clones and the operator toggles the UI to view.
+    pub debug_iterations: Vec<super::llm_context_debug::LlmIterationDebug>,
 }
 
 /// Run one assistant turn through the LLM agent loop.
@@ -44,10 +96,16 @@ pub struct AgentTurnResult {
 /// prior turns (oldest first), used as a single system message so the
 /// model can resolve references to earlier turns.
 ///
-/// `on_delta` is invoked with the final assistant answer in one shot once
-/// the loop exits. Token-level streaming through tool-using models is
-/// provider-specific; we keep the public surface stable by emitting the
-/// final text as a single delta event.
+/// `on_progress` is invoked in real time with:
+///  * [`AgentProgressEvent::ToolCallStarted`] immediately before each
+///    MCP tool dispatch (so the UI can show "searching…" while the
+///    dispatch is in flight);
+///  * [`AgentProgressEvent::ToolCallCompleted`] right after each
+///    dispatch with a short result preview and the error flag;
+///  * [`AgentProgressEvent::AnswerDelta`] once, at the end, carrying
+///    the final answer text. Token-level streaming through tool-using
+///    models is provider-specific — the public surface stays stable
+///    and the final text is emitted as a single delta.
 pub async fn run_assistant_turn(
     state: &AppState,
     auth: &AuthContext,
@@ -55,7 +113,7 @@ pub async fn run_assistant_turn(
     request_id: &str,
     user_question: &str,
     conversation_history: Option<&str>,
-    mut on_delta: Option<&mut (dyn FnMut(String) + Send)>,
+    mut on_progress: Option<&mut (dyn FnMut(AgentProgressEvent) + Send)>,
 ) -> anyhow::Result<AgentTurnResult> {
     // 1. Resolve the configured provider/model for this library's QueryAnswer
     //    binding so the assistant uses whichever model the operator picked.
@@ -78,16 +136,24 @@ pub async fn run_assistant_turn(
     //    sees tools its auth permits — same as `tools/list` over MCP.
     let tools = list_assistant_tools(auth);
 
-    // 3. Build the conversation messages for the LLM.
+    // 3. Build the conversation messages for the LLM. The system
+    //    prompt is the canonical one — exact same text external MCP
+    //    clients get from `/v1/query/assistant/system-prompt`, with
+    //    the active library id substituted in. Keep this path
+    //    trivially thin so the in-app assistant and external agents
+    //    see the same guidance.
     let mut messages = Vec::new();
-    let system_prompt = build_assistant_system_prompt(library_id, conversation_history);
+    let system_prompt = super::assistant_prompt::render(library_id, conversation_history);
     messages.push(ChatMessage::system(system_prompt));
     messages.push(ChatMessage::user(user_question.to_string()));
 
     let mut total_tool_calls = 0usize;
     let mut last_usage = serde_json::json!({});
+    let mut debug_iterations: Vec<super::llm_context_debug::LlmIterationDebug> = Vec::new();
+    let mut assistant_grounding = AssistantGroundingEvidence::default();
 
     for iteration in 1..=MAX_AGENT_ITERATIONS {
+        let request_messages_snapshot = messages.clone();
         let tool_use_request = ToolUseRequest {
             provider_kind: binding.provider_kind.clone(),
             model_name: binding.model_name.clone(),
@@ -101,28 +167,64 @@ pub async fn run_assistant_turn(
             extra_parameters_json: binding.extra_parameters_json.clone(),
         };
 
-        let response = state
-            .llm_gateway
-            .generate_with_tools(tool_use_request)
-            .await
-            .with_context(|| format!("LLM tool-use call failed (iteration {iteration})"))?;
+        // Use the streaming variant so assistant text tokens are
+        // forwarded to the UI the moment the provider emits them
+        // instead of after the whole response finalizes. Tool-call
+        // chunks are buffered inside the gateway and surfaced as the
+        // usual `tool_calls` vector once the stream ends. If the
+        // binding uses a provider that does not implement streaming,
+        // the trait default falls back to non-streaming.
+        //
+        // The lifetime dance: `stream_delta_forwarder` captures a
+        // mutable borrow of `on_progress`, keeps it alive for the
+        // duration of the provider call, and drops it before we
+        // touch `on_progress` again for tool-call events below.
+        let response = {
+            let progress_slot: &mut Option<&mut (dyn FnMut(AgentProgressEvent) + Send)> =
+                &mut on_progress;
+            let mut stream_delta_forwarder = |delta: String| {
+                if delta.is_empty() {
+                    return;
+                }
+                if let Some(emit) = progress_slot.as_deref_mut() {
+                    emit(AgentProgressEvent::AnswerDelta(delta));
+                }
+            };
+            state
+                .llm_gateway
+                .generate_with_tools_stream(tool_use_request, &mut stream_delta_forwarder)
+                .await
+                .with_context(|| format!("LLM tool-use call failed (iteration {iteration})"))?
+        };
 
         last_usage = response.usage_json.clone();
 
         // No tool calls? The model produced its final answer.
         if response.tool_calls.is_empty() {
             let answer = response.output_text.trim().to_string();
-            if let Some(emit) = on_delta.as_deref_mut() {
-                if !answer.is_empty() {
-                    emit(answer.clone());
-                }
-            }
+            debug_iterations.push(super::llm_context_debug::LlmIterationDebug {
+                iteration,
+                provider_kind: binding.provider_kind.clone(),
+                model_name: binding.model_name.clone(),
+                request_messages: request_messages_snapshot,
+                response_text: (!answer.is_empty()).then(|| answer.clone()),
+                response_tool_calls: Vec::new(),
+                usage: last_usage.clone(),
+            });
+            // Text has already been forwarded live through
+            // `stream_delta_forwarder` as the provider produced it,
+            // so we deliberately do NOT re-emit the whole answer
+            // here — doing so would double every character in the
+            // UI bubble. The final `Completed` frame from turn.rs
+            // still carries the authoritative answer text.
             return Ok(AgentTurnResult {
                 answer,
                 provider,
                 usage_json: last_usage,
                 iterations: iteration,
                 tool_calls_total: total_tool_calls,
+                assistant_grounding,
+                debug_iterations,
             });
         }
 
@@ -131,28 +233,65 @@ pub async fn run_assistant_turn(
         messages.push(ChatMessage::assistant_with_tool_calls(response.tool_calls.clone()));
 
         // Execute each tool call and append the result as a `tool` message.
+        // (Sequential for now — parallelizing with buffered streams hits
+        // an HRTB-lifetime Send overflow in the surrounding async
+        // body that needs a larger refactor to fix cleanly.)
+        let mut iteration_tool_debugs: Vec<super::llm_context_debug::ResponseToolCallDebug> =
+            Vec::with_capacity(response.tool_calls.len());
         for call in &response.tool_calls {
             total_tool_calls = total_tool_calls.saturating_add(1);
             let arguments_value: serde_json::Value = serde_json::from_str(&call.arguments_json)
                 .unwrap_or_else(|_| serde_json::json!({}));
-
+            if let Some(emit) = on_progress.as_deref_mut() {
+                emit(AgentProgressEvent::ToolCallStarted {
+                    iteration,
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments_preview: preview_text(&call.arguments_json, 240),
+                });
+            }
             let dispatch =
                 dispatch_assistant_tool(state, auth, request_id, &call.name, &arguments_value)
                     .await;
-
             tracing::debug!(
                 tool = %call.name,
                 arguments = %call.arguments_json,
                 is_error = dispatch.is_error,
                 "assistant agent tool call"
             );
-
-            messages.push(ChatMessage::tool_result(
-                call.id.clone(),
-                call.name.clone(),
-                dispatch.tool_message_text,
-            ));
+            let tool_text = truncate_tool_result(&dispatch.tool_message_text);
+            assistant_grounding.record_tool_result(
+                &call.name,
+                &dispatch.tool_message_text,
+                dispatch.is_error,
+            );
+            if let Some(emit) = on_progress.as_deref_mut() {
+                emit(AgentProgressEvent::ToolCallCompleted {
+                    iteration,
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    is_error: dispatch.is_error,
+                    result_preview: preview_text(&tool_text, 240),
+                });
+            }
+            iteration_tool_debugs.push(super::llm_context_debug::ResponseToolCallDebug {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments_json: call.arguments_json.clone(),
+                result_text: Some(tool_text.clone()),
+                is_error: dispatch.is_error,
+            });
+            messages.push(ChatMessage::tool_result(call.id.clone(), call.name.clone(), tool_text));
         }
+        debug_iterations.push(super::llm_context_debug::LlmIterationDebug {
+            iteration,
+            provider_kind: binding.provider_kind.clone(),
+            model_name: binding.model_name.clone(),
+            request_messages: request_messages_snapshot,
+            response_text: (!response.output_text.is_empty()).then(|| response.output_text.clone()),
+            response_tool_calls: iteration_tool_debugs,
+            usage: last_usage.clone(),
+        });
 
         // Trim runaway tool messages so we never blow past context limits.
         if messages.len() > 80 {
@@ -168,49 +307,76 @@ pub async fn run_assistant_turn(
     )
 }
 
-fn build_assistant_system_prompt(library_id: Uuid, conversation_history: Option<&str>) -> String {
-    let mut prompt = String::new();
-    prompt.push_str(
-        "You are an in-app assistant connected to the IronRAG knowledge platform via MCP \
-tools. You behave like a vanilla MCP user agent: you have NO built-in retrieval, no \
-hidden context, and no special access — only the tools listed below.\n\n",
-    );
-    prompt.push_str(&format!(
-        "The user is currently working in library `{library_id}`. Pass this library id \
-to every tool that requires a `libraryId` argument unless the user explicitly asks you \
-to look at a different library.\n\n",
-    ));
-    prompt.push_str(
-        "Workflow:\n\
-        1. Decide which tool(s) you need to answer the question.\n\
-        2. Call them through the function-calling interface; the runtime will execute \
-each call and return the JSON result.\n\
-        3. Iterate until you have enough grounded information.\n\
-        4. Produce a clear, concise answer in the user's language. Cite document or \
-table names when they are useful, but do not narrate the tool calls themselves.\n\
-        5. If the tools return nothing useful, say so honestly — do NOT invent facts.\n\n",
-    );
-    prompt.push_str(
-        "When the user asks a meta question (\"what is this library about\", \"what \
-documents do you have\"), call `list_documents` (and optionally `list_libraries` / \
-`get_graph_topology`) before answering.\n\n",
-    );
-    prompt.push_str(
-        "When the user asks about specific records or aggregates (\"top customers\", \
-\"how many products\", \"popular cities\"), call `search_documents` or \
-`read_document` to load the actual table content before computing the answer.\n",
-    );
-    prompt.push_str(
-        "When the user asks about images or photos, identify the relevant image documents \
-with `list_documents` or `search_documents`, then call `read_document`. Image reads may \
-include `sourceAccess` plus a `visualDescription` derived from the original source image; \
-prefer that grounded description over guessing from OCR fragments alone.\n",
-    );
+/// Shorten a string to `max_chars` characters on a UTF-8 char
+/// boundary, appending an ellipsis when truncation occurred. Used for
+/// tool-call arguments and result previews pushed to the UI — the
+/// full text is still carried in the debug snapshot.
+fn preview_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(max_chars + 1);
+    for (i, ch) in text.chars().enumerate() {
+        if i >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
 
-    if let Some(history) = conversation_history.map(str::trim).filter(|h| !h.is_empty()) {
-        prompt.push_str("\nRecent conversation (oldest first):\n");
-        prompt.push_str(history);
+/// Enforce [`MAX_TOOL_RESULT_CHARS`] on a single tool result string.
+///
+/// The input is allowed to be any length; the returned string is at
+/// most `MAX_TOOL_RESULT_CHARS + notice.len()` characters, truncated
+/// on a UTF-8 char boundary and tagged with an explicit instruction
+/// so the model knows to use `continuationToken` (or a tighter
+/// search / page parameter) to fetch the remainder instead of
+/// assuming the first window is complete.
+fn truncate_tool_result(text: &str) -> String {
+    if text.len() <= MAX_TOOL_RESULT_CHARS {
+        return text.to_string();
+    }
+    let mut boundary = MAX_TOOL_RESULT_CHARS;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let mut truncated = String::with_capacity(boundary + 160);
+    truncated.push_str(&text[..boundary]);
+    truncated.push_str(
+        "\n\n[tool result truncated to keep the provider payload under limit. \
+If you need more of this document, call `read_document` again with a \
+`continuationToken`, or narrow the query via `search_documents`.]",
+    );
+    truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_TOOL_RESULT_CHARS, truncate_tool_result};
+
+    #[test]
+    fn short_tool_results_pass_through() {
+        let text = "compact result";
+        assert_eq!(truncate_tool_result(text), text);
     }
 
-    prompt
+    #[test]
+    fn long_tool_results_are_truncated_with_notice() {
+        let text = "x".repeat(MAX_TOOL_RESULT_CHARS * 4);
+        let result = truncate_tool_result(&text);
+        assert!(result.len() <= MAX_TOOL_RESULT_CHARS + 400);
+        assert!(result.contains("[tool result truncated"));
+    }
+
+    #[test]
+    fn truncation_respects_utf8_char_boundary() {
+        // Cyrillic: every char is 2 bytes. If we happened to cut mid-char
+        // the slicing below would panic; the point of the test is that it
+        // returns a valid `String`.
+        let text = "ы".repeat(MAX_TOOL_RESULT_CHARS);
+        let result = truncate_tool_result(&text);
+        assert!(result.contains("[tool result truncated"));
+    }
 }

@@ -12,7 +12,8 @@ pub use recovery::{extraction_lifecycle_from_record, extraction_recovery_summary
 pub use types::{
     GraphEntityCandidate, GraphExtractionCandidateSet, GraphExtractionExecutionError,
     GraphExtractionOutcome, GraphExtractionRequest, GraphExtractionResumeState,
-    GraphExtractionStructuredChunkContext, GraphExtractionTaskFailure,
+    GraphExtractionStructuredChunkContext, GraphExtractionSubTypeHintEntry,
+    GraphExtractionSubTypeHintGroup, GraphExtractionSubTypeHints, GraphExtractionTaskFailure,
     GraphExtractionTaskFailureCode, GraphExtractionTechnicalFact, GraphRelationCandidate,
 };
 

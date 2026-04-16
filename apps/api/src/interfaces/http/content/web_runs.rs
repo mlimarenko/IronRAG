@@ -35,6 +35,12 @@ pub(super) struct CreateWebIngestRunRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_web_ingest_run",
+    skip_all,
+    fields(library_id = %request.library_id)
+)]
 pub(super) async fn create_web_ingest_run(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -76,20 +82,34 @@ pub(super) async fn create_web_ingest_run(
     ))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_web_ingest_runs",
+    skip_all,
+    fields(library_id = ?query.library_id, item_count)
+)]
 pub(super) async fn list_web_ingest_runs(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListWebIngestRunsQuery>,
 ) -> Result<Json<Vec<WebIngestRunSummary>>, ApiError> {
+    let span = tracing::Span::current();
     let library_id = query
         .library_id
         .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
     let runs = state.canonical_services.web_ingest.list_runs(&state, library.id).await?;
+    span.record("item_count", runs.len());
     Ok(Json(runs))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_web_ingest_run",
+    skip_all,
+    fields(run_id = %run_id)
+)]
 pub(super) async fn get_web_ingest_run(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -101,18 +121,32 @@ pub(super) async fn get_web_ingest_run(
     Ok(Json(run))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_web_ingest_run_pages",
+    skip_all,
+    fields(run_id = %run_id, item_count)
+)]
 pub(super) async fn list_web_ingest_run_pages(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<Vec<WebDiscoveredPage>>, ApiError> {
+    let span = tracing::Span::current();
     let run = state.canonical_services.web_ingest.get_run(&state, run_id).await?;
     let _library =
         load_library_and_authorize(&auth, &state, run.library_id, POLICY_LIBRARY_READ).await?;
     let pages = state.canonical_services.web_ingest.list_pages(&state, run_id).await?;
+    span.record("item_count", pages.len());
     Ok(Json(pages))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.cancel_web_ingest_run",
+    skip_all,
+    fields(run_id = %run_id)
+)]
 pub(super) async fn cancel_web_ingest_run(
     auth: AuthContext,
     State(state): State<AppState>,

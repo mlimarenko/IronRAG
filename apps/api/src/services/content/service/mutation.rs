@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::content::{ContentMutation, ContentMutationItem},
+    domains::ops::{ASYNC_OP_STATUS_READY, MUTATION_KIND_DELETE},
     infra::repositories::content_repository::{self, NewContentMutation, NewContentMutationItem},
     interfaces::http::router_support::ApiError,
     services::{
@@ -11,6 +12,9 @@ use crate::{
         ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
     },
 };
+
+/// Default priority for content-mutation ingest jobs.
+const DEFAULT_JOB_PRIORITY: i32 = 100;
 
 use super::{
     AcceptMutationCommand, AdmitDocumentCommand, AdmitMutationCommand, ContentMutationAdmission,
@@ -84,6 +88,7 @@ impl ContentService {
                         status: "accepted".to_string(),
                         subject_kind: "content_mutation".to_string(),
                         subject_id: Some(mutation.id),
+                        parent_async_operation_id: None,
                         completed_at: None,
                         failure_code: None,
                     },
@@ -128,7 +133,7 @@ impl ContentService {
                             knowledge_document_id: Some(document.id),
                             knowledge_revision_id: Some(revision.id),
                             job_kind: "content_mutation".to_string(),
-                            priority: 100,
+                            priority: DEFAULT_JOB_PRIORITY,
                             dedupe_key: command.idempotency_key,
                             available_at: None,
                         },
@@ -224,7 +229,7 @@ impl ContentService {
     ) -> Result<ContentMutationAdmission, ApiError> {
         let accept_command = Self::accept_mutation_command_from_admit(&command);
 
-        if command.operation_kind == "delete" {
+        if command.operation_kind == MUTATION_KIND_DELETE {
             let document_lock = content_repository::acquire_content_document_lock(
                 &state.persistence.postgres,
                 command.document_id,
@@ -276,6 +281,7 @@ impl ContentService {
                     status: "accepted".to_string(),
                     subject_kind: "content_mutation".to_string(),
                     subject_id: Some(mutation.id),
+                    parent_async_operation_id: command.parent_async_operation_id,
                     completed_at: None,
                     failure_code: None,
                 },
@@ -475,7 +481,7 @@ impl ContentService {
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 {
-                    Some(existing_row) if existing_row.operation_kind == "delete" => {
+                    Some(existing_row) if existing_row.operation_kind == MUTATION_KIND_DELETE => {
                         map_mutation_row(existing_row)
                     }
                     _ => self.accept_mutation(state, accept_command.clone()).await?,
@@ -718,7 +724,7 @@ impl ContentService {
             .await?
         };
 
-        if async_operation.status != "ready"
+        if async_operation.status != ASYNC_OP_STATUS_READY
             || async_operation.completed_at.is_none()
             || async_operation.failure_code.is_some()
         {
@@ -825,6 +831,7 @@ impl ContentService {
                     status: "accepted".to_string(),
                     subject_kind: "content_mutation".to_string(),
                     subject_id: Some(mutation_id),
+                    parent_async_operation_id: None,
                     completed_at: None,
                     failure_code: None,
                 },

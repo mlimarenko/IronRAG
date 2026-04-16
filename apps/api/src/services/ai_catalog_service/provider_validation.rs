@@ -1,9 +1,23 @@
 use super::*;
 use crate::{
-    integrations::llm::ChatRequest, shared::provider_base_url::provider_base_url_candidates,
+    domains::provider_profiles::SupportedProviderKind, integrations::llm::ChatRequest,
+    shared::provider_base_url::provider_base_url_candidates,
 };
 use reqwest::{Client, Url};
 use serde_json::{Value, json};
+
+const TEXT_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 2] =
+    [AiBindingPurpose::ExtractGraph, AiBindingPurpose::QueryAnswer];
+const MULTIMODAL_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 3] =
+    [AiBindingPurpose::ExtractGraph, AiBindingPurpose::QueryAnswer, AiBindingPurpose::Vision];
+const EMBEDDING_BINDING_PURPOSES: [AiBindingPurpose; 1] = [AiBindingPurpose::EmbedChunk];
+
+#[derive(Clone, Copy)]
+pub(super) struct DiscoveredModelSignature {
+    pub(super) capability_kind: &'static str,
+    pub(super) modality_kind: &'static str,
+    pub(super) allowed_binding_purposes: &'static [AiBindingPurpose],
+}
 
 pub(super) fn normalize_provider_base_url_input(
     provider: &ProviderCatalogEntry,
@@ -51,7 +65,7 @@ pub(super) fn canonicalize_provider_base_url(
         ))
     })?;
     if matches!(url.scheme(), "http" | "https") {
-        if provider.provider_kind == "ollama" {
+        if provider.provider_kind == SupportedProviderKind::Ollama.as_str() {
             let mut path_segments = url
                 .path_segments()
                 .map(|segments| segments.filter(|segment| !segment.is_empty()).collect::<Vec<_>>())
@@ -78,32 +92,153 @@ pub(super) fn canonicalize_provider_base_url(
     )))
 }
 
-fn discovered_ollama_model_signature(
-    model_name: &str,
-) -> (&'static str, &'static str, Vec<AiBindingPurpose>) {
-    let normalized = model_name.trim().to_ascii_lowercase();
-    if normalized.contains("embedding") {
-        return ("embedding", "text", vec![AiBindingPurpose::EmbedChunk]);
+fn text_chat_signature() -> DiscoveredModelSignature {
+    DiscoveredModelSignature {
+        capability_kind: "chat",
+        modality_kind: "text",
+        allowed_binding_purposes: &TEXT_CHAT_BINDING_PURPOSES,
     }
-    if normalized.contains("vl")
-        || normalized.contains("vision")
-        || normalized.contains("llava")
-        || normalized.contains("minicpm-v")
-    {
-        return ("chat", "multimodal", vec![AiBindingPurpose::Vision]);
-    }
-    ("chat", "text", vec![AiBindingPurpose::ExtractGraph, AiBindingPurpose::QueryAnswer])
 }
 
-pub(super) async fn ensure_discovered_ollama_model_catalog_entry(
+fn multimodal_chat_signature() -> DiscoveredModelSignature {
+    DiscoveredModelSignature {
+        capability_kind: "chat",
+        modality_kind: "multimodal",
+        allowed_binding_purposes: &MULTIMODAL_CHAT_BINDING_PURPOSES,
+    }
+}
+
+fn embedding_signature() -> DiscoveredModelSignature {
+    DiscoveredModelSignature {
+        capability_kind: "embedding",
+        modality_kind: "text",
+        allowed_binding_purposes: &EMBEDDING_BINDING_PURPOSES,
+    }
+}
+
+fn model_name_looks_like_embedding(normalized: &str) -> bool {
+    normalized.contains("embedding")
+        || normalized.contains("-embed")
+        || normalized.contains("embed-")
+        || normalized.starts_with("bge-")
+        || normalized.starts_with("all-minilm")
+}
+
+fn model_name_looks_like_multimodal(normalized: &str) -> bool {
+    normalized.contains("vision")
+        || normalized.contains("vl")
+        || normalized.contains("ocr")
+        || normalized.contains("llava")
+        || normalized.contains("bakllava")
+        || normalized.contains("minicpm-v")
+        || normalized.contains("minicpmv")
+        || normalized.contains("moondream")
+        || normalized.contains("smolvlm")
+        || normalized.contains("pixtral")
+        || normalized.contains("qvq")
+}
+
+fn discovered_openai_model_signature(normalized: &str) -> Option<DiscoveredModelSignature> {
+    if normalized.starts_with("text-embedding-") {
+        return Some(embedding_signature());
+    }
+    if normalized.starts_with("gpt-image")
+        || normalized.starts_with("gpt-audio")
+        || normalized.starts_with("gpt-realtime")
+        || normalized.starts_with("omni-moderation")
+        || normalized.starts_with("sora")
+        || normalized.starts_with("whisper")
+        || normalized.contains("-tts")
+        || normalized.contains("-transcribe")
+    {
+        return None;
+    }
+    if normalized.contains("codex")
+        || normalized.starts_with("gpt-5.3-chat")
+        || normalized.starts_with("o1")
+        || normalized.starts_with("o3-mini")
+        || normalized.starts_with("o3-pro")
+    {
+        return Some(text_chat_signature());
+    }
+    if normalized == "o3" || normalized.starts_with("o4-mini") {
+        return Some(multimodal_chat_signature());
+    }
+    if normalized.starts_with("gpt-5")
+        || normalized.starts_with("gpt-4.1")
+        || normalized.starts_with("gpt-4o")
+        || normalized.starts_with("gpt-4")
+    {
+        return Some(multimodal_chat_signature());
+    }
+    None
+}
+
+fn discovered_qwen_model_signature(normalized: &str) -> Option<DiscoveredModelSignature> {
+    if model_name_looks_like_embedding(normalized) {
+        return Some(embedding_signature());
+    }
+    if model_name_looks_like_multimodal(normalized) {
+        return Some(multimodal_chat_signature());
+    }
+    if normalized.starts_with("qwen")
+        || normalized.starts_with("qwq")
+        || normalized.starts_with("qwen-max")
+        || normalized.starts_with("qvq")
+    {
+        return Some(text_chat_signature());
+    }
+    None
+}
+
+fn discovered_ollama_model_signature(model_name: &str) -> DiscoveredModelSignature {
+    let normalized = model_name.trim().to_ascii_lowercase();
+    if model_name_looks_like_embedding(&normalized) {
+        return embedding_signature();
+    }
+    if model_name_looks_like_multimodal(&normalized)
+        || normalized.starts_with("gemma3")
+        || normalized.starts_with("llama4")
+    {
+        return multimodal_chat_signature();
+    }
+    text_chat_signature()
+}
+
+pub(super) fn discovered_provider_model_signature(
+    provider_kind: &str,
+    model_name: &str,
+) -> Option<DiscoveredModelSignature> {
+    let normalized = model_name.trim().to_ascii_lowercase();
+    match provider_kind {
+        "openai" => discovered_openai_model_signature(&normalized),
+        "deepseek" => {
+            if model_name_looks_like_embedding(&normalized) {
+                Some(embedding_signature())
+            } else if normalized.starts_with("deepseek") {
+                Some(text_chat_signature())
+            } else {
+                None
+            }
+        }
+        "qwen" => discovered_qwen_model_signature(&normalized),
+        "ollama" => Some(discovered_ollama_model_signature(model_name)),
+        _ => None,
+    }
+}
+
+pub(super) async fn ensure_discovered_provider_model_catalog_entry(
     state: &AppState,
-    provider_catalog_id: Uuid,
+    provider: &ProviderCatalogEntry,
     model_name: &str,
 ) -> Result<(), ApiError> {
-    let (capability_kind, modality_kind, allowed_binding_purposes) =
-        discovered_ollama_model_signature(model_name);
+    let Some(signature) = discovered_provider_model_signature(&provider.provider_kind, model_name)
+    else {
+        return Ok(());
+    };
     let metadata_json = json!({
-        "defaultRoles": allowed_binding_purposes
+        "defaultRoles": signature
+            .allowed_binding_purposes
             .iter()
             .map(|purpose| purpose.as_str())
             .collect::<Vec<_>>(),
@@ -111,15 +246,31 @@ pub(super) async fn ensure_discovered_ollama_model_catalog_entry(
     });
     ai_repository::upsert_model_catalog(
         &state.persistence.postgres,
-        provider_catalog_id,
+        provider.id,
         model_name,
-        capability_kind,
-        modality_kind,
+        signature.capability_kind,
+        signature.modality_kind,
         metadata_json,
     )
     .await
     .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     Ok(())
+}
+
+pub(super) async fn sync_provider_model_catalog(
+    state: &AppState,
+    provider: &ProviderCatalogEntry,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+) -> Result<Vec<String>, ApiError> {
+    let Some(base_url) = resolve_provider_base_url(provider, base_url)? else {
+        return Ok(Vec::new());
+    };
+    let model_names = fetch_provider_model_names(provider, api_key, &base_url).await?;
+    for model_name in &model_names {
+        ensure_discovered_provider_model_catalog_entry(state, provider, model_name).await?;
+    }
+    Ok(model_names)
 }
 
 pub(super) async fn fetch_provider_model_names(
@@ -326,8 +477,8 @@ pub(super) async fn validate_provider_model_listing(
             provider.provider_kind
         )));
     };
-    let ollama_loopback_base_url =
-        provider.provider_kind == "ollama" && is_loopback_base_url(base_url);
+    let ollama_loopback_base_url = provider.provider_kind == SupportedProviderKind::Ollama.as_str()
+        && is_loopback_base_url(base_url);
     match fetch_provider_model_names(provider, api_key, base_url).await {
         Ok(_) => Ok(()),
         Err(error) if ollama_loopback_base_url => {

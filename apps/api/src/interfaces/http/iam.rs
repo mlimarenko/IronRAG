@@ -56,6 +56,7 @@ pub fn router() -> Router<AppState> {
         .route("/iam/grants/{grant_id}", delete(revoke_grant))
 }
 
+#[tracing::instrument(level = "info", name = "http.get_me", skip_all)]
 async fn get_me(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -104,11 +105,18 @@ async fn get_me(
     }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_tokens",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id, item_count)
+)]
 async fn list_tokens(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListTokensQuery>,
 ) -> Result<Json<Vec<TokenResponse>>, ApiError> {
+    let span = tracing::Span::current();
     auth.require_any_scope(POLICY_IAM_ADMIN)?;
     let workspace_filter = resolve_workspace_filter(&auth, query.workspace_id)?;
 
@@ -131,9 +139,17 @@ async fn list_tokens(
         "listed api tokens",
     );
 
-    Ok(Json(rows.into_iter().map(map_token_row).collect()))
+    let items: Vec<_> = rows.into_iter().map(map_token_row).collect();
+    span.record("item_count", items.len());
+    Ok(Json(items))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.mint_token",
+    skip_all,
+    fields(workspace_id = ?payload.workspace_id)
+)]
 async fn mint_token(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -261,11 +277,18 @@ async fn mint_token(
     Ok(Json(MintTokenResponse { token: outcome.token, api_token: map_token_row(row) }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_grants",
+    skip_all,
+    fields(principal_id = ?query.principal_id, item_count)
+)]
 async fn list_grants(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListGrantsQuery>,
 ) -> Result<Json<Vec<GrantResponse>>, ApiError> {
+    let span = tracing::Span::current();
     auth.require_any_scope(POLICY_IAM_ADMIN)?;
     let principal_id = query.principal_id.unwrap_or(auth.principal_id);
     let rows = iam_repository::list_resolved_grants_by_principal(
@@ -313,9 +336,18 @@ async fn list_grants(
         }
     }
 
-    Ok(Json(rows.into_iter().map(map_resolved_grant_row).collect::<Result<Vec<_>, _>>()?))
+    let items: Vec<_> =
+        rows.into_iter().map(map_resolved_grant_row).collect::<Result<Vec<_>, _>>()?;
+    span.record("item_count", items.len());
+    Ok(Json(items))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.revoke_token",
+    skip_all,
+    fields(token_principal_id = %token_principal_id)
+)]
 async fn revoke_token(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -387,6 +419,12 @@ async fn revoke_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.create_grant",
+    skip_all,
+    fields(principal_id = %payload.principal_id)
+)]
 async fn create_grant(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -435,6 +473,12 @@ async fn create_grant(
     Ok(Json(map_grant_domain(grant)?))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.revoke_grant",
+    skip_all,
+    fields(grant_id = %grant_id)
+)]
 async fn revoke_grant(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -775,7 +819,6 @@ fn build_mint_grants(
     match scope {
         MintGrantScope::Workspace(workspace_id) => permission_kinds
             .iter()
-            .cloned()
             .map(|permission_kind| {
                 validate_permission_kind_for_resource(
                     IamGrantResourceKind::Workspace,
@@ -785,7 +828,7 @@ fn build_mint_grants(
                     resource_kind: GrantResourceKind::Workspace,
                     resource_id: workspace_id,
                     permission_kind: permission_kind.as_str().to_string(),
-                    expires_at: expires_at.clone(),
+                    expires_at,
                 })
             })
             .collect(),

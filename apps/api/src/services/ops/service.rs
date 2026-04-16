@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::ops::{OpsAsyncOperation, OpsLibraryState, OpsLibraryWarning},
+    domains::ops::{
+        OpsAsyncOperation, OpsAsyncOperationProgress, OpsLibraryState, OpsLibraryWarning,
+    },
     domains::{
         content::{
             ContentDocumentPipelineJob, ContentDocumentSummary, ContentMutation,
@@ -14,7 +16,7 @@ use crate::{
         knowledge::{KnowledgeLibraryGeneration, StructuredDocumentRevision},
     },
     infra::arangodb::document_store::KnowledgeRevisionRow,
-    infra::repositories::ops_repository,
+    infra::repositories::{self, content_repository, ops_repository},
     interfaces::http::router_support::ApiError,
 };
 
@@ -28,6 +30,10 @@ pub struct CreateAsyncOperationCommand {
     pub status: String,
     pub subject_kind: String,
     pub subject_id: Option<Uuid>,
+    /// When set, links this operation as a child of a parent batch op.
+    /// Used by canonical batch endpoints (batch-reprocess, …) so progress
+    /// polling can aggregate child counts from a single parent id.
+    pub parent_async_operation_id: Option<Uuid>,
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub failure_code: Option<String>,
 }
@@ -83,6 +89,7 @@ impl OpsService {
                 status: &command.status,
                 subject_kind: &command.subject_kind,
                 subject_id: command.subject_id,
+                parent_async_operation_id: command.parent_async_operation_id,
                 completed_at: command.completed_at,
                 failure_code: command.failure_code.as_deref(),
             },
@@ -125,6 +132,26 @@ impl OpsService {
         Ok(map_async_operation_row(row))
     }
 
+    /// Aggregated child-operation counts for a parent batch `ops_async_operation`.
+    /// Returns zero counts when the operation has no children (it is not a
+    /// batch parent, or no children have been linked yet).
+    pub async fn get_async_operation_progress(
+        &self,
+        state: &AppState,
+        parent_id: Uuid,
+    ) -> Result<OpsAsyncOperationProgress, ApiError> {
+        let row =
+            ops_repository::get_async_operation_progress(&state.persistence.postgres, parent_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(OpsAsyncOperationProgress {
+            total: row.total,
+            completed: row.completed,
+            failed: row.failed,
+            in_flight: row.in_flight,
+        })
+    }
+
     pub async fn get_latest_async_operation_by_subject(
         &self,
         state: &AppState,
@@ -155,13 +182,8 @@ impl OpsService {
         knowledge_generations.sort_by(|left, right| {
             right.created_at.cmp(&left.created_at).then_with(|| right.id.cmp(&left.id))
         });
-        let document_summaries =
-            state.canonical_services.content.list_documents(state, library_id).await?;
-        let coverage = self.derive_library_knowledge_coverage(
-            library_id,
-            &document_summaries,
-            knowledge_generations.first().map(|generation| generation.id),
-        );
+        let readiness =
+            load_library_coverage_fast(state, library_id, knowledge_generations.first()).await?;
         let failed_attempts = ops_repository::list_recent_failed_ingest_attempts(
             &state.persistence.postgres,
             library_id,
@@ -176,11 +198,10 @@ impl OpsService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let state = map_library_facts_row(
+        let state = map_library_facts_from_aggregate(
             &facts,
-            &coverage,
+            &readiness,
             &knowledge_generations,
-            &document_summaries,
             !failed_attempts.is_empty(),
             !bundle_failures.is_empty(),
         );
@@ -192,8 +213,7 @@ impl OpsService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<Vec<OpsLibraryWarning>, ApiError> {
-        let document_summaries =
-            state.canonical_services.content.list_documents(state, library_id).await?;
+        let readiness = load_library_coverage_fast(state, library_id, None).await?;
         let failed_attempts = ops_repository::list_recent_failed_ingest_attempts(
             &state.persistence.postgres,
             library_id,
@@ -208,9 +228,9 @@ impl OpsService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(build_library_warnings(
+        Ok(build_library_warnings_from_aggregate(
             library_id,
-            &document_summaries,
+            &readiness,
             &failed_attempts,
             &bundle_failures,
         ))
@@ -430,52 +450,61 @@ impl OpsService {
     }
 }
 
-fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyncOperation {
-    OpsAsyncOperation {
-        id: row.id,
-        workspace_id: row.workspace_id,
-        library_id: row.library_id,
-        operation_kind: row.operation_kind,
-        status: row.status,
-        surface_kind: Some(row.surface_kind),
-        subject_kind: Some(row.subject_kind),
-        subject_id: row.subject_id,
-        failure_code: row.failure_code,
-        created_at: row.created_at,
-        completed_at: row.completed_at,
-    }
+/// Fast O(1) library readiness snapshot used by the dashboard and warnings
+/// surfaces. Replaces the previous O(N) `list_documents` + N+1 prefetch
+/// storm that ran per-document Arango + Postgres fan-outs — on a 5k-doc
+/// library the old path took 7+ seconds and gated the query execution
+/// context. This path is 2 queries total: one Postgres aggregate over
+/// `derived_status` and one point lookup on `runtime_graph_snapshot`.
+pub struct LibraryCoverageFast {
+    pub readiness: content_repository::LibraryDocumentReadinessAggregate,
+    pub graph_snapshot: Option<repositories::RuntimeGraphSnapshotRow>,
+    pub latest_generation_id: Option<Uuid>,
 }
 
-fn map_library_facts_row(
+pub async fn load_library_coverage_fast(
+    state: &AppState,
+    library_id: Uuid,
+    latest_generation: Option<&KnowledgeLibraryGeneration>,
+) -> Result<LibraryCoverageFast, ApiError> {
+    let readiness = content_repository::aggregate_library_document_readiness(
+        &state.persistence.postgres,
+        library_id,
+    )
+    .await
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    let graph_snapshot =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    Ok(LibraryCoverageFast {
+        readiness,
+        graph_snapshot,
+        latest_generation_id: latest_generation.map(|generation| generation.id),
+    })
+}
+
+fn map_library_facts_from_aggregate(
     row: &ops_repository::OpsLibraryFactsRow,
-    coverage: &LibraryKnowledgeCoverage,
+    coverage: &LibraryCoverageFast,
     knowledge_generations: &[KnowledgeLibraryGeneration],
-    document_summaries: &[ContentDocumentSummary],
     has_failed_attempts: bool,
     has_bundle_failures: bool,
 ) -> OpsLibraryState {
     let latest_knowledge_generation = knowledge_generations.first();
-    let readable_document_count = i64::try_from(
-        document_summaries
-            .iter()
-            .filter(|summary| summary.document.document_state != "deleted")
-            .filter(|summary| {
-                summary.readiness_summary.as_ref().is_some_and(|readiness| {
-                    matches!(
-                        readiness.readiness_kind.as_str(),
-                        "readable" | "graph_sparse" | "graph_ready"
-                    )
-                })
-            })
-            .count(),
-    )
-    .unwrap_or(i64::MAX);
-    let failed_document_count =
-        coverage.document_counts_by_readiness.get("failed").copied().unwrap_or_default();
-    let stale_vector_count =
-        document_summaries.iter().filter(|summary| is_document_vector_rebuilding(summary)).count();
-    let stale_relation_count =
-        document_summaries.iter().filter(|summary| is_document_graph_rebuilding(summary)).count();
+    let readable_document_count = coverage.readiness.readable_count;
+    let failed_document_count = coverage.readiness.failed_count;
+    // Approximation: "rebuilding" docs are those whose latest mutation is
+    // still in-flight. The old path split this into vector vs relation
+    // rebuilding by reading each doc's Arango revision state — on a
+    // large library that enumeration dominates latency. The canonical
+    // replacement reports one bucket keyed by the in-flight mutation
+    // signal, which is precise enough to drive the
+    // healthy/rebuilding/processing banner and does not pretend to
+    // differentiate between stale vectors and stale relations here.
+    let processing_count_usize = usize::try_from(coverage.readiness.processing_count).unwrap_or(0);
+    let stale_vector_count = processing_count_usize;
+    let stale_relation_count = processing_count_usize;
 
     OpsLibraryState {
         library_id: row.library_id,
@@ -500,74 +529,20 @@ fn map_library_facts_row(
     }
 }
 
-fn document_has_active_processing(summary: &ContentDocumentSummary) -> bool {
-    summary
-        .pipeline
-        .latest_job
-        .as_ref()
-        .is_some_and(|job| matches!(job.queue_state.as_str(), "queued" | "leased" | "running"))
-        || summary.pipeline.latest_mutation.as_ref().is_some_and(|mutation| {
-            matches!(mutation.mutation_state.as_str(), "accepted" | "running")
-        })
-}
-
-fn is_document_vector_rebuilding(summary: &ContentDocumentSummary) -> bool {
-    let Some(readiness) = summary.readiness.as_ref() else {
-        return false;
-    };
-    document_has_active_processing(summary)
-        && revision_text_state_is_readable(&readiness.text_state)
-        && !matches!(readiness.vector_state.as_str(), "ready" | "vector_ready" | "graph_ready")
-}
-
-fn is_document_graph_rebuilding(summary: &ContentDocumentSummary) -> bool {
-    let Some(readiness) = summary.readiness.as_ref() else {
-        return false;
-    };
-    document_has_active_processing(summary)
-        && revision_text_state_is_readable(&readiness.text_state)
-        && !matches!(readiness.graph_state.as_str(), "ready" | "graph_ready")
-}
-
-fn derive_degraded_state(
-    queue_depth: i64,
-    running_attempts: i64,
-    failed_document_count: usize,
-    stale_vector_count: usize,
-    stale_relation_count: usize,
-    has_failed_attempts: bool,
-    has_bundle_failures: bool,
-    latest_generation: Option<&KnowledgeLibraryGeneration>,
-) -> String {
-    if failed_document_count > 0 || has_failed_attempts || has_bundle_failures {
-        "degraded".to_string()
-    } else if stale_vector_count > 0 || stale_relation_count > 0 {
-        "rebuilding".to_string()
-    } else if queue_depth > 0 || running_attempts > 0 {
-        "processing".to_string()
-    } else {
-        let _ = latest_generation;
-        "healthy".to_string()
-    }
-}
-
-fn build_library_warnings(
+fn build_library_warnings_from_aggregate(
     library_id: Uuid,
-    document_summaries: &[ContentDocumentSummary],
+    coverage: &LibraryCoverageFast,
     failed_attempts: &[ops_repository::OpsLibraryFailureRow],
     bundle_failures: &[ops_repository::OpsLibraryFailureRow],
 ) -> Vec<OpsLibraryWarning> {
     let mut warnings = Vec::new();
 
-    let stale_vectors =
-        document_summaries.iter().filter(|summary| is_document_vector_rebuilding(summary)).count();
-    if stale_vectors > 0 {
+    // One "rebuilding" bucket keyed on in-flight mutation count — no
+    // per-doc Arango revision state reads. See the comment in
+    // `map_library_facts_from_aggregate` for why this is the canonical
+    // signal here.
+    if coverage.readiness.processing_count > 0 {
         warnings.push(derived_warning(library_id, "stale_vectors", "warning", Utc::now()));
-    }
-
-    let stale_relations =
-        document_summaries.iter().filter(|summary| is_document_graph_rebuilding(summary)).count();
-    if stale_relations > 0 {
         warnings.push(derived_warning(library_id, "stale_relations", "warning", Utc::now()));
     }
 
@@ -598,6 +573,45 @@ fn build_library_warnings(
     warnings
 }
 
+fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyncOperation {
+    OpsAsyncOperation {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        operation_kind: row.operation_kind,
+        status: row.status,
+        surface_kind: Some(row.surface_kind),
+        subject_kind: Some(row.subject_kind),
+        subject_id: row.subject_id,
+        parent_async_operation_id: row.parent_async_operation_id,
+        failure_code: row.failure_code,
+        created_at: row.created_at,
+        completed_at: row.completed_at,
+    }
+}
+
+fn derive_degraded_state(
+    queue_depth: i64,
+    running_attempts: i64,
+    failed_document_count: usize,
+    stale_vector_count: usize,
+    stale_relation_count: usize,
+    has_failed_attempts: bool,
+    has_bundle_failures: bool,
+    latest_generation: Option<&KnowledgeLibraryGeneration>,
+) -> String {
+    if failed_document_count > 0 || has_failed_attempts || has_bundle_failures {
+        "degraded".to_string()
+    } else if stale_vector_count > 0 || stale_relation_count > 0 {
+        "rebuilding".to_string()
+    } else if queue_depth > 0 || running_attempts > 0 {
+        "processing".to_string()
+    } else {
+        let _ = latest_generation;
+        "healthy".to_string()
+    }
+}
+
 fn derived_warning(
     library_id: Uuid,
     warning_kind: &str,
@@ -620,75 +634,26 @@ fn derived_warning(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_library_warnings, derive_degraded_state};
-    use crate::domains::content::{
-        ContentDocument, ContentDocumentHead, ContentDocumentPipelineState, ContentDocumentSummary,
-        ContentMutation, ContentRevisionReadiness, revision_text_state_is_readable,
+    use super::{
+        LibraryCoverageFast, build_library_warnings_from_aggregate, derive_degraded_state,
     };
     use crate::domains::knowledge::KnowledgeLibraryGeneration;
     use crate::domains::ops::OpsLibraryWarning;
+    use crate::infra::repositories::content_repository::LibraryDocumentReadinessAggregate;
     use chrono::Utc;
     use uuid::Uuid;
 
-    fn sample_summary(
-        text_state: &str,
-        vector_state: &str,
-        graph_state: &str,
-        mutation_state: Option<&str>,
-    ) -> ContentDocumentSummary {
-        let now = Utc::now();
-        ContentDocumentSummary {
-            document: ContentDocument {
-                id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                external_key: "sample".to_string(),
-                document_state: "active".to_string(),
-                created_at: now,
+    fn coverage_with_processing(processing_count: i64) -> LibraryCoverageFast {
+        LibraryCoverageFast {
+            readiness: LibraryDocumentReadinessAggregate {
+                active_count: processing_count.max(1),
+                deleted_count: 0,
+                failed_count: 0,
+                processing_count,
+                readable_count: 0,
             },
-            file_name: "sample.txt".to_string(),
-            head: Some(ContentDocumentHead {
-                document_id: Uuid::now_v7(),
-                active_revision_id: None,
-                readable_revision_id: None,
-                latest_mutation_id: None,
-                latest_successful_attempt_id: None,
-                head_updated_at: now,
-                document_summary: None,
-            }),
-            active_revision: None,
-            source_access: None,
-            readiness: Some(ContentRevisionReadiness {
-                revision_id: Uuid::now_v7(),
-                text_state: text_state.to_string(),
-                vector_state: vector_state.to_string(),
-                graph_state: graph_state.to_string(),
-                text_readable_at: revision_text_state_is_readable(text_state).then_some(now),
-                vector_ready_at: matches!(vector_state, "ready" | "vector_ready" | "graph_ready")
-                    .then_some(now),
-                graph_ready_at: matches!(graph_state, "ready" | "graph_ready").then_some(now),
-            }),
-            readiness_summary: None,
-            prepared_revision: None,
-            web_page_provenance: None,
-            pipeline: ContentDocumentPipelineState {
-                latest_mutation: mutation_state.map(|state| ContentMutation {
-                    id: Uuid::now_v7(),
-                    workspace_id: Uuid::now_v7(),
-                    library_id: Uuid::now_v7(),
-                    operation_kind: "upload".to_string(),
-                    mutation_state: state.to_string(),
-                    requested_at: now,
-                    completed_at: None,
-                    requested_by_principal_id: None,
-                    request_surface: "rest".to_string(),
-                    idempotency_key: None,
-                    source_identity: None,
-                    failure_code: None,
-                    conflict_code: None,
-                }),
-                latest_job: None,
-            },
+            graph_snapshot: None,
+            latest_generation_id: None,
         }
     }
 
@@ -721,30 +686,25 @@ mod tests {
     }
 
     #[test]
-    fn build_library_warnings_ignores_idle_sparse_documents() {
-        let warnings = build_library_warnings(
-            Uuid::now_v7(),
-            &[sample_summary("text_readable", "vector_ready", "pending", None)],
-            &[],
-            &[],
-        );
-
+    fn build_library_warnings_ignores_idle_library() {
+        let coverage = coverage_with_processing(0);
+        let warnings = build_library_warnings_from_aggregate(Uuid::now_v7(), &coverage, &[], &[]);
         assert!(warnings.is_empty());
     }
 
     #[test]
-    fn build_library_warnings_reports_active_graph_rebuilds() {
-        let warnings = build_library_warnings(
-            Uuid::now_v7(),
-            &[sample_summary("text_readable", "vector_ready", "pending", Some("running"))],
-            &[],
-            &[],
-        );
-
+    fn build_library_warnings_reports_in_flight_rebuilds() {
+        let coverage = coverage_with_processing(3);
+        let warnings = build_library_warnings_from_aggregate(Uuid::now_v7(), &coverage, &[], &[]);
         assert!(
             warnings
                 .iter()
                 .any(|warning: &OpsLibraryWarning| warning.warning_kind == "stale_relations")
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning: &OpsLibraryWarning| warning.warning_kind == "stale_vectors")
         );
     }
 }

@@ -108,6 +108,11 @@ pub(super) struct OpenAiCompatibleToolUseChatRequest<'a> {
     pub(super) max_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) tool_choice: Option<&'a str>,
+    /// When true, request SSE streaming from the provider. Omitted on
+    /// the wire when false so non-streaming calls keep a stable request
+    /// body across providers that don't recognise the field.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) stream: bool,
     #[serde(flatten)]
     pub(super) extra: serde_json::Value,
 }

@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::Context;
 use uuid::Uuid;
 
@@ -256,8 +254,10 @@ fn collect_target_ids(
         .collect()
 }
 
-fn dedupe_ids(ids: Vec<Uuid>) -> Vec<Uuid> {
-    ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect()
+fn dedupe_ids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 fn revision_scope_confidence(

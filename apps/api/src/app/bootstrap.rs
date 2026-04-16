@@ -84,6 +84,12 @@ pub(crate) async fn apply_configured_default_catalog_ai_setup(
     state: &AppState,
     catalog: &DefaultCatalogBootstrapOutcome,
 ) -> Result<bool, ApiError> {
+    // Pre-create model presets for every known provider (OpenAI,
+    // DeepSeek, Qwen, Ollama) so they are available immediately when
+    // the operator adds a credential — no manual preset creation
+    // required.
+    state.canonical_services.ai_catalog.seed_all_provider_presets(state).await?;
+
     state
         .canonical_services
         .ai_catalog

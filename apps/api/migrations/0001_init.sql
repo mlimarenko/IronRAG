@@ -7,6 +7,7 @@
 -- ============================================================================
 
 create extension if not exists pgcrypto;
+create extension if not exists pg_trgm;
 
 -- ============================================================================
 -- Functions
@@ -318,7 +319,15 @@ create table ai_model_catalog (
     context_window integer,
     max_output_tokens integer,
     lifecycle_state ai_model_lifecycle_state not null default 'active',
-    metadata_json jsonb not null default '{}'::jsonb,
+    metadata_json jsonb not null,
+    constraint ai_model_catalog_default_roles_check
+        check (
+            case
+                when jsonb_typeof(metadata_json -> 'defaultRoles') = 'array'
+                    then jsonb_array_length(metadata_json -> 'defaultRoles') > 0
+                else false
+            end
+        ),
     unique (provider_catalog_id, model_name, capability_kind)
 );
 
@@ -652,6 +661,14 @@ create table content_mutation_item (
     message text
 );
 
+-- Canonical batch-ops mechanism: any batch endpoint (batch-reprocess,
+-- batch-delete, batch-cancel, future batch-annotate …) creates one
+-- parent `ops_async_operation` and each per-document mutation it
+-- spawns links its own async_op to that parent via
+-- `parent_async_operation_id`. Progress endpoints aggregate children
+-- by parent id with a single indexed count query; there is no
+-- parallel batch-tracking table. Nullable — single-operation flows
+-- just leave this column null.
 create table ops_async_operation (
     id uuid primary key default uuidv7(),
     workspace_id uuid not null,
@@ -662,6 +679,9 @@ create table ops_async_operation (
     status ops_async_operation_status not null default 'accepted',
     subject_kind text not null,
     subject_id uuid,
+    parent_async_operation_id uuid
+        references ops_async_operation(id)
+        on delete set null,
     created_at timestamptz not null default now(),
     completed_at timestamptz,
     failure_code text,
@@ -824,6 +844,12 @@ create table extract_edge_candidate (
     to_canonical_key text not null,
     summary text
 );
+
+create index idx_extract_node_candidate_chunk_result_id
+    on extract_node_candidate (chunk_result_id);
+
+create index idx_extract_edge_candidate_chunk_result_id
+    on extract_edge_candidate (chunk_result_id);
 
 create table extract_resume_cursor (
     attempt_id uuid primary key references ingest_attempt(id) on delete cascade,
@@ -1219,13 +1245,24 @@ create table audit_event (
     internal_message text
 );
 
+-- Drift-tolerant subject columns: workspace_id / library_id / document_id
+-- are informational breadcrumbs on an append-only audit log, NOT
+-- referential integrity. We used to carry hard FKs here but that
+-- rejected legitimate writes whenever the Arango knowledge_document
+-- projection was momentarily ahead of PG (crashed ingest, manual
+-- cleanup that touched one store but not the other) or a stale
+-- document_id surfaced from a search result. An audit row for a
+-- deleted workspace/library/document is still a valid historical
+-- record of what the caller asserted it saw. Only `audit_event_id`
+-- keeps its cascade, so deleting an audit event still cleans up
+-- its subject rows.
 create table audit_event_subject (
     audit_event_id uuid not null references audit_event(id) on delete cascade,
     subject_kind text not null,
     subject_id uuid not null,
-    workspace_id uuid references catalog_workspace(id) on delete set null,
-    library_id uuid references catalog_library(id) on delete set null,
-    document_id uuid references content_document(id) on delete set null,
+    workspace_id uuid,
+    library_id uuid,
+    document_id uuid,
     primary key (audit_event_id, subject_kind, subject_id)
 );
 
@@ -1351,6 +1388,21 @@ create index ai_binding_assignment_scope_idx
 create index idx_content_document_library_state
     on content_document (library_id, document_state);
 
+-- Keyset pagination index: matches the WHERE library_id = $
+-- + ORDER BY created_at desc, id desc access pattern used by
+-- list_documents_page. Without this the canonical documents list
+-- endpoint falls back to a seq scan on the whole table.
+create index idx_content_document_library_created_cursor
+    on content_document (library_id, created_at desc, id desc);
+
+-- Fuzzy / ILIKE search index over external_key (which the UI
+-- renders as the file-name fallback). pg_trgm with GIN lets
+-- `lower(external_key) like '%query%'` hit the index; the
+-- library_id predicate is applied via bitmap-AND with the keyset
+-- index above.
+create index idx_content_document_external_key_trgm
+    on content_document using gin (lower(external_key) gin_trgm_ops);
+
 create index idx_content_revision_document_created_at
     on content_revision (document_id, created_at desc);
 
@@ -1381,6 +1433,16 @@ create index idx_content_web_discovered_page_document
 
 create index idx_ingest_job_library_queue
     on ingest_job (library_id, queue_state, priority, available_at);
+
+-- Document list keyset + dashboard status-counts aggregate both
+-- LEFT JOIN LATERAL `ingest_job WHERE mutation_id = m.id ORDER BY
+-- queued_at DESC LIMIT 1` to resolve the latest job per mutation.
+-- Without this partial btree on `mutation_id` each LATERAL
+-- invocation seq-scans all 10k+ jobs on the reference library and
+-- the query costs multiple seconds on a cold buffer cache.
+create index idx_ingest_job_mutation_id
+    on ingest_job (mutation_id)
+    where mutation_id is not null;
 
 create index idx_ingest_attempt_job_state
     on ingest_attempt (job_id, attempt_state, started_at desc);
@@ -1484,6 +1546,14 @@ create index idx_billing_provider_call_owner
 create index idx_ops_async_operation_library_status
     on ops_async_operation (library_id, status, created_at desc);
 
+-- Partial index on parent_async_operation_id so the batch-ops
+-- progress endpoint can aggregate children of one parent with a
+-- single indexed count query. NULL rows (single-operation flows)
+-- are excluded to keep the index small.
+create index idx_ops_async_operation_parent
+    on ops_async_operation (parent_async_operation_id)
+    where parent_async_operation_id is not null;
+
 create index idx_audit_event_actor_created_at
     on audit_event (actor_principal_id, created_at desc);
 
@@ -1554,49 +1624,49 @@ insert into ai_model_catalog (
     metadata_json
 )
 values
-    ('00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000202', '00000000-0000-0000-0000-000000000101', 'text-embedding-3-large', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000203', '00000000-0000-0000-0000-000000000101', 'gpt-5.4', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000203', '00000000-0000-0000-0000-000000000101', 'gpt-5.4', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000204', '00000000-0000-0000-0000-000000000102', 'deepseek-chat', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000205', '00000000-0000-0000-0000-000000000103', 'qwen3-max', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000206', '00000000-0000-0000-0000-000000000103', 'text-embedding-v4', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000207', '00000000-0000-0000-0000-000000000103', 'qwen3.5-plus', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000208', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000209', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-pro', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000210', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-chat-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000211', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-codex', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000212', '00000000-0000-0000-0000-000000000101', 'gpt-4.1', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000213', '00000000-0000-0000-0000-000000000101', 'gpt-4.1-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000214', '00000000-0000-0000-0000-000000000101', 'gpt-4.1-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000215', '00000000-0000-0000-0000-000000000101', 'gpt-4o', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000216', '00000000-0000-0000-0000-000000000101', 'gpt-4o-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000217', '00000000-0000-0000-0000-000000000101', 'o1', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000218', '00000000-0000-0000-0000-000000000101', 'o1-mini', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000219', '00000000-0000-0000-0000-000000000101', 'o3', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000220', '00000000-0000-0000-0000-000000000101', 'o3-mini', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000221', '00000000-0000-0000-0000-000000000101', 'o3-pro', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000222', '00000000-0000-0000-0000-000000000101', 'o4-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000207', '00000000-0000-0000-0000-000000000103', 'qwen3.5-plus', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000208', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000209', '00000000-0000-0000-0000-000000000101', 'gpt-5.4-pro', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000210', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-chat-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000211', '00000000-0000-0000-0000-000000000101', 'gpt-5.3-codex', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000212', '00000000-0000-0000-0000-000000000101', 'gpt-4.1', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000213', '00000000-0000-0000-0000-000000000101', 'gpt-4.1-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000214', '00000000-0000-0000-0000-000000000101', 'gpt-4.1-nano', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000215', '00000000-0000-0000-0000-000000000101', 'gpt-4o', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000216', '00000000-0000-0000-0000-000000000101', 'gpt-4o-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000217', '00000000-0000-0000-0000-000000000101', 'o1', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000218', '00000000-0000-0000-0000-000000000101', 'o1-mini', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000219', '00000000-0000-0000-0000-000000000101', 'o3', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000220', '00000000-0000-0000-0000-000000000101', 'o3-mini', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000221', '00000000-0000-0000-0000-000000000101', 'o3-pro', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000222', '00000000-0000-0000-0000-000000000101', 'o4-mini', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000223', '00000000-0000-0000-0000-000000000101', 'text-embedding-3-small', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000224', '00000000-0000-0000-0000-000000000102', 'deepseek-reasoner', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000225', '00000000-0000-0000-0000-000000000103', 'qwen3-max-preview', 'chat', 'text', null, null, 'preview', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000226', '00000000-0000-0000-0000-000000000103', 'qwen-max', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000227', '00000000-0000-0000-0000-000000000103', 'qwen-max-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000226', '00000000-0000-0000-0000-000000000103', 'qwen-max', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000227', '00000000-0000-0000-0000-000000000103', 'qwen-max-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000228', '00000000-0000-0000-0000-000000000103', 'qwen-plus', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000229', '00000000-0000-0000-0000-000000000103', 'qwen-plus-latest', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000230', '00000000-0000-0000-0000-000000000103', 'qwen-flash', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000231', '00000000-0000-0000-0000-000000000103', 'qwen-vl-max', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000232', '00000000-0000-0000-0000-000000000103', 'qwen-vl-max-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000233', '00000000-0000-0000-0000-000000000103', 'qwen-vl-plus', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000234', '00000000-0000-0000-0000-000000000103', 'qwen-vl-plus-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000235', '00000000-0000-0000-0000-000000000103', 'qwen-vl-ocr', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000236', '00000000-0000-0000-0000-000000000103', 'qwen-vl-ocr-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_text", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000231', '00000000-0000-0000-0000-000000000103', 'qwen-vl-max', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000232', '00000000-0000-0000-0000-000000000103', 'qwen-vl-max-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000233', '00000000-0000-0000-0000-000000000103', 'qwen-vl-plus', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000234', '00000000-0000-0000-0000-000000000103', 'qwen-vl-plus-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000235', '00000000-0000-0000-0000-000000000103', 'qwen-vl-ocr', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000236', '00000000-0000-0000-0000-000000000103', 'qwen-vl-ocr-latest', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000237', '00000000-0000-0000-0000-000000000103', 'text-embedding-v3', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000238', '00000000-0000-0000-0000-000000000103', 'qwen-turbo', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000239', '00000000-0000-0000-0000-000000000103', 'qwen-turbo-latest', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000238', '00000000-0000-0000-0000-000000000103', 'qwen-turbo', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
+    ('00000000-0000-0000-0000-000000000239', '00000000-0000-0000-0000-000000000103', 'qwen-turbo-latest', 'chat', 'text', null, null, 'deprecated', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000240', '00000000-0000-0000-0000-000000000103', 'qwen3.5-flash', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000241', '00000000-0000-0000-0000-000000000104', 'qwen3:0.6b', 'chat', 'text', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer"], "seedSource": "provider_catalog"}'::jsonb),
     ('00000000-0000-0000-0000-000000000242', '00000000-0000-0000-0000-000000000104', 'qwen3-embedding:0.6b', 'embedding', 'text', null, null, 'active', '{"defaultRoles": ["embed_chunk"], "seedSource": "provider_catalog"}'::jsonb),
-    ('00000000-0000-0000-0000-000000000243', '00000000-0000-0000-0000-000000000104', 'qwen3-vl:2b', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["vision"], "seedSource": "provider_catalog"}'::jsonb);
+    ('00000000-0000-0000-0000-000000000243', '00000000-0000-0000-0000-000000000104', 'qwen3-vl:2b', 'chat', 'multimodal', null, null, 'active', '{"defaultRoles": ["extract_graph", "query_answer", "vision"], "seedSource": "provider_catalog"}'::jsonb);
 
 insert into ai_price_catalog (
     id,

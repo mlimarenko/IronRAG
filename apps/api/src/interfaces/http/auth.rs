@@ -142,6 +142,43 @@ impl AuthContext {
         Err(ApiError::Unauthorized)
     }
 
+    /// If the token is scoped to exactly one workspace (either via the
+    /// token's explicit `workspace_id` or because the grants point at
+    /// only one), return that workspace id. MCP tools and the query API
+    /// use this to auto-fill `workspace_id` when the caller omits it —
+    /// no reason to force agents to pass a value they cannot choose.
+    #[must_use]
+    pub fn sole_workspace_id(&self) -> Option<Uuid> {
+        // Explicit token workspace scope wins unconditionally.
+        if let Some(ws) = self.workspace_id {
+            return Some(ws);
+        }
+        // Fall back to the only visible workspace.
+        if self.visible_workspace_ids.len() == 1 {
+            return self.visible_workspace_ids.iter().next().copied();
+        }
+        None
+    }
+
+    /// If the token's grants reference exactly one library, return it.
+    /// MCP tools that require a `library_id` parameter auto-fill it
+    /// from here when the caller omits it, keeping the agent context
+    /// free of boilerplate ids.
+    #[must_use]
+    pub fn sole_library_id(&self) -> Option<Uuid> {
+        let mut seen: Option<Uuid> = None;
+        for grant in &self.grants {
+            if let Some(lib) = grant.library_id {
+                match seen {
+                    None => seen = Some(lib),
+                    Some(existing) if existing == lib => {}
+                    Some(_) => return None, // More than one library.
+                }
+            }
+        }
+        seen
+    }
+
     #[must_use]
     pub const fn token_kind(&self) -> &'static str {
         self.token_kind.as_str()
@@ -828,7 +865,11 @@ mod tests {
 
         assert!(auth.can_access_workspace(workspace_id));
         assert!(auth.can_discover_library(workspace_id, Uuid::now_v7(), &["workspace_admin"]));
-        assert!(auth.can_discover_library(workspace_id, Uuid::now_v7(), &["library_read", "workspace_admin"]));
+        assert!(auth.can_discover_library(
+            workspace_id,
+            Uuid::now_v7(),
+            &["library_read", "workspace_admin"]
+        ));
     }
 
     #[test]

@@ -82,20 +82,31 @@ pub async fn load_document_lifecycle(
     .await
     .map_err(|e| ApiError::internal_with_log(e, "lifecycle: list jobs"))?;
 
+    // Batch-load all attempts and stage events in two queries instead
+    // of 2*N (one per job). The old N+1 loop was the dominant latency
+    // contributor on documents with many retry attempts.
+    let job_ids: Vec<Uuid> = jobs.iter().map(|j| j.id).collect();
+    let all_attempt_rows =
+        ingest_repository::list_ingest_attempts_by_jobs(&state.persistence.postgres, &job_ids)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "lifecycle: list attempts"))?;
+    let all_stage_rows =
+        ingest_repository::list_ingest_stage_events_by_jobs(&state.persistence.postgres, &job_ids)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "lifecycle: list stages"))?;
+
     let mut attempts = Vec::new();
     for job in &jobs {
-        let attempt_rows =
-            ingest_repository::list_ingest_attempts_by_job(&state.persistence.postgres, job.id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "lifecycle: list attempts"))?;
-        let stage_rows =
-            ingest_repository::list_ingest_stage_events_by_job(&state.persistence.postgres, job.id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "lifecycle: list stages"))?;
+        let attempt_rows: Vec<&_> =
+            all_attempt_rows.iter().filter(|a| a.job_id == job.id).collect();
+        let stage_rows: Vec<&_> = all_stage_rows
+            .iter()
+            .filter(|s| attempt_rows.iter().any(|a| a.id == s.attempt_id))
+            .collect();
 
         for ar in &attempt_rows {
             let my_stages: Vec<&ingest_repository::IngestStageEventRow> =
-                stage_rows.iter().filter(|s| s.attempt_id == ar.id).collect();
+                stage_rows.iter().filter(|s| s.attempt_id == ar.id).copied().collect();
             let stage_events = merge_stages(&my_stages);
             let total_elapsed_ms =
                 ar.finished_at.map(|fin| (fin - ar.started_at).num_milliseconds());

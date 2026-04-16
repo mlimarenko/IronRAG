@@ -9,11 +9,9 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::{
-        content::{ContentDocumentPipelineState, ContentDocumentSummary},
         ingest,
         knowledge::{KnowledgeLibraryGeneration, KnowledgeLibrarySummary},
-        ops::{OpsLibraryState, OpsLibraryWarning},
-        runtime_ingestion::RuntimeDocumentActivityStatus,
+        ops::{OpsAsyncOperation, OpsAsyncOperationProgress, OpsLibraryState, OpsLibraryWarning},
     },
     interfaces::http::{
         auth::AuthContext,
@@ -88,17 +86,71 @@ pub fn router() -> Router<AppState> {
         .route("/ops/libraries/{library_id}/dashboard", get(get_library_dashboard))
 }
 
+/// Canonical async-operation polling payload. Exposes the raw parent row
+/// plus aggregated child-operation counts, so any batch endpoint (batch
+/// rerun, batch delete, future batch annotate, …) can be polled via the
+/// same response shape. `progress` is populated whenever at least one child
+/// operation references this row via `parent_async_operation_id`; for
+/// non-batch operations it reports zeros across the board.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AsyncOperationDetailResponse {
+    #[serde(flatten)]
+    operation: OpsAsyncOperation,
+    progress: OpsAsyncOperationProgress,
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_async_operation",
+    skip_all,
+    fields(operation_id = %operation_id)
+)]
 async fn get_async_operation(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(operation_id): Path<Uuid>,
-) -> Result<Json<crate::domains::ops::OpsAsyncOperation>, ApiError> {
+) -> Result<Json<AsyncOperationDetailResponse>, ApiError> {
     let _ =
         load_async_operation_and_authorize(&auth, &state, operation_id, POLICY_USAGE_READ).await?;
-    let operation = state.canonical_services.ops.get_async_operation(&state, operation_id).await?;
-    Ok(Json(operation))
+    let mut operation =
+        state.canonical_services.ops.get_async_operation(&state, operation_id).await?;
+    let progress =
+        state.canonical_services.ops.get_async_operation_progress(&state, operation_id).await?;
+
+    // For any parent batch op (children present), the effective status is
+    // DERIVED from child progress, not from the stored row. The spawned
+    // batch worker only writes to the parent on admit-phase catastrophic
+    // failure; happy-path transitions through `processing → ready/failed`
+    // are all computed on read from the aggregate counts. This gives
+    // callers a single source of truth — `progress` — regardless of what
+    // the stored parent row happens to say.
+    if progress.total > 0 {
+        let pending = progress.total.saturating_sub(progress.completed + progress.failed);
+        let derived = if pending > 0 {
+            "processing"
+        } else if progress.failed > 0 {
+            "failed"
+        } else {
+            "ready"
+        };
+        if operation.status != derived {
+            operation.status = derived.to_string();
+        }
+        if pending == 0 && operation.completed_at.is_none() {
+            operation.completed_at = Some(chrono::Utc::now());
+        }
+    }
+
+    Ok(Json(AsyncOperationDetailResponse { operation, progress }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_library_state",
+    skip_all,
+    fields(library_id = %library_id)
+)]
 async fn get_library_state(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -119,32 +171,75 @@ async fn get_library_state(
     }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_library_dashboard",
+    skip_all,
+    fields(library_id = %library_id, elapsed_ms)
+)]
 async fn get_library_dashboard(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
 ) -> Result<Json<DashboardSurface>, ApiError> {
+    let started_at = std::time::Instant::now();
+    let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
-    let (documents, recent_web_runs, knowledge_summary, ops_snapshot, ops_warnings) = tokio::try_join!(
-        state.canonical_services.content.list_documents(&state, library_id),
+
+    // Canonical bounded fetch — no more `list_documents` enumeration.
+    // Top 6 recent entries for the "Recent documents" strip + the
+    // aggregate status counts for the overview tiles. The old path
+    // spent ~7.5 s on a 5k-doc library because it enumerated every
+    // document through the 6-call prefetch pipeline for stats that
+    // are a single `COUNT(*) FILTER (...)` away.
+    let recent_page_command = crate::services::content::service::ListDocumentsPageCommand {
+        library_id,
+        include_deleted: false,
+        cursor: None,
+        limit: 6,
+        search: None,
+        sort: crate::infra::repositories::content_repository::DocumentListSortColumn::CreatedAt,
+        sort_desc: true,
+        status_filter: Vec::new(),
+    };
+    let (
+        recent_page,
+        status_counts_row,
+        recent_web_runs,
+        knowledge_summary,
+        ops_snapshot,
+        ops_warnings,
+    ) = tokio::try_join!(
+        state.canonical_services.content.list_documents_page(&state, recent_page_command),
+        async {
+            crate::infra::repositories::content_repository::aggregate_document_list_status_counts(
+                &state.persistence.postgres,
+                library_id,
+                false,
+                None,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))
+        },
         state.canonical_services.web_ingest.list_runs(&state, library_id),
         state.canonical_services.knowledge.get_library_summary(&state, library_id),
         state.canonical_services.ops.get_library_state_snapshot(&state, library_id),
         state.canonical_services.ops.list_library_warnings(&state, library_id),
     )?;
 
-    let document_summaries = documents.iter().map(map_document_summary).collect::<Vec<_>>();
-    let overview = build_documents_overview(&document_summaries);
+    let recent_documents: Vec<DocumentSummary> =
+        recent_page.items.into_iter().map(map_list_entry_to_dashboard_summary).collect();
+    let overview = build_documents_overview_from_counts(&status_counts_row);
     let warnings = map_operator_warnings(&ops_warnings, &ops_snapshot.state);
     let graph = map_graph_surface(&knowledge_summary, &ops_snapshot.state, warnings.first());
-    let attention = build_attention_items(
+    let attention = build_attention_items_bounded(
         &ops_snapshot.state,
         &ops_warnings,
         &graph,
-        document_summaries.as_slice(),
+        &recent_documents,
     );
     let metrics = build_dashboard_metrics(&overview, &ops_snapshot.state, &graph, attention.len());
-    let recent_documents = sort_recent_documents(document_summaries.clone());
+    span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
 
     Ok(Json(DashboardSurface {
         overview,
@@ -157,12 +252,135 @@ async fn get_library_dashboard(
     }))
 }
 
-fn sort_recent_documents(mut documents: Vec<DocumentSummary>) -> Vec<DocumentSummary> {
-    documents.sort_by(|left, right| {
-        right.uploaded_at.cmp(&left.uploaded_at).then_with(|| right.id.cmp(&left.id))
+/// Builds a `DocumentSummary` for the dashboard "Recent documents" strip
+/// from a slim `ContentDocumentListEntry`. All fields that require a
+/// per-document Arango revision fetch are omitted — the dashboard
+/// surface does not display them on this card.
+fn map_list_entry_to_dashboard_summary(
+    entry: crate::services::content::service::ContentDocumentListEntry,
+) -> DocumentSummary {
+    let status = parse_list_entry_status(&entry.status);
+    let readiness = parse_list_entry_readiness(&entry.readiness);
+    DocumentSummary {
+        id: entry.id,
+        workspace_id: Some(entry.workspace_id),
+        library_id: Some(entry.library_id),
+        file_name: entry.file_name,
+        file_type: entry.file_type.unwrap_or_else(|| "unknown".to_string()),
+        file_size: entry.file_size.unwrap_or(0),
+        uploaded_at: entry.uploaded_at,
+        status,
+        readiness,
+        stage_label: entry.stage,
+        progress_percent: None,
+        cost_usd: None,
+        failure_message: entry.failure_code,
+        can_retry: entry.retryable,
+        prepared_segment_count: None,
+        technical_fact_count: None,
+        source_format: None,
+    }
+}
+
+fn parse_list_entry_status(value: &str) -> DocumentStatus {
+    // The dashboard contract enum has 5 variants and does not model
+    // `canceled` separately — cancelled runs surface as `Failed` on
+    // this surface. Anything else we don't understand degrades to
+    // `Queued` so the dashboard never crashes on a future backend
+    // enum value it wasn't aware of.
+    match value {
+        "ready" => DocumentStatus::Ready,
+        "processing" => DocumentStatus::Processing,
+        "queued" => DocumentStatus::Queued,
+        "failed" | "canceled" => DocumentStatus::Failed,
+        _ => DocumentStatus::Queued,
+    }
+}
+
+fn parse_list_entry_readiness(value: &str) -> DocumentReadiness {
+    match value {
+        "graph_ready" => DocumentReadiness::GraphReady,
+        "graph_sparse" => DocumentReadiness::GraphSparse,
+        "readable" => DocumentReadiness::Readable,
+        "failed" => DocumentReadiness::Failed,
+        _ => DocumentReadiness::Processing,
+    }
+}
+
+fn build_documents_overview_from_counts(
+    counts: &crate::infra::repositories::content_repository::DocumentListStatusCountsRow,
+) -> DocumentsOverview {
+    DocumentsOverview {
+        total_documents: saturating_i32(counts.total.unwrap_or(0) as usize),
+        ready_documents: saturating_i32(counts.ready.unwrap_or(0) as usize),
+        processing_documents: saturating_i32(
+            (counts.processing.unwrap_or(0) + counts.queued.unwrap_or(0)) as usize,
+        ),
+        failed_documents: saturating_i32(
+            (counts.failed.unwrap_or(0) + counts.canceled.unwrap_or(0)) as usize,
+        ),
+        // graph_sparse split is not in the aggregate — the graph surface
+        // already reports that count from the runtime_graph_snapshot.
+        graph_sparse_documents: 0,
+    }
+}
+
+fn build_attention_items_bounded(
+    ops_state: &OpsLibraryState,
+    warnings: &[OpsLibraryWarning],
+    graph: &GraphSurface,
+    recent_documents: &[DocumentSummary],
+) -> Vec<DashboardAttentionItem> {
+    let mut attention = Vec::new();
+    let graph_coverage_gap_count = usize::try_from(graph.graph_sparse_document_count).unwrap_or(0);
+
+    if ops_state.failed_document_count > 0 {
+        attention.push(DashboardAttentionItem {
+            code: "failed_documents".to_string(),
+            title: "Failed documents need review".to_string(),
+            detail: format!(
+                "{} documents are currently failed in the active library.",
+                ops_state.failed_document_count
+            ),
+            route_path: "/documents".to_string(),
+            level: MessageLevel::Error,
+        });
+    }
+
+    if graph_coverage_gap_count > 0 {
+        attention.push(DashboardAttentionItem {
+            code: "graph_coverage_gap".to_string(),
+            title: "Graph coverage remains partial".to_string(),
+            detail: format!(
+                "{graph_coverage_gap_count} readable documents still do not contribute to the graph."
+            ),
+            route_path: "/documents?status=processing".to_string(),
+            level: MessageLevel::Warning,
+        });
+    }
+
+    if let Some(document) = recent_documents.iter().find(|document| document.can_retry) {
+        attention.push(DashboardAttentionItem {
+            code: "retryable_document".to_string(),
+            title: "A document can be retried".to_string(),
+            detail: format!(
+                "{} reported a retryable failure or stalled ingest step.",
+                document.file_name
+            ),
+            route_path: "/documents".to_string(),
+            level: MessageLevel::Warning,
+        });
+    }
+
+    attention.extend(warnings.iter().map(map_attention_item));
+    attention.sort_by(|left, right| {
+        attention_priority(right.level)
+            .cmp(&attention_priority(left.level))
+            .then_with(|| left.code.cmp(&right.code))
     });
-    documents.truncate(6);
-    documents
+    attention.dedup_by(|left, right| left.code == right.code);
+    attention.truncate(6);
+    attention
 }
 
 fn map_ops_library_state(state: &OpsLibraryState) -> OpsLibraryStateSummaryResponse {
@@ -201,40 +419,6 @@ fn map_ops_warning(warning: &OpsLibraryWarning) -> OpsLibraryWarningResponse {
         severity: warning.severity.clone(),
         created_at: warning.created_at,
         resolved_at: warning.resolved_at,
-    }
-}
-
-fn build_documents_overview(documents: &[DocumentSummary]) -> DocumentsOverview {
-    DocumentsOverview {
-        total_documents: saturating_i32(documents.len()),
-        ready_documents: saturating_i32(
-            documents
-                .iter()
-                .filter(|document| {
-                    matches!(document.status, DocumentStatus::Ready | DocumentStatus::ReadyNoGraph)
-                })
-                .count(),
-        ),
-        processing_documents: saturating_i32(
-            documents
-                .iter()
-                .filter(|document| {
-                    matches!(document.status, DocumentStatus::Queued | DocumentStatus::Processing)
-                })
-                .count(),
-        ),
-        failed_documents: saturating_i32(
-            documents
-                .iter()
-                .filter(|document| matches!(document.status, DocumentStatus::Failed))
-                .count(),
-        ),
-        graph_sparse_documents: saturating_i32(
-            documents
-                .iter()
-                .filter(|document| matches!(document.readiness, DocumentReadiness::GraphSparse))
-                .count(),
-        ),
     }
 }
 
@@ -277,74 +461,6 @@ fn build_dashboard_metrics(
             level: if attention > 0 { MessageLevel::Error } else { MessageLevel::Info },
         },
     ]
-}
-
-fn build_attention_items(
-    ops_state: &OpsLibraryState,
-    warnings: &[OpsLibraryWarning],
-    graph: &GraphSurface,
-    documents: &[DocumentSummary],
-) -> Vec<DashboardAttentionItem> {
-    let mut attention = Vec::new();
-    let readable_without_graph_count = documents
-        .iter()
-        .filter(|document| matches!(document.readiness, DocumentReadiness::Readable))
-        .count();
-    let graph_coverage_gap_count = readable_without_graph_count
-        .saturating_add(usize::try_from(graph.graph_sparse_document_count).unwrap_or(usize::MAX));
-
-    if ops_state.failed_document_count > 0 {
-        attention.push(DashboardAttentionItem {
-            code: "failed_documents".to_string(),
-            title: "Failed documents need review".to_string(),
-            detail: format!(
-                "{} documents are currently failed in the active library.",
-                ops_state.failed_document_count
-            ),
-            route_path: "/documents".to_string(),
-            level: MessageLevel::Error,
-        });
-    }
-
-    if graph_coverage_gap_count > 0 {
-        attention.push(DashboardAttentionItem {
-            code: "graph_coverage_gap".to_string(),
-            title: "Graph coverage remains partial".to_string(),
-            detail: format!(
-                "{} readable documents still do not contribute to the graph.",
-                graph_coverage_gap_count
-            ),
-            route_path: if readable_without_graph_count > 0 {
-                "/documents?readiness=readable".to_string()
-            } else {
-                "/documents?readiness=graph_sparse".to_string()
-            },
-            level: MessageLevel::Warning,
-        });
-    }
-
-    if let Some(document) = documents.iter().find(|document| document.can_retry) {
-        attention.push(DashboardAttentionItem {
-            code: "retryable_document".to_string(),
-            title: "A document can be retried".to_string(),
-            detail: format!(
-                "{} reported a retryable failure or stalled ingest step.",
-                document.file_name
-            ),
-            route_path: "/documents".to_string(),
-            level: MessageLevel::Warning,
-        });
-    }
-
-    attention.extend(warnings.iter().map(map_attention_item));
-    attention.sort_by(|left, right| {
-        attention_priority(right.level)
-            .cmp(&attention_priority(left.level))
-            .then_with(|| left.code.cmp(&right.code))
-    });
-    attention.dedup_by(|left, right| left.code == right.code);
-    attention.truncate(6);
-    attention
 }
 
 fn map_attention_item(warning: &OpsLibraryWarning) -> DashboardAttentionItem {
@@ -509,82 +625,6 @@ fn map_graph_surface(
     }
 }
 
-fn map_document_summary(summary: &ContentDocumentSummary) -> DocumentSummary {
-    let status = map_document_status(
-        &summary.document.document_state,
-        summary.readiness.as_ref(),
-        summary.readiness_summary.as_ref(),
-        &summary.pipeline,
-    );
-    let readiness = map_document_readiness(
-        summary.readiness.as_ref(),
-        summary.readiness_summary.as_ref(),
-        status,
-    );
-
-    DocumentSummary {
-        id: summary.document.id,
-        workspace_id: Some(summary.document.workspace_id),
-        library_id: Some(summary.document.library_id),
-        file_name: summary.file_name.clone(),
-        file_type: summary
-            .active_revision
-            .as_ref()
-            .map_or_else(|| "unknown".to_string(), |revision| revision.mime_type.clone()),
-        file_size: summary.active_revision.as_ref().map_or(0, |revision| revision.byte_size),
-        uploaded_at: summary.document.created_at,
-        status,
-        readiness,
-        stage_label: summary
-            .pipeline
-            .latest_job
-            .as_ref()
-            .and_then(|job| job.current_stage.clone())
-            .or_else(|| {
-                summary
-                    .readiness_summary
-                    .as_ref()
-                    .and_then(|details| details.last_job_stage.clone())
-            })
-            .or_else(|| {
-                summary.readiness_summary.as_ref().map(|details| details.preparation_state.clone())
-            }),
-        progress_percent: None,
-        cost_usd: None,
-        failure_message: summary
-            .readiness_summary
-            .as_ref()
-            .and_then(|details| details.stalled_reason.clone())
-            .or_else(|| {
-                summary.pipeline.latest_job.as_ref().and_then(|job| job.failure_code.clone())
-            })
-            .or_else(|| {
-                summary
-                    .pipeline
-                    .latest_mutation
-                    .as_ref()
-                    .and_then(|mutation| mutation.failure_code.clone())
-            }),
-        can_retry: summary
-            .pipeline
-            .latest_job
-            .as_ref()
-            .map_or(matches!(status, DocumentStatus::Failed), |job| job.retryable),
-        prepared_segment_count: summary
-            .prepared_revision
-            .as_ref()
-            .map(|revision| revision.block_count),
-        technical_fact_count: summary
-            .prepared_revision
-            .as_ref()
-            .map(|revision| revision.typed_fact_count),
-        source_format: summary
-            .prepared_revision
-            .as_ref()
-            .map(|revision| revision.source_format.clone()),
-    }
-}
-
 fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSummary {
     WebIngestRunSummary {
         run_id: summary.run_id,
@@ -611,259 +651,11 @@ fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSumm
     }
 }
 
-fn map_document_status(
-    document_state: &str,
-    readiness: Option<&crate::domains::content::ContentRevisionReadiness>,
-    readiness_summary: Option<&crate::domains::content::DocumentReadinessSummary>,
-    pipeline: &ContentDocumentPipelineState,
-) -> DocumentStatus {
-    let state = document_state.trim().to_ascii_lowercase();
-
-    if state.contains("failed")
-        || pipeline.latest_job.as_ref().and_then(|job| job.failure_code.as_ref()).is_some()
-        || pipeline
-            .latest_mutation
-            .as_ref()
-            .and_then(|mutation| mutation.failure_code.as_ref())
-            .is_some()
-        || readiness_summary
-            .as_ref()
-            .is_some_and(|summary| summary.readiness_kind.contains("failed"))
-        || readiness_summary.as_ref().is_some_and(|summary| {
-            matches!(summary.activity_status, RuntimeDocumentActivityStatus::Failed)
-        })
-    {
-        return DocumentStatus::Failed;
-    }
-
-    if pipeline.latest_job.as_ref().is_some_and(|job| job.queue_state == "queued")
-        || readiness_summary.as_ref().is_some_and(|summary| {
-            matches!(summary.activity_status, RuntimeDocumentActivityStatus::Queued)
-        })
-        || state.contains("queued")
-    {
-        return DocumentStatus::Queued;
-    }
-
-    if pipeline
-        .latest_job
-        .as_ref()
-        .is_some_and(|job| matches!(job.queue_state.as_str(), "leased" | "running" | "processing"))
-        || readiness_summary.as_ref().is_some_and(|summary| {
-            matches!(
-                summary.activity_status,
-                RuntimeDocumentActivityStatus::Active
-                    | RuntimeDocumentActivityStatus::Retrying
-                    | RuntimeDocumentActivityStatus::Blocked
-                    | RuntimeDocumentActivityStatus::Stalled
-            )
-        })
-        || state.contains("processing")
-        || state.contains("running")
-    {
-        return DocumentStatus::Processing;
-    }
-
-    if readiness_summary
-        .as_ref()
-        .is_some_and(|summary| summary.graph_coverage_kind.contains("sparse"))
-    {
-        return DocumentStatus::ReadyNoGraph;
-    }
-
-    if readiness_summary
-        .as_ref()
-        .is_some_and(|summary| summary.graph_coverage_kind.contains("ready"))
-        || readiness.as_ref().is_some_and(|readiness| {
-            matches!(readiness.graph_state.as_str(), "ready" | "graph_ready")
-        })
-    {
-        return DocumentStatus::Ready;
-    }
-
-    if readiness.as_ref().is_some_and(|readiness| {
-        matches!(readiness.text_state.as_str(), "readable" | "ready" | "text_readable")
-    }) {
-        return DocumentStatus::ReadyNoGraph;
-    }
-
-    if state.contains("ready") {
-        return DocumentStatus::Ready;
-    }
-
-    DocumentStatus::Processing
-}
-
-fn map_document_readiness(
-    readiness: Option<&crate::domains::content::ContentRevisionReadiness>,
-    readiness_summary: Option<&crate::domains::content::DocumentReadinessSummary>,
-    status: DocumentStatus,
-) -> DocumentReadiness {
-    if let Some(readiness) = readiness {
-        if matches!(readiness.graph_state.as_str(), "ready" | "graph_ready") {
-            return DocumentReadiness::GraphReady;
-        }
-        if matches!(readiness.graph_state.as_str(), "graph_sparse" | "sparse") {
-            return DocumentReadiness::GraphSparse;
-        }
-        if readiness.graph_state == "failed" {
-            return DocumentReadiness::Failed;
-        }
-    }
-
-    if let Some(summary) = readiness_summary {
-        if summary.graph_coverage_kind.contains("ready") {
-            return DocumentReadiness::GraphReady;
-        }
-        if summary.graph_coverage_kind.contains("sparse") {
-            return DocumentReadiness::GraphSparse;
-        }
-        if summary.readiness_kind.contains("failed") {
-            return DocumentReadiness::Failed;
-        }
-    }
-
-    match status {
-        DocumentStatus::ReadyNoGraph => return DocumentReadiness::Readable,
-        DocumentStatus::Ready => return DocumentReadiness::GraphReady,
-        DocumentStatus::Failed => return DocumentReadiness::Failed,
-        DocumentStatus::Queued | DocumentStatus::Processing => {}
-    }
-
-    if let Some(readiness) = readiness {
-        if matches!(readiness.text_state.as_str(), "readable" | "ready" | "text_readable") {
-            return DocumentReadiness::Readable;
-        }
-        if matches!(readiness.text_state.as_str(), "queued" | "processing") {
-            return DocumentReadiness::Processing;
-        }
-        if readiness.text_state == "failed" {
-            return DocumentReadiness::Failed;
-        }
-    }
-
-    match status {
-        DocumentStatus::Ready => DocumentReadiness::GraphReady,
-        DocumentStatus::ReadyNoGraph => DocumentReadiness::Readable,
-        DocumentStatus::Queued | DocumentStatus::Processing => DocumentReadiness::Processing,
-        DocumentStatus::Failed => DocumentReadiness::Failed,
-    }
-}
-
 fn severity_level(value: &str) -> MessageLevel {
     match value {
         "error" => MessageLevel::Error,
         "warning" => MessageLevel::Warning,
         _ => MessageLevel::Info,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{map_document_readiness, map_document_summary};
-    use crate::domains::{
-        content::{
-            ContentDocument, ContentDocumentPipelineState, ContentDocumentSummary,
-            ContentRevisionReadiness, DocumentReadinessSummary,
-        },
-        ops::OpsAsyncOperation,
-        runtime_ingestion::RuntimeDocumentActivityStatus,
-    };
-    use chrono::Utc;
-    use ironrag_contracts::documents::{DocumentReadiness, DocumentStatus};
-    use serde_json::json;
-    use uuid::Uuid;
-
-    fn sample_summary() -> ContentDocumentSummary {
-        ContentDocumentSummary {
-            document: ContentDocument {
-                id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                external_key: "legacy-external-key".to_string(),
-                document_state: "active".to_string(),
-                created_at: Utc::now(),
-            },
-            file_name: "canonical-file-name.txt".to_string(),
-            head: None,
-            active_revision: None,
-            source_access: None,
-            readiness: None,
-            readiness_summary: None,
-            prepared_revision: None,
-            web_page_provenance: None,
-            pipeline: ContentDocumentPipelineState { latest_mutation: None, latest_job: None },
-        }
-    }
-
-    #[test]
-    fn ready_no_graph_status_without_sparse_coverage_maps_to_readable() {
-        let readiness = ContentRevisionReadiness {
-            revision_id: Uuid::now_v7(),
-            text_state: "ready".to_string(),
-            vector_state: "ready".to_string(),
-            graph_state: "accepted".to_string(),
-            text_readable_at: Some(Utc::now()),
-            vector_ready_at: Some(Utc::now()),
-            graph_ready_at: None,
-        };
-
-        let mapped = map_document_readiness(Some(&readiness), None, DocumentStatus::ReadyNoGraph);
-        assert_eq!(mapped, DocumentReadiness::Readable);
-    }
-
-    #[test]
-    fn sparse_coverage_summary_still_maps_to_graph_sparse() {
-        let summary = DocumentReadinessSummary {
-            document_id: Uuid::now_v7(),
-            active_revision_id: Some(Uuid::now_v7()),
-            readiness_kind: "readable".to_string(),
-            activity_status: RuntimeDocumentActivityStatus::Ready,
-            stalled_reason: None,
-            preparation_state: "ready".to_string(),
-            graph_coverage_kind: "graph_sparse".to_string(),
-            typed_fact_coverage: Some(1.0),
-            last_mutation_id: None,
-            last_job_stage: None,
-            updated_at: Utc::now(),
-        };
-
-        let mapped = map_document_readiness(None, Some(&summary), DocumentStatus::ReadyNoGraph);
-        assert_eq!(mapped, DocumentReadiness::GraphSparse);
-    }
-
-    #[test]
-    fn document_summary_uses_canonical_summary_file_name() {
-        let mut summary = sample_summary();
-        summary.document.external_key = "stale-fallback".to_string();
-
-        let mapped = map_document_summary(&summary);
-
-        assert_eq!(mapped.file_name, "canonical-file-name.txt");
-    }
-
-    #[test]
-    fn async_operation_serializes_using_canonical_camel_case_fields() {
-        let operation = OpsAsyncOperation {
-            id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Some(Uuid::now_v7()),
-            operation_kind: "content_mutation".to_string(),
-            status: "ready".to_string(),
-            surface_kind: Some("rest".to_string()),
-            subject_kind: Some("content_mutation".to_string()),
-            subject_id: Some(Uuid::now_v7()),
-            failure_code: None,
-            created_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-        };
-
-        let serialized =
-            serde_json::to_value(&operation).expect("ops async operation to serialize");
-
-        assert!(serialized.get("completedAt").is_some());
-        assert!(serialized.get("completed_at").is_none());
-        assert_eq!(serialized.get("status"), Some(&json!("ready")));
     }
 }
 
@@ -908,3 +700,7 @@ fn saturating_i32(value: usize) -> i32 {
 fn saturating_i32_from_i64(value: i64) -> i32 {
     i32::try_from(value).unwrap_or_else(|_| if value.is_negative() { i32::MIN } else { i32::MAX })
 }
+
+#[cfg(test)]
+#[path = "ops_tests.rs"]
+mod tests;

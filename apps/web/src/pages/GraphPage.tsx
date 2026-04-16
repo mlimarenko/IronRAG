@@ -1,53 +1,42 @@
-import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
+import { useCallback, useEffect, useMemo, useState, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useApp } from '@/contexts/AppContext';
 import { useNavigate } from 'react-router-dom';
+import {
+  mapGraphDocumentDetail,
+  mapGraphTopology,
+  mapKnowledgeEntityDetail,
+} from '@/adapters/graph';
+import { errorMessage } from '@/lib/errorMessage';
 import { documentsApi, knowledgeApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
   GRAPH_LAYOUT_OPTIONS,
-  GRAPH_NODE_COLORS,
   isGraphLayoutType,
   type GraphLayoutType,
 } from '@/components/graph/config';
 import {
-  Search, X, Loader2,
-  FileText, Share2, AlertTriangle,
-  Eye, EyeOff, RotateCcw, Layers,
-  PieChart, Rows3, Network, CircleDashed, Orbit,
+  Search,
+  X,
+  Loader2,
+  FileText,
+  Share2,
+  AlertTriangle,
+  PieChart,
+  Rows3,
+  Network,
+  CircleDashed,
+  Orbit,
 } from 'lucide-react';
-import type { GraphNode, GraphNodeType, GraphMetadata, GraphStatus } from '@/types';
-import type {
-  RawKnowledgeEntity,
-  RawKnowledgeRelation,
-  RawKnowledgeDocument,
-  RawKnowledgeEntityDetail,
-  RawGraphDocumentLink,
-} from '@/types/api-responses';
-
-function errorMessage(err: unknown, fallback: string): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'object' && err !== null && 'message' in err) {
-    const msg = (err as { message?: unknown }).message;
-    if (typeof msg === 'string') return msg;
-  }
-  return fallback;
-}
-
-function resolveDocumentSummary(raw: Record<string, unknown>): string | undefined {
-  const head = typeof raw.head === 'object' && raw.head !== null
-    ? (raw.head as Record<string, unknown>)
-    : null;
-  const summary = head?.documentSummary ?? head?.document_summary;
-  return typeof summary === 'string' && summary.trim().length > 0 ? summary : undefined;
-}
-
+import type { GraphEdge, GraphMetadata, GraphNode, GraphStatus } from '@/types';
+import { GraphInspector } from '@/components/graph/GraphInspector';
+import { GraphLegend } from '@/components/graph/GraphLegend';
+import { buildTypeLegend, subtypeFilterKey } from '@/components/graph/typeLegend';
+import { useGraphAdjacency } from '@/components/graph/useGraphAdjacency';
 
 const SigmaGraph = lazy(() => import('@/components/SigmaGraph'));
-const SUBTYPE_PREVIEW_LIMIT = 12;
-const NO_SUBTYPE_KEY = '__no_subtype__';
 
 const GRAPH_LAYOUT_ICONS = {
   sectors: PieChart,
@@ -57,380 +46,222 @@ const GRAPH_LAYOUT_ICONS = {
   clusters: Orbit,
 } as const;
 
-function mapNodeType(t: string | undefined): GraphNodeType {
-  if (t === 'document') return 'document';
-  if (t === 'person') return 'person';
-  if (t === 'organization') return 'organization';
-  if (t === 'location') return 'location';
-  if (t === 'event') return 'event';
-  if (t === 'artifact') return 'artifact';
-  if (t === 'natural') return 'natural';
-  if (t === 'process') return 'process';
-  if (t === 'concept') return 'concept';
-  if (t === 'attribute') return 'attribute';
-  if (t === 'entity') return 'entity';
-  // Backward compat for legacy type names
-  if (t === 'topic') return 'concept';
-  if (t === 'technology') return 'artifact';
-  if (t === 'api') return 'artifact';
-  if (t === 'code_symbol') return 'artifact';
-  if (t === 'natural_kind') return 'natural';
-  if (t === 'metric') return 'attribute';
-  if (t === 'regulation') return 'artifact';
-  return 'entity';
-}
-
-function subtypeFilterKey(type: string, subType?: string | null): string {
-  return `${type}:${subType && subType.trim().length > 0 ? subType : NO_SUBTYPE_KEY}`;
-}
-
-function subtypeLegendLabel(t: (key: string, options?: Record<string, unknown>) => string, subType: string): string {
-  return subType === NO_SUBTYPE_KEY ? t('graph.noSubType') : subType;
-}
-
-type GraphEdgeData = { id: string; sourceId: string; targetId: string; label: string; weight: number };
-
-function countConnectedComponents(nodes: GraphNode[], edges: GraphEdgeData[]): number {
-  if (nodes.length === 0) return 0;
-
-  const adjacency = new Map<string, string[]>();
-  for (const node of nodes) {
-    adjacency.set(node.id, []);
-  }
-
-  for (const edge of edges) {
-    if (edge.sourceId === edge.targetId) continue;
-    const sourceNeighbors = adjacency.get(edge.sourceId);
-    const targetNeighbors = adjacency.get(edge.targetId);
-    if (!sourceNeighbors || !targetNeighbors) continue;
-    sourceNeighbors.push(edge.targetId);
-    targetNeighbors.push(edge.sourceId);
-  }
-
-  let componentCount = 0;
-  const visited = new Set<string>();
-
-  for (const node of nodes) {
-    if (visited.has(node.id)) continue;
-    componentCount += 1;
-
-    const queue = [node.id];
-    visited.add(node.id);
-
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (!current) continue;
-
-      for (const neighbor of adjacency.get(current) ?? []) {
-        if (visited.has(neighbor)) continue;
-        visited.add(neighbor);
-        queue.push(neighbor);
-      }
-    }
-  }
-
-  return componentCount;
-}
-
-function recommendGraphLayout(nodes: GraphNode[], edges: GraphEdgeData[]): GraphLayoutType {
-  if (nodes.length === 0) return 'bands';
-
-  const typeCount = new Set(nodes.map((node) => node.type)).size;
-  const componentCount = countConnectedComponents(nodes, edges);
-
-  if (componentCount >= 6 && edges.length < nodes.length * 2.2) {
-    return 'components';
-  }
-
-  if (nodes.length > 320 || edges.length > nodes.length * 2.8 || typeCount >= 6) {
-    return 'bands';
-  }
-
-  return 'sectors';
-}
-
-
 export default function GraphPage() {
   const { t } = useTranslation();
   const { activeLibrary } = useApp();
   const navigate = useNavigate();
 
-  // Edges from entities/relations fallback
-  const edgesRef = useRef<GraphEdgeData[]>([]);
-
-  // API state
+  // Graph data
   const [allNodes, setAllNodes] = useState<GraphNode[]>([]);
+  const [allEdges, setAllEdges] = useState<GraphEdge[]>([]);
   const [graphMeta, setGraphMeta] = useState<GraphMetadata | null>(null);
   const [graphStatus, setGraphStatus] = useState<GraphStatus>('building');
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadProgress, setLoadProgress] = useState<{ nodes: number; total: number } | null>(null);
 
-  // Node detail state (from entity detail endpoint)
+  // Selection state
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<GraphNode | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
   // UI controls
   const [searchQuery, setSearchQuery] = useState('');
+  // `debouncedSearchQuery` trails `searchQuery` by 250 ms so rapid typing
+  // does not recompute `hiddenIds` on every keystroke. On a 100k-node graph
+  // the filter scan is still fast, but the Sigma reducer refresh that
+  // follows each change is not — debouncing keeps the UI glassy while the
+  // user is still composing their query.
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [hiddenSubTypes, setHiddenSubTypes] = useState<Set<string>>(new Set());
   const [layout, setLayout] = useState<GraphLayoutType>('bands');
   const [legendOpen, setLegendOpen] = useState(true);
   const [expandedSubtypeGroups, setExpandedSubtypeGroups] = useState<Set<string>>(new Set());
-  const hasActiveGraphFilters = searchQuery.trim().length > 0 || hiddenTypes.size > 0 || hiddenSubTypes.size > 0;
+
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearchQuery(searchQuery), 250);
+    return () => clearTimeout(handle);
+  }, [searchQuery]);
+
+  const hasActiveGraphFilters =
+    searchQuery.trim().length > 0 || hiddenTypes.size > 0 || hiddenSubTypes.size > 0;
   const hasActiveGraphState = hasActiveGraphFilters || selectedNode !== null;
 
-  const resetGraphView = () => {
-    setSelectedNode(null);
+  // Canonical adjacency index — computed once per (nodes, edges). The inspector,
+  // search, and any future neighbor lookup read from this in O(k) per query
+  // instead of scanning every edge on each render.
+  const adjacency = useGraphAdjacency(allNodes, allEdges);
+
+  const handleSelectNode = useCallback((nextId: string | null) => {
+    setSelectedNode(nextId);
     setSelectedDetail(null);
+    setDetailLoading(nextId !== null);
+  }, []);
+
+  const resetGraphView = useCallback(() => {
+    handleSelectNode(null);
     setSearchQuery('');
     setHiddenTypes(new Set());
     setHiddenSubTypes(new Set());
     setExpandedSubtypeGroups(new Set());
-  };
+  }, [handleSelectNode]);
 
-  // Fetch graph workbench data, falling back to entities+relations endpoints
+  // Fetch graph topology on library change. Uses cancellation guard so a
+  // rapid library switch does not commit stale data.
   useEffect(() => {
     if (!activeLibrary) return;
     let cancelled = false;
-    setGraphStatus('building');
-    setLoadError(null);
-    setAllNodes([]);
-    setGraphMeta(null);
-    setSelectedNode(null);
-    setSelectedDetail(null);
-    setSearchQuery('');
-    setHiddenTypes(new Set());
-    setHiddenSubTypes(new Set());
 
-    // Load graph data from fast individual endpoints (not slow graph-workbench)
-    Promise.all([
-      knowledgeApi.listEntities(activeLibrary.id),
-      knowledgeApi.listRelations(activeLibrary.id),
-      knowledgeApi.listDocuments(activeLibrary.id),
-      knowledgeApi.getGraphTopology(activeLibrary.id).catch((err) => {
-        console.warn('failed to load graph topology', err);
-        return null;
-      }),
-    ]).then(([entitiesRes, relationsRes, documentsRes, topologyRes]) => {
-          if (cancelled) return;
+    void (async () => {
+      setGraphStatus('building');
+      setLoadError(null);
+      setAllNodes([]);
+      setAllEdges([]);
+      setGraphMeta(null);
+      setLoadProgress({ nodes: 0, total: 0 });
+      setSelectedNode(null);
+      setSelectedDetail(null);
+      setDetailLoading(false);
+      setSearchQuery('');
+      setHiddenTypes(new Set());
+      setHiddenSubTypes(new Set());
 
-          const entities: RawKnowledgeEntity[] = Array.isArray(entitiesRes)
-            ? (entitiesRes as RawKnowledgeEntity[])
-            : ((entitiesRes.items ?? []) as RawKnowledgeEntity[]);
-          const relations: RawKnowledgeRelation[] = Array.isArray(relationsRes)
-            ? (relationsRes as RawKnowledgeRelation[])
-            : ((relationsRes.items ?? []) as RawKnowledgeRelation[]);
-          const documents: RawKnowledgeDocument[] = Array.isArray(documentsRes)
-            ? (documentsRes as RawKnowledgeDocument[])
-            : ((documentsRes.items ?? documentsRes.documents ?? []) as RawKnowledgeDocument[]);
-          const documentLinks: RawGraphDocumentLink[] =
-            (topologyRes?.documentLinks as RawGraphDocumentLink[] | undefined) ?? [];
+      try {
+        const topologyRes = await knowledgeApi.getGraphTopology(activeLibrary.id, {
+          onProgress: (progress) => {
+            if (cancelled) return;
+            setLoadProgress({
+              nodes: progress.nodesLoaded,
+              total: progress.expectedNodes,
+            });
+          },
+        });
+        if (cancelled) return;
+        const {
+          nodes: topologyNodes,
+          edges: topologyEdges,
+          meta: topologyMeta,
+        } = mapGraphTopology(topologyRes);
+        const recommendedLayout =
+          topologyMeta.recommendedLayout && isGraphLayoutType(topologyMeta.recommendedLayout)
+            ? topologyMeta.recommendedLayout
+            : 'bands';
 
-          // Pre-compute per-document edge counts from topology links
-          const docEdgeCounts = new Map<string, number>();
-          documentLinks.forEach((link) => {
-            docEdgeCounts.set(link.documentId, (docEdgeCounts.get(link.documentId) ?? 0) + 1);
-          });
-
-          const entityNodes: GraphNode[] = entities.map((e) => {
-            const canonical = mapNodeType(e.entityType);
-            const rawType = (e.entityType ?? '').toLowerCase();
-            return {
-              id: e.entityId ?? e.id ?? '',
-              label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
-              type: canonical,
-              subType: e.entitySubType ?? (rawType !== canonical ? rawType : undefined),
-              summary: e.summary ?? undefined,
-              edgeCount: e.supportCount ?? 0,
-              properties: {},
-              sourceDocumentIds: [],
-            };
-          });
-
-          const documentNodes: GraphNode[] = documents.map((d) => {
-            const docId = d.document_id ?? d.documentId ?? d.id ?? '';
-            return {
-              id: docId,
-              label: d.title ?? d.fileName ?? d.external_key ?? 'untitled',
-              type: 'document' as GraphNodeType,
-              summary: undefined,
-              edgeCount: docEdgeCounts.get(docId) ?? 0,
-              properties: {},
-              sourceDocumentIds: [],
-            };
-          });
-
-          const fallbackNodes: GraphNode[] = [...entityNodes, ...documentNodes];
-
-          const relationEdges = relations.map((r) => ({
-            id: r.relationId ?? r.id ?? '',
-            sourceId: r.subjectEntityId,
-            targetId: r.objectEntityId,
-            label: r.predicate ?? '',
-            weight: r.supportCount ?? 1,
-          }));
-
-          const documentEdges = documentLinks.map((link) => ({
-            id: `dl-${link.documentId}-${link.targetNodeId}`,
-            sourceId: link.documentId,
-            targetId: link.targetNodeId,
-            label: 'supports',
-            weight: link.supportCount ?? 1,
-          }));
-
-          const fallbackEdges = [...relationEdges, ...documentEdges];
-
-          // Store edges on the module level so GraphCanvas can use them
-          edgesRef.current = fallbackEdges;
-          const recommendedLayout = recommendGraphLayout(fallbackNodes, fallbackEdges);
-
-          const fallbackMeta: GraphMetadata = {
-            nodeCount: fallbackNodes.length,
-            edgeCount: fallbackEdges.length,
-            hiddenDisconnectedCount: 0,
-            status: fallbackNodes.length > 0 ? 'ready' : 'empty',
-            convergenceStatus: 'current',
-            recommendedLayout,
-          };
-
-          setAllNodes(fallbackNodes);
-          setGraphMeta(fallbackMeta);
-          setGraphStatus(fallbackMeta.status);
-          setLayout(recommendedLayout);
-      })
-      .catch((err: unknown) => {
+        setAllNodes(topologyNodes);
+        setAllEdges(topologyEdges);
+        setGraphMeta(topologyMeta);
+        setGraphStatus(topologyMeta.status);
+        setLayout(recommendedLayout);
+        setLoadProgress(null);
+      } catch (err: unknown) {
         if (cancelled) return;
         setLoadError(errorMessage(err, 'Failed to load graph'));
         setGraphStatus('failed');
-      });
+        setLoadProgress(null);
+      }
+    })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [activeLibrary]);
 
-  // Fetch node detail when selected — different API for entities vs documents
+  // Fetch node detail when selected — different API for entities vs documents.
+  // Depends only on the selection and the adjacency index (used to look up the
+  // basic node by ID), not on the full `allNodes` array, so selection events
+  // do not re-fire on unrelated topology state changes.
   useEffect(() => {
-    if (!activeLibrary || !selectedNode) {
-      setSelectedDetail(null);
-      return;
-    }
-    const basic = allNodes.find(n => n.id === selectedNode) ?? null;
-    setSelectedDetail(basic);
-    setDetailLoading(true);
+    if (!activeLibrary || !selectedNode) return;
+    const basic = adjacency.nodeById.get(selectedNode) ?? null;
+    if (!basic) return;
 
     let cancelled = false;
 
-    if (basic?.type === 'document') {
-      // For documents, fetch document detail from content API
-      documentsApi.get(selectedNode)
+    if (basic.type === 'document') {
+      documentsApi
+        .get(selectedNode)
         .then((doc) => {
           if (cancelled) return;
-          const enriched: GraphNode = {
-            id: selectedNode,
-            label: (typeof doc.fileName === 'string' ? doc.fileName : undefined) ?? basic.label,
-            type: 'document',
-            summary: resolveDocumentSummary(doc as Record<string, unknown>) ?? basic.summary,
-            edgeCount: basic.edgeCount,
-            properties: {},
-            sourceDocumentIds: [],
-          };
-          const rev = (doc.activeRevision ?? doc.active_revision) as
-            | { mime_type?: string; byte_size?: number; revision_number?: number }
-            | undefined;
-          if (rev?.mime_type) enriched.properties['format'] = rev.mime_type;
-          if (rev?.byte_size != null) enriched.properties['size'] = `${(rev.byte_size / 1024).toFixed(1)} KB`;
-          if (rev?.revision_number != null) enriched.properties['revision'] = String(rev.revision_number);
-          enriched.properties['state'] = doc.readinessSummary?.readinessKind ?? 'unknown';
-          enriched.properties['activity'] = doc.readinessSummary?.activityStatus ?? 'unknown';
-          if (doc.readinessSummary?.graphCoverageKind) enriched.properties['graph coverage'] = doc.readinessSummary.graphCoverageKind;
-          setSelectedDetail(enriched);
+          setSelectedDetail(mapGraphDocumentDetail(doc, basic, selectedNode));
         })
         .catch((err) => {
           console.warn('failed to load entity detail, falling back to basic', err);
           if (!cancelled) setSelectedDetail(basic);
         })
-        .finally(() => { if (!cancelled) setDetailLoading(false); });
-      return () => { cancelled = true; };
+        .finally(() => {
+          if (!cancelled) setDetailLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
     }
 
-    // For entities/topics, use the knowledge entity API
-    knowledgeApi.getEntity(activeLibrary.id, selectedNode)
+    knowledgeApi
+      .getEntity(activeLibrary.id, selectedNode)
       .then((rawDetail) => {
         if (cancelled) return;
-        const detail = rawDetail as RawKnowledgeEntityDetail;
-        const entity: RawKnowledgeEntity = detail.entity ?? (detail as RawKnowledgeEntity);
-        const canonicalType = mapNodeType(entity.entityType ?? entity.nodeType);
-        const rawType = (entity.entityType ?? '').toLowerCase();
-        const resolvedSubType =
-          entity.entitySubType ??
-          basic?.subType ??
-          (rawType !== canonicalType ? rawType : undefined);
-        const enriched: GraphNode = {
-          id: entity.entityId ?? entity.id ?? selectedNode,
-          label: entity.canonicalLabel ?? entity.label ?? basic?.label ?? '',
-          type: canonicalType,
-          subType: resolvedSubType,
-          summary: entity.summary ?? basic?.summary ?? undefined,
-          edgeCount: entity.supportCount ?? basic?.edgeCount ?? 0,
-          properties: {},
-          sourceDocumentIds: [],
-        };
-        if (entity.entityType) enriched.properties['type'] = entity.entityType;
-        if (entity.confidence != null) enriched.properties['confidence'] = String(Math.round(entity.confidence * 100)) + '%';
-        if (entity.supportCount != null) enriched.properties['support count'] = String(entity.supportCount);
-        if (entity.entityState) enriched.properties['state'] = entity.entityState;
-        if (entity.aliases?.length) enriched.properties['aliases'] = entity.aliases.join(', ');
-        if (detail.selectedNode?.relatedNodes) {
-          enriched.sourceDocumentIds = (detail.selectedNode.supportingDocuments ?? []).map((d) => d.documentId);
-        }
-        setSelectedDetail(enriched);
+        setSelectedDetail(mapKnowledgeEntityDetail(rawDetail, basic, selectedNode));
       })
       .catch((err: unknown) => {
-        console.error("Entity detail failed:", err);
+        console.error('Entity detail failed:', err);
         toast.error(errorMessage(err, 'Failed to load entity details'));
       })
       .finally(() => {
         if (!cancelled) setDetailLoading(false);
       });
 
-    return () => { cancelled = true; };
-  }, [activeLibrary, selectedNode, allNodes]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeLibrary, selectedNode, adjacency]);
 
-  const filteredNodes = useMemo(() => allNodes.filter(n => {
-    if (hiddenTypes.has(n.type)) return false;
-    if (hiddenSubTypes.has(subtypeFilterKey(n.type, n.subType))) return false;
-    if (searchQuery && !n.label.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-    return true;
-  }), [allNodes, hiddenTypes, hiddenSubTypes, searchQuery]);
+  // Canonical "hide this node" set, recomputed only when filter inputs
+  // change. SigmaGraph reads this and applies the hide flag via its
+  // reducer pipeline — the Graphology instance is never rebuilt, so
+  // typing in the search box does not trigger the multi-second layout
+  // pass that a filtered-nodes-prop approach would cost at 100k nodes.
+  const hiddenIds = useMemo(() => {
+    const hidden = new Set<string>();
+    const query = debouncedSearchQuery.trim().toLowerCase();
+    const hasTypeFilter = hiddenTypes.size > 0;
+    const hasSubTypeFilter = hiddenSubTypes.size > 0;
+    const hasQuery = query.length > 0;
+    if (!hasTypeFilter && !hasSubTypeFilter && !hasQuery) return hidden;
+    for (const n of allNodes) {
+      if (hasTypeFilter && hiddenTypes.has(n.type)) {
+        hidden.add(n.id);
+        continue;
+      }
+      if (hasSubTypeFilter && hiddenSubTypes.has(subtypeFilterKey(n.type, n.subType))) {
+        hidden.add(n.id);
+        continue;
+      }
+      if (hasQuery && !n.label.toLowerCase().includes(query)) {
+        hidden.add(n.id);
+      }
+    }
+    return hidden;
+  }, [allNodes, hiddenTypes, hiddenSubTypes, debouncedSearchQuery]);
 
-  const effectiveLayout = layout;
-  const activeLayoutOption = GRAPH_LAYOUT_OPTIONS.find((option) => option.id === layout) ?? GRAPH_LAYOUT_OPTIONS[0];
+  const visibleNodeCount = allNodes.length - hiddenIds.size;
+
+  const activeLayoutOption =
+    GRAPH_LAYOUT_OPTIONS.find((option) => option.id === layout) ?? GRAPH_LAYOUT_OPTIONS[0];
   const recommendedLayout =
     graphMeta?.recommendedLayout && isGraphLayoutType(graphMeta.recommendedLayout)
       ? graphMeta.recommendedLayout
       : null;
 
-  // Compute type → subtype breakdown for legend.
-  const typeLegend = useMemo(() => {
-    const map = new Map<string, { count: number; subs: Map<string, number>; noSubtypeCount: number }>();
-    for (const n of allNodes) {
-      let entry = map.get(n.type);
-      if (!entry) { entry = { count: 0, subs: new Map(), noSubtypeCount: 0 }; map.set(n.type, entry); }
-      entry.count++;
-      if (n.subType && n.subType.trim().length > 0) {
-        entry.subs.set(n.subType, (entry.subs.get(n.subType) ?? 0) + 1);
-      } else {
-        entry.noSubtypeCount += 1;
-      }
-    }
-    return map;
-  }, [allNodes]);
+  const typeLegend = useMemo(() => buildTypeLegend(allNodes), [allNodes]);
 
-  const selected = selectedDetail ?? allNodes.find(n => n.id === selectedNode) ?? null;
+  const selected = selectedDetail ?? adjacency.nodeById.get(selectedNode ?? '') ?? null;
 
   if (!activeLibrary) {
     return (
       <div className="flex-1 flex flex-col">
-        <div className="page-header"><h1 className="text-lg font-bold tracking-tight">{t('graph.title')}</h1></div>
+        <div className="page-header">
+          <h1 className="text-lg font-bold tracking-tight">{t('graph.title')}</h1>
+        </div>
         <div className="empty-state flex-1">
           <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
             <Share2 className="h-7 w-7 text-muted-foreground" />
@@ -445,15 +276,21 @@ export default function GraphPage() {
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
       {/* Toolbar */}
-      <div className="px-4 py-2.5 border-b flex items-center gap-2 flex-wrap" style={{
-        background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--background)))',
-      }}>
+      <div
+        className="px-4 py-2.5 border-b flex items-center gap-2 flex-wrap"
+        style={{
+          background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--background)))',
+        }}
+      >
         <div className="relative min-w-[180px]">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-          <Input className="h-8 pl-8 text-xs" placeholder={t('graph.searchPlaceholder')} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+          <Input
+            className="h-8 pl-8 text-xs"
+            placeholder={t('graph.searchPlaceholder')}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
         </div>
-
-        {/* Type filter moved to clickable legend below */}
 
         <div className="flex items-center gap-1 rounded-xl border border-border/60 bg-card/80 p-1 shadow-soft">
           {GRAPH_LAYOUT_OPTIONS.map((option) => {
@@ -490,23 +327,44 @@ export default function GraphPage() {
           >
             <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
             <span className="text-muted-foreground">{t('graph.recommended')}</span>
-            <span className="font-semibold text-primary">{t(`graph.layouts.${recommendedLayout}`)}</span>
+            <span className="font-semibold text-primary">
+              {t(`graph.layouts.${recommendedLayout}`)}
+            </span>
           </button>
         )}
 
-        {/* Sigma.js handles zoom via mouse wheel / pinch */}
-
         {hasActiveGraphState && (
-          <button className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold" onClick={resetGraphView}>
+          <button
+            className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold"
+            onClick={resetGraphView}
+          >
             <X className="h-3.5 w-3.5" /> {t('graph.clear')}
           </button>
         )}
 
         <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="tabular-nums font-semibold">{graphMeta?.nodeCount ?? 0} {t('graph.nodes')}</span>
-          <span className="tabular-nums font-semibold">{graphMeta?.edgeCount ?? 0} {t('graph.edges')}</span>
-          {(graphMeta?.hiddenDisconnectedCount ?? 0) > 0 && <span className="tabular-nums">{graphMeta!.hiddenDisconnectedCount} {t('graph.hidden')}</span>}
-          <span className={`status-badge ${graphStatus === 'ready' ? 'status-ready' : graphStatus === 'partial' ? 'status-warning' : graphStatus === 'failed' ? 'status-failed' : 'status-processing'}`}>
+          <span className="tabular-nums font-semibold">
+            {graphMeta?.nodeCount ?? 0} {t('graph.nodes')}
+          </span>
+          <span className="tabular-nums font-semibold">
+            {graphMeta?.edgeCount ?? 0} {t('graph.edges')}
+          </span>
+          {(graphMeta?.hiddenDisconnectedCount ?? 0) > 0 && (
+            <span className="tabular-nums">
+              {graphMeta!.hiddenDisconnectedCount} {t('graph.hidden')}
+            </span>
+          )}
+          <span
+            className={`status-badge ${
+              graphStatus === 'ready'
+                ? 'status-ready'
+                : graphStatus === 'partial'
+                  ? 'status-warning'
+                  : graphStatus === 'failed'
+                    ? 'status-failed'
+                    : 'status-processing'
+            }`}
+          >
             {graphStatus}
           </span>
         </div>
@@ -518,6 +376,11 @@ export default function GraphPage() {
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-sunken">
               <Loader2 className="h-8 w-8 animate-spin text-primary/60 mb-3" />
               <p className="text-sm font-semibold text-muted-foreground">{t('graph.loading')}</p>
+              {loadProgress && loadProgress.total > 0 && (
+                <p className="text-xs text-muted-foreground mt-1 tabular-nums">
+                  {loadProgress.nodes} / {loadProgress.total}
+                </p>
+              )}
             </div>
           ) : loadError ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-sunken">
@@ -527,7 +390,7 @@ export default function GraphPage() {
               <h2 className="text-base font-bold tracking-tight">{t('graph.failedToLoad')}</h2>
               <p className="text-sm text-muted-foreground mt-2 max-w-sm text-center">{loadError}</p>
             </div>
-          ) : filteredNodes.length === 0 ? (
+          ) : visibleNodeCount === 0 ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-sunken">
               <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
                 <Share2 className="h-7 w-7 text-muted-foreground" />
@@ -539,339 +402,61 @@ export default function GraphPage() {
                 {allNodes.length === 0 ? t('graph.noGraphDesc') : t('graph.noMatchingNodesDesc')}
               </p>
               {allNodes.length === 0 && (
-                <Button variant="outline" size="sm" className="mt-4" onClick={() => navigate('/documents')}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-4"
+                  onClick={() => navigate('/documents')}
+                >
                   <FileText className="h-3.5 w-3.5 mr-1.5" /> {t('graph.goToDocuments')}
                 </Button>
               )}
             </div>
           ) : (
-            <Suspense fallback={<div className="flex-1 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin" /></div>}>
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center">
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                </div>
+              }
+            >
               <SigmaGraph
-                nodes={filteredNodes}
-                edges={edgesRef.current}
+                nodes={allNodes}
+                edges={allEdges}
                 selectedId={selectedNode}
-                onSelect={setSelectedNode}
-                layout={effectiveLayout}
-                hiddenTypes={hiddenTypes}
+                onSelect={handleSelectNode}
+                layout={layout}
+                hiddenIds={hiddenIds}
               />
             </Suspense>
           )}
 
-          {/* Legend toggle button — always visible */}
-          {!legendOpen && (
-            <button
-              onClick={() => setLegendOpen(true)}
-              className="absolute top-3 left-3 glass-panel rounded-xl p-2 shadow-lifted cursor-pointer hover:bg-white/10 transition-all"
-              title={t('graph.showLegend')}
-            >
-              <Layers className="h-4 w-4 text-muted-foreground" />
-            </button>
-          )}
-
-          {/* Vertical legend — left side */}
-          {legendOpen && (
-            <div className="absolute top-3 left-3 bottom-3 max-h-[calc(100%-24px)] overflow-y-auto text-xs glass-panel rounded-xl shadow-lifted min-w-[150px] max-w-[250px] flex flex-col">
-              {/* Legend header with controls */}
-              <div className="flex items-center gap-1 px-3 py-2 border-b border-white/10">
-                <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex-1">{t('graph.legend')}</span>
-                <button
-                  onClick={() => { setHiddenTypes(new Set()); setHiddenSubTypes(new Set()); }}
-                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
-                  title={t('graph.showAll')}
-                >
-                  <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-                </button>
-                <button
-                  onClick={() => {
-                    setHiddenTypes(prev => {
-                      const allTypes = Object.keys(GRAPH_NODE_COLORS);
-                      const next = new Set<string>();
-                      for (const tp of allTypes) {
-                        if (!prev.has(tp)) next.add(tp);
-                      }
-                      return next;
-                    });
-                  }}
-                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
-                  title={t('graph.invert')}
-                >
-                  <RotateCcw className="h-3.5 w-3.5 text-muted-foreground" />
-                </button>
-                <button
-                  onClick={() => setLegendOpen(false)}
-                  className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
-                  title={t('graph.hideLegend')}
-                >
-                  <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />
-                </button>
-              </div>
-
-              {/* Type list */}
-              <div className="px-2 py-1.5 flex-1 overflow-y-auto">
-                {Object.entries(GRAPH_NODE_COLORS).map(([type, color]) => {
-                  const isHidden = hiddenTypes.has(type);
-                  const stats = typeLegend.get(type);
-                  const count = stats?.count ?? 0;
-                  if (count === 0 && type !== 'document') return null;
-                  const realSubs = stats?.subs ? Array.from(stats.subs.entries()).sort((a, b) => b[1] - a[1]) : [];
-                  const subs = stats && stats.noSubtypeCount > 0 && realSubs.length > 0
-                    ? [...realSubs, [NO_SUBTYPE_KEY, stats.noSubtypeCount] as const]
-                    : realSubs;
-                  const isSubtypeGroupExpanded = expandedSubtypeGroups.has(type);
-                  const visibleSubs = isSubtypeGroupExpanded ? subs : subs.slice(0, SUBTYPE_PREVIEW_LIMIT);
-                  const hiddenSubtypeCount = Math.max(0, subs.length - SUBTYPE_PREVIEW_LIMIT);
-                  return (
-                    <div key={type} className={`mb-0.5 ${isHidden ? 'opacity-35' : ''}`}>
-                      <button
-                        className={`flex items-center gap-1.5 w-full px-2 py-1 rounded-md transition-all cursor-pointer ${isHidden ? 'line-through' : 'hover:bg-white/10'}`}
-                        onClick={(e) => {
-                          if (e.ctrlKey || e.metaKey) {
-                            // Ctrl/Cmd+Click: toggle single type
-                            setHiddenTypes(prev => {
-                              const next = new Set(prev);
-                              if (next.has(type)) next.delete(type);
-                              else next.add(type);
-                              return next;
-                            });
-                          } else {
-                            // Click: isolate (show only this) or reset
-                            const allTypes = Object.keys(GRAPH_NODE_COLORS);
-                            const othersHidden = allTypes.filter(t => t !== type).every(t => hiddenTypes.has(t));
-                            if (othersHidden && !hiddenTypes.has(type)) {
-                              setHiddenTypes(new Set());
-                              setHiddenSubTypes(new Set());
-                            } else {
-                              setHiddenTypes(new Set(allTypes.filter(t => t !== type)));
-                              setHiddenSubTypes(new Set());
-                            }
-                          }
-                        }}
-                        title={t(`graph.nodeTypes.${type}`)}
-                      >
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
-                        <span className="font-semibold truncate">{t(`graph.nodeTypes.${type}`)}</span>
-                        <span className="ml-auto tabular-nums text-muted-foreground">{count}</span>
-                      </button>
-                      {subs.length > 0 && !isHidden && (
-                        <div className="pl-6 pr-1 mt-0.5 mb-1">
-                          <div className="flex flex-wrap gap-x-1.5 gap-y-0.5">
-                          {visibleSubs.map(([sub, subCount]) => {
-                            const subKey = `${type}:${sub}`;
-                            const isSubHidden = hiddenSubTypes.has(subKey);
-                            return (
-                              <button
-                                key={sub}
-                                className={`text-[10px] whitespace-nowrap cursor-pointer rounded px-1 py-0.5 transition-colors ${isSubHidden ? 'opacity-35 line-through text-muted-foreground' : 'text-muted-foreground hover:bg-white/10'}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (e.ctrlKey || e.metaKey) {
-                                    // Ctrl/Cmd+Click: toggle single sub-type
-                                    setHiddenSubTypes(prev => {
-                                      const next = new Set(prev);
-                                      if (next.has(subKey)) next.delete(subKey);
-                                      else next.add(subKey);
-                                      return next;
-                                    });
-                                  } else {
-                                    // Click: isolate sub-type or reset
-                                    const siblingKeys = subs.map(([s]) => `${type}:${s}`);
-                                    if (siblingKeys.length === 1) {
-                                      setHiddenSubTypes(prev => {
-                                        const next = new Set(prev);
-                                        if (next.has(subKey)) next.delete(subKey);
-                                        else next.add(subKey);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    const othersHidden = siblingKeys.filter(k => k !== subKey).every(k => hiddenSubTypes.has(k));
-                                    if (othersHidden && !hiddenSubTypes.has(subKey)) {
-                                      setHiddenSubTypes(prev => {
-                                        const next = new Set(prev);
-                                        for (const k of siblingKeys) next.delete(k);
-                                        return next;
-                                      });
-                                    } else {
-                                      setHiddenSubTypes(prev => {
-                                        const next = new Set(prev);
-                                        for (const k of siblingKeys) {
-                                          if (k === subKey) next.delete(k);
-                                          else next.add(k);
-                                        }
-                                        return next;
-                                      });
-                                    }
-                                  }
-                                }}
-                                title={subtypeLegendLabel(t, sub)}
-                              >
-                                <span className="inline-block w-1.5 h-1.5 rounded-full mr-0.5 align-middle" style={{ background: color, opacity: 0.6 }} />
-                                {subtypeLegendLabel(t, sub)} <span className="tabular-nums">{subCount}</span>
-                              </button>
-                            );
-                          })}
-                          </div>
-                          {subs.length > SUBTYPE_PREVIEW_LIMIT && (
-                            <button
-                              type="button"
-                              className="mt-1 inline-flex h-6 items-center rounded-md px-1.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setExpandedSubtypeGroups((prev) => {
-                                  const next = new Set(prev);
-                                  if (next.has(type)) next.delete(type);
-                                  else next.add(type);
-                                  return next;
-                                });
-                              }}
-                            >
-                              {isSubtypeGroupExpanded
-                                ? t('graph.hideSubTypes')
-                                : t('graph.showAllSubTypes', { count: hiddenSubtypeCount })}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          <GraphLegend
+            t={t}
+            legend={typeLegend}
+            legendOpen={legendOpen}
+            setLegendOpen={setLegendOpen}
+            hiddenTypes={hiddenTypes}
+            setHiddenTypes={(updater) => setHiddenTypes((prev) => updater(prev))}
+            hiddenSubTypes={hiddenSubTypes}
+            setHiddenSubTypes={(updater) => setHiddenSubTypes((prev) => updater(prev))}
+            expandedSubtypeGroups={expandedSubtypeGroups}
+            setExpandedSubtypeGroups={(updater) =>
+              setExpandedSubtypeGroups((prev) => updater(prev))
+            }
+          />
         </div>
 
-        {selected && (() => {
-          // Build ACTUALLY connected nodes using adjacency map
-          const connectedIds = edgesRef.current
-            .filter(e => e.sourceId === selected.id || e.targetId === selected.id)
-            .map(e => e.sourceId === selected.id ? e.targetId : e.sourceId);
-          const connectedNodes = connectedIds
-            .map(id => allNodes.find(n => n.id === id))
-            .filter((n): n is GraphNode => n != null)
-            .slice(0, 20);
-          const connectedDocs = connectedNodes.filter(n => n.type === 'document');
-          const connectedEntities = connectedNodes.filter(n => n.type === 'entity');
-          const connectedConcepts = connectedNodes.filter(n => n.type === 'concept');
-
-          return (
-            <div className="absolute top-0 right-0 h-full w-80 lg:w-96 bg-card border-l shadow-xl z-20 overflow-y-auto animate-slide-in-right">
-              <div className="p-4 border-b flex items-center justify-between">
-                <h3 className="text-sm font-bold truncate tracking-tight">{selected.label}</h3>
-                <div className="flex items-center gap-1">
-                  {detailLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-                  <button onClick={() => setSelectedNode(null)} className="p-1.5 rounded-lg hover:bg-muted transition-colors" aria-label={t('common.close')}><X className="h-4 w-4" /></button>
-                </div>
-              </div>
-              <div className="p-4 space-y-4">
-                {/* Type & connections header */}
-                <div className="flex items-center gap-2.5">
-                  <span className="w-3 h-3 rounded-full" style={{ background: GRAPH_NODE_COLORS[selected.type] }} />
-                  <div className="flex flex-col">
-                    <span className="text-sm font-semibold capitalize">{t(`graph.nodeTypes.${selected.type}`)}</span>
-                    {selected.subType && (
-                      <span className="text-[11px] text-muted-foreground capitalize">{selected.subType}</span>
-                    )}
-                  </div>
-                  <span className="text-xs text-muted-foreground ml-auto tabular-nums font-medium">{connectedIds.length} {t('graph.connections')}</span>
-                </div>
-
-                {selected.type !== 'document' && (
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-muted-foreground">{t('graph.subType')}</span>
-                    <span className="font-medium text-foreground">{selected.subType ?? '—'}</span>
-                  </div>
-                )}
-
-                {/* Summary */}
-                {selected.summary && (
-                  <div><div className="section-label mb-1">{t('graph.summary')}</div><p className="text-sm leading-relaxed text-muted-foreground">{selected.summary}</p></div>
-                )}
-
-                {/* Properties */}
-                {Object.keys(selected.properties).length > 0 && (
-                  <div>
-                    <div className="section-label mb-1.5">{t('graph.properties')}</div>
-                    <div className="space-y-1">
-                      {Object.entries(selected.properties).map(([k, v]) => (
-                        <div key={k} className="grid grid-cols-[80px_minmax(0,1fr)] items-start gap-x-3 text-xs">
-                          <span className="pt-0.5 text-muted-foreground capitalize">{k}</span>
-                          <span className="min-w-0 text-right font-semibold leading-tight text-foreground [overflow-wrap:anywhere]">
-                            {v}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Actions */}
-                <div className="flex gap-2">
-                  {selected.type === 'document' && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-xs h-7"
-                      onClick={() => navigate(`/documents?documentId=${encodeURIComponent(selected.id)}`)}
-                    >
-                      <FileText className="h-3 w-3 mr-1" /> {t('graph.viewDocument')}
-                    </Button>
-                  )}
-                </div>
-
-                {/* Connected Documents */}
-                {connectedDocs.length > 0 && (
-                  <div>
-                    <div className="section-label mb-1.5">{t('graph.sourceDocuments')} ({connectedDocs.length})</div>
-                    <div className="space-y-0.5">
-                      {connectedDocs.map(n => (
-                        <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.document }} />
-                          <span className="truncate font-medium">{n.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Connected Entities */}
-                {connectedEntities.length > 0 && (
-                  <div>
-                    <div className="section-label mb-1.5">{t('graph.connectedEntities')} ({connectedEntities.length})</div>
-                    <div className="space-y-0.5">
-                      {connectedEntities.slice(0, 15).map(n => (
-                        <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.entity }} />
-                          <span className="truncate">{n.label}</span>
-                          {n.edgeCount > 0 && <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{n.edgeCount}</span>}
-                        </button>
-                      ))}
-                      {connectedEntities.length > 15 && <span className="text-xs text-muted-foreground pl-6">+{connectedEntities.length - 15} more</span>}
-                    </div>
-                  </div>
-                )}
-
-                {/* Connected Concepts */}
-                {connectedConcepts.length > 0 && (
-                  <div>
-                    <div className="section-label mb-1.5">{t('graph.connectedConcepts')} ({connectedConcepts.length})</div>
-                    <div className="space-y-0.5">
-                      {connectedConcepts.slice(0, 10).map(n => (
-                        <button key={n.id} className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-accent/50 text-left text-xs transition-colors" onClick={() => setSelectedNode(n.id)}>
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GRAPH_NODE_COLORS.concept }} />
-                          <span className="truncate">{n.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {connectedNodes.length === 0 && !detailLoading && (
-                  <p className="text-xs text-muted-foreground">{t('graph.noConnections')}</p>
-                )}
-              </div>
-            </div>
-          );
-        })()}
+        {selected && (
+          <GraphInspector
+            t={t}
+            selected={selected}
+            detailLoading={detailLoading}
+            adjacency={adjacency}
+            onClose={() => handleSelectNode(null)}
+            onSelectNode={handleSelectNode}
+          />
+        )}
       </div>
     </div>
   );

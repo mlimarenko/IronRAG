@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
-import type { DocumentItem, DocumentReadiness } from '@/types';
+import type { DocumentItem } from '@/types';
 
 import { DocumentsInspectorPanel } from './DocumentsInspectorPanel';
 
@@ -27,14 +27,6 @@ function buildSelectedDoc(overrides: Partial<DocumentItem> = {}): DocumentItem {
     ...overrides,
   };
 }
-
-const readinessConfig: Record<DocumentReadiness, { label: string; cls: string }> = {
-  processing: { label: 'Processing', cls: 'status-processing' },
-  readable: { label: 'Readable', cls: 'status-warning' },
-  graph_sparse: { label: 'Graph Sparse', cls: 'status-warning' },
-  graph_ready: { label: 'Graph Ready', cls: 'status-ready' },
-  failed: { label: 'Failed', cls: 'status-failed' },
-};
 
 describe('DocumentsInspectorPanel', () => {
   let container: HTMLDivElement;
@@ -72,16 +64,10 @@ describe('DocumentsInspectorPanel', () => {
           locale="en"
           onEdit={noop}
           onRetry={noop}
-          readinessConfig={readinessConfig}
           selectedDoc={overrides?.selectedDoc ?? buildSelectedDoc()}
           selectionMode={false}
-          setAddLinkOpen={noop}
-          setCrawlMode={noop}
           setDeleteDocOpen={noop}
-          setMaxDepth={noop}
-          setMaxPages={noop}
           setReplaceFileOpen={noop}
-          setSeedUrl={noop}
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
@@ -162,16 +148,10 @@ describe('DocumentsInspectorPanel', () => {
           locale="en"
           onEdit={noop}
           onRetry={noop}
-          readinessConfig={readinessConfig}
           selectedDoc={buildSelectedDoc()}
           selectionMode={false}
-          setAddLinkOpen={noop}
-          setCrawlMode={noop}
           setDeleteDocOpen={noop}
-          setMaxDepth={noop}
-          setMaxPages={noop}
           setReplaceFileOpen={noop}
-          setSeedUrl={noop}
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
@@ -194,5 +174,35 @@ describe('DocumentsInspectorPanel', () => {
 
     expect(container.textContent).toContain('Web page');
     expect(container.textContent).not.toContain('PHP');
+  });
+
+  it('collapses long inspector titles behind an explicit toggle', async () => {
+    const fullUrl =
+      'https://passport.yandex.ru/showcaptcha?cc=1&from=fb-hint=8.191&mt=895CC538B346D26B47C082D2499B07E478D7FB2AE8D408D1DE014386C74C5D639';
+
+    await renderPanel({
+      selectedDoc: buildSelectedDoc({
+        fileName: fullUrl,
+        fileType: 'php',
+        sourceKind: 'web_page',
+      }),
+    });
+
+    expect(container.textContent).toContain('Show full name');
+    expect(container.textContent).toContain('https://passport.yandex.ru/showcaptcha?');
+    expect(container.textContent).not.toContain(fullUrl);
+
+    const toggleButton = Array.from(container.querySelectorAll('button')).find(button =>
+      button.textContent?.includes('Show full name'),
+    );
+
+    expect(toggleButton).toBeTruthy();
+
+    await act(async () => {
+      toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain('Show less');
+    expect(container.textContent).toContain(fullUrl);
   });
 });

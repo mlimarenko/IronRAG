@@ -171,11 +171,9 @@ fn build_test_state(
     ui_bootstrap_ai_setup: Option<UiBootstrapAiSetup>,
 ) -> Result<AppState> {
     let bootstrap_settings = settings.bootstrap_settings();
-    let persistence = Persistence {
-        postgres,
-        redis: redis::Client::open(settings.redis_url.clone())
-            .context("failed to create redis client for bootstrap test state")?,
-    };
+    let redis = redis::Client::open(settings.redis_url.clone())
+        .context("failed to create redis client for bootstrap test state")?;
+    let persistence = Persistence::for_tests(postgres, redis);
     let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
 
     let mut state = AppState::from_dependencies(
@@ -600,6 +598,74 @@ async fn bootstrap_setup_route_accepts_provider_bundle_payload() -> Result<()> {
         .await
         .context("failed to load extract_graph bootstrap model")?;
         assert_eq!(binding_models, "gpt-5.4-nano");
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bootstrap_setup_route_deepseek_bundle_uses_openai_for_vision_when_available() -> Result<()>
+{
+    let fixture =
+        GreenfieldBootstrapFixture::create_with_ui_bootstrap_ai_setup(Some(UiBootstrapAiSetup {
+            provider_secrets: vec![UiBootstrapAiProviderSecret {
+                provider_kind: "openai".to_string(),
+                api_key: "test-openai-bootstrap-token".to_string(),
+            }],
+            binding_defaults: vec![],
+        }))
+        .await?;
+
+    let result = async {
+        let payload = json!({
+            "login": "admin",
+            "displayName": "Admin",
+            "password": "super-secret-password",
+            "aiSetup": {
+                "providerKind": "deepseek",
+                "apiKey": "test-deepseek-bootstrap-token"
+            }
+        });
+
+        let response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/iam/bootstrap/setup")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .expect("build deepseek provider bundle bootstrap setup request"),
+            )
+            .await
+            .context("deepseek provider bundle bootstrap setup request failed")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key(header::SET_COOKIE));
+
+        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
+        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+
+        let vision_binding = sqlx::query_as::<_, (String, String)>(
+            "select apc2.provider_kind, amc.model_name
+             from ai_library_model_binding almb
+             join ai_provider_credential apc on apc.id = almb.provider_credential_id
+             join ai_provider_catalog apc2 on apc2.id = apc.provider_catalog_id
+             join ai_model_preset amp on amp.id = almb.model_preset_id
+             join ai_model_catalog amc on amc.id = amp.model_catalog_id
+             where almb.binding_purpose = 'vision'",
+        )
+        .fetch_one(fixture.pool())
+        .await
+        .context("failed to load vision bootstrap binding")?;
+        assert_eq!(vision_binding.0, "openai");
+        assert_eq!(vision_binding.1, "gpt-5.4-mini");
 
         Ok(())
     }

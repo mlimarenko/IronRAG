@@ -4,13 +4,12 @@ pub(super) fn select_runtime_preset<'a>(
     presets: &'a [ModelPreset],
     canonical_name: &str,
 ) -> Option<&'a ModelPreset> {
-    if let Some(existing) = presets.iter().find(|preset| preset.preset_name == canonical_name) {
-        return Some(existing);
-    }
-    match presets {
-        [only] => Some(only),
-        _ => None,
-    }
+    // Exact name match is the only reliable lookup. The previous
+    // fallback to `[only] => Some(only)` returned the wrong preset
+    // when two purposes shared the same model (e.g. ExtractGraph and
+    // QueryAnswer both using `qwen3:0.6b`) — the first preset's
+    // existence would shadow the second, preventing its creation.
+    presets.iter().find(|preset| preset.preset_name == canonical_name)
 }
 
 pub(super) fn normalize_non_empty(

@@ -5,6 +5,10 @@ import { Button } from '@/components/ui/button';
 import SwaggerUI from 'swagger-ui-react';
 import 'swagger-ui-react/swagger-ui.css';
 
+type SwaggerRequest = {
+  credentials?: RequestCredentials;
+};
+
 export default function SwaggerPage() {
   const { t } = useTranslation();
   const [state, setState] = useState<'loading' | 'loaded' | 'error'>('loading');
@@ -29,7 +33,7 @@ export default function SwaggerPage() {
           withCredentials={true}
           onComplete={() => setState('loaded')}
           onFailure={() => setState('error')}
-          requestInterceptor={(req: any) => {
+          requestInterceptor={(req: SwaggerRequest) => {
             req.credentials = 'include';
             return req;
           }}

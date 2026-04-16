@@ -5,11 +5,13 @@ mod runtime;
 mod types;
 
 pub use self::{
-    catalog::{create_library, create_workspace, visible_libraries, visible_workspaces},
+    catalog::{
+        create_library, create_workspace, visible_catalog, visible_libraries, visible_workspaces,
+    },
     documents::{
         authorize_library_for_mcp, delete_document, list_documents, read_document, search_documents,
     },
-    graph::{get_communities, get_graph_topology, list_relations},
+    graph::{get_communities, get_graph_topology, list_relations, search_entities},
     runtime::{get_runtime_execution, get_runtime_execution_trace},
 };
 

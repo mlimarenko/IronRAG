@@ -171,13 +171,24 @@ fn build_structured_blocks(
                 index += 1;
             }
             if !code_lines.is_empty() {
+                // If the fenced block has no language tag (` ``` ` with
+                // no annotation), auto-detect the language via tree-sitter
+                // probing so the extraction pipeline can still produce
+                // AST-based identifiers.
+                let resolved_language = if language.is_empty() {
+                    let code_text: String =
+                        code_lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+                    crate::shared::ast_extraction::detect_language(&code_text).map(str::to_string)
+                } else {
+                    Some(language.to_string())
+                };
                 blocks.push(build_block(
                     ordinal,
                     StructuredBlockKind::CodeBlock,
                     &code_lines,
                     &heading_stack,
                     None,
-                    (!language.is_empty()).then_some(language.to_string()),
+                    resolved_language,
                     None,
                     None,
                 ));

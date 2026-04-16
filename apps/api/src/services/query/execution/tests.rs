@@ -1,16 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use serde_json::json;
 
 use crate::infra::arangodb::{
     document_store::{
-        KnowledgeChunkRow, KnowledgeLibraryGenerationRow, KnowledgeStructuredBlockRow,
-        KnowledgeTechnicalFactRow,
+        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
+        KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
     },
     graph_store::KnowledgeEvidenceRow,
 };
+use crate::services::query::execution::technical_literals::{
+    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
+    extract_url_literals,
+};
 use crate::services::query::{
+    assistant_grounding::AssistantGroundingEvidence,
     planner::{QueryIntentProfile, RuntimeQueryPlan, UnsupportedCapabilityIntent},
     support::RerankOutcome,
 };
@@ -493,6 +498,700 @@ fn build_multi_document_endpoint_answer_handles_english_checkout_rewards_questio
 }
 
 #[test]
+fn build_single_endpoint_answer_from_chunks_prefers_system_info_over_adjacent_noise() {
+    let checkout_document_id = Uuid::now_v7();
+
+    let answer = build_single_endpoint_answer_from_chunks(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: checkout_document_id,
+                document_label: "checkout_server_reference.pdf".to_string(),
+                excerpt: "GET /checkout-api/rest/dictionaries/cardChanged возвращает историю изменений карт checkout server.".to_string(),
+                score: Some(0.96),
+                source_text: repair_technical_layout_noise(
+                    "GET\nhttp://demo.local:8080/checkout-api/rest/dictionaries/cardChanged\nПолучить историю изменений карт checkout server.",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: checkout_document_id,
+                document_label: "checkout_server_reference.pdf".to_string(),
+                excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
+                score: Some(0.71),
+                source_text: repair_technical_layout_noise(
+                    "Публичное API checkout server.\nhttp://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info\nДля получения текущего статуса checkout server.",
+                ),
+            },
+        ],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`GET /system/info`"), "{answer}");
+    assert!(!answer.contains("cardChanged"), "{answer}");
+}
+
+#[test]
+fn build_single_endpoint_answer_from_chunks_prefers_question_matched_document_over_foreign_noise() {
+    let checkout_document_id = Uuid::now_v7();
+    let rewards_document_id = Uuid::now_v7();
+
+    let answer = build_single_endpoint_answer_from_chunks(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: rewards_document_id,
+                document_label: "rewards_accounts_api_contract.md".to_string(),
+                excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
+                score: Some(0.99),
+                source_text: repair_technical_layout_noise(
+                    "Rewards Accounts API Contract\nGET /v1/accounts\nTransport: REST JSON",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: checkout_document_id,
+                document_label: "checkout_runtime_contract.md".to_string(),
+                excerpt: "GET /system/info возвращает текущую информацию checkout server."
+                    .to_string(),
+                score: Some(0.72),
+                source_text: repair_technical_layout_noise(
+                    "Checkout Runtime Contract\nGET\n/system/info\ncurrent checkout server system information",
+                ),
+            },
+        ],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`GET /system/info`"), "{answer}");
+    assert!(!answer.contains("/v1/accounts"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_uses_exact_wsdl_literal_without_agent_loop() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id,
+        document_label: "inventory_soap_api_contract.md".to_string(),
+        excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
+        score: Some(0.98),
+        source_text: repair_technical_layout_noise(
+            "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+        ),
+    };
+    let answer = build_deterministic_grounded_answer(
+        "Какой WSDL у inventory soap api?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "url".to_string(),
+                canonical_value_text: "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                canonical_value_exact: "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                canonical_value_json: json!(
+                    "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                ),
+                display_value: "http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[chunk],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("inventory"));
+    assert!(answer.contains("`http://demo.local:8080/inventory-api/ws/inventory.wsdl`"));
+}
+
+#[test]
+fn build_deterministic_grounded_answer_uses_endpoint_fact_without_chunk_parsing() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "endpoint_path".to_string(),
+                canonical_value_text: "/system/info".to_string(),
+                canonical_value_exact: "/system/info".to_string(),
+                canonical_value_json: json!("/system/info"),
+                display_value: "/system/info".to_string(),
+                qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[],
+    )
+    .unwrap_or_default();
+
+    assert_eq!(answer, "Нужен endpoint `GET /system/info`.");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_uses_multi_document_endpoint_facts() {
+    let checkout_document_id = Uuid::now_v7();
+    let rewards_document_id = Uuid::now_v7();
+    let checkout_revision_id = Uuid::now_v7();
+    let rewards_revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![
+                KnowledgeTechnicalFactRow {
+                    fact_kind: "endpoint_path".to_string(),
+                    canonical_value_text: "/system/info".to_string(),
+                    canonical_value_exact: "/system/info".to_string(),
+                    canonical_value_json: json!("/system/info"),
+                    display_value: "/system/info".to_string(),
+                    qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                    ..sample_technical_fact_row(
+                        Uuid::now_v7(),
+                        checkout_document_id,
+                        checkout_revision_id,
+                    )
+                },
+                KnowledgeTechnicalFactRow {
+                    fact_kind: "endpoint_path".to_string(),
+                    canonical_value_text: "/v1/accounts".to_string(),
+                    canonical_value_exact: "/v1/accounts".to_string(),
+                    canonical_value_json: json!("/v1/accounts"),
+                    display_value: "/v1/accounts".to_string(),
+                    qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                    ..sample_technical_fact_row(
+                        Uuid::now_v7(),
+                        rewards_document_id,
+                        rewards_revision_id,
+                    )
+                },
+            ],
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: rewards_document_id,
+                document_label: "rewards_service_reference.pdf".to_string(),
+                excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
+                score: Some(0.94),
+                source_text: repair_technical_layout_noise(
+                    "/v1/accounts\nGET\nПолучить список счетов rewards service.",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: checkout_document_id,
+                document_label: "checkout_server_reference.pdf".to_string(),
+                excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
+                score: Some(0.71),
+                source_text: repair_technical_layout_noise(
+                    "Публичное API checkout server.\nhttp://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info\nДля получения текущего статуса checkout server.",
+                ),
+            },
+        ],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`GET /v1/accounts`"));
+    assert!(answer.contains("`GET /system/info`"));
+}
+
+#[test]
+fn build_deterministic_grounded_answer_uses_port_fact_without_chunk_parsing() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Какой порт использует rewards accounts rest api?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "port".to_string(),
+                canonical_value_text: "8081".to_string(),
+                canonical_value_exact: "8081".to_string(),
+                canonical_value_json: json!("8081"),
+                display_value: "8081".to_string(),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            document_label: "rewards_accounts_rest_reference.md".to_string(),
+            excerpt: "Rewards Accounts REST API Reference".to_string(),
+            score: Some(0.93),
+            source_text: "Rewards Accounts REST API Reference".to_string(),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`8081`"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
+    let rewards_document_id = Uuid::now_v7();
+    let loyalty_document_id = Uuid::now_v7();
+    let rewards_revision_id = Uuid::now_v7();
+    let loyalty_revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![
+                KnowledgeTechnicalFactRow {
+                    fact_kind: "port".to_string(),
+                    canonical_value_text: "8081".to_string(),
+                    canonical_value_exact: "8081".to_string(),
+                    canonical_value_json: json!("8081"),
+                    display_value: "8081".to_string(),
+                    ..sample_technical_fact_row(
+                        Uuid::now_v7(),
+                        rewards_document_id,
+                        rewards_revision_id,
+                    )
+                },
+                KnowledgeTechnicalFactRow {
+                    fact_kind: "protocol".to_string(),
+                    canonical_value_text: "http".to_string(),
+                    canonical_value_exact: "http".to_string(),
+                    canonical_value_json: json!("http"),
+                    display_value: "http".to_string(),
+                    ..sample_technical_fact_row(
+                        Uuid::now_v7(),
+                        loyalty_document_id,
+                        loyalty_revision_id,
+                    )
+                },
+                KnowledgeTechnicalFactRow {
+                    fact_kind: "protocol".to_string(),
+                    canonical_value_text: "soap".to_string(),
+                    canonical_value_exact: "soap".to_string(),
+                    canonical_value_json: json!("soap"),
+                    display_value: "soap".to_string(),
+                    ..sample_technical_fact_row(
+                        Uuid::now_v7(),
+                        loyalty_document_id,
+                        loyalty_revision_id,
+                    )
+                },
+            ],
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: rewards_document_id,
+                document_label: "rewards_accounts_rest_reference.md".to_string(),
+                excerpt: "Rewards Accounts REST API Reference".to_string(),
+                score: Some(0.99),
+                source_text: "Rewards Accounts REST API Reference".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: loyalty_document_id,
+                document_label: "customer_profile_soap_reference.md".to_string(),
+                excerpt: "Customer Profile SOAP API Reference".to_string(),
+                score: Some(0.98),
+                source_text: "Customer Profile SOAP API Reference".to_string(),
+            },
+        ],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`8081`"), "{answer}");
+    assert!(answer.contains("`SOAP`"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_reports_unconfirmed_port_without_fact() {
+    let control_document_id = Uuid::now_v7();
+    let telegram_document_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Какой порт использует Acme Control Center?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: control_document_id,
+                document_label: "Acme Control Center - Example".to_string(),
+                excerpt: "Acme Control Center — программное обеспечение для управления конфигурацией объектов управления.".to_string(),
+                score: Some(0.95),
+                source_text: repair_technical_layout_noise(
+                    "Acme Control Center\nОписание\nAcme Control Center — программное обеспечение для управления конфигурацией объектов управления.",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: telegram_document_id,
+                document_label: "Acme Telegram Bot - Example".to_string(),
+                excerpt: "Для интеграции используется localhost:2026.".to_string(),
+                score: Some(0.91),
+                source_text: repair_technical_layout_noise(
+                    "Acme Telegram Bot\nНастройки\nport: 2026\nlocalhost:2026",
+                ),
+            },
+        ],
+    );
+
+    assert_eq!(
+        answer.as_deref(),
+        Some("Точный порт для Acme Control Center не подтвержден в выбранных доказательствах.")
+    );
+}
+
+#[test]
+fn build_deterministic_grounded_answer_prefers_exact_wsdl_document_over_foreign_focus_noise() {
+    let inventory_document_id = Uuid::now_v7();
+    let rewards_document_id = Uuid::now_v7();
+    let inventory_revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Какой WSDL у inventory soap api?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "url".to_string(),
+                canonical_value_text: "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                canonical_value_exact: "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                canonical_value_json: json!(
+                    "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                ),
+                display_value: "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                ..sample_technical_fact_row(Uuid::now_v7(), inventory_document_id, inventory_revision_id)
+            }],
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: rewards_document_id,
+                document_label: "rewards_accounts_api_contract.md".to_string(),
+                excerpt: "Compared with inventory SOAP surface, rewards accounts use REST JSON."
+                    .to_string(),
+                score: Some(0.99),
+                source_text: repair_technical_layout_noise(
+                    "Rewards Accounts API Contract\nCompared with inventory SOAP surface, rewards accounts use REST JSON.",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
+                score: Some(0.71),
+                source_text: repair_technical_layout_noise(
+                    "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                ),
+            },
+        ],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("inventory"));
+    assert!(answer.contains("`http://demo.local:8080/inventory-api/ws/inventory.wsdl`"));
+}
+
+#[test]
+fn build_deterministic_grounded_answer_uses_parameter_meaning_from_structured_block() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let block_id = Uuid::now_v7();
+    let chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id,
+        document_label: "rewards_accounts_api_contract.md".to_string(),
+        excerpt: "| `pageNumber` | 1-based page number |".to_string(),
+        score: Some(0.96),
+        source_text: repair_technical_layout_noise(
+            "Pagination parameters\n| Parameter | Meaning |\n| `pageNumber` | 1-based page number |",
+        ),
+    };
+    let answer = build_deterministic_grounded_answer(
+        "Как называется параметр pageNumber в API пагинации?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![KnowledgeStructuredBlockRow {
+                normalized_text: "| `pageNumber` | 1-based page number |".to_string(),
+                text: "| `pageNumber` | 1-based page number |".to_string(),
+                ..sample_structured_block_row(block_id, document_id, revision_id)
+            }],
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "parameter_name".to_string(),
+                canonical_value_text: "pageNumber".to_string(),
+                canonical_value_exact: "pageNumber".to_string(),
+                canonical_value_json: json!({ "value_type": "text", "value": "pageNumber" }),
+                display_value: "pageNumber".to_string(),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[chunk],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`pageNumber`"), "{answer}");
+    assert!(answer.contains("1-based page number"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despite_foreign_noise() {
+    let document_id = Uuid::now_v7();
+    let foreign_document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let block_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Есть ли параметр withCards?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![KnowledgeStructuredBlockRow {
+                normalized_text: "| `withCards` | include linked card records in the response |"
+                    .to_string(),
+                text: "| `withCards` | include linked card records in the response |"
+                    .to_string(),
+                ..sample_structured_block_row(block_id, document_id, revision_id)
+            }],
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "parameter_name".to_string(),
+                canonical_value_text: "withCards".to_string(),
+                canonical_value_exact: "withCards".to_string(),
+                canonical_value_json: json!({ "value_type": "text", "value": "withCards" }),
+                display_value: "withCards".to_string(),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: foreign_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "Inventory SOAP uses WSDL.".to_string(),
+                score: Some(0.99),
+                source_text: repair_technical_layout_noise(
+                    "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id,
+                document_label: "rewards_accounts_api_contract.md".to_string(),
+                excerpt: "withCards includes linked card records.".to_string(),
+                score: Some(0.71),
+                source_text: repair_technical_layout_noise(
+                    "| `withCards` | include linked card records in the response |",
+                ),
+            },
+        ],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("Да"), "{answer}");
+    assert!(answer.contains("`withCards`"), "{answer}");
+    assert!(answer.contains("include linked card records in the response"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_confirms_parameter_existence() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let block_id = Uuid::now_v7();
+    let answer = build_deterministic_grounded_answer(
+        "Есть ли параметр withCards?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![KnowledgeStructuredBlockRow {
+                normalized_text: "| `withCards` | include linked card records in the response |"
+                    .to_string(),
+                text: "| `withCards` | include linked card records in the response |".to_string(),
+                ..sample_structured_block_row(block_id, document_id, revision_id)
+            }],
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "parameter_name".to_string(),
+                canonical_value_text: "withCards".to_string(),
+                canonical_value_exact: "withCards".to_string(),
+                canonical_value_json: json!({ "value_type": "text", "value": "withCards" }),
+                display_value: "withCards".to_string(),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            document_label: "rewards_accounts_api_contract.md".to_string(),
+            excerpt: "withCards includes linked card records.".to_string(),
+            score: Some(0.95),
+            source_text: repair_technical_layout_noise(
+                "| `withCards` | include linked card records in the response |",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("Да"), "{answer}");
+    assert!(answer.contains("`withCards`"), "{answer}");
+    assert!(answer.contains("include linked card records in the response"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_does_not_infer_wsdl_from_chunks_without_fact() {
+    let document_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Какой WSDL у inventory soap api?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            document_label: "inventory_soap_api_contract.md".to_string(),
+            excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
+            score: Some(0.98),
+            source_text: repair_technical_layout_noise(
+                "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+            ),
+        }],
+    );
+
+    assert!(answer.is_none());
+}
+
+#[test]
+fn build_deterministic_grounded_answer_does_not_infer_single_endpoint_from_chunks_without_fact() {
+    let document_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            document_label: "checkout_runtime_contract.md".to_string(),
+            excerpt: "GET /system/info возвращает текущую информацию checkout server.".to_string(),
+            score: Some(0.94),
+            source_text: repair_technical_layout_noise(
+                "Checkout Runtime Contract\nGET\n/system/info\ncurrent checkout server system information",
+            ),
+        }],
+    );
+
+    assert!(answer.is_none());
+}
+
+#[test]
+fn build_deterministic_grounded_answer_does_not_infer_multi_document_endpoints_from_chunks_without_facts()
+ {
+    let checkout_document_id = Uuid::now_v7();
+    let rewards_document_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: rewards_document_id,
+                document_label: "rewards_service_reference.pdf".to_string(),
+                excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
+                score: Some(0.94),
+                source_text: repair_technical_layout_noise(
+                    "/v1/accounts\nGET\nПолучить список счетов rewards service.",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: checkout_document_id,
+                document_label: "checkout_server_reference.pdf".to_string(),
+                excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
+                score: Some(0.71),
+                source_text: repair_technical_layout_noise(
+                    "Публичное API checkout server.\nhttp://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info\nДля получения текущего статуса checkout server.",
+                ),
+            },
+        ],
+    );
+
+    assert!(answer.is_none());
+}
+
+#[test]
+fn build_deterministic_grounded_answer_does_not_infer_parameter_from_chunks_without_fact() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let block_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Есть ли параметр withCards?",
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![KnowledgeStructuredBlockRow {
+                normalized_text: "| `withCards` | include linked card records in the response |"
+                    .to_string(),
+                text: "| `withCards` | include linked card records in the response |".to_string(),
+                ..sample_structured_block_row(block_id, document_id, revision_id)
+            }],
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            document_label: "rewards_accounts_api_contract.md".to_string(),
+            excerpt: "withCards includes linked card records.".to_string(),
+            score: Some(0.95),
+            source_text: repair_technical_layout_noise(
+                "| `withCards` | include linked card records in the response |",
+            ),
+        }],
+    );
+
+    assert!(answer.is_none());
+}
+
+#[test]
 fn build_exact_technical_literals_section_picks_best_matching_chunk_within_document() {
     let cash_document_id = Uuid::now_v7();
     let section = build_exact_technical_literals_section(
@@ -814,7 +1513,7 @@ fn build_structured_query_diagnostics_emits_typed_response_shape() {
             source_text: "IronRAG query runtime returns structured references.".to_string(),
         }],
     };
-    let graph_index = QueryGraphIndex { nodes: HashMap::new(), edges: Vec::new() };
+    let graph_index = QueryGraphIndex { nodes: HashMap::new(), edges: HashMap::new() };
     let enrichment = QueryExecutionEnrichment {
         planning: crate::domains::query::QueryPlanningMetadata {
             requested_mode: RuntimeQueryMode::Hybrid,
@@ -940,6 +1639,7 @@ fn enrich_query_candidate_summary_overwrites_canonical_reference_counts() {
                 sample_technical_fact_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()),
             ],
         },
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(enriched["finalChunkReferences"], serde_json::json!(2));
@@ -970,6 +1670,7 @@ fn enrich_query_assembly_diagnostics_emits_verification_and_graph_participation(
             "finalEntityReferences": 5,
             "finalRelationReferences": 2
         }),
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(diagnostics["verificationState"], "verified");
@@ -1083,19 +1784,19 @@ fn question_requests_multi_document_scope_detects_role_pairing_questions() {
     assert!(question_requests_multi_document_scope(
         "Which technology in this corpus focuses on making Internet data machine-readable through standards like RDF and OWL, and which one stores interlinked descriptions of entities and concepts?"
     ));
+    assert!(question_requests_multi_document_scope(
+        "Чем REST API rewards accounts отличается от inventory wsdl в транспортном контракте?"
+    ));
+    assert!(question_requests_multi_document_scope(
+        "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?"
+    ));
 }
 
 #[test]
-fn build_document_literal_answer_extracts_report_name_from_focused_document() {
+fn build_focused_document_answer_extracts_report_name_from_focused_document() {
     let document_id = Uuid::now_v7();
-    let answer = build_document_literal_answer(
+    let answer = build_focused_document_answer(
         "What report name appears in the runtime PDF upload check?",
-        &CanonicalAnswerEvidence {
-            bundle: None,
-            chunk_rows: Vec::new(),
-            structured_blocks: Vec::new(),
-            technical_facts: Vec::new(),
-        },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
             document_id,
@@ -1109,16 +1810,10 @@ fn build_document_literal_answer_extracts_report_name_from_focused_document() {
 }
 
 #[test]
-fn build_document_literal_answer_extracts_formats_under_test() {
+fn build_focused_document_answer_extracts_formats_under_test() {
     let document_id = Uuid::now_v7();
-    let answer = build_document_literal_answer(
+    let answer = build_focused_document_answer(
             "Which formats are explicitly listed under test in the PDF smoke fixture?",
-            &CanonicalAnswerEvidence {
-                bundle: None,
-                chunk_rows: Vec::new(),
-                structured_blocks: Vec::new(),
-                technical_facts: Vec::new(),
-            },
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 document_id,
@@ -1132,16 +1827,10 @@ fn build_document_literal_answer_extracts_formats_under_test() {
 }
 
 #[test]
-fn build_document_literal_answer_extracts_vectorized_modalities() {
+fn build_focused_document_answer_does_not_answer_semantic_vectorized_modalities_question() {
     let document_id = Uuid::now_v7();
-    let answer = build_document_literal_answer(
+    let answer = build_focused_document_answer(
             "According to the vector database article, what kinds of data can all be vectorized?",
-            &CanonicalAnswerEvidence {
-                bundle: None,
-                chunk_rows: Vec::new(),
-                structured_blocks: Vec::new(),
-                technical_facts: Vec::new(),
-            },
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 document_id,
@@ -1155,10 +1844,7 @@ fn build_document_literal_answer_extracts_vectorized_modalities() {
                         .to_string(),
             }],
         );
-    assert_eq!(
-        answer.as_deref(),
-        Some("Words, phrases, entire documents, images, and audio can all be vectorized.")
-    );
+    assert!(answer.is_none());
 }
 
 #[test]
@@ -1170,51 +1856,7 @@ fn build_canonical_answer_context_limits_sections_to_focused_document() {
 
     let context = build_canonical_answer_context(
         "Which search engines and assistants or services are named as examples in the knowledge graph article?",
-        &RuntimeStructuredQueryResult {
-            planned_mode: RuntimeQueryMode::Hybrid,
-            embedding_usage: None,
-            intent_profile: QueryIntentProfile::default(),
-            context_text: String::new(),
-            technical_literals_text: None,
-            technical_literal_chunks: Vec::new(),
-            diagnostics: RuntimeStructuredQueryDiagnostics {
-                requested_mode: RuntimeQueryMode::Hybrid,
-                planned_mode: RuntimeQueryMode::Hybrid,
-                keywords: Vec::new(),
-                high_level_keywords: Vec::new(),
-                low_level_keywords: Vec::new(),
-                top_k: 8,
-                reference_counts: RuntimeStructuredQueryReferenceCounts {
-                    entity_count: 0,
-                    relationship_count: 0,
-                    chunk_count: 0,
-                    graph_node_count: 0,
-                    graph_edge_count: 0,
-                },
-                planning: crate::domains::query::QueryPlanningMetadata {
-                    requested_mode: RuntimeQueryMode::Hybrid,
-                    planned_mode: RuntimeQueryMode::Hybrid,
-                    intent_cache_status: crate::domains::query::QueryIntentCacheStatus::Miss,
-                    keywords: crate::domains::query::IntentKeywords::default(),
-                    warnings: Vec::new(),
-                },
-                rerank: crate::domains::query::RerankMetadata {
-                    status: crate::domains::query::RerankStatus::Skipped,
-                    candidate_count: 0,
-                    reordered_count: None,
-                },
-                context_assembly: crate::domains::query::ContextAssemblyMetadata {
-                    status: crate::domains::query::ContextAssemblyStatus::BalancedMixed,
-                    warning: None,
-                },
-                grouped_references: Vec::new(),
-                context_text: None,
-                warning: None,
-                warning_kind: None,
-                library_summary: None,
-            },
-            retrieved_documents: Vec::new(),
-        },
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1362,6 +2004,41 @@ fn build_multi_document_role_answer_selects_distinct_corpus_technologies() {
 }
 
 #[test]
+fn build_multi_document_role_answer_handles_retrieval_and_embeddings_roles() {
+    let rag_document_id = Uuid::now_v7();
+    let vector_document_id = Uuid::now_v7();
+    let answer = build_multi_document_role_answer(
+            "If a system needs retrieval from external documents before answering and also semantic similarity over embeddings, which two technologies from this corpus fit those roles?",
+            &[
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: rag_document_id,
+                    document_label: "retrieval_augmented_generation_wikipedia.md".to_string(),
+                    excerpt: "Retrieval-augmented generation fetches external documents before the model answers."
+                        .to_string(),
+                    score: Some(0.9),
+                    source_text: "Retrieval-augmented generation\n\nRetrieval-augmented generation combines a retrieval step over external documents before answering with a language model."
+                        .to_string(),
+                },
+                RuntimeMatchedChunk {
+                    chunk_id: Uuid::now_v7(),
+                    document_id: vector_document_id,
+                    document_label: "vector_database_wikipedia.md".to_string(),
+                    excerpt: "Vector databases support semantic similarity over embeddings."
+                        .to_string(),
+                    score: Some(0.88),
+                    source_text: "Vector database\n\nA vector database stores embeddings and supports semantic similarity search over vector representations."
+                        .to_string(),
+                },
+            ],
+        )
+        .expect("expected deterministic multi-document role answer");
+
+    assert!(answer.contains("Retrieval-augmented generation"));
+    assert!(answer.contains("Vector database"));
+}
+
+#[test]
 fn build_multi_document_role_answer_distinguishes_rust_and_llm_roles() {
     let rust_document_id = Uuid::now_v7();
     let llm_document_id = Uuid::now_v7();
@@ -1444,6 +2121,205 @@ fn extract_multi_document_role_clauses_supports_which_one_stores_questions() {
 }
 
 #[test]
+fn canonical_preflight_answer_prefers_missing_explicit_document_before_other_paths() {
+    let missing_document_id = Uuid::now_v7();
+    let available_document_id = Uuid::now_v7();
+    let document_index = HashMap::from([(
+        available_document_id,
+        sample_document_row_for_preflight(available_document_id, "available.md"),
+    )]);
+
+    let answer = build_canonical_preflight_answer(
+        "Что сказано в missing-contract.md?",
+        &QueryIntentProfile::default(),
+        &document_index,
+        Some("table answer".to_string()),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: missing_document_id,
+            document_label: "available.md".to_string(),
+            excerpt: "No GraphQL API is published here.".to_string(),
+            score: Some(0.9),
+            source_text: "The library does not publish any GraphQL API.".to_string(),
+        }],
+    )
+    .expect("missing explicit document answer");
+
+    assert!(answer.contains("missing-contract.md"));
+}
+
+#[test]
+fn canonical_preflight_answer_reuses_graphql_absence_override_for_live_path() {
+    let document_id = Uuid::now_v7();
+    let document_index = HashMap::from([(
+        document_id,
+        sample_document_row_for_preflight(document_id, "api-contract.md"),
+    )]);
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id,
+        document_label: "api-contract.md".to_string(),
+        excerpt: "GraphQL is not published.".to_string(),
+        score: Some(0.95),
+        source_text: "This library does not publish a GraphQL API and has no /graphql schema."
+            .to_string(),
+    }];
+
+    let answer = build_canonical_preflight_answer(
+        "Есть ли в этой библиотеке GraphQL API?",
+        &QueryIntentProfile {
+            exact_literal_technical: true,
+            unsupported_capability: Some(UnsupportedCapabilityIntent::GraphQlApi),
+            ..QueryIntentProfile::default()
+        },
+        &document_index,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &chunks,
+    )
+    .expect("graphql absence preflight answer");
+
+    assert_eq!(answer, "Нет, в этой библиотеке GraphQL API не публикуется.");
+}
+
+#[test]
+fn canonical_preflight_answer_reuses_single_endpoint_override_for_live_path() {
+    let document_id = Uuid::now_v7();
+    let document_index = HashMap::from([(
+        document_id,
+        sample_document_row_for_preflight(document_id, "checkout_runtime_contract.md"),
+    )]);
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id,
+        document_label: "checkout_runtime_contract.md".to_string(),
+        excerpt: "Для получения текущей информации checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
+        score: Some(0.97),
+        source_text: repair_technical_layout_noise(
+            "http://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info",
+        ),
+    }];
+
+    let revision_id = Uuid::now_v7();
+    let answer = build_canonical_preflight_answer(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+        &document_index,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "endpoint_path".to_string(),
+                canonical_value_text: "/system/info".to_string(),
+                canonical_value_exact: "/system/info".to_string(),
+                canonical_value_json: json!("/system/info"),
+                display_value: "/system/info".to_string(),
+                qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &chunks,
+    )
+    .expect("single endpoint preflight answer");
+
+    assert_eq!(answer, "Нужен endpoint `GET /system/info`.");
+}
+
+#[test]
+fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
+    let document_id = Uuid::now_v7();
+    let noisy_chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id,
+        document_label: "checkout_runtime_contract.md".to_string(),
+        excerpt: "The checkout server exposes runtime metadata.".to_string(),
+        score: Some(0.55),
+        source_text: "Checkout runtime contract overview without the exact endpoint literal."
+            .to_string(),
+    };
+    let endpoint_chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id,
+        document_label: "checkout_runtime_contract.md".to_string(),
+        excerpt: "GET /system/info returns checkout server information.".to_string(),
+        score: Some(0.99),
+        source_text: repair_technical_layout_noise(
+            "http://demo.local:8080/checkout-api/rest/system/info\nGET\n/system/info",
+        ),
+    };
+
+    let merged = build_preflight_answer_chunks(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+        std::slice::from_ref(&noisy_chunk),
+        std::slice::from_ref(&endpoint_chunk),
+    );
+    let document_index = HashMap::from([(
+        document_id,
+        sample_document_row_for_preflight(document_id, "checkout_runtime_contract.md"),
+    )]);
+    let revision_id = Uuid::now_v7();
+    let answer = build_canonical_preflight_answer(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+        &document_index,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "endpoint_path".to_string(),
+                canonical_value_text: "/system/info".to_string(),
+                canonical_value_exact: "/system/info".to_string(),
+                canonical_value_json: json!("/system/info"),
+                display_value: "/system/info".to_string(),
+                qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &merged,
+    )
+    .expect("single endpoint preflight answer from merged candidates");
+
+    assert_eq!(answer, "Нужен endpoint `GET /system/info`.");
+}
+
+#[test]
+fn build_single_endpoint_answer_falls_back_to_full_source_when_focus_excerpt_skips_literal() {
+    let document_id = Uuid::now_v7();
+    let answer = build_single_endpoint_answer_from_chunks(
+        "Какой endpoint возвращает текущую информацию checkout server?",
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            document_label: "checkout_runtime_contract.md".to_string(),
+            excerpt: "# Checkout Runtime Contract".to_string(),
+            score: Some(0.99),
+            source_text: repair_technical_layout_noise(
+                "# Checkout Runtime Contract\nThe checkout server exposes runtime metadata.\nMethod: GET\nPath: /system/info",
+            ),
+        }],
+    )
+    .expect("single endpoint answer");
+
+    assert_eq!(answer, "Нужен endpoint `GET /system/info`.");
+}
+
+#[test]
 fn verify_answer_accepts_semantic_web_and_knowledge_graph_targets() {
     let verification = verify_answer_against_canonical_evidence(
         "Which technology in this corpus focuses on making Internet data machine-readable through standards like RDF and OWL, and which one stores interlinked descriptions of entities and concepts?",
@@ -1457,6 +2333,7 @@ fn verify_answer_accepts_semantic_web_and_knowledge_graph_targets() {
         },
         &[],
         "",
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(verification.state, QueryVerificationState::Verified);
@@ -1504,10 +2381,68 @@ fn verify_answer_accepts_method_path_literal_when_method_and_path_are_grounded()
             },
             &[],
             "",
+            &AssistantGroundingEvidence::default(),
         );
 
     assert_eq!(verification.state, QueryVerificationState::Verified);
     assert!(verification.warnings.is_empty());
+}
+
+#[test]
+fn verify_answer_accepts_literals_grounded_by_assistant_tool_reads() {
+    let verification = verify_answer_against_canonical_evidence(
+        "какая логика в коде",
+        "По этим файлам видно, что это backend-логика на Rust. `query_repository.rs` хранит `query_conversation`, `query_turn` и `query_execution`. `audit_repository.rs` фильтрует audit по `action_kind` и пишет `iam.bootstrap.claim`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[],
+        "",
+        &AssistantGroundingEvidence {
+            verification_corpus: vec![
+                r#"{"structuredContent":{"documentTitle":"query_repository.rs","content":"from query_conversation and query_turn joined to query_execution"},"isError":false}"#
+                    .to_string(),
+                r#"{"structuredContent":{"documentTitle":"audit_repository.rs","content":"append_audit_event filters by action_kind and writes iam.bootstrap.claim"},"isError":false}"#
+                    .to_string(),
+            ],
+            document_references: Vec::new(),
+        },
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
+}
+
+#[test]
+fn verify_answer_accepts_quoted_literals_grounded_by_decoded_read_document_content() {
+    let mut grounding = AssistantGroundingEvidence::default();
+    grounding.record_tool_result(
+        "read_document",
+        r#"{"isError":false,"structuredContent":{"documentId":"019d9758-e88e-7b30-b15a-a355a029f6f3","documentTitle":"audit_repository.rs","libraryId":"019d9724-4d6f-75a2-87e4-65cc050fa9d0","workspaceId":"019d96c1-77d9-76b3-a33d-92e3c517127c","readMode":"full","readabilityState":"readable","readinessKind":"graph_sparse","graphCoverageKind":"graph_sparse","content":"surface_kind = \"bootstrap\" and result_kind = \"succeeded\"","sliceStartOffset":0,"sliceEndOffset":64,"hasMore":false}}"#,
+        false,
+    );
+
+    let verification = verify_answer_against_canonical_evidence(
+        "Какие фильтры и события обслуживает audit_repository.rs?",
+        "Файл фильтрует по `\"bootstrap\"` и `\"succeeded\"` в примерах literal-значений.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[],
+        "",
+        &grounding,
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
 }
 
 #[test]
@@ -1557,6 +2492,7 @@ fn verify_answer_ignores_background_conflicts_when_grounded_literals_are_explici
         },
         &[],
         "",
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(verification.state, QueryVerificationState::Verified);
@@ -1614,6 +2550,7 @@ fn verify_unsupported_capability_answer_skips_unrelated_conflict_warnings() {
         },
         &[],
         "",
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(verification.state, QueryVerificationState::Verified);
@@ -1656,6 +2593,7 @@ fn verify_answer_marks_conflicting_when_exact_literal_question_stays_ambiguous()
         },
         &[],
         "",
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(verification.state, QueryVerificationState::Conflicting);
@@ -1693,6 +2631,541 @@ fn technical_literal_candidate_limit_expands_document_recall_for_endpoint_questi
         ),
         8
     );
+}
+
+#[test]
+fn literal_extractors_normalize_markdown_wrapped_tokens() {
+    let text = "Method: `GET` Path: `/system/info` WSDL: `http://demo.local:8080/inventory-api/ws/inventory.wsdl` Param: `withCards`";
+
+    assert_eq!(extract_http_methods(text, 2), vec!["GET".to_string()]);
+    assert_eq!(extract_explicit_path_literals(text, 2), vec!["/system/info".to_string()]);
+    assert_eq!(
+        extract_url_literals(text, 2),
+        vec!["http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string()]
+    );
+    assert_eq!(extract_parameter_literals(text, 2), vec!["withCards".to_string()]);
+}
+
+#[test]
+fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_best_document() {
+    let question = "Как называется параметр pageNumber в API пагинации?";
+    let rewards_document_id = Uuid::now_v7();
+    let inventory_document_id = Uuid::now_v7();
+    let selected = select_technical_literal_chunks(
+        question,
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: rewards_document_id,
+                document_label: "rewards_accounts_api_contract.md".to_string(),
+                excerpt: "| `pageNumber` | 1-based page number |".to_string(),
+                score: Some(0.99),
+                source_text: repair_technical_layout_noise(
+                    "| `pageNumber` | 1-based page number |",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "Inventory SOAP canonical WSDL.".to_string(),
+                score: Some(0.98),
+                source_text: repair_technical_layout_noise(
+                    "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "SOAP over HTTP.".to_string(),
+                score: Some(0.97),
+                source_text: "SOAP over HTTP.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "Agents use XML.".to_string(),
+                score: Some(0.96),
+                source_text: "Agents use XML.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "Port 8080.".to_string(),
+                score: Some(0.95),
+                source_text: "Port 8080.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "Contract note.".to_string(),
+                score: Some(0.94),
+                source_text: "Contract note.".to_string(),
+            },
+        ],
+        detect_technical_literal_intent(question),
+        8,
+        &technical_literal_focus_keywords(question),
+        question_mentions_pagination(question),
+    );
+
+    assert_eq!(selected.len(), 1);
+    assert!(selected.iter().all(|chunk| chunk.document_id == rewards_document_id));
+    assert!(selected.iter().all(|chunk| chunk.source_text.contains("pageNumber")));
+    assert!(!selected.iter().any(|chunk| chunk.document_id == inventory_document_id));
+}
+
+#[test]
+fn select_technical_literal_chunks_prefers_matching_wsdl_document_for_single_source_question() {
+    let question = "Какой WSDL у inventory soap api?";
+    let checkout_document_id = Uuid::now_v7();
+    let inventory_document_id = Uuid::now_v7();
+    let selected = select_technical_literal_chunks(
+        question,
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: checkout_document_id,
+                document_label: "checkout_runtime_contract.md".to_string(),
+                excerpt: "Checkout GraphQL is unsupported.".to_string(),
+                score: Some(0.99),
+                source_text: repair_technical_layout_noise(
+                    "Checkout Runtime Contract\nThe checkout server does not publish a GraphQL API.",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                score: Some(0.97),
+                source_text: repair_technical_layout_noise(
+                    "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                ),
+            },
+        ],
+        detect_technical_literal_intent(question),
+        8,
+        &technical_literal_focus_keywords(question),
+        question_mentions_pagination(question),
+    );
+
+    assert!(!selected.is_empty());
+    assert!(selected.iter().all(|chunk| chunk.document_id == inventory_document_id));
+}
+
+#[test]
+fn build_preflight_canonical_evidence_scopes_exact_literal_questions_to_literal_documents() {
+    let rewards_document_id = Uuid::now_v7();
+    let inventory_document_id = Uuid::now_v7();
+    let rewards_revision_id = Uuid::now_v7();
+    let inventory_revision_id = Uuid::now_v7();
+    let filtered = build_preflight_canonical_evidence(
+        "Как называется параметр pageNumber в API пагинации?",
+        &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: vec![
+                sample_chunk_row(Uuid::now_v7(), rewards_document_id, rewards_revision_id),
+                sample_chunk_row(Uuid::now_v7(), inventory_document_id, inventory_revision_id),
+            ],
+            structured_blocks: vec![
+                sample_structured_block_row(
+                    Uuid::now_v7(),
+                    rewards_document_id,
+                    rewards_revision_id,
+                ),
+                sample_structured_block_row(
+                    Uuid::now_v7(),
+                    inventory_document_id,
+                    inventory_revision_id,
+                ),
+            ],
+            technical_facts: vec![
+                sample_technical_fact_row(Uuid::now_v7(), rewards_document_id, rewards_revision_id),
+                sample_technical_fact_row(
+                    Uuid::now_v7(),
+                    inventory_document_id,
+                    inventory_revision_id,
+                ),
+            ],
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: rewards_document_id,
+            document_label: "rewards_accounts_api_contract.md".to_string(),
+            excerpt: "| `pageNumber` | 1-based page number |".to_string(),
+            score: Some(0.99),
+            source_text: "| `pageNumber` | 1-based page number |".to_string(),
+        }],
+    );
+
+    assert_eq!(
+        filtered.chunk_rows.iter().map(|row| row.document_id).collect::<HashSet<_>>(),
+        HashSet::from([rewards_document_id])
+    );
+    assert_eq!(
+        filtered.structured_blocks.iter().map(|block| block.document_id).collect::<HashSet<_>>(),
+        HashSet::from([rewards_document_id])
+    );
+    assert_eq!(
+        filtered.technical_facts.iter().map(|fact| fact.document_id).collect::<HashSet<_>>(),
+        HashSet::from([rewards_document_id])
+    );
+}
+
+#[test]
+fn canonical_preflight_answer_uses_literal_scoped_evidence_for_parameter_question() {
+    let rewards_document_id = Uuid::now_v7();
+    let inventory_document_id = Uuid::now_v7();
+    let rewards_revision_id = Uuid::now_v7();
+    let inventory_revision_id = Uuid::now_v7();
+    let document_index = HashMap::from([
+        (
+            rewards_document_id,
+            sample_document_row_for_preflight(
+                rewards_document_id,
+                "rewards_accounts_api_contract.md",
+            ),
+        ),
+        (
+            inventory_document_id,
+            sample_document_row_for_preflight(
+                inventory_document_id,
+                "inventory_soap_api_contract.md",
+            ),
+        ),
+    ]);
+    let profile =
+        QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() };
+    let canonical_evidence = CanonicalAnswerEvidence {
+        bundle: None,
+        chunk_rows: Vec::new(),
+        structured_blocks: vec![
+            KnowledgeStructuredBlockRow {
+                normalized_text: "| `pageNumber` | 1-based page number |".to_string(),
+                text: "| `pageNumber` | 1-based page number |".to_string(),
+                ..sample_structured_block_row(
+                    Uuid::now_v7(),
+                    rewards_document_id,
+                    rewards_revision_id,
+                )
+            },
+            KnowledgeStructuredBlockRow {
+                normalized_text: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                text: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                ..sample_structured_block_row(
+                    Uuid::now_v7(),
+                    inventory_document_id,
+                    inventory_revision_id,
+                )
+            },
+        ],
+        technical_facts: vec![
+            KnowledgeTechnicalFactRow {
+                fact_kind: "parameter_name".to_string(),
+                canonical_value_text: "pageNumber".to_string(),
+                canonical_value_exact: "pageNumber".to_string(),
+                canonical_value_json: json!({ "value_type": "text", "value": "pageNumber" }),
+                display_value: "pageNumber".to_string(),
+                ..sample_technical_fact_row(
+                    Uuid::now_v7(),
+                    rewards_document_id,
+                    rewards_revision_id,
+                )
+            },
+            KnowledgeTechnicalFactRow {
+                fact_kind: "url".to_string(),
+                canonical_value_text: "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                canonical_value_exact: "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                canonical_value_json: json!(
+                    "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                ),
+                display_value: "http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
+                ..sample_technical_fact_row(
+                    Uuid::now_v7(),
+                    inventory_document_id,
+                    inventory_revision_id,
+                )
+            },
+        ],
+    };
+    let technical_literal_chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id: rewards_document_id,
+        document_label: "rewards_accounts_api_contract.md".to_string(),
+        excerpt: "| `pageNumber` | 1-based page number |".to_string(),
+        score: Some(0.99),
+        source_text: repair_technical_layout_noise(
+            "Pagination parameters\n| Parameter | Meaning |\n| `pageNumber` | 1-based page number |",
+        ),
+    }];
+    let preflight_chunks = build_preflight_answer_chunks(
+        "Как называется параметр pageNumber в API пагинации?",
+        &profile,
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                    .to_string(),
+                score: Some(0.98),
+                source_text: repair_technical_layout_noise(
+                    "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                ),
+            },
+            technical_literal_chunks[0].clone(),
+        ],
+        &technical_literal_chunks,
+    );
+    let preflight_evidence = build_preflight_canonical_evidence(
+        "Как называется параметр pageNumber в API пагинации?",
+        &profile,
+        &canonical_evidence,
+        &technical_literal_chunks,
+    );
+
+    let answer = build_canonical_preflight_answer(
+        "Как называется параметр pageNumber в API пагинации?",
+        &profile,
+        &document_index,
+        None,
+        &preflight_evidence,
+        &preflight_chunks,
+    )
+    .expect("parameter preflight answer");
+
+    assert!(answer.contains("`pageNumber`"), "{answer}");
+    assert!(!answer.contains("inventory"), "{answer}");
+}
+
+#[test]
+fn preflight_exact_literal_scope_prefers_focused_document_for_single_source_question() {
+    let rewards_document_id = Uuid::now_v7();
+    let inventory_document_id = Uuid::now_v7();
+    let profile =
+        QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() };
+    let question = "Какой WSDL у inventory soap api?";
+    let technical_literal_chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: rewards_document_id,
+            document_label: "rewards_accounts_api_contract.md".to_string(),
+            excerpt: "GET /v1/accounts returns rewards accounts.".to_string(),
+            score: Some(0.99),
+            source_text: repair_technical_layout_noise(
+                "Rewards Accounts API Contract\nGET /v1/accounts\nwithCards",
+            ),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: inventory_document_id,
+            document_label: "inventory_soap_api_contract.md".to_string(),
+            excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
+            score: Some(0.97),
+            source_text: repair_technical_layout_noise(
+                "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+            ),
+        },
+    ];
+
+    let preflight_chunks = build_preflight_answer_chunks(
+        question,
+        &profile,
+        &technical_literal_chunks,
+        &technical_literal_chunks,
+    );
+    let preflight_evidence = build_preflight_canonical_evidence(
+        question,
+        &profile,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![
+                KnowledgeStructuredBlockRow {
+                    normalized_text: "GET /v1/accounts".to_string(),
+                    text: "GET /v1/accounts".to_string(),
+                    ..sample_structured_block_row(
+                        Uuid::now_v7(),
+                        rewards_document_id,
+                        Uuid::now_v7(),
+                    )
+                },
+                KnowledgeStructuredBlockRow {
+                    normalized_text:
+                        "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                            .to_string(),
+                    text: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
+                        .to_string(),
+                    ..sample_structured_block_row(
+                        Uuid::now_v7(),
+                        inventory_document_id,
+                        Uuid::now_v7(),
+                    )
+                },
+            ],
+            technical_facts: Vec::new(),
+        },
+        &technical_literal_chunks,
+    );
+
+    assert_eq!(
+        preflight_chunks.iter().map(|chunk| chunk.document_id).collect::<HashSet<_>>(),
+        HashSet::from([inventory_document_id])
+    );
+    assert_eq!(
+        preflight_evidence
+            .structured_blocks
+            .iter()
+            .map(|block| block.document_id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([inventory_document_id])
+    );
+}
+
+#[test]
+fn preflight_exact_literal_scope_keeps_multi_document_comparison_questions_broad() {
+    let checkout_document_id = Uuid::now_v7();
+    let inventory_document_id = Uuid::now_v7();
+    let profile =
+        QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() };
+
+    let scoped_documents = preflight_exact_literal_document_scope(
+        "Чем rewards REST отличается от inventory WSDL?",
+        &profile,
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: checkout_document_id,
+                document_label: "rewards_accounts_api_contract.md".to_string(),
+                excerpt: "REST API over JSON.".to_string(),
+                score: Some(0.99),
+                source_text: "REST API over JSON.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "SOAP API with WSDL.".to_string(),
+                score: Some(0.97),
+                source_text: "SOAP API with WSDL.".to_string(),
+            },
+        ],
+    )
+    .expect("comparison questions should keep document scope");
+
+    assert_eq!(scoped_documents, HashSet::from([checkout_document_id, inventory_document_id]));
+}
+
+#[test]
+fn canonical_preflight_answer_handles_english_transport_comparison_without_graphql_noise() {
+    let rewards_document_id = Uuid::now_v7();
+    let inventory_document_id = Uuid::now_v7();
+    let document_index = HashMap::from([
+        (
+            rewards_document_id,
+            sample_document_row_for_preflight(
+                rewards_document_id,
+                "rewards_accounts_api_contract.md",
+            ),
+        ),
+        (
+            inventory_document_id,
+            sample_document_row_for_preflight(
+                inventory_document_id,
+                "inventory_soap_api_contract.md",
+            ),
+        ),
+    ]);
+    let question = "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?";
+    let answer = build_canonical_preflight_answer(
+        question,
+        &QueryIntentProfile::default(),
+        &document_index,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: rewards_document_id,
+                document_label: "rewards_accounts_api_contract.md".to_string(),
+                excerpt: "REST JSON over HTTP".to_string(),
+                score: Some(0.99),
+                source_text:
+                    "The rewards accounts surface is a REST API that returns JSON over HTTP."
+                        .to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: inventory_document_id,
+                document_label: "inventory_soap_api_contract.md".to_string(),
+                excerpt: "SOAP WSDL over HTTP".to_string(),
+                score: Some(0.97),
+                source_text:
+                    "The inventory integration surface is SOAP over HTTP and described by WSDL."
+                        .to_string(),
+            },
+        ],
+    )
+    .expect("comparison preflight answer");
+
+    let lowered = answer.to_lowercase();
+    assert!(lowered.contains("rewards accounts"), "{answer}");
+    assert!(lowered.contains("inventory"), "{answer}");
+    assert!(lowered.contains("rest"), "{answer}");
+    assert!(lowered.contains("wsdl"), "{answer}");
+    assert!(!lowered.contains("graphql"), "{answer}");
+}
+
+#[test]
+fn should_skip_crag_retry_only_for_grounded_exact_literal_queries() {
+    let literal_plan = RuntimeQueryPlan {
+        requested_mode: RuntimeQueryMode::Document,
+        planned_mode: RuntimeQueryMode::Document,
+        intent_profile: QueryIntentProfile {
+            exact_literal_technical: true,
+            ..QueryIntentProfile::default()
+        },
+        keywords: vec!["checkout".to_string(), "endpoint".to_string()],
+        high_level_keywords: Vec::new(),
+        low_level_keywords: Vec::new(),
+        entity_keywords: Vec::new(),
+        concept_keywords: Vec::new(),
+        expanded_keywords: Vec::new(),
+        top_k: 8,
+        context_budget_chars: 16_000,
+        hyde_recommended: false,
+    };
+    let grounded_chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        document_id: Uuid::now_v7(),
+        document_label: "checkout_runtime_contract.md".to_string(),
+        excerpt: "GET /system/info returns checkout server information.".to_string(),
+        score: Some(0.88),
+        source_text: "GET /system/info returns checkout server information.".to_string(),
+    }];
+
+    assert!(should_skip_crag_retry(&literal_plan, &grounded_chunks));
+    assert!(!should_skip_crag_retry(&literal_plan, &[]));
+
+    let semantic_plan =
+        RuntimeQueryPlan { intent_profile: QueryIntentProfile::default(), ..literal_plan };
+    assert!(!should_skip_crag_retry(&semantic_plan, &grounded_chunks));
 }
 
 #[test]
@@ -1775,6 +3248,7 @@ fn verify_answer_rejects_wrong_canonical_targets_for_role_question() {
         },
         &[],
         "",
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
@@ -1795,6 +3269,7 @@ fn verify_answer_rejects_conflated_semantic_web_and_knowledge_graph_role_questio
         },
         &[],
         "",
+        &AssistantGroundingEvidence::default(),
     );
 
     assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
@@ -1802,16 +3277,10 @@ fn verify_answer_rejects_conflated_semantic_web_and_knowledge_graph_role_questio
 }
 
 #[test]
-fn build_document_literal_answer_extracts_ocr_source_materials() {
+fn build_focused_document_answer_does_not_answer_semantic_ocr_sources_question() {
     let document_id = Uuid::now_v7();
-    let answer = build_document_literal_answer(
+    let answer = build_focused_document_answer(
             "Which kinds of source material are explicitly listed as OCR inputs in the OCR article?",
-            &CanonicalAnswerEvidence {
-                bundle: None,
-                chunk_rows: Vec::new(),
-                structured_blocks: Vec::new(),
-                technical_facts: Vec::new(),
-            },
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 document_id,
@@ -1820,27 +3289,16 @@ fn build_document_literal_answer_extracts_ocr_source_materials() {
                 score: Some(1.0),
                 source_text: "Optical character recognition converts images into machine-encoded text, whether from a scanned document, a photo of a document, a scene photo (for example the text on signs and billboards in a landscape photo) or from subtitle text superimposed on an image.".to_string(),
             }],
-        )
-        .expect("expected OCR literal answer");
+        );
 
-    assert!(answer.contains("scanned document"));
-    assert!(answer.contains("photo of a document"));
-    assert!(answer.contains("scene photo"));
-    assert!(answer.contains("subtitle text"));
-    assert!(answer.contains("signs and billboards"));
+    assert!(answer.is_none());
 }
 
 #[test]
-fn build_document_literal_answer_extracts_ocr_machine_encoded_text_and_sources() {
+fn build_focused_document_answer_does_not_answer_semantic_ocr_conversion_question() {
     let document_id = Uuid::now_v7();
-    let answer = build_document_literal_answer(
+    let answer = build_focused_document_answer(
             "What does OCR convert images of text into, and what kinds of source material are explicitly named?",
-            &CanonicalAnswerEvidence {
-                bundle: None,
-                chunk_rows: Vec::new(),
-                structured_blocks: Vec::new(),
-                technical_facts: Vec::new(),
-            },
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 document_id,
@@ -1849,14 +3307,9 @@ fn build_document_literal_answer_extracts_ocr_machine_encoded_text_and_sources()
                 score: Some(1.0),
                 source_text: "Optical character recognition converts images of text into machine-encoded text, whether from a scanned document, a photo of a document, a scene photo (for example the text on signs and billboards in a landscape photo) or from subtitle text superimposed on an image.".to_string(),
             }],
-        )
-        .expect("expected OCR combined answer");
+        );
 
-    assert!(answer.contains("machine-encoded text"));
-    assert!(answer.contains("scanned document"));
-    assert!(answer.contains("photo of a document"));
-    assert!(answer.contains("signs and billboards"));
-    assert!(answer.contains("subtitle text"));
+    assert!(answer.is_none());
 }
 
 #[test]
@@ -1925,6 +3378,7 @@ fn verify_answer_rejects_unsupported_graph_query_language_claims() {
             },
             &[],
             "",
+            &AssistantGroundingEvidence::default(),
         );
 
     assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
@@ -2022,4 +3476,25 @@ fn maps_query_graph_status_from_library_generation() {
     assert_eq!(query_graph_status(Some(&degraded_generation)), "partial");
     assert_eq!(query_graph_status(Some(&empty_generation)), "empty");
     assert_eq!(query_graph_status(None), "empty");
+}
+
+fn sample_document_row_for_preflight(document_id: Uuid, file_name: &str) -> KnowledgeDocumentRow {
+    KnowledgeDocumentRow {
+        key: document_id.to_string(),
+        arango_id: None,
+        arango_rev: None,
+        document_id,
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        external_key: document_id.to_string(),
+        file_name: Some(file_name.to_string()),
+        title: Some(file_name.to_string()),
+        document_state: "active".to_string(),
+        active_revision_id: Some(Uuid::now_v7()),
+        readable_revision_id: Some(Uuid::now_v7()),
+        latest_revision_no: Some(1),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        deleted_at: None,
+    }
 }

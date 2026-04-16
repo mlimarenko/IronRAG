@@ -56,6 +56,20 @@ function groupNodesByType(graph: Graph): GroupedNodes[] {
     });
 }
 
+/**
+ * The minimum visual gap between two adjacent nodes in any layout. All the
+ * scale-dependent maths keys off this constant so a tweak here re-tunes
+ * every layout consistently.
+ */
+const NODE_VISUAL_GAP = 6;
+
+/** How many nodes can comfortably sit on a single concentric ring at radius
+ *  R, given the global node gap. The ring's circumference is `2πR`, and we
+ *  reserve `NODE_VISUAL_GAP` of arc length per node. */
+function ringCapacity(radius: number): number {
+  return Math.max(8, Math.floor((2 * Math.PI * radius) / NODE_VISUAL_GAP));
+}
+
 function layoutNodesInSector(
   graph: Graph,
   nodes: string[],
@@ -102,9 +116,14 @@ function layoutSectors(graph: Graph): void {
   const usableAngle = 2 * Math.PI - groups.length * sectorGap;
   const weights = groups.map((group) => Math.sqrt(group.nodes.length + 2));
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const innerRadius = Math.max(10, Math.sqrt(graph.order) * 0.8);
-  const rowGap = Math.max(4.5, Math.sqrt(graph.order) * 0.18);
-  const arcGap = Math.max(3.2, rowGap * 0.9);
+  // Spacing GROWS with graph size aggressively so Sigma's autoRescale
+  // (which fits the entire layout into the viewport) still leaves enough
+  // pixels between node centers for them to be visually distinct on dense
+  // datasets. Previous factors collapsed at 5k+ nodes after rescale.
+  const orderRoot = Math.sqrt(graph.order);
+  const innerRadius = Math.max(40, orderRoot * 4);
+  const rowGap = Math.max(NODE_VISUAL_GAP * 2.5, orderRoot * 1.4);
+  const arcGap = Math.max(NODE_VISUAL_GAP * 2, rowGap);
 
   let cursor = -Math.PI / 2;
 
@@ -121,15 +140,32 @@ function layoutBands(graph: Graph): void {
   if (graph.order === 0) return;
 
   const groups = groupNodesByType(graph);
-  const maxGroupSize = Math.max(...groups.map((group) => group.nodes.length));
-  const cell = Math.max(4.2, Math.min(7, 180 / Math.sqrt(graph.order)));
-  const rowGap = cell * 1.15;
-  const columnGap = cell * 1.7;
-  const bandGap = cell * 2.4;
-  const baseColumns = Math.max(14, Math.min(72, Math.ceil(Math.sqrt(maxGroupSize) * 3.2)));
+  // `cell` is the base unit of separation between adjacent nodes. We push
+  // it aggressively higher than before so that even after Sigma's
+  // `autoRescale` shrinks 25k+ nodes down to fit the viewport, the
+  // resulting per-cell pixel size is still wide enough to keep nodes
+  // visually distinct. The previous `orderRoot * 0.32` capped cell at
+  // ~50 for 25k nodes; once Sigma compressed that to fit a 600 px canvas
+  // every cell collapsed to ~3 px and the entire graph painted as one
+  // colored block. The new factor (1.4) reserves enough layout-space
+  // headroom that even the worst rescaling still leaves ~6-8 px between
+  // node centers at 25k nodes.
+  const orderRoot = Math.sqrt(graph.order);
+  const cell = Math.max(NODE_VISUAL_GAP * 2, orderRoot * 1.4);
+  const rowGap = cell * 1.5;
+  const columnGap = cell * 2;
+  const bandGap = cell * 4;
+
+  // Width of each band is bounded so that even the largest group does not
+  // become an absurdly wide horizontal smear; instead it wraps onto more
+  // rows. Aspect ratio stays close to "comfortable strip", not "string".
+  const maxColumns = Math.max(20, Math.min(96, Math.ceil(orderRoot * 1.6)));
 
   const bandMeasurements = groups.map((group) => {
-    const columns = Math.min(baseColumns, Math.max(8, Math.ceil(Math.sqrt(group.nodes.length) * 2.6)));
+    const columns = Math.min(
+      maxColumns,
+      Math.max(10, Math.ceil(Math.sqrt(group.nodes.length) * 2.4)),
+    );
     const rows = Math.max(1, Math.ceil(group.nodes.length / columns));
     const bandHeight = rows * rowGap;
     return { group, columns, rows, bandHeight };
@@ -168,29 +204,54 @@ function layoutRings(graph: Graph): void {
   if (graph.order === 0) return;
 
   const groups = groupNodesByType(graph);
-  const typeCount = groups.length;
-  const baseRingGap = Math.max(12, Math.sqrt(graph.order) * 0.55);
-  const minArcGap = Math.max(2.4, baseRingGap * 0.48);
-  let currentRadius = Math.max(baseRingGap * 2, 6);
 
-  groups.forEach((group, ring) => {
-    const radiusForCount = (group.nodes.length * minArcGap) / (2 * Math.PI);
-    const ringGap =
-      ring === 0
-        ? baseRingGap * 2
-        : baseRingGap * (1 + ring / Math.max(1, typeCount - 1)) + Math.sqrt(currentRadius) * 0.7;
+  // Each concentric ring is placed at a uniform additive gap from the
+  // previous one. The gap GROWS with graph size so that on dense graphs,
+  // after Sigma's autoRescale fits the layout into the viewport, the
+  // physical pixel distance between rings is still large enough for the
+  // rings to be visually distinct discs of nodes.
+  const orderRoot = Math.sqrt(graph.order);
+  const ringGap = Math.max(60, orderRoot * 1.6);
+  const innerRadius = Math.max(80, orderRoot * 2.2);
 
-    currentRadius =
-      ring === 0
-        ? Math.max(baseRingGap * 2.5, radiusForCount)
-        : Math.max(radiusForCount, currentRadius + ringGap);
+  // Big groups (e.g. 4000 entities) cannot fit on a single ring without
+  // overlapping. Split them across multiple sub-rings so each sub-ring
+  // stays at a comfortable density. The capacity of a ring grows with its
+  // radius (more circumference = more nodes), so we figure out the radius
+  // first, then partition the group into chunks small enough to fit.
+  type RingPlan = { type: string; nodes: string[]; radius: number };
+  const ringPlans: RingPlan[] = [];
 
-    const angularOffset = ring * (Math.PI / Math.max(6, group.nodes.length));
+  let currentRadius = innerRadius;
+  groups.forEach((group) => {
+    let remaining = group.nodes.length;
+    let pointer = 0;
+    while (remaining > 0) {
+      const capacity = ringCapacity(currentRadius);
+      const taken = Math.min(remaining, capacity);
+      ringPlans.push({
+        type: group.type,
+        nodes: group.nodes.slice(pointer, pointer + taken),
+        radius: currentRadius,
+      });
+      pointer += taken;
+      remaining -= taken;
+      currentRadius += ringGap;
+    }
+  });
 
-    for (let index = 0; index < group.nodes.length; index += 1) {
-      const angle = (2 * Math.PI * index) / group.nodes.length + angularOffset;
-      graph.setNodeAttribute(group.nodes[index], 'x', Math.cos(angle) * currentRadius);
-      graph.setNodeAttribute(group.nodes[index], 'y', Math.sin(angle) * currentRadius);
+  ringPlans.forEach((plan, ringIndex) => {
+    // Stagger the angular start position per ring so neighbouring sub-rings
+    // do not align their nodes on the same radial spoke (looks like spokes
+    // instead of concentric circles).
+    const angularOffset = ringIndex * (Math.PI / 6);
+    const count = plan.nodes.length;
+    if (count === 0) return;
+    const step = (2 * Math.PI) / count;
+    for (let index = 0; index < count; index += 1) {
+      const angle = angularOffset + index * step;
+      graph.setNodeAttribute(plan.nodes[index], 'x', Math.cos(angle) * plan.radius);
+      graph.setNodeAttribute(plan.nodes[index], 'y', Math.sin(angle) * plan.radius);
     }
   });
 }
@@ -220,18 +281,26 @@ function layoutClusters(graph: Graph): void {
 function findConnectedComponents(graph: Graph): string[][] {
   const visited = new Set<string>();
   const components: string[][] = [];
+  // Reused across seeds to avoid reallocating a fresh queue for every
+  // component. At 25k nodes this matters because V8 allocates a new
+  // backing buffer per array.
+  const queue: string[] = [];
 
   graph.forEachNode((node) => {
     if (visited.has(node)) return;
 
-    const queue = [node];
+    // Head-pointer BFS. `queue.shift()` is O(n) per pop in V8, which
+    // turned a 25k-node BFS into an O(N²) stall (minutes on the main
+    // thread). Incrementing a head index is O(1).
+    queue.length = 0;
+    queue.push(node);
     const component: string[] = [];
     visited.add(node);
+    let head = 0;
 
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (!current) continue;
-
+    while (head < queue.length) {
+      const current = queue[head];
+      head += 1;
       component.push(current);
 
       graph.forEachNeighbor(current, (neighbor) => {
@@ -312,13 +381,95 @@ function layoutComponentNodes(graph: Graph, nodes: string[], centerX: number, ce
 function layoutComponents(graph: Graph): void {
   if (graph.order === 0) return;
 
+  // `findConnectedComponents` already returns components sorted by size
+  // desc. We only need to enrich them with radius. The downstream
+  // `layoutComponentNodes` already calls `sortNodesByImportance` on the
+  // nodes it receives — do it once there, not twice.
   const components = findConnectedComponents(graph).map((nodes) => ({
-    nodes: sortNodesByImportance(graph, nodes),
+    nodes,
     radius: componentRadius(nodes.length),
   }));
 
-  const packedCircles: PackedCircle[] = [];
+  // Two packing strategies by component count:
+  //
+  // * Small count (≤ 200): the spiral-pack `packComponentCircle` gives
+  //   the tightest visually-balanced layout. Cost is O(C² * 3200) per
+  //   component in the worst case, which is fine at C ≤ 200.
+  //
+  // * Large count (> 200): a graph with thousands of tiny disconnected
+  //   components (a prod reference library has ~800 doc islands + many
+  //   singleton entities) makes the spiral packer O(C³)-ish AND silently falls
+  //   through into `(placed.length * r, placed.length * r * 0.15)` when
+  //   the 3200-step spiral exhausts — which literally stacked all
+  //   overflow components along a diagonal line at slope 0.15. Users
+  //   saw that as a rainbow streak across the canvas. We drop into a
+  //   shelf-pack layout instead: rows of bubbles of varying size,
+  //   filled left-to-right, wrapping at a target width. Largest first
+  //   (components are already sorted desc in `findConnectedComponents`)
+  //   so the visually-anchoring ones land near the top-left and the
+  //   tail of singletons flows out to the edges. O(C) time, no
+  //   cascading fallback.
+  const LARGE_COMPONENT_COUNT = 200;
+  if (components.length > LARGE_COMPONENT_COUNT) {
+    const gapBetweenCells = 18;
+    // Aim for a square-ish aspect ratio. The total packed area (sum of
+    // bounding-box areas) gives a rough budget; rowWidth is the
+    // sqrt of that, plus padding for the largest cell.
+    const areaBudget = components.reduce((sum, component) => {
+      const side = component.radius * 2 + gapBetweenCells;
+      return sum + side * side;
+    }, 0);
+    const targetRowWidth = Math.sqrt(areaBudget * 1.2);
 
+    let cursorX = 0;
+    let cursorY = 0;
+    let rowHeight = 0;
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+
+    // First pass: assign world-space centers without committing to the
+    // graph yet, so we can center the whole pack afterwards.
+    const placements: { component: typeof components[number]; centerX: number; centerY: number }[] =
+      new Array(components.length);
+    for (let index = 0; index < components.length; index += 1) {
+      const component = components[index];
+      const side = component.radius * 2 + gapBetweenCells;
+      if (cursorX > 0 && cursorX + side > targetRowWidth) {
+        cursorX = 0;
+        cursorY += rowHeight;
+        rowHeight = 0;
+      }
+      const centerX = cursorX + component.radius;
+      const centerY = cursorY + component.radius;
+      placements[index] = { component, centerX, centerY };
+
+      cursorX += side;
+      if (side > rowHeight) rowHeight = side;
+
+      if (centerX - component.radius < minX) minX = centerX - component.radius;
+      if (centerX + component.radius > maxX) maxX = centerX + component.radius;
+      if (centerY - component.radius < minY) minY = centerY - component.radius;
+      if (centerY + component.radius > maxY) maxY = centerY + component.radius;
+    }
+
+    const offsetX = (minX + maxX) / 2;
+    const offsetY = (minY + maxY) / 2;
+
+    for (const placement of placements) {
+      layoutComponentNodes(
+        graph,
+        placement.component.nodes,
+        placement.centerX - offsetX,
+        placement.centerY - offsetY,
+        placement.component.radius,
+      );
+    }
+    return;
+  }
+
+  const packedCircles: PackedCircle[] = [];
   components.forEach((component) => {
     const packed = packComponentCircle(packedCircles, component.radius);
     packedCircles.push(packed);

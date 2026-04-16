@@ -11,6 +11,9 @@ use crate::{
 };
 
 /// Result summary of a community detection run.
+///
+/// Fields are currently unused by callers (they discard the `Ok` value), but
+/// the struct is returned from live code paths and kept for observability.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct CommunityDetectionResult {

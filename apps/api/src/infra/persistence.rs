@@ -32,6 +32,13 @@ const CANONICAL_BASELINE_TABLES: [&str; 9] = [
 #[derive(Clone)]
 pub struct Persistence {
     pub postgres: PgPool,
+    /// Small dedicated pool reserved for latency-critical control plane
+    /// traffic that must never starve behind the main working pool. Sized
+    /// so heartbeat/cancel polls can always grab a connection even while
+    /// the ingest worker has saturated `postgres` with fan-out graph
+    /// merges. Canonically used by the ingest worker heartbeat loop to
+    /// keep `ingest_attempt.heartbeat_at` fresh under CPU-bound stages.
+    pub heartbeat_postgres: PgPool,
     pub redis: RedisClient,
 }
 
@@ -46,11 +53,32 @@ impl Persistence {
             .connect(&settings.database_url)
             .await?;
 
+        // Independent 2-connection pool — kept tiny on purpose so it
+        // cannot compete with the main pool for PG slots, but guarantees
+        // the heartbeat loop gets a connection even when `postgres` is
+        // fully checked out by parallel graph merges.
+        let heartbeat_postgres = PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(2)
+            .connect(&settings.database_url)
+            .await?;
+
         let redis = RedisClient::open(settings.redis_url.clone())?;
         let mut conn = redis.get_multiplexed_async_connection().await?;
         let _: String = redis::cmd("PING").query_async(&mut conn).await?;
 
-        Ok(Self { postgres, redis })
+        Ok(Self { postgres, heartbeat_postgres, redis })
+    }
+
+    /// Test-only constructor that reuses the same Postgres pool for the
+    /// heartbeat path. Production always uses a dedicated tiny pool via
+    /// [`Persistence::connect`]; integration tests don't exercise the
+    /// starvation scenario the dedicated pool guards against, so sharing
+    /// one pool keeps fixture setup simple while still populating every
+    /// field of the struct.
+    #[must_use]
+    pub fn for_tests(postgres: PgPool, redis: RedisClient) -> Self {
+        Self { postgres: postgres.clone(), heartbeat_postgres: postgres, redis }
     }
 }
 

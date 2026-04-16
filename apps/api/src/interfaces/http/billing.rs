@@ -34,6 +34,12 @@ pub fn router() -> Router<AppState> {
         .route("/billing/library-cost-summary", get(get_library_cost_summary))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_provider_calls",
+    skip_all,
+    fields(execution_kind = %execution_kind, execution_id = %execution_id)
+)]
 async fn list_provider_calls(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -53,6 +59,12 @@ async fn list_provider_calls(
     Ok(Json(calls))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_charges",
+    skip_all,
+    fields(execution_kind = %execution_kind, execution_id = %execution_id)
+)]
 async fn list_charges(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -72,6 +84,12 @@ async fn list_charges(
     Ok(Json(charges))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_execution_cost",
+    skip_all,
+    fields(execution_kind = %execution_kind, execution_id = %execution_id)
+)]
 async fn get_execution_cost(
     auth: AuthContext,
     State(state): State<AppState>,
@@ -91,20 +109,34 @@ async fn get_execution_cost(
     Ok(Json(cost))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_library_document_costs",
+    skip_all,
+    fields(library_id = %query.library_id, item_count)
+)]
 async fn list_library_document_costs(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<LibraryCostQuery>,
 ) -> Result<Json<Vec<DocumentCostSummary>>, ApiError> {
+    let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, query.library_id, POLICY_USAGE_READ).await?;
     let costs = state
         .canonical_services
         .billing
         .list_document_costs_for_library(&state, query.library_id)
         .await?;
+    span.record("item_count", costs.len());
     Ok(Json(costs))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_library_cost_summary",
+    skip_all,
+    fields(library_id = %query.library_id)
+)]
 async fn get_library_cost_summary(
     auth: AuthContext,
     State(state): State<AppState>,

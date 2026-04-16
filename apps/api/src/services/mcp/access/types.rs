@@ -90,10 +90,41 @@ pub(crate) struct McpDocumentAccumulator {
     pub(crate) excerpt: Option<String>,
     pub(crate) excerpt_start_offset: Option<usize>,
     pub(crate) excerpt_end_offset: Option<usize>,
+    /// Character offset of the top-scoring chunk inside the full
+    /// normalized revision text. Populated from `chunk.span_start`
+    /// when `merge_chunk_span_anchor` is called with a higher score
+    /// than we've previously recorded — so the document-level hit
+    /// ends up pointing at the best chunk's start offset.
+    pub(crate) suggested_start_offset: Option<usize>,
+    pub(crate) suggested_start_offset_score: f64,
     pub(crate) chunk_references: HashMap<Uuid, RankedSearchReference>,
 }
 
 impl McpDocumentAccumulator {
+    pub(crate) fn from_metadata(
+        row: &crate::infra::repositories::content_repository::ContentDocumentMetadataSearchRow,
+    ) -> Self {
+        let document_title = row
+            .revision_title
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| row.external_key.clone());
+        Self {
+            document_id: row.document_id,
+            library_id: row.library_id,
+            workspace_id: row.workspace_id,
+            readable_revision_id: row.readable_revision_id,
+            document_title,
+            score: row.metadata_score,
+            excerpt: None,
+            excerpt_start_offset: None,
+            excerpt_end_offset: None,
+            suggested_start_offset: None,
+            suggested_start_offset_score: f64::MIN,
+            chunk_references: HashMap::new(),
+        }
+    }
+
     pub(crate) fn from_knowledge(
         document: &crate::infra::arangodb::document_store::KnowledgeDocumentRow,
         revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
@@ -114,8 +145,29 @@ impl McpDocumentAccumulator {
             excerpt: None,
             excerpt_start_offset: None,
             excerpt_end_offset: None,
+            suggested_start_offset: None,
+            suggested_start_offset_score: f64::MIN,
             chunk_references: HashMap::new(),
         }
+    }
+
+    /// Record the start offset of a candidate chunk. Keeps the offset
+    /// whose score is the highest we've seen so far — the idea is
+    /// that the top chunk's `span_start` points right at the paragraph
+    /// the user is actually asking about, so handing it to the agent
+    /// as `suggestedStartOffset` skips the PDF table of contents.
+    pub(crate) fn merge_chunk_span_anchor(&mut self, span_start: Option<i32>, score: f64) {
+        let Some(start) = span_start else {
+            return;
+        };
+        if start < 0 {
+            return;
+        }
+        if score <= self.suggested_start_offset_score {
+            return;
+        }
+        self.suggested_start_offset = Some(start as usize);
+        self.suggested_start_offset_score = score;
     }
 
     pub(crate) fn bump_score(&mut self, score: f64) {

@@ -50,6 +50,20 @@ use crate::{
     },
 };
 
+/// Descriptor returned by `WebIngestService::refetch_document_source` after
+/// successfully fetching a fresh copy of a web document. The caller (retry
+/// path) uses these fields to build a new `RevisionAdmissionMetadata` with
+/// the updated blob reference so the next ingest run operates on the new
+/// bytes rather than the old captured snapshot.
+#[derive(Debug, Clone)]
+pub struct RefetchedWebDocumentSource {
+    pub storage_key: String,
+    pub checksum: String,
+    pub byte_size: i64,
+    pub mime_type: Option<String>,
+    pub final_url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateWebIngestRunCommand {
     pub workspace_id: Uuid,
@@ -145,6 +159,75 @@ impl WebIngestService {
         &self.http
     }
 
+    /// Re-fetches a web-captured document's source URL and persists the fresh
+    /// bytes as a new revision snapshot. Used by the reprocess/retry path so
+    /// that "retry" for a web document means "go back to the site and pull
+    /// the current version" instead of "re-parse the captured HTML we already
+    /// stored". Diff-aware ingest then still kicks in downstream: unchanged
+    /// chunks reuse prior extractions, changed chunks get a fresh run.
+    ///
+    /// Returns the new storage descriptor for the revision row. On transport
+    /// failure, non-2xx status, or invalid URL, returns a `BadRequest` with
+    /// a message the UI can surface per-document so the user knows which URLs
+    /// could not be refreshed.
+    pub async fn refetch_document_source(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        source_uri: &str,
+    ) -> Result<RefetchedWebDocumentSource, ApiError> {
+        let trimmed = source_uri.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::BadRequest(
+                "web document has no source_uri to re-fetch".to_string(),
+            ));
+        }
+        let response = self.http.get(trimmed).send().await.map_err(|error| {
+            ApiError::BadRequest(format!("failed to re-fetch {trimmed}: {error}"))
+        })?;
+        let http_status = response.status();
+        if !http_status.is_success() {
+            return Err(ApiError::BadRequest(format!(
+                "{trimmed} returned status {http_status} on re-fetch"
+            )));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase);
+        let final_url = response.url().as_str().to_string();
+        let payload_bytes = response
+            .bytes()
+            .await
+            .map_err(|error| {
+                ApiError::BadRequest(format!("failed to read body of {trimmed}: {error}"))
+            })?
+            .to_vec();
+        let byte_size = i64::try_from(payload_bytes.len()).unwrap_or(i64::MAX);
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&payload_bytes))
+        );
+        let storage_key = state
+            .content_storage
+            .persist_web_snapshot(workspace_id, library_id, &final_url, &checksum, &payload_bytes)
+            .await
+            .map_err(|error| {
+                ApiError::internal_with_log(error, "persist refetched web snapshot")
+            })?;
+        Ok(RefetchedWebDocumentSource {
+            storage_key,
+            checksum,
+            byte_size,
+            mime_type: content_type,
+            final_url,
+        })
+    }
+
     pub async fn create_run(
         &self,
         state: &AppState,
@@ -202,6 +285,7 @@ impl WebIngestService {
                     status: "accepted".to_string(),
                     subject_kind: "content_web_ingest_run".to_string(),
                     subject_id: Some(run_id),
+                    parent_async_operation_id: None,
                     completed_at: None,
                     failure_code: None,
                 },

@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 
+use crate::interfaces::http::router_support::ApiError;
 use crate::mcp_types::{
     McpAuditActionKind, McpAuditScope, McpDeleteDocumentRequest, McpGetMutationStatusRequest,
     McpListDocumentsRequest, McpReadDocumentRequest, McpSearchDocumentsRequest,
@@ -21,7 +22,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     match name {
         "search_documents" => Some(McpToolDescriptor {
             name: "search_documents",
-            description: "Search authorized library memory and return document-level candidates. Agents should usually follow relevant hits with read_document in full mode before answering.",
+            description: "Search authorized library memory and return document-level candidates. Usually follow relevant hits with `read_document` before answering a content question — the search response alone is NOT enough to ground an answer, it only tells you where to look. Each hit carries `suggestedStartOffset` — the character offset of the best-matching chunk inside the full document; ALWAYS pass this value as `startOffset` to `read_document` on the first call for that document so your very first read window lands on the relevant paragraph instead of the PDF's table of contents. Rules: (1) NEVER rerun this tool with the same `query`+`libraryIds`+`limit` payload in one turn; if the first call returned nothing useful, narrow or broaden the query, do not try a synonym on the same scope. (2) If the top hit is clearly the right document, prefer one `read_document` call (with `startOffset=suggestedStartOffset`) on it over issuing more searches. (3) Keep `limit` small (3-10) — larger limits just bloat the context without finding new answers.",
             input_schema: json!({
                 "type": "object",
                 "required": ["query"],
@@ -49,7 +50,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "read_document" => Some(McpToolDescriptor {
             name: "read_document",
-            description: "Read one document in full or as an excerpt. Use this after search_documents or when you already know the documentId; full mode is the safe default for fact extraction. For image-backed documents the response can include sourceAccess and a visualDescription derived from the original source image, not just extracted OCR text.",
+            description: "Read one document's text content. Use this after `search_documents` or when you already know the `documentId`. The response includes a `hasMore` flag and a `continuationToken` when the document does not fit in a single window — this is the ONLY correct way to page through long documents. Rules: (1) IMPORTANT — on the first read after `search_documents`, pass `startOffset` equal to the hit's `suggestedStartOffset`. That value is the character offset of the matched chunk inside the document, so the very first window will land on the actual answer paragraph instead of the document's table of contents / front matter. Only omit `startOffset` if you have no `suggestedStartOffset` (e.g. direct read by known `documentId`). (2) If `hasMore` is true, call this tool AGAIN with the same `documentId` and the returned `continuationToken` to fetch the next window; do NOT switch to a different document just because the first window looks thin. (3) NEVER rerun with an identical payload — always advance the token. (4) A PDF's first 1-2 windows (offset 0) are almost always table of contents, copyright pages, and section headers (lines of dotted leader `................`, chapter numbers with no body text). If the only thing you see is ToC, you have NOT read the content yet — page forward with `continuationToken` until real paragraphs appear, then answer. Do NOT answer a content question from ToC text alone. (5) For image-backed documents the response can include `sourceAccess` and a `visualDescription` derived from the original source image; prefer that grounded description over guessing from OCR fragments.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -86,15 +87,14 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "list_documents" => Some(McpToolDescriptor {
             name: "list_documents",
-            description: "List documents in a knowledge library. Optionally filter by processing status.",
+            description: "List documents in a knowledge library. Use this for meta questions (\"what documents do you have\", \"what is this library about\") before answering. For specific content questions prefer `search_documents` — listing does not return document bodies, only titles and status, so it cannot ground a factual answer on its own.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId"],
                 "properties": {
                     "libraryId": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Target library UUID."
+                        "description": "Target library UUID. Omit if your token is scoped to a single library — it will be inferred automatically."
                     },
                     "limit": {
                         "type": "integer",
@@ -446,7 +446,16 @@ async fn read_document(context: ToolCallContext<'_>, arguments: &Value) -> McpTo
 async fn list_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpListDocumentsRequest>(arguments.clone()) {
         Ok(args) => {
-            let library_id = args.library_id;
+            let library_id = match args.library_id.or_else(|| context.auth.sole_library_id()) {
+                Some(id) => id,
+                None => {
+                    return tool_error_result(ApiError::BadRequest(
+                        "libraryId is required — your token has access to multiple libraries, \
+                         so the target must be specified explicitly"
+                            .into(),
+                    ));
+                }
+            };
             let limit = args.limit.unwrap_or(50).clamp(1, 200);
             match crate::services::mcp::access::list_documents(
                 context.auth,

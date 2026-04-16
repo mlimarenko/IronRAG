@@ -7,6 +7,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -16,7 +17,10 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::repositories::iam_repository,
+    infra::{
+        arangodb::document_store::KnowledgeDocumentRow,
+        repositories::{self, content_repository, iam_repository},
+    },
     interfaces::http::{
         auth::hash_token,
         authorization::{PERMISSION_LIBRARY_READ, PERMISSION_LIBRARY_WRITE},
@@ -149,6 +153,16 @@ struct McpKnowledgeFixture {
     temp_arango: TempArangoDatabase,
     workspace_id: Uuid,
     library_id: Uuid,
+}
+
+struct SeededGraphFixture {
+    top_entity_id: Uuid,
+    second_entity_id: Uuid,
+    hidden_entity_id: Uuid,
+    top_relation_id: Uuid,
+    second_relation_id: Uuid,
+    visible_document_id: Uuid,
+    secondary_visible_document_id: Uuid,
 }
 
 impl McpKnowledgeFixture {
@@ -296,6 +310,276 @@ impl McpKnowledgeFixture {
         let response = self.mcp_call(token, "tools/list", json!({})).await?;
         tool_names(&response)
     }
+
+    async fn insert_graph_document(
+        &self,
+        external_key: &str,
+        title: &str,
+    ) -> Result<KnowledgeDocumentRow> {
+        let document = content_repository::create_document(
+            &self.state.persistence.postgres,
+            &content_repository::NewContentDocument {
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                external_key,
+                document_state: "active",
+                created_by_principal_id: None,
+            },
+        )
+        .await
+        .with_context(|| format!("failed to create content document {external_key}"))?;
+        let now = Utc::now();
+        self.state
+            .arango_document_store
+            .upsert_document(&KnowledgeDocumentRow {
+                key: document.id.to_string(),
+                arango_id: None,
+                arango_rev: None,
+                document_id: document.id,
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                external_key: external_key.to_string(),
+                file_name: Some(format!("{external_key}.md")),
+                title: Some(title.to_string()),
+                document_state: "active".to_string(),
+                active_revision_id: None,
+                readable_revision_id: None,
+                latest_revision_no: None,
+                created_at: now,
+                updated_at: now,
+                deleted_at: None,
+            })
+            .await
+            .with_context(|| format!("failed to upsert arango document {external_key}"))
+    }
+
+    async fn seed_graph_quality_fixture(&self) -> Result<SeededGraphFixture> {
+        let projection_version = 7;
+        let visible_document = self
+            .insert_graph_document("mcp-graph-topology-visible", "Visible topology evidence")
+            .await?;
+        let secondary_visible_document = self
+            .insert_graph_document(
+                "mcp-graph-topology-visible-secondary",
+                "Secondary visible topology evidence",
+            )
+            .await?;
+        let hidden_document = self
+            .insert_graph_document("mcp-graph-topology-hidden", "Hidden topology evidence")
+            .await?;
+
+        let top_entity = repositories::upsert_runtime_graph_node(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "entity:orion",
+            "Orion",
+            "entity",
+            json!(["Orion Signal"]),
+            Some("Primary supported entity."),
+            json!({}),
+            10,
+            projection_version,
+        )
+        .await
+        .context("failed to create top graph entity")?;
+        let second_entity = repositories::upsert_runtime_graph_node(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "entity:atlas",
+            "Atlas",
+            "entity",
+            json!([]),
+            Some("Secondary supported entity."),
+            json!({}),
+            8,
+            projection_version,
+        )
+        .await
+        .context("failed to create second graph entity")?;
+        let third_entity = repositories::upsert_runtime_graph_node(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "entity:zephyr",
+            "Zephyr",
+            "entity",
+            json!([]),
+            Some("Tertiary supported entity."),
+            json!({}),
+            7,
+            projection_version,
+        )
+        .await
+        .context("failed to create third graph entity")?;
+        let hidden_entity = repositories::upsert_runtime_graph_node(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "entity:noise",
+            "Noise",
+            "entity",
+            json!([]),
+            Some("Low-value entity."),
+            json!({}),
+            1,
+            projection_version,
+        )
+        .await
+        .context("failed to create hidden graph entity")?;
+
+        let top_relation = repositories::upsert_runtime_graph_edge(
+            &self.state.persistence.postgres,
+            self.library_id,
+            top_entity.id,
+            second_entity.id,
+            "depends_on",
+            "edge:orion:depends_on:atlas",
+            Some("Orion depends on Atlas."),
+            None,
+            9,
+            json!({}),
+            projection_version,
+        )
+        .await
+        .context("failed to create top graph relation")?;
+        let second_relation = repositories::upsert_runtime_graph_edge(
+            &self.state.persistence.postgres,
+            self.library_id,
+            second_entity.id,
+            third_entity.id,
+            "feeds",
+            "edge:atlas:feeds:zephyr",
+            Some("Atlas feeds Zephyr."),
+            None,
+            5,
+            json!({}),
+            projection_version,
+        )
+        .await
+        .context("failed to create second graph relation")?;
+        let hidden_relation = repositories::upsert_runtime_graph_edge(
+            &self.state.persistence.postgres,
+            self.library_id,
+            top_entity.id,
+            hidden_entity.id,
+            "mentions",
+            "edge:orion:mentions:noise",
+            Some("Orion mentions Noise."),
+            None,
+            1,
+            json!({}),
+            projection_version,
+        )
+        .await
+        .context("failed to create hidden graph relation")?;
+
+        repositories::create_runtime_graph_evidence(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "node",
+            top_entity.id,
+            Some(visible_document.document_id),
+            None,
+            None,
+            None,
+            Some("visible.md"),
+            None,
+            "Visible evidence for Orion.",
+            Some(0.95),
+            "visible-node",
+        )
+        .await
+        .context("failed to create visible node evidence")?;
+        repositories::create_runtime_graph_evidence(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "edge",
+            top_relation.id,
+            Some(visible_document.document_id),
+            None,
+            None,
+            None,
+            Some("visible.md"),
+            None,
+            "Visible evidence for Orion -> Atlas.",
+            Some(0.9),
+            "visible-edge",
+        )
+        .await
+        .context("failed to create visible edge evidence")?;
+        repositories::create_runtime_graph_evidence(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "node",
+            second_entity.id,
+            Some(secondary_visible_document.document_id),
+            None,
+            None,
+            None,
+            Some("visible-secondary.md"),
+            None,
+            "Secondary visible evidence for Atlas.",
+            Some(0.7),
+            "visible-secondary-node",
+        )
+        .await
+        .context("failed to create secondary visible node evidence")?;
+        repositories::create_runtime_graph_evidence(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "node",
+            hidden_entity.id,
+            Some(hidden_document.document_id),
+            None,
+            None,
+            None,
+            Some("hidden.md"),
+            None,
+            "Hidden evidence for Noise.",
+            Some(0.2),
+            "hidden-node",
+        )
+        .await
+        .context("failed to create hidden node evidence")?;
+        repositories::create_runtime_graph_evidence(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "edge",
+            hidden_relation.id,
+            Some(hidden_document.document_id),
+            None,
+            None,
+            None,
+            Some("hidden.md"),
+            None,
+            "Hidden evidence for Orion -> Noise.",
+            Some(0.1),
+            "hidden-edge",
+        )
+        .await
+        .context("failed to create hidden edge evidence")?;
+
+        repositories::upsert_runtime_graph_snapshot(
+            &self.state.persistence.postgres,
+            self.library_id,
+            "ready",
+            projection_version,
+            4,
+            3,
+            Some(100.0),
+            None,
+        )
+        .await
+        .context("failed to upsert runtime graph snapshot")?;
+
+        Ok(SeededGraphFixture {
+            top_entity_id: top_entity.id,
+            second_entity_id: second_entity.id,
+            hidden_entity_id: hidden_entity.id,
+            top_relation_id: top_relation.id,
+            second_relation_id: second_relation.id,
+            visible_document_id: visible_document.document_id,
+            secondary_visible_document_id: secondary_visible_document.document_id,
+        })
+    }
 }
 
 fn tool_names(value: &Value) -> Result<Vec<String>> {
@@ -381,6 +665,10 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(read_tools.contains(&"get_runtime_execution_trace".to_string()));
         assert!(read_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(read_tools.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(read_tools.contains(&"search_entities".to_string()));
+        assert!(read_tools.contains(&"get_graph_topology".to_string()));
+        assert!(read_tools.contains(&"list_relations".to_string()));
+        assert!(read_tools.contains(&"get_communities".to_string()));
         assert!(!read_tools.contains(&"create_workspace".to_string()));
         assert!(!read_tools.contains(&"create_library".to_string()));
         assert!(!read_tools.contains(&"upload_documents".to_string()));
@@ -405,8 +693,147 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(write_tools.contains(&"get_web_ingest_run".to_string()));
         assert!(write_tools.contains(&"list_web_ingest_run_pages".to_string()));
         assert!(write_tools.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(write_tools.contains(&"search_entities".to_string()));
+        assert!(write_tools.contains(&"get_graph_topology".to_string()));
+        assert!(write_tools.contains(&"list_relations".to_string()));
+        assert!(write_tools.contains(&"get_communities".to_string()));
         assert!(!write_tools.contains(&"create_workspace".to_string()));
         assert!(!write_tools.contains(&"create_library".to_string()));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn graph_tools_return_ranked_coherent_subgraphs_instead_of_orphaned_slices() -> Result<()> {
+    let fixture = McpKnowledgeFixture::create().await?;
+
+    let result = async {
+        let seeded = fixture.seed_graph_quality_fixture().await?;
+        let token = fixture
+            .mint_token_with_grants(
+                "graph-read-token",
+                &[GrantSpec {
+                    resource_kind: "library",
+                    resource_id: fixture.library_id,
+                    permission_kind: PERMISSION_LIBRARY_READ,
+                }],
+            )
+            .await?;
+
+        let entity_search = fixture
+            .mcp_call(
+                &token,
+                "tools/call",
+                json!({
+                    "name": "search_entities",
+                    "arguments": {
+                        "libraryId": fixture.library_id,
+                        "query": "Orion",
+                        "limit": 2,
+                    },
+                }),
+            )
+            .await?;
+        assert_eq!(entity_search["result"]["isError"], json!(false));
+        let entity_hits = entity_search["result"]["structuredContent"]["entities"]
+            .as_array()
+            .context("search_entities content must be an array")?;
+        assert!(!entity_hits.is_empty());
+        assert_eq!(entity_hits[0]["entityId"], json!(seeded.top_entity_id));
+
+        let topology = fixture
+            .mcp_call(
+                &token,
+                "tools/call",
+                json!({
+                    "name": "get_graph_topology",
+                    "arguments": {
+                        "libraryId": fixture.library_id,
+                        "limit": 2,
+                    },
+                }),
+            )
+            .await?;
+        assert_eq!(topology["result"]["isError"], json!(false));
+        let entities = topology["result"]["structuredContent"]["entities"]
+            .as_array()
+            .context("graph topology entities must be an array")?;
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[0]["entityId"], json!(seeded.top_entity_id));
+        assert_eq!(entities[1]["entityId"], json!(seeded.second_entity_id));
+        let relations = topology["result"]["structuredContent"]["relations"]
+            .as_array()
+            .context("graph topology relations must be an array")?;
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0]["relationId"], json!(seeded.top_relation_id));
+        let links = topology["result"]["structuredContent"]["documentLinks"]
+            .as_array()
+            .context("graph topology links must be an array")?;
+        assert!(!links.is_empty());
+        let visible_document_ids =
+            [seeded.visible_document_id, seeded.secondary_visible_document_id]
+                .into_iter()
+                .map(|id| json!(id))
+                .collect::<Vec<_>>();
+        assert!(links.iter().all(|row| visible_document_ids.contains(&row["documentId"])));
+        assert!(
+            links.iter().all(|row| row["targetNodeId"] != json!(seeded.hidden_entity_id)),
+            "hidden target should not leak into the truncated subgraph"
+        );
+        let documents = topology["result"]["structuredContent"]["documents"]
+            .as_array()
+            .context("graph topology documents must be an array")?;
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0]["documentId"], json!(seeded.visible_document_id));
+        assert_eq!(documents[1]["documentId"], json!(seeded.secondary_visible_document_id));
+        let linked_document_ids = links
+            .iter()
+            .filter_map(|row| row["documentId"].as_str().map(ToString::to_string))
+            .collect::<std::collections::BTreeSet<_>>();
+        let topology_document_ids = documents
+            .iter()
+            .filter_map(|row| row["documentId"].as_str().map(ToString::to_string))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(linked_document_ids, topology_document_ids);
+        assert_eq!(
+            topology["result"]["structuredContent"]["truncation"]["totalEntities"],
+            json!(4)
+        );
+        assert_eq!(
+            topology["result"]["structuredContent"]["truncation"]["totalRelations"],
+            json!(3)
+        );
+
+        let list_relations = fixture
+            .mcp_call(
+                &token,
+                "tools/call",
+                json!({
+                    "name": "list_relations",
+                    "arguments": {
+                        "libraryId": fixture.library_id,
+                        "limit": 2,
+                    },
+                }),
+            )
+            .await?;
+        assert_eq!(list_relations["result"]["isError"], json!(false));
+        let relation_rows = list_relations["result"]["structuredContent"]
+            .as_array()
+            .context("list_relations content must be an array")?;
+        assert_eq!(relation_rows.len(), 2);
+        assert_eq!(relation_rows[0]["relationId"], json!(seeded.top_relation_id));
+        assert_eq!(relation_rows[1]["relationId"], json!(seeded.second_relation_id));
+        assert_eq!(relation_rows[0]["sourceLabel"], json!("Orion"));
+        assert_eq!(relation_rows[0]["targetLabel"], json!("Atlas"));
+        assert!(relation_rows.iter().all(|row| row["sourceLabel"] != json!("unknown")));
+        assert!(relation_rows.iter().all(|row| row["targetLabel"] != json!("unknown")));
 
         Ok(())
     }
@@ -561,6 +988,83 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
             .as_array()
             .context("uploaded search chunk references must be an array")?;
         assert!(!uploaded_hit_chunk_refs.is_empty());
+
+        let mut filename_search = json!({});
+        let mut filename_hit = None;
+        for _attempt in 0..20 {
+            filename_search = fixture
+                .mcp_call(
+                    &token,
+                    "tools/call",
+                    json!({
+                        "name": "search_documents",
+                        "arguments": {
+                            "query": "mcp-knowledge-upload.txt",
+                            "libraryIds": [fixture.library_id],
+                            "limit": 5,
+                        },
+                    }),
+                )
+                .await?;
+            assert_eq!(filename_search["result"]["isError"], json!(false));
+            let filename_hits = filename_search["result"]["structuredContent"]["hits"]
+                .as_array()
+                .context("filename search hits must be an array")?;
+            filename_hit =
+                filename_hits.iter().find(|hit| hit["documentId"] == json!(receipt_document_id));
+            if filename_hit.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        let filename_hit = filename_hit
+            .context("metadata filename search must include the uploaded document")?;
+        assert_eq!(filename_hit["libraryId"], json!(fixture.library_id));
+        assert_eq!(filename_hit["workspaceId"], json!(fixture.workspace_id));
+        assert_eq!(filename_hit["readabilityState"], json!("readable"));
+        assert!(
+            filename_hit["excerpt"]
+                .as_str()
+                .is_some_and(|excerpt| excerpt.contains("mcp-knowledge-upload.txt"))
+        );
+
+        let mut title_search = json!({});
+        let mut title_hit = None;
+        for _attempt in 0..20 {
+            title_search = fixture
+                .mcp_call(
+                    &token,
+                    "tools/call",
+                    json!({
+                        "name": "search_documents",
+                        "arguments": {
+                            "query": "Upload Proof",
+                            "libraryIds": [fixture.library_id],
+                            "limit": 5,
+                        },
+                    }),
+                )
+                .await?;
+            assert_eq!(title_search["result"]["isError"], json!(false));
+            let title_hits = title_search["result"]["structuredContent"]["hits"]
+                .as_array()
+                .context("title search hits must be an array")?;
+            title_hit = title_hits.iter().find(|hit| hit["documentId"] == json!(receipt_document_id));
+            if title_hit.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        let title_hit =
+            title_hit.context("metadata title search must include the uploaded document")?;
+        assert_eq!(title_hit["libraryId"], json!(fixture.library_id));
+        assert_eq!(title_hit["workspaceId"], json!(fixture.workspace_id));
+        assert_eq!(title_hit["readabilityState"], json!("readable"));
+        assert!(
+            title_hit["excerpt"]
+                .as_str()
+                .is_some_and(|excerpt| excerpt.contains("Upload Proof"))
+        );
 
         Ok(())
     }

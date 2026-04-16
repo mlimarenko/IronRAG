@@ -175,11 +175,9 @@ impl ContentLifecycleFixture {
         .await
         .context("failed to bootstrap Arango knowledge plane for content lifecycle")?;
 
-        let persistence = Persistence {
-            postgres,
-            redis: redis::Client::open(settings.redis_url.clone())
-                .context("failed to create redis client for content lifecycle test state")?,
-        };
+        let redis = redis::Client::open(settings.redis_url.clone())
+            .context("failed to create redis client for content lifecycle test state")?;
+        let persistence = Persistence::for_tests(postgres, redis);
         let state = AppState::from_dependencies(settings, persistence, arango_client)?;
         let workspace = state
             .canonical_services

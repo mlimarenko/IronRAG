@@ -332,7 +332,6 @@ pub async fn embed_runtime_graph_nodes(
         let model_name = model_name_owned.clone();
         let api_key = api_key_owned.clone();
         let base_url = base_url_owned.clone();
-        let state = state;
         async move {
             let inputs: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
             let first_index = batch.first().map(|(index, _)| *index).unwrap_or_default();
@@ -440,7 +439,6 @@ pub async fn embed_runtime_graph_edges(
         let model_name = model_name_owned.clone();
         let api_key = api_key_owned.clone();
         let base_url = base_url_owned.clone();
-        let state = state;
         async move {
             let inputs: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
             let first_index = batch.first().map(|(index, _)| *index).unwrap_or_default();

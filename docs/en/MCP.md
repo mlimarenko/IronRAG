@@ -4,7 +4,7 @@
 
 ### Connect Codex, Cursor, VS Code, Claude Code, or any HTTP MCP client to the same knowledge base used by IronRAG
 
-[README](../../README.md) | [MCP (RU)](../ru/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md)
+[Overview](./README.md) | [MCP (RU)](../ru/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md) | [Benchmarks](./BENCHMARKS.md)
 
 </div>
 
@@ -60,7 +60,7 @@ Tool arguments use canonical camelCase fields only.
 |------|-------------|---------------------|
 | `search_documents` | Search library memory and return document-level candidates. | `query` |
 | `read_document` | Read one document in full or as an excerpt. | `documentId` |
-| `list_documents` | List documents in a library, optionally filtered by processing status. | `libraryId` |
+| `list_documents` | List documents in a library, optionally filtered by processing status. | `libraryId` (optional) |
 | `upload_documents` | Create one or more new documents in a library. | `libraryId`, `documents` |
 | `update_document` | Append to or replace an existing document. | `libraryId`, `documentId`, `operationKind` |
 | `delete_document` | Delete a document and its revisions, chunks, and graph contributions. | `documentId` |
@@ -71,8 +71,9 @@ Tool arguments use canonical camelCase fields only.
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
 | `search_entities` | Search knowledge graph entities by name or label. | `libraryId`, `query` |
-| `get_graph_topology` | Get the graph topology (entities, relations, document links) with truncation. | `libraryId` |
+| `get_graph_topology` | Get a support-ranked graph topology slice (entities, relations, document links) with truncation. | `libraryId` |
 | `list_relations` | List knowledge graph relations ordered by support count. | `libraryId` |
+| `get_communities` | List detected graph communities with summaries and top entities. | `libraryId` |
 
 ### Web Crawl
 
@@ -87,10 +88,19 @@ Tool arguments use canonical camelCase fields only.
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `get_runtime_execution` | Load the runtime lifecycle summary for one execution. | `executionId` |
-| `get_runtime_execution_trace` | Load the full stage, action, and policy trace for one execution. | `executionId` |
+| `get_runtime_execution` | Load the runtime lifecycle summary for one runtime execution. | `runtimeExecutionId` |
+| `get_runtime_execution_trace` | Load the full stage, action, and policy trace for one runtime execution. | `runtimeExecutionId` |
 
 Under the hood, MCP calls the same canonical services as the web app: Postgres for control state, ArangoDB for graph and document truth, and Redis-backed workers for ingestion.
+
+## Graph Tool Quality Contract
+
+- `get_graph_topology` is not a raw full-graph dump. When `limit` truncates the response, IronRAG keeps the highest-support entities first, then keeps only relations whose endpoints remain visible, then keeps only document links and documents that still support that visible slice.
+- `search_entities` reads from the same admitted runtime graph snapshot as `get_graph_topology`. If an entity is visible in the current runtime graph, `search_entities` should discover that same runtime vocabulary instead of relying on a parallel stale index.
+- `list_relations` is ranked by relation support, not by insertion order.
+- The goal is a coherent subgraph for agents, not an alphabetical or arbitrary fragment that leaks orphaned edges and unrelated documents.
+- When validating a client integration, check result usefulness as well as JSON shape: top entities should be stable across runs, the strongest relations should appear first, linked documents should still support the returned nodes or edges, and `list_relations` should resolve real endpoint labels instead of falling back to `unknown`.
+- A healthy graph slice should not return duplicate normalized entity labels or duplicate `(source, relationType, target)` relation signatures inside one ranked response. Those are quality regressions, not harmless formatting noise.
 
 ## Access model
 
@@ -98,6 +108,7 @@ Under the hood, MCP calls the same canonical services as the web app: Postgres f
 - Read-only tokens are useful for assistants that should only search and read.
 - Write-enabled tokens can upload documents or update existing content when you want an agent to maintain the knowledge base.
 - Tool visibility follows grants, so clients only see the operations they are allowed to use.
+- When a token is scoped to exactly one workspace or library, MCP tools and the query API auto-fill `workspaceId` and `libraryId` from the token scope.
 
 ## What the client gets
 

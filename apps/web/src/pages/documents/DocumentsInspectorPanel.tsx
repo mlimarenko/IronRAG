@@ -1,9 +1,9 @@
+import { useEffect, useState } from 'react';
 import type { TFunction } from 'i18next';
 import {
   FilePenLine,
   Download,
   ExternalLink,
-  Globe,
   Loader2,
   RotateCw,
   Trash2,
@@ -13,9 +13,16 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import type { DocumentItem, DocumentLifecycle, DocumentReadiness } from '@/types';
+import type { DocumentItem, DocumentLifecycle } from '@/types';
+import { compactText, truncatedTitle } from '@/lib/compactText';
 
-import { formatDate, formatDocumentTypeLabel, formatSize } from './mappers';
+import {
+  buildDocumentStatusBadgeConfig,
+  formatDate,
+  formatDocumentTypeLabel,
+  formatSize,
+  isWebPageDocument,
+} from '@/adapters/documents';
 
 type DocumentsInspectorPanelProps = {
   canEdit: boolean;
@@ -25,16 +32,10 @@ type DocumentsInspectorPanelProps = {
   inspectorFacts: number | null;
   inspectorSegments: number | null;
   lifecycle: DocumentLifecycle | null;
-  readinessConfig: Record<DocumentReadiness, { label: string; cls: string }>;
   selectedDoc: DocumentItem;
   selectionMode: boolean;
-  setAddLinkOpen: (open: boolean) => void;
-  setCrawlMode: (value: string) => void;
   setDeleteDocOpen: (open: boolean) => void;
-  setMaxDepth: (value: string) => void;
-  setMaxPages: (value: string) => void;
   setReplaceFileOpen: (open: boolean) => void;
-  setSeedUrl: (value: string) => void;
   updateSearchParamState: (updates: Record<string, string | null>) => void;
   onEdit: () => void;
   onRetry: () => void;
@@ -48,21 +49,33 @@ export function DocumentsInspectorPanel({
   inspectorFacts,
   inspectorSegments,
   lifecycle,
-  readinessConfig,
   selectedDoc,
   selectionMode,
-  setAddLinkOpen,
-  setCrawlMode,
   setDeleteDocOpen,
-  setMaxDepth,
-  setMaxPages,
   setReplaceFileOpen,
-  setSeedUrl,
   updateSearchParamState,
   onEdit,
   onRetry,
 }: DocumentsInspectorPanelProps) {
-  const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t);
+  const isWebPage = isWebPageDocument(
+    selectedDoc.sourceKind,
+    selectedDoc.sourceUri,
+    selectedDoc.fileName,
+  );
+  const displayName =
+    isWebPage && selectedDoc.sourceUri ? selectedDoc.sourceUri : selectedDoc.fileName;
+  const [showFullName, setShowFullName] = useState(false);
+  const compactDisplayName = compactText(displayName, 96);
+  const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t, {
+    sourceUri: selectedDoc.sourceUri,
+    fileName: selectedDoc.fileName,
+  });
+  const compactTypeLabel = compactText(typeLabel, 54);
+  const statusBadge = buildDocumentStatusBadgeConfig(t)[selectedDoc.status];
+
+  useEffect(() => {
+    setShowFullName(false);
+  }, [selectedDoc.id]);
 
   const openSource = () => {
     const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri;
@@ -79,11 +92,29 @@ export function DocumentsInspectorPanel({
         selectionMode ? 'opacity-40 pointer-events-none' : ''
       }`}
     >
-      <div className="p-4 border-b flex items-center justify-between">
-        <h3 className="text-sm font-bold truncate tracking-tight">{selectedDoc.fileName}</h3>
+      <div className="p-4 border-b flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <h3
+            className="text-sm font-bold tracking-tight leading-5 [overflow-wrap:anywhere]"
+            title={compactDisplayName.isTruncated && !showFullName ? displayName : undefined}
+          >
+            {showFullName || !compactDisplayName.isTruncated
+              ? displayName
+              : compactDisplayName.text}
+          </h3>
+          {compactDisplayName.isTruncated && (
+            <button
+              type="button"
+              className="mt-1 text-xs font-medium text-primary hover:text-primary/80"
+              onClick={() => setShowFullName((value) => !value)}
+            >
+              {showFullName ? t('documents.showLessName') : t('documents.showFullName')}
+            </button>
+          )}
+        </div>
         <button
           onClick={() => updateSearchParamState({ documentId: null })}
-          className="p-1.5 rounded-lg hover:bg-muted transition-colors"
+          className="shrink-0 p-1.5 rounded-lg hover:bg-muted transition-colors"
           aria-label={t('common.close')}
         >
           <X className="h-4 w-4" />
@@ -91,13 +122,24 @@ export function DocumentsInspectorPanel({
       </div>
       <div className="p-4 space-y-5">
         <div>
-          <span className={`status-badge ${readinessConfig[selectedDoc.readiness].cls}`}>
-            {readinessConfig[selectedDoc.readiness].label}
+          <span className={`status-badge ${statusBadge.cls}`} title={selectedDoc.statusReason}>
+            {statusBadge.label}
           </span>
-          {selectedDoc.stage && selectedDoc.readiness === 'processing' && (
-            <span className="text-xs text-muted-foreground ml-2">{selectedDoc.stage}</span>
-          )}
+          {selectedDoc.stage &&
+            (selectedDoc.status === 'processing' || selectedDoc.status === 'queued') && (
+              <span className="text-xs text-muted-foreground ml-2">{selectedDoc.stage}</span>
+            )}
         </div>
+
+        {selectedDoc.statusReason && selectedDoc.status === 'failed' && (
+          <div className="inline-error">
+            <div className="flex items-center gap-1.5 font-bold text-destructive mb-1.5">
+              <XCircle className="h-3.5 w-3.5" />
+              {t('documents.attention')}
+            </div>
+            {selectedDoc.statusReason}
+          </div>
+        )}
 
         {selectedDoc.failureMessage && (
           <div className="inline-error">
@@ -133,17 +175,22 @@ export function DocumentsInspectorPanel({
 
         <div className="space-y-2.5">
           <div className="section-label">
-            {selectedDoc.sourceKind === 'web_page' ? t('documents.webSource') : t('documents.fileInfo')}
+            {isWebPage ? t('documents.webSource') : t('documents.fileInfo')}
           </div>
           {[
-            [t('documents.type'), typeLabel],
+            [t('documents.type'), compactTypeLabel.text],
             [t('documents.size'), formatSize(selectedDoc.fileSize)],
             [t('documents.uploaded'), formatDate(selectedDoc.uploadedAt, locale)],
             [t('documents.documentId'), selectedDoc.id],
           ].map(([label, value]) => (
-            <div key={label} className="flex justify-between text-sm">
+            <div key={label} className="flex justify-between gap-3 text-sm">
               <span className="text-muted-foreground">{label}</span>
-              <span className="font-mono text-xs font-semibold">{value}</span>
+              <span
+                className="font-mono text-xs font-semibold text-right [overflow-wrap:anywhere]"
+                title={label === t('documents.type') ? truncatedTitle(compactTypeLabel) : undefined}
+              >
+                {value}
+              </span>
             </div>
           ))}
         </div>
@@ -151,12 +198,19 @@ export function DocumentsInspectorPanel({
         {lifecycle?.attempts?.[0]?.stageEvents?.length != null && lifecycle.attempts[0].stageEvents.length > 0 && (
           <div className="space-y-2">
             <div className="section-label">{t('documents.pipeline')}</div>
+            {/* Column widths tuned for the canonical ~360 px inspector
+                panel. Model names like `qwen3-embedding:0.6b` or
+                `text-embedding-3-large` are the longest cell content,
+                so Model gets the biggest share and is allowed to wrap
+                via `break-words` instead of clipping with `truncate`.
+                The title attribute still shows the full name on hover
+                for the rare super-long variant. */}
             <table className="w-full text-[11px] table-fixed">
               <colgroup>
-                <col className="w-[35%]" />
-                <col className="w-[15%]" />
-                <col className="w-[30%]" />
-                <col className="w-[20%]" />
+                <col className="w-[28%]" />
+                <col className="w-[14%]" />
+                <col className="w-[42%]" />
+                <col className="w-[16%]" />
               </colgroup>
               <thead>
                 <tr className="text-left text-muted-foreground border-b">
@@ -169,14 +223,17 @@ export function DocumentsInspectorPanel({
               <tbody>
                 {lifecycle.attempts[0].stageEvents.map((se) => (
                   <tr key={se.stage} className="border-b border-border/30">
-                    <td className="py-1 capitalize truncate">{se.stage.replace(/_/g, ' ')}</td>
-                    <td className="py-1 text-right text-muted-foreground tabular-nums">
+                    <td className="py-1 capitalize break-words">{se.stage.replace(/_/g, ' ')}</td>
+                    <td className="py-1 text-right text-muted-foreground tabular-nums whitespace-nowrap">
                       {se.elapsedMs != null ? `${(se.elapsedMs / 1000).toFixed(1)}s` : '\u2014'}
                     </td>
-                    <td className="py-1 text-right text-muted-foreground truncate" title={se.modelName || undefined}>
+                    <td
+                      className="py-1 text-right text-muted-foreground font-mono text-[10px] [overflow-wrap:anywhere] leading-tight"
+                      title={se.modelName || undefined}
+                    >
                       {se.modelName ? se.modelName.replace('text-embedding-', 'embed-') : '\u2014'}
                     </td>
-                    <td className="py-1 text-right text-muted-foreground tabular-nums">
+                    <td className="py-1 text-right text-muted-foreground tabular-nums whitespace-nowrap">
                       {se.estimatedCost != null ? `$${Number(se.estimatedCost).toFixed(4)}` : '\u2014'}
                     </td>
                   </tr>
@@ -217,8 +274,8 @@ export function DocumentsInspectorPanel({
                 </div>
                 <div className="flex justify-between">
                   <span>{t('documents.sourceFormat')}</span>
-                  <span className="font-semibold text-foreground">
-                    {typeLabel}
+                  <span className="font-semibold text-foreground" title={truncatedTitle(compactTypeLabel)}>
+                    {compactTypeLabel.text}
                   </span>
                 </div>
               </div>
@@ -257,27 +314,9 @@ export function DocumentsInspectorPanel({
               </Button>
             )}
           </div>
-          {selectedDoc.canRetry && (
-            <Button variant="outline" size="sm" className="w-full justify-start" onClick={onRetry}>
-              <RotateCw className="h-3.5 w-3.5 mr-2" /> {t('documents.retryProcessing')}
-            </Button>
-          )}
-          {selectedDoc.sourceKind === 'web_page' && selectedDoc.sourceUri && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full justify-start"
-              onClick={() => {
-                setSeedUrl(selectedDoc.sourceUri || '');
-                setCrawlMode('single_page');
-                setMaxDepth('1');
-                setMaxPages('10');
-                setAddLinkOpen(true);
-              }}
-            >
-              <Globe className="h-3.5 w-3.5 mr-2" /> {t('documents.reIngest')}
-            </Button>
-          )}
+          <Button variant="outline" size="sm" className="w-full justify-start" onClick={onRetry}>
+            <RotateCw className="h-3.5 w-3.5 mr-2" /> {t('documents.retryProcessing')}
+          </Button>
           <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setReplaceFileOpen(true)}>
             <Upload className="h-3.5 w-3.5 mr-2" /> {t('documents.replaceFile')}
           </Button>

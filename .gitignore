@@ -20,6 +20,7 @@ dist
 coverage
 playwright-report
 test-results
+tmp/
 tmp-*
 
 # IDE / local metadata

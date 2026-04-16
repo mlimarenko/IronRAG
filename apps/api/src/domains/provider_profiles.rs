@@ -9,6 +9,11 @@ pub enum SupportedProviderKind {
     OpenAi,
     DeepSeek,
     Qwen,
+    // Self-hosted OpenAI-compatible runtime. Local stacks (Ollama,
+    // llama.cpp, vLLM, LM Studio, OpenWebUI) all serve the same chat
+    // completions shape, so once the enum accepts the name the existing
+    // `UnifiedGateway` path at integrations/llm.rs handles the transport.
+    Ollama,
 }
 
 impl SupportedProviderKind {
@@ -18,6 +23,7 @@ impl SupportedProviderKind {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
             Self::Qwen => "qwen",
+            Self::Ollama => "ollama",
         }
     }
 }
@@ -30,6 +36,7 @@ impl std::str::FromStr for SupportedProviderKind {
             "openai" => Ok(Self::OpenAi),
             "deepseek" => Ok(Self::DeepSeek),
             "qwen" => Ok(Self::Qwen),
+            "ollama" => Ok(Self::Ollama),
             other => Err(format!("unsupported provider kind: {other}")),
         }
     }

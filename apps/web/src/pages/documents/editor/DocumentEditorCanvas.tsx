@@ -20,6 +20,16 @@ type DocumentEditorCanvasProps = {
   t: TFunction;
 };
 
+const EMPTY_TABLE_SCROLL_STATE = {
+  canScrollLeft: false,
+  canScrollRight: false,
+  contentWidth: 0,
+  maxScrollLeft: 0,
+  scrollLeft: 0,
+  showRail: false,
+  viewportWidth: 0,
+};
+
 export function DocumentEditorCanvas({
   currentMarkdown,
   documentName,
@@ -33,31 +43,16 @@ export function DocumentEditorCanvas({
 }: DocumentEditorCanvasProps) {
   const tableViewportRef = useRef<HTMLDivElement | null>(null);
   const tableContentRef = useRef<HTMLDivElement | null>(null);
-  const [tableScrollState, setTableScrollState] = useState({
-    canScrollLeft: false,
-    canScrollRight: false,
-    contentWidth: 0,
-    maxScrollLeft: 0,
-    scrollLeft: 0,
-    showRail: false,
-    viewportWidth: 0,
-  });
+  const [tableScrollState, setTableScrollState] = useState(EMPTY_TABLE_SCROLL_STATE);
   const hasEditorContent = Boolean(editor?.getMarkdown().trim());
   const showFatalError = Boolean(error) && !hasEditorContent;
   const editorMarkdown = currentMarkdown || editor?.getMarkdown() || '';
   const codeLines = surfaceMode === 'code' ? extractCodeLines(editorMarkdown) : [];
+  const effectiveTableScrollState =
+    surfaceMode === 'table' ? tableScrollState : EMPTY_TABLE_SCROLL_STATE;
 
   useEffect(() => {
     if (surfaceMode !== 'table') {
-      setTableScrollState({
-        canScrollLeft: false,
-        canScrollRight: false,
-        contentWidth: 0,
-        maxScrollLeft: 0,
-        scrollLeft: 0,
-        showRail: false,
-        viewportWidth: 0,
-      });
       return;
     }
 
@@ -177,8 +172,8 @@ export function DocumentEditorCanvas({
                 ref={tableViewportRef}
                 className={cn(
                   'document-editor-table-scroll min-h-0 min-w-0 w-full flex-1 overflow-auto',
-                  tableScrollState.canScrollLeft && 'document-editor-table-scroll--can-left',
-                  tableScrollState.canScrollRight && 'document-editor-table-scroll--can-right',
+                  effectiveTableScrollState.canScrollLeft && 'document-editor-table-scroll--can-left',
+                  effectiveTableScrollState.canScrollRight && 'document-editor-table-scroll--can-right',
                 )}
               >
                 <div ref={tableContentRef} className="min-h-full w-max min-w-full pb-4">
@@ -186,17 +181,20 @@ export function DocumentEditorCanvas({
                 </div>
               </div>
 
-              {tableScrollState.showRail ? (
+              {effectiveTableScrollState.showRail ? (
                 <div className="document-editor-table-rail-shell">
                   <input
                     aria-label={t('documents.editor.tableScrollRail')}
                     className="document-editor-table-slider"
                     data-testid="document-editor-table-slider"
-                    max={tableScrollState.maxScrollLeft}
+                    max={effectiveTableScrollState.maxScrollLeft}
                     min={0}
                     onChange={handleTableRailChange}
                     type="range"
-                    value={Math.min(tableScrollState.scrollLeft, tableScrollState.maxScrollLeft)}
+                    value={Math.min(
+                      effectiveTableScrollState.scrollLeft,
+                      effectiveTableScrollState.maxScrollLeft,
+                    )}
                   />
                 </div>
               ) : null}

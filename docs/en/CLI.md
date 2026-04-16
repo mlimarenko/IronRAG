@@ -1,5 +1,7 @@
 # IronRAG CLI
 
+[Overview](./README.md) | [IAM](./IAM.md) | [MCP](./MCP.md)
+
 Command-line tool for IronRAG admin operations. Connects directly to PostgreSQL.
 
 ## Build
@@ -81,6 +83,7 @@ Available permissions:
 - `query_run` -- execute queries (ask)
 - `ops_read`, `audit_read` -- operational and audit data
 - `credential_admin`, `binding_admin` -- integration management
+- `connector_admin` -- manage connectors
 
 Scope resolution (when `--scope` is not specified):
 - System permissions (`iam_admin`, `ops_read`, `audit_read`) → `system` scope

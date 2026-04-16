@@ -5,6 +5,7 @@ impl ArangoGraphStore {
         &self,
         document_id: Uuid,
         revision_id: Uuid,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_DOCUMENT_REVISION_EDGE,
@@ -12,6 +13,7 @@ impl ArangoGraphStore {
             document_id,
             KNOWLEDGE_REVISION_COLLECTION,
             revision_id,
+            library_id,
             serde_json::json!({}),
         )
         .await
@@ -21,6 +23,7 @@ impl ArangoGraphStore {
         &self,
         revision_id: Uuid,
         chunk_id: Uuid,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_REVISION_CHUNK_EDGE,
@@ -28,6 +31,7 @@ impl ArangoGraphStore {
             revision_id,
             KNOWLEDGE_CHUNK_COLLECTION,
             chunk_id,
+            library_id,
             serde_json::json!({}),
         )
         .await
@@ -37,9 +41,10 @@ impl ArangoGraphStore {
         &self,
         revision_id: Uuid,
         chunk_ids: &[Uuid],
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         for chunk_id in chunk_ids {
-            self.upsert_revision_chunk_edge(revision_id, *chunk_id).await?;
+            self.upsert_revision_chunk_edge(revision_id, *chunk_id, library_id).await?;
         }
         Ok(())
     }
@@ -70,6 +75,7 @@ impl ArangoGraphStore {
         rank: Option<i32>,
         score: Option<f64>,
         inclusion_reason: Option<String>,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
@@ -77,6 +83,7 @@ impl ArangoGraphStore {
             chunk_id,
             KNOWLEDGE_ENTITY_COLLECTION,
             entity_id,
+            library_id,
             serde_json::json!({
                 "rank": rank,
                 "score": score,
@@ -90,6 +97,7 @@ impl ArangoGraphStore {
         &self,
         relation_id: Uuid,
         subject_entity_id: Uuid,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_RELATION_SUBJECT_EDGE,
@@ -97,6 +105,7 @@ impl ArangoGraphStore {
             relation_id,
             KNOWLEDGE_ENTITY_COLLECTION,
             subject_entity_id,
+            library_id,
             serde_json::json!({}),
         )
         .await
@@ -106,6 +115,7 @@ impl ArangoGraphStore {
         &self,
         relation_id: Uuid,
         object_entity_id: Uuid,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_RELATION_OBJECT_EDGE,
@@ -113,6 +123,7 @@ impl ArangoGraphStore {
             relation_id,
             KNOWLEDGE_ENTITY_COLLECTION,
             object_entity_id,
+            library_id,
             serde_json::json!({}),
         )
         .await
@@ -122,6 +133,7 @@ impl ArangoGraphStore {
         &self,
         evidence_id: Uuid,
         revision_id: Uuid,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
@@ -129,6 +141,7 @@ impl ArangoGraphStore {
             evidence_id,
             KNOWLEDGE_REVISION_COLLECTION,
             revision_id,
+            library_id,
             serde_json::json!({}),
         )
         .await
@@ -141,6 +154,7 @@ impl ArangoGraphStore {
         rank: Option<i32>,
         score: Option<f64>,
         inclusion_reason: Option<String>,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
@@ -148,6 +162,7 @@ impl ArangoGraphStore {
             evidence_id,
             KNOWLEDGE_ENTITY_COLLECTION,
             entity_id,
+            library_id,
             serde_json::json!({
                 "rank": rank,
                 "score": score,
@@ -164,6 +179,7 @@ impl ArangoGraphStore {
         rank: Option<i32>,
         score: Option<f64>,
         inclusion_reason: Option<String>,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
@@ -171,6 +187,7 @@ impl ArangoGraphStore {
             evidence_id,
             KNOWLEDGE_RELATION_COLLECTION,
             relation_id,
+            library_id,
             serde_json::json!({
                 "rank": rank,
                 "score": score,
@@ -184,6 +201,7 @@ impl ArangoGraphStore {
         &self,
         fact_id: Uuid,
         evidence_id: Uuid,
+        library_id: Uuid,
     ) -> anyhow::Result<()> {
         self.insert_edge(
             KNOWLEDGE_FACT_EVIDENCE_EDGE,
@@ -191,6 +209,7 @@ impl ArangoGraphStore {
             fact_id,
             KNOWLEDGE_EVIDENCE_COLLECTION,
             evidence_id,
+            library_id,
             serde_json::json!({}),
         )
         .await
@@ -203,6 +222,7 @@ impl ArangoGraphStore {
         from_id: Uuid,
         to_collection: &str,
         to_id: Uuid,
+        library_id: Uuid,
         extra_fields: serde_json::Value,
     ) -> anyhow::Result<()> {
         let mut payload = serde_json::json!({
@@ -210,6 +230,7 @@ impl ArangoGraphStore {
             "@collection": collection,
             "_from": format!("{}/{}", from_collection, from_id),
             "_to": format!("{}/{}", to_collection, to_id),
+            "library_id": library_id.to_string(),
             "created_at": Utc::now(),
             "updated_at": Utc::now(),
         });

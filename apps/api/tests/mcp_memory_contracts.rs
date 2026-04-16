@@ -32,13 +32,13 @@ use tower::ServiceExt;
 #[test]
 fn capability_snapshot_serializes_null_workspace_scope_and_tool_list() {
     let value = serde_json::to_value(McpCapabilitySnapshot {
-        token_id: Uuid::nil(),
+        token_id: Some(Uuid::nil()),
         token_kind: "instance_admin".to_string(),
         workspace_scope: None,
         visible_workspace_count: 2,
         visible_library_count: 4,
         tools: vec!["list_workspaces".to_string(), "search_documents".to_string()],
-        generated_at: Utc::now(),
+        generated_at: Some(Utc::now()),
     })
     .unwrap();
 
@@ -59,6 +59,10 @@ fn read_response_preserves_nullability_for_unreadable_payloads() {
         readiness_kind: "processing".to_string(),
         graph_coverage_kind: "processing".to_string(),
         status_reason: Some("document is still being processed".to_string()),
+        mime_type: None,
+        source_uri: None,
+        source_access: None,
+        visual_description: None,
         content: None,
         slice_start_offset: 0,
         slice_end_offset: 0,
@@ -73,10 +77,10 @@ fn read_response_preserves_nullability_for_unreadable_payloads() {
     })
     .unwrap();
 
-    assert!(value.get("latestRevisionId").is_some_and(serde_json::Value::is_null));
-    assert!(value.get("content").is_some_and(serde_json::Value::is_null));
-    assert!(value.get("totalContentLength").is_some_and(serde_json::Value::is_null));
-    assert!(value.get("continuationToken").is_some_and(serde_json::Value::is_null));
+    assert!(value.get("latestRevisionId").is_none());
+    assert!(value.get("content").is_none());
+    assert!(value.get("totalContentLength").is_none());
+    assert!(value.get("continuationToken").is_none());
     assert_eq!(value.get("readabilityState"), Some(&json!("processing")));
 }
 
@@ -114,7 +118,6 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
         hits: vec![
             McpDocumentHit {
                 document_id: readable_document_id,
-                logical_document_id: readable_document_id,
                 library_id: Uuid::nil(),
                 workspace_id: Uuid::nil(),
                 document_title: "Readable memory".to_string(),
@@ -123,6 +126,7 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
                 excerpt: Some("memory excerpt".to_string()),
                 excerpt_start_offset: Some(12),
                 excerpt_end_offset: Some(26),
+                suggested_start_offset: None,
                 readability_state: McpReadabilityState::Readable,
                 readiness_kind: "readable".to_string(),
                 graph_coverage_kind: "graph_ready".to_string(),
@@ -135,7 +139,6 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
             },
             McpDocumentHit {
                 document_id: unavailable_document_id,
-                logical_document_id: unavailable_document_id,
                 library_id: Uuid::nil(),
                 workspace_id: Uuid::nil(),
                 document_title: "Unavailable memory".to_string(),
@@ -144,6 +147,7 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
                 excerpt: None,
                 excerpt_start_offset: None,
                 excerpt_end_offset: None,
+                suggested_start_offset: None,
                 readability_state: McpReadabilityState::Unavailable,
                 readiness_kind: "failed".to_string(),
                 graph_coverage_kind: "failed".to_string(),
@@ -163,10 +167,10 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
     let hits = value.get("hits").and_then(serde_json::Value::as_array).unwrap();
     assert_eq!(hits[0].get("documentId"), Some(&json!(readable_document_id)));
     assert_eq!(hits[1].get("documentId"), Some(&json!(unavailable_document_id)));
-    assert!(hits[1].get("latestRevisionId").is_some_and(serde_json::Value::is_null));
-    assert!(hits[1].get("excerpt").is_some_and(serde_json::Value::is_null));
-    assert!(hits[1].get("excerptStartOffset").is_some_and(serde_json::Value::is_null));
-    assert!(hits[1].get("excerptEndOffset").is_some_and(serde_json::Value::is_null));
+    assert!(hits[1].get("latestRevisionId").is_none());
+    assert!(hits[1].get("excerpt").is_none());
+    assert!(hits[1].get("excerptStartOffset").is_none());
+    assert!(hits[1].get("excerptEndOffset").is_none());
     assert_eq!(hits[1].get("readabilityState"), Some(&json!("unavailable")));
 }
 
@@ -663,13 +667,13 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
             .iter()
             .find(|tool| tool["name"] == json!("get_runtime_execution"))
             .context("get_runtime_execution tool missing from tools/list")?;
-        assert_eq!(runtime_tool["inputSchema"]["required"], json!(["executionId"]));
+        assert_eq!(runtime_tool["inputSchema"]["required"], json!(["runtimeExecutionId"]));
 
         let trace_tool = tool_items
             .iter()
             .find(|tool| tool["name"] == json!("get_runtime_execution_trace"))
             .context("get_runtime_execution_trace tool missing from tools/list")?;
-        assert_eq!(trace_tool["inputSchema"]["required"], json!(["executionId"]));
+        assert_eq!(trace_tool["inputSchema"]["required"], json!(["runtimeExecutionId"]));
 
         Ok(())
     }

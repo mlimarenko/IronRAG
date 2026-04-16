@@ -37,11 +37,11 @@ use super::{
     context::{assemble_context_bundle, load_execution_prepared_reference_context},
     emit_query_runtime_summary,
     formatting::{
-        append_answer_source_links, build_prepared_segment_references,
-        build_technical_fact_references, map_chunk_references, map_entity_references,
-        map_execution_runtime_stage_summaries, map_execution_runtime_summary,
-        map_relation_references, parse_query_verification_state, parse_query_verification_warnings,
-        search_pg_entity_references,
+        append_answer_source_links, build_assistant_document_references,
+        build_prepared_segment_references, build_technical_fact_references, map_chunk_references,
+        map_entity_references, map_execution_runtime_stage_summaries,
+        map_execution_runtime_summary, map_relation_references, parse_query_verification_state,
+        parse_query_verification_warnings, search_pg_entity_references,
     },
     session::{
         build_conversation_runtime_context, derive_conversation_title,
@@ -186,6 +186,7 @@ impl QueryService {
                     status: "accepted".to_string(),
                     subject_kind: "query_execution".to_string(),
                     subject_id: Some(execution.id),
+                    parent_async_operation_id: None,
                     completed_at: None,
                     failure_code: None,
                 },
@@ -207,11 +208,46 @@ impl QueryService {
 
         let top_k = command.top_k.clamp(1, 32);
         let mut query_embedding_usage = None;
-        let mut stream_answer_delta = |delta: String| {
-            if let Some(progress) = progress.as_ref() {
-                let _ = progress.send(QueryTurnProgressEvent::AnswerDelta(delta));
-            }
-        };
+        // Bridge the assistant agent's structured progress events into
+        // the turn-level SSE stream. One central place so the handler
+        // and the frontend both see one canonical set of frames.
+        let mut stream_agent_progress =
+            |event: crate::services::query::agent_loop::AgentProgressEvent| {
+                use crate::services::query::agent_loop::AgentProgressEvent;
+                let Some(progress) = progress.as_ref() else {
+                    return;
+                };
+                let frame = match event {
+                    AgentProgressEvent::AnswerDelta(delta) => {
+                        QueryTurnProgressEvent::AnswerDelta(delta)
+                    }
+                    AgentProgressEvent::ToolCallStarted {
+                        iteration,
+                        call_id,
+                        name,
+                        arguments_preview,
+                    } => QueryTurnProgressEvent::AssistantToolCallStarted {
+                        iteration,
+                        call_id,
+                        name,
+                        arguments_preview,
+                    },
+                    AgentProgressEvent::ToolCallCompleted {
+                        iteration,
+                        call_id,
+                        name,
+                        is_error,
+                        result_preview,
+                    } => QueryTurnProgressEvent::AssistantToolCallCompleted {
+                        iteration,
+                        call_id,
+                        name,
+                        is_error,
+                        result_preview,
+                    },
+                };
+                let _ = progress.send(frame);
+            };
         let outcome: RuntimeTerminalOutcome<QueryAnswerTaskSuccess, QueryAnswerTaskFailure> = {
             if let Err(failure) = begin_query_runtime_stage(
                 state.agent_runtime.executor(),
@@ -448,7 +484,10 @@ impl QueryService {
                                     None,
                                     prepared,
                                     progress.as_ref().map(|_| {
-                                        &mut stream_answer_delta as &mut (dyn FnMut(String) + Send)
+                                        &mut stream_agent_progress
+                                            as &mut (dyn FnMut(
+                                                crate::services::query::agent_loop::AgentProgressEvent,
+                                            ) + Send)
                                     }),
                                     &command.auth,
                                 )
@@ -988,13 +1027,20 @@ impl QueryService {
                 .bundle_refs
                 .as_ref()
                 .map_or_else(Vec::new, map_chunk_references),
-            prepared_segment_references: build_prepared_segment_references(
-                prepared_reference_context.bundle_refs.as_ref(),
-                &prepared_reference_context.structured_block_rows,
-                &prepared_reference_context.block_rank_refs,
-                &query_text,
-                &prepared_reference_context.segment_revision_info,
-            ),
+            prepared_segment_references: {
+                let mut references = build_prepared_segment_references(
+                    prepared_reference_context.bundle_refs.as_ref(),
+                    &prepared_reference_context.structured_block_rows,
+                    &prepared_reference_context.block_rank_refs,
+                    &query_text,
+                    &prepared_reference_context.segment_revision_info,
+                );
+                references.extend(build_assistant_document_references(
+                    execution.id,
+                    &prepared_reference_context.assistant_document_references,
+                ));
+                references
+            },
             technical_fact_references: build_technical_fact_references(
                 prepared_reference_context.bundle_refs.as_ref(),
                 &prepared_reference_context.technical_fact_rows,
@@ -1043,13 +1089,17 @@ impl QueryService {
                     return answer;
                 }
             };
-        let prepared_segment_references = build_prepared_segment_references(
+        let mut prepared_segment_references = build_prepared_segment_references(
             reference_context.bundle_refs.as_ref(),
             &reference_context.structured_block_rows,
             &reference_context.block_rank_refs,
             query_text,
             &reference_context.segment_revision_info,
         );
+        prepared_segment_references.extend(build_assistant_document_references(
+            execution_id,
+            &reference_context.assistant_document_references,
+        ));
 
         append_answer_source_links(answer, &prepared_segment_references)
     }

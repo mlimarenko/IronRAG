@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { AlertTriangle, Brain, KeyRound, Loader2, Settings2 } from 'lucide-react';
+import { AlertTriangle, Brain, KeyRound, Loader2, Search, Settings2 } from 'lucide-react';
 
 import { adminApi } from '@/api';
 import { useApp } from '@/contexts/AppContext';
@@ -15,20 +15,30 @@ import type {
   AIScopeKind,
   ModelPreset,
 } from '@/types';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 
-import { mapProvider, mapCredential, mapModelOption, mapPreset, mapBinding } from '@/lib/ai-mappers';
+import {
+  mapBindingList,
+  mapCredentialList,
+  mapModelList,
+  mapPresetList,
+  mapProviderList,
+} from '@/adapters/ai';
 
 type BindingResolution = {
   localBinding: AIBindingAssignment | null;
   effectiveBinding: AIBindingAssignment | null;
   sourceKind: AIScopeKind | null;
 };
+
+type CredentialModelLoadState = 'loading' | 'ready' | 'failed';
 
 const PURPOSE_ORDER: AIPurpose[] = ['extract_graph', 'embed_chunk', 'query_answer', 'vision'];
 
@@ -86,11 +96,14 @@ function isModelAvailableForCredential(
   credential: AICredential | null | undefined,
   modelsByCredentialId: Record<string, AIModelOption[]>,
 ): boolean {
-  if (!model || !credential || credential.providerKind !== 'ollama') {
+  if (!model || !credential) {
     return true;
   }
   const discoveredModels = modelsByCredentialId[credential.id];
   if (!discoveredModels) {
+    if (model.availableCredentialIds.includes(credential.id)) {
+      return true;
+    }
     return model.availabilityState !== 'unavailable';
   }
   return discoveredModels.some(entry => entry.id === model.id);
@@ -99,6 +112,18 @@ function isModelAvailableForCredential(
 function formatModelLabel(model: AIModelOption, providers: AIProvider[]) {
   const provider = providers.find(entry => entry.id === model.providerCatalogId);
   return provider ? `${provider.displayName} · ${model.modelName}` : model.modelName;
+}
+
+function matchesFilter(values: Array<string | undefined>, filter: string) {
+  const normalized = filter.trim().toLocaleLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return values.some(value => value?.toLocaleLowerCase().includes(normalized));
+}
+
+function compareByUpdatedAtDesc(left: { updatedAt: string; id: string }, right: { updatedAt: string; id: string }) {
+  return right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id);
 }
 
 export default function AiConfigurationPanel() {
@@ -110,11 +135,14 @@ export default function AiConfigurationPanel() {
   const formatPurposeList = (purposes: AIPurpose[]) => (
     purposes.length > 0 ? purposes.map(purposeLabel).join(', ') : t('admin.aiPanel.none')
   );
+
   const [selectedScope, setSelectedScope] = useState<AIScopeKind>('instance');
   const autoSelectedScopeRef = useRef(false);
+
   const [providers, setProviders] = useState<AIProvider[]>([]);
   const [models, setModels] = useState<AIModelOption[]>([]);
   const [modelsByCredentialId, setModelsByCredentialId] = useState<Record<string, AIModelOption[]>>({});
+  const [credentialModelLoadState, setCredentialModelLoadState] = useState<Record<string, CredentialModelLoadState>>({});
   const [availableCredentials, setAvailableCredentials] = useState<AICredential[]>([]);
   const [availablePresets, setAvailablePresets] = useState<ModelPreset[]>([]);
   const [localCredentials, setLocalCredentials] = useState<AICredential[]>([]);
@@ -125,6 +153,8 @@ export default function AiConfigurationPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [credentialSearch, setCredentialSearch] = useState('');
+  const [presetSearch, setPresetSearch] = useState('');
 
   const [editingPurpose, setEditingPurpose] = useState<AIPurpose | null>(null);
   const [bindingCredentialId, setBindingCredentialId] = useState('');
@@ -171,7 +201,7 @@ export default function AiConfigurationPanel() {
 
   const visibleParams = useCallback((scopeKind: AIScopeKind) => {
     if (scopeKind === 'instance') {
-      return { scopeKind: 'instance' as const };
+      return {};
     }
     if (scopeKind === 'workspace') {
       return { workspaceId: activeWorkspace?.id };
@@ -198,14 +228,31 @@ export default function AiConfigurationPanel() {
       setLoading(true);
       setError(null);
       try {
-        const visibleModelParams = visibleParams(selectedScope);
-        const [providerRaw, modelRaw, localCredentialRaw, localPresetRaw, visibleCredentialRaw, visiblePresetRaw, instanceBindingRaw, workspaceBindingRaw, libraryBindingRaw] = await Promise.all([
+        const localScopeParams = scopeParams(selectedScope);
+        const currentVisibleParams = visibleParams(selectedScope);
+        const localCredentialRequest = adminApi.listCredentials(localScopeParams);
+        const localPresetRequest = adminApi.listModelPresets(localScopeParams);
+        const visibleCredentialRequest =
+          selectedScope === 'instance' ? localCredentialRequest : adminApi.listCredentials(currentVisibleParams);
+        const visiblePresetRequest =
+          selectedScope === 'instance' ? localPresetRequest : adminApi.listModelPresets(currentVisibleParams);
+        const [
+          providerRaw,
+          modelRaw,
+          localCredentialRaw,
+          localPresetRaw,
+          visibleCredentialRaw,
+          visiblePresetRaw,
+          instanceBindingRaw,
+          workspaceBindingRaw,
+          libraryBindingRaw,
+        ] = await Promise.all([
           adminApi.listProviders(),
-          adminApi.listModels(visibleModelParams),
-          adminApi.listCredentials(scopeParams(selectedScope)),
-          adminApi.listModelPresets(scopeParams(selectedScope)),
-          adminApi.listCredentials(visibleParams(selectedScope)),
-          adminApi.listModelPresets(visibleParams(selectedScope)),
+          adminApi.listModels(currentVisibleParams),
+          localCredentialRequest,
+          localPresetRequest,
+          visibleCredentialRequest,
+          visiblePresetRequest,
           adminApi.listBindings({ scopeKind: 'instance' }),
           activeWorkspace?.id ? adminApi.listBindings({ scopeKind: 'workspace', workspaceId: activeWorkspace.id }) : Promise.resolve([]),
           activeLibrary?.id ? adminApi.listBindings({ scopeKind: 'library', workspaceId: activeWorkspace?.id, libraryId: activeLibrary.id }) : Promise.resolve([]),
@@ -213,34 +260,22 @@ export default function AiConfigurationPanel() {
         if (cancelled) {
           return;
         }
-        const providerList = (Array.isArray(providerRaw) ? providerRaw : []).map(mapProvider);
-        const visibleCredentialList = (Array.isArray(visibleCredentialRaw) ? visibleCredentialRaw : []).map((entry: any) => mapCredential(entry, providerList));
-        const modelList = (Array.isArray(modelRaw) ? modelRaw : []).map(mapModelOption);
-        const ollamaCredentials = visibleCredentialList.filter(entry => entry.providerKind === 'ollama');
-        const discoveredModelsByCredential = Object.fromEntries(await Promise.all(
-          ollamaCredentials.map(async credential => {
-            const resolved = await adminApi.listModels({
-              providerCatalogId: credential.providerId,
-              credentialId: credential.id,
-              ...visibleModelParams,
-            });
-            return [credential.id, (Array.isArray(resolved) ? resolved : []).map(mapModelOption)];
-          }),
-        ));
-        if (cancelled) {
-          return;
-        }
+        const providerList = mapProviderList(providerRaw);
+        const modelList = mapModelList(modelRaw);
+        const localCredentialList = mapCredentialList(localCredentialRaw, providerList);
+        const visibleCredentialList = mapCredentialList(visibleCredentialRaw, providerList);
         setProviders(providerList);
         setModels(modelList);
-        setModelsByCredentialId(discoveredModelsByCredential);
-        setLocalCredentials((Array.isArray(localCredentialRaw) ? localCredentialRaw : []).map((entry: any) => mapCredential(entry, providerList)));
+        setModelsByCredentialId({});
+        setCredentialModelLoadState({});
+        setLocalCredentials(localCredentialList);
         setAvailableCredentials(visibleCredentialList);
-        setLocalPresets((Array.isArray(localPresetRaw) ? localPresetRaw : []).map((entry: any) => mapPreset(entry, providerList, modelList)));
-        setAvailablePresets((Array.isArray(visiblePresetRaw) ? visiblePresetRaw : []).map((entry: any) => mapPreset(entry, providerList, modelList)));
-        setInstanceBindings((Array.isArray(instanceBindingRaw) ? instanceBindingRaw : []).map(mapBinding));
-        setWorkspaceBindings((Array.isArray(workspaceBindingRaw) ? workspaceBindingRaw : []).map(mapBinding));
-        setLibraryBindings((Array.isArray(libraryBindingRaw) ? libraryBindingRaw : []).map(mapBinding));
-      } catch (loadError: any) {
+        setLocalPresets(mapPresetList(localPresetRaw, providerList, modelList));
+        setAvailablePresets(mapPresetList(visiblePresetRaw, providerList, modelList));
+        setInstanceBindings(mapBindingList(instanceBindingRaw));
+        setWorkspaceBindings(mapBindingList(workspaceBindingRaw));
+        setLibraryBindings(mapBindingList(libraryBindingRaw));
+      } catch (_loadError: unknown) {
         if (!cancelled) {
           setError(t('admin.aiPanel.messages.loadFailed'));
         }
@@ -293,6 +328,44 @@ export default function AiConfigurationPanel() {
     workspaceBindings.length,
   ]);
 
+  useEffect(() => {
+    if (!editingPurpose || !bindingCredentialId) {
+      return;
+    }
+    const credential = availableCredentials.find(entry => entry.id === bindingCredentialId);
+    if (!credential || credential.providerKind !== 'ollama') {
+      return;
+    }
+    if (modelsByCredentialId[credential.id] || credentialModelLoadState[credential.id] === 'loading' || credentialModelLoadState[credential.id] === 'failed') {
+      return;
+    }
+
+    let cancelled = false;
+    setCredentialModelLoadState(current => ({ ...current, [credential.id]: 'loading' }));
+    const currentVisibleParams = visibleParams(selectedScope);
+    void adminApi.listModels({
+      providerCatalogId: credential.providerId,
+      credentialId: credential.id,
+      ...currentVisibleParams,
+    }).then(raw => {
+      if (cancelled) {
+        return;
+      }
+      setModelsByCredentialId(current => ({ ...current, [credential.id]: mapModelList(raw) }));
+      setCredentialModelLoadState(current => ({ ...current, [credential.id]: 'ready' }));
+    }).catch(() => {
+      if (cancelled) {
+        return;
+      }
+      setCredentialModelLoadState(current => ({ ...current, [credential.id]: 'failed' }));
+      toast.error(t('admin.aiPanel.messages.credentialModelRefreshFailed'));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [availableCredentials, bindingCredentialId, credentialModelLoadState, editingPurpose, modelsByCredentialId, selectedScope, t, visibleParams]);
+
   const bindingsForScope = selectedScope === 'instance' ? instanceBindings : selectedScope === 'workspace' ? workspaceBindings : libraryBindings;
   const showMissingInstanceNotice =
     selectedScope !== 'instance'
@@ -306,10 +379,7 @@ export default function AiConfigurationPanel() {
     if (entry.providerCatalogId === '' || entry.providerCatalogId === undefined) {
       return false;
     }
-    if (providers.find(provider => provider.id === entry.providerCatalogId)?.kind !== 'ollama') {
-      return true;
-    }
-    return entry.availabilityState === 'available';
+    return entry.availabilityState !== 'unavailable';
   });
 
   const resolveBinding = (purpose: AIPurpose): BindingResolution => {
@@ -385,7 +455,7 @@ export default function AiConfigurationPanel() {
       resetCredentialDialog();
       setReloadKey(value => value + 1);
       toast.success(t('admin.aiPanel.messages.credentialSaved'));
-    } catch (saveError: any) {
+    } catch (saveError: unknown) {
       toast.error(credentialSaveErrorMessage(saveError));
     } finally {
       setCredentialSaving(false);
@@ -422,7 +492,7 @@ export default function AiConfigurationPanel() {
       resetPresetDialog();
       setReloadKey(value => value + 1);
       toast.success(t('admin.aiPanel.messages.presetSaved'));
-    } catch (_saveError: any) {
+    } catch (_saveError: unknown) {
       toast.error(t('admin.aiPanel.messages.presetSaveFailed'));
     } finally {
       setPresetSaving(false);
@@ -455,7 +525,7 @@ export default function AiConfigurationPanel() {
       setBindingPresetId('');
       setReloadKey(value => value + 1);
       toast.success(t('admin.aiPanel.messages.bindingSaved'));
-    } catch (_saveError: any) {
+    } catch (_saveError: unknown) {
       toast.error(t('admin.aiPanel.messages.bindingSaveFailed'));
     } finally {
       setBindingSaving(false);
@@ -472,112 +542,124 @@ export default function AiConfigurationPanel() {
       setEditingPurpose(null);
       setReloadKey(value => value + 1);
       toast.success(t('admin.aiPanel.messages.overrideRemoved'));
-    } catch (_deleteError: any) {
+    } catch (_deleteError: unknown) {
       toast.error(t('admin.aiPanel.messages.overrideRemoveFailed'));
     }
   };
 
+  // `localBindingCount` drives the "X/Y configured" badge next to the
+  // bindings header. Provider inventory + per-scope binding metrics
+  // were removed when the page was simplified — the same numbers are
+  // already visible in the binding cards and the per-list count
+  // badges below, so showing them up top was redundant noise.
+  const localBindingCount = bindingsForScope.length;
+  const filteredLocalCredentials = localCredentials
+    .filter(entry => matchesFilter([
+      entry.label,
+      entry.providerName,
+      entry.providerKind,
+      entry.baseUrl,
+      credentialStateLabel(entry.state),
+    ], credentialSearch))
+    .slice()
+    .sort(compareByUpdatedAtDesc);
+  const filteredLocalPresets = localPresets
+    .filter(entry => matchesFilter([
+      entry.presetName,
+      entry.providerName,
+      entry.providerKind,
+      entry.modelName,
+      formatPurposeList(entry.allowedBindingPurposes),
+    ], presetSearch))
+    .slice()
+    .sort(compareByUpdatedAtDesc);
+
+  // Scope tab metadata kept inline so the disabled/title computation
+  // happens once per render and the JSX stays readable.
+  const scopeTabs: Array<{ kind: AIScopeKind; title: string; disabled: boolean }> = [
+    {
+      kind: 'instance',
+      title: t('admin.aiPanel.scopeCards.instanceTitle'),
+      disabled: false,
+    },
+    {
+      kind: 'workspace',
+      title: activeWorkspace?.name ?? t('admin.aiPanel.scopeCards.workspaceTitle'),
+      disabled: !activeWorkspace,
+    },
+    {
+      kind: 'library',
+      title: activeLibrary?.name ?? t('admin.aiPanel.scopeCards.libraryTitle'),
+      disabled: !activeLibrary,
+    },
+  ];
+
   return (
-    <div className="space-y-6">
-      <div className="workbench-surface p-5">
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-          <div className="max-w-2xl">
-            <h2 className="text-base font-bold tracking-tight">{t('admin.aiPanel.title')}</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {t('admin.aiPanel.description')}
-            </p>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[520px]">
-            {[
-              {
-                kind: 'instance' as const,
-                title: t('admin.aiPanel.scopeCards.instanceTitle'),
-                detail: t('admin.aiPanel.scopeCards.instanceDetail'),
-                disabled: false,
-              },
-              {
-                kind: 'workspace' as const,
-                title: activeWorkspace ? activeWorkspace.name : t('admin.aiPanel.scopeCards.workspaceTitle'),
-                detail: activeWorkspace
-                  ? t('admin.aiPanel.scopeCards.workspaceDetail')
-                  : t('admin.aiPanel.scopeCards.workspaceMissingDetail'),
-                disabled: !activeWorkspace,
-              },
-              {
-                kind: 'library' as const,
-                title: activeLibrary ? activeLibrary.name : t('admin.aiPanel.scopeCards.libraryTitle'),
-                detail: activeLibrary
-                  ? t('admin.aiPanel.scopeCards.libraryDetail')
-                  : t('admin.aiPanel.scopeCards.libraryMissingDetail'),
-                disabled: !activeLibrary,
-              },
-            ].map(scope => (
-              <button
-                key={scope.kind}
-                type="button"
-                disabled={scope.disabled}
-                onClick={() => setSelectedScope(scope.kind)}
-                className={`rounded-2xl border p-4 text-left transition ${selectedScope === scope.kind ? 'border-primary bg-primary/5 shadow-lifted' : 'border-border bg-card hover:border-primary/40'} ${scope.disabled ? 'cursor-not-allowed opacity-50' : ''}`}
-              >
-                <div className="text-sm font-semibold">{scope.title}</div>
-                <p className="mt-1 text-xs text-muted-foreground">{scope.detail}</p>
-              </button>
-            ))}
-          </div>
-        </div>
+    <div className="space-y-5">
+      {/* ── Header: slim title row + a real Radix-style segmented scope
+           tab strip below it. The previous design tried to balance the
+           scope picker on the right of the title and it kept wrapping
+           to a second line on mid-width viewports. A dedicated full-
+           width strip aligns with the existing admin tab pattern and
+           reads like a single canonical "what am I editing now"
+           anchor. */}
+      <div>
+        <h2 className="text-base font-bold tracking-tight">{t('admin.aiPanel.title')}</h2>
+        <p className="mt-1 text-xs text-muted-foreground">{t('admin.aiPanel.description')}</p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-border/70 bg-surface-sunken p-1 shadow-sm">
+        {scopeTabs.map(scope => (
+          <button
+            key={scope.kind}
+            type="button"
+            disabled={scope.disabled}
+            onClick={() => setSelectedScope(scope.kind)}
+            className={`flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition ${
+              selectedScope === scope.kind
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:bg-muted/60'
+            } ${scope.disabled ? 'cursor-not-allowed opacity-40' : ''}`}
+            title={scope.title}
+          >
+            {scope.title}
+          </button>
+        ))}
       </div>
 
       {showMissingInstanceNotice && (
-        <div className="rounded-2xl border border-status-warning/20 bg-status-warning/5 p-4 text-sm text-status-warning">
+        <div className="rounded-2xl border border-status-warning/20 bg-status-warning/5 p-3 text-sm text-status-warning">
           {t('admin.aiPanel.notices.missingInstanceBaseline')}
         </div>
       )}
 
       {loading ? (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.75fr)_360px]">
-          <div className="space-y-4">
-            {PURPOSE_ORDER.map(purpose => (
-              <div key={purpose} className="workbench-surface p-5">
-                <div className="animate-pulse space-y-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="space-y-2">
-                      <div className="h-4 w-36 rounded-full bg-muted/70" />
-                      <div className="h-3 w-56 rounded-full bg-muted/50" />
-                    </div>
-                    <div className="h-9 w-28 rounded-xl bg-muted/60" />
-                  </div>
-                  <div className="rounded-2xl border border-dashed border-border/70 bg-surface-sunken p-4 text-sm text-muted-foreground">
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      {t('admin.aiPanel.loadingPurpose', { purpose: purposeLabel(purpose) })}
-                    </div>
-                  </div>
-                </div>
+        <div className="space-y-6">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div key={index} className="workbench-surface p-5 animate-pulse">
+                <div className="h-8 w-16 rounded-full bg-muted/60" />
+                <div className="mt-3 h-3 w-28 rounded-full bg-muted/45" />
               </div>
             ))}
           </div>
-
-          <div className="space-y-4">
-            {[t('admin.aiPanel.credentialsTitle'), t('admin.aiPanel.presetsTitle')].map(title => (
-              <div key={title} className="workbench-surface p-5">
-                <div className="animate-pulse space-y-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-2">
-                      <div className="h-4 w-40 rounded-full bg-muted/70" />
-                      <div className="h-3 w-44 rounded-full bg-muted/50" />
-                    </div>
-                    <div className="h-9 w-20 rounded-xl bg-muted/60" />
-                  </div>
-                  <div className="space-y-3">
-                    <div className="rounded-xl border border-border/60 p-4">
-                      <div className="h-4 w-32 rounded-full bg-muted/60" />
-                      <div className="mt-2 h-3 w-48 rounded-full bg-muted/45" />
-                    </div>
-                    <div className="rounded-xl border border-border/60 p-4">
-                      <div className="h-4 w-28 rounded-full bg-muted/60" />
-                      <div className="mt-2 h-3 w-40 rounded-full bg-muted/45" />
-                    </div>
-                  </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {PURPOSE_ORDER.map(purpose => (
+              <div key={purpose} className="workbench-surface p-5 animate-pulse space-y-4">
+                <div className="h-4 w-40 rounded-full bg-muted/60" />
+                <div className="h-3 w-48 rounded-full bg-muted/45" />
+                <div className="h-24 rounded-3xl bg-muted/40" />
+              </div>
+            ))}
+          </div>
+          <div className="grid gap-6 xl:grid-cols-2">
+            {Array.from({ length: 2 }).map((_, index) => (
+              <div key={index} className="workbench-surface p-5 animate-pulse space-y-4">
+                <div className="h-4 w-40 rounded-full bg-muted/60" />
+                <div className="h-10 rounded-2xl bg-muted/45" />
+                <div className="space-y-3">
+                  <div className="h-24 rounded-3xl bg-muted/35" />
+                  <div className="h-24 rounded-3xl bg-muted/35" />
                 </div>
               </div>
             ))}
@@ -588,241 +670,324 @@ export default function AiConfigurationPanel() {
           {error}
         </div>
       ) : (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.75fr)_360px]">
-          <div className="space-y-4">
-            {PURPOSE_ORDER.map(purpose => {
-              const resolved = resolveBinding(purpose);
-              const credential = availableCredentials.find(entry => entry.id === resolved.effectiveBinding?.credentialId);
-              const preset = availablePresets.find(entry => entry.id === resolved.effectiveBinding?.presetId);
-              const presetModel = preset ? modelById.get(preset.modelCatalogId) : undefined;
-              const bindingModelUnavailable =
-                credential && preset
-                  ? !isModelAvailableForCredential(presetModel, credential, modelsByCredentialId)
-                  : false;
-              const selectedCredential = availableCredentials.find(entry => entry.id === bindingCredentialId);
-              const selectedCredentialModelSet = selectedCredential?.providerKind === 'ollama'
-                ? new Set((modelsByCredentialId[selectedCredential.id] ?? []).map(entry => entry.id))
-                : null;
-              const presetOptions = availablePresets
-                .filter(entry => entry.allowedBindingPurposes.includes(purpose))
-                .filter(entry => !selectedCredential || entry.providerId === selectedCredential.providerId);
-              const selectedPresetUnavailable = selectedCredential?.providerKind === 'ollama'
-                && bindingPresetId !== ''
-                && selectedCredentialModelSet !== null
-                && !selectedCredentialModelSet.has(
-                  availablePresets.find(entry => entry.id === bindingPresetId)?.modelCatalogId ?? '',
-                );
-              return (
-                <div key={purpose} className="workbench-surface p-5">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-sm font-bold tracking-tight">{purposeLabel(purpose)}</h3>
-                        {resolved.sourceKind && (
-                          <span className={`status-badge ${badgeClass(resolved.sourceKind === 'instance' ? 'ready' : resolved.sourceKind === 'workspace' ? 'warning' : 'failed')}`}>
-                            {scopeLabel(resolved.sourceKind)}
-                          </span>
-                        )}
+        <>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-bold tracking-tight">{t('admin.aiPanel.sections.bindingsTitle')}</h3>
+              <Badge variant="outline">{localBindingCount}/{PURPOSE_ORDER.length}</Badge>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              {PURPOSE_ORDER.map(purpose => {
+                const resolved = resolveBinding(purpose);
+                const credential = availableCredentials.find(entry => entry.id === resolved.effectiveBinding?.credentialId);
+                const preset = availablePresets.find(entry => entry.id === resolved.effectiveBinding?.presetId);
+                const presetModel = preset ? modelById.get(preset.modelCatalogId) : undefined;
+                const bindingModelUnavailable =
+                  credential && preset
+                    ? !isModelAvailableForCredential(presetModel, credential, modelsByCredentialId)
+                    : false;
+                const selectedCredential = availableCredentials.find(entry => entry.id === bindingCredentialId) ?? null;
+                const selectedCredentialModels = selectedCredential ? modelsByCredentialId[selectedCredential.id] : undefined;
+                const selectedCredentialModelSet = selectedCredentialModels
+                  ? new Set(selectedCredentialModels.map(entry => entry.id))
+                  : null;
+                const selectedCredentialLoadState = selectedCredential ? credentialModelLoadState[selectedCredential.id] : undefined;
+                const presetOptions = availablePresets
+                  .filter(entry => entry.allowedBindingPurposes.includes(purpose))
+                  .filter(entry => !selectedCredential || entry.providerId === selectedCredential.providerId);
+                const selectedPreset = availablePresets.find(entry => entry.id === bindingPresetId);
+                const selectedPresetUnavailable =
+                  selectedCredential !== null
+                  && bindingPresetId !== ''
+                  && !isModelAvailableForCredential(
+                    modelById.get(selectedPreset?.modelCatalogId ?? ''),
+                    selectedCredential,
+                    modelsByCredentialId,
+                  );
+                // Source-scope badge only matters when the active
+                // binding lives at a DIFFERENT scope than the one the
+                // operator is currently editing — otherwise it just
+                // restates "this scope's local value", which is the
+                // default and never news.
+                const showSourceBadge =
+                  resolved.sourceKind != null && resolved.sourceKind !== selectedScope;
+                return (
+                  <div key={purpose} className="workbench-surface overflow-hidden p-4">
+                    <div className="flex h-full flex-col gap-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h4 className="text-sm font-semibold tracking-tight">{purposeLabel(purpose)}</h4>
+                            {showSourceBadge && resolved.sourceKind && (
+                              <span className={`status-badge text-[10px] ${badgeClass(resolved.sourceKind === 'instance' ? 'ready' : resolved.sourceKind === 'workspace' ? 'warning' : 'failed')}`}>
+                                {t('admin.aiPanel.labels.inheritedFrom', {
+                                  scope: scopeLabel(resolved.sourceKind),
+                                })}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <Button size="sm" variant="outline" onClick={() => openBindingEditor(purpose)}>
+                          <Settings2 className="mr-1.5 h-3.5 w-3.5" />
+                          {resolved.localBinding
+                            ? t('admin.aiPanel.actions.editHere')
+                            : selectedScope === 'instance'
+                              ? t('admin.aiPanel.actions.setDefault')
+                              : t('admin.aiPanel.actions.createOverride')}
+                        </Button>
                       </div>
+
                       {resolved.effectiveBinding && credential && preset ? (
-                        <div className="mt-2 space-y-1 text-sm">
-                          <div>
-                            <span className="text-muted-foreground">{t('admin.aiPanel.fields.credential')}:</span>{' '}
-                            <span className="font-semibold">{credential.label}</span>
-                            <span className="text-muted-foreground"> · {credential.providerName}</span>
+                        // Compact single-row summary: "credential · preset · model"
+                        // replaces the previous two stacked cards. Each binding
+                        // already shows the provider name in the credential field,
+                        // so the previous duplicated provider line under the preset
+                        // was pure noise.
+                        <div className="text-sm space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <KeyRound className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <span className="font-semibold truncate">{credential.label}</span>
+                            <span className="text-xs text-muted-foreground">· {credential.providerName}</span>
                           </div>
-                          <div>
-                            <span className="text-muted-foreground">{t('admin.aiPanel.fields.preset')}:</span>{' '}
-                            <span className="font-semibold">{formatPresetLabel(preset)}</span>
+                          <div className="flex items-center gap-2">
+                            <Brain className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <span className="font-semibold truncate">{formatPresetLabel(preset)}</span>
+                            <span className="text-xs text-muted-foreground">· {preset.modelName}</span>
                           </div>
-                          {bindingModelUnavailable && (
-                            <div className="flex items-center gap-2 text-status-warning">
-                              <AlertTriangle className="h-4 w-4" />
-                              {t('admin.aiPanel.messages.bindingModelUnavailable', { model: preset.modelName })}
-                            </div>
-                          )}
                         </div>
                       ) : (
-                        <div className="mt-3 flex items-center gap-2 text-sm text-status-warning">
-                          <AlertTriangle className="h-4 w-4" />
-                          {t('admin.aiPanel.empty.noEffectiveBinding')}
+                        <div className="rounded-2xl border border-dashed border-status-warning/30 bg-status-warning/5 p-3 text-sm text-status-warning">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="h-4 w-4" />
+                            {t('admin.aiPanel.empty.noEffectiveBinding')}
+                          </div>
+                        </div>
+                      )}
+
+                      {bindingModelUnavailable && (
+                        <div className="rounded-2xl border border-status-warning/25 bg-status-warning/5 p-3 text-sm text-status-warning">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="h-4 w-4" />
+                            {t('admin.aiPanel.messages.bindingModelUnavailable', { model: preset?.modelName ?? '' })}
+                          </div>
+                        </div>
+                      )}
+
+                      {editingPurpose === purpose && (
+                        <div className="rounded-3xl border border-border/70 bg-surface-sunken p-4">
+                          <div className="grid gap-4 xl:grid-cols-2">
+                            <div>
+                              <Label className="text-xs font-semibold">{t('admin.aiPanel.fields.credential')}</Label>
+                              <Select value={bindingCredentialId} onValueChange={value => {
+                                setBindingCredentialId(value);
+                                setBindingPresetId('');
+                              }}>
+                                <SelectTrigger className="mt-2 h-10 text-sm">
+                                  <SelectValue placeholder={t('admin.aiPanel.placeholders.selectCredential')} />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {availableCredentials.map(entry => (
+                                    <SelectItem key={entry.id} value={entry.id}>
+                                      {entry.label} · {scopeLabel(entry.scopeKind)}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div>
+                              <Label className="text-xs font-semibold">{t('admin.aiPanel.fields.modelPreset')}</Label>
+                              <Select value={bindingPresetId} onValueChange={setBindingPresetId}>
+                                <SelectTrigger className="mt-2 h-10 text-sm">
+                                  <SelectValue placeholder={t('admin.aiPanel.placeholders.selectPreset')} />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {presetOptions.map(entry => (
+                                    <SelectItem key={entry.id} value={entry.id}>
+                                      {selectedCredentialModelSet !== null && !selectedCredentialModelSet.has(entry.modelCatalogId)
+                                        ? `${formatPresetLabel(entry)} · ${t('admin.aiPanel.unavailableBadge')}`
+                                        : formatPresetLabel(entry)}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+
+                          {selectedCredentialLoadState === 'loading' && (
+                            <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              {t('admin.aiPanel.messages.checkingCredentialModels')}
+                            </div>
+                          )}
+
+                          {selectedPresetUnavailable && (
+                            <div className="mt-3 flex items-center gap-2 text-sm text-status-warning">
+                              <AlertTriangle className="h-4 w-4" />
+                              {t('admin.aiPanel.messages.selectedPresetUnavailable')}
+                            </div>
+                          )}
+
+                          <div className="mt-4 flex flex-wrap gap-2">
+                            <Button size="sm" disabled={!bindingCredentialId || !bindingPresetId || bindingSaving || Boolean(selectedPresetUnavailable)} onClick={() => void saveBinding(purpose)}>
+                              {bindingSaving ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.save')}
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => setEditingPurpose(null)}>
+                              {t('admin.cancel')}
+                            </Button>
+                            {resolved.localBinding && selectedScope !== 'instance' && (
+                              <Button size="sm" variant="outline" onClick={() => void resetBinding(purpose)}>
+                                {t('admin.aiPanel.actions.resetToInherited')}
+                              </Button>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
-                    <div className="flex shrink-0 flex-wrap gap-2">
-                      <Button size="sm" variant="outline" onClick={() => openBindingEditor(purpose)}>
-                        <Settings2 className="mr-1.5 h-3.5 w-3.5" />
-                        {resolved.localBinding
-                          ? t('admin.aiPanel.actions.editHere')
-                          : selectedScope === 'instance'
-                            ? t('admin.aiPanel.actions.setDefault')
-                            : t('admin.aiPanel.actions.createOverride')}
-                      </Button>
-                      {resolved.localBinding && selectedScope !== 'instance' && (
-                        <Button size="sm" variant="outline" onClick={() => void resetBinding(purpose)}>
-                          {t('admin.aiPanel.actions.resetToInherited')}
-                        </Button>
-                      )}
-                    </div>
                   </div>
+                );
+              })}
+            </div>
+          </div>
 
-                  {editingPurpose === purpose && (
-                    <div className="mt-4 rounded-2xl border border-border/60 bg-surface-sunken p-4">
-                      <div className="grid gap-4 lg:grid-cols-2">
-                        <div>
-                          <Label className="text-xs font-semibold">{t('admin.aiPanel.fields.credential')}</Label>
-                          <Select value={bindingCredentialId} onValueChange={value => {
-                            setBindingCredentialId(value);
-                            setBindingPresetId('');
+          <div className="grid gap-6 xl:grid-cols-2">
+            <div className="workbench-surface overflow-hidden p-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-bold tracking-tight">{t('admin.aiPanel.credentialsTitle')}</h3>
+                    <Badge variant="outline">{localCredentials.length}</Badge>
+                  </div>
+                  <p className="mt-1 text-sm text-muted-foreground">{t('admin.aiPanel.credentialsDescription')}</p>
+                </div>
+                <div className="flex w-full flex-col gap-2 sm:w-[260px]">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input className="pl-9" value={credentialSearch} onChange={event => setCredentialSearch(event.target.value)} placeholder={t('admin.aiPanel.filters.credentialsSearch')} />
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => setCredentialOpen(true)}>
+                    <KeyRound className="mr-1.5 h-3.5 w-3.5" /> {t('admin.add')}
+                  </Button>
+                </div>
+              </div>
+              <ScrollArea className="mt-4 h-[420px] pr-4">
+                <div className="space-y-3">
+                  {localCredentials.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                      {t('admin.aiPanel.empty.noLocalCredentials')}
+                    </div>
+                  ) : filteredLocalCredentials.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                      {t('admin.aiPanel.empty.noMatchingCredentials')}
+                    </div>
+                  ) : filteredLocalCredentials.map(entry => (
+                    <div key={entry.id} className="rounded-3xl border border-border/70 bg-surface-sunken p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold">{entry.label}</div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {entry.providerName}
+                            {entry.baseUrl ? ` · ${baseUrlForProviderInput(entry.providerKind, entry.baseUrl)}` : ''}
+                          </div>
+                        </div>
+                        <span className={`status-badge ${badgeClass(entry.state === 'active' ? 'ready' : entry.state === 'invalid' ? 'failed' : 'warning')}`}>
+                          {credentialStateLabel(entry.state)}
+                        </span>
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">{scopeLabel(entry.scopeKind)}</Badge>
+                        <span className="font-mono">{entry.apiKeySummary || t('admin.aiPanel.tokenOptional')}</span>
+                      </div>
+                      <div className="mt-4 flex justify-end">
+                        <Button size="sm" variant="outline" onClick={() => {
+                          const provider = providers.find(providerEntry => providerEntry.id === entry.providerId);
+                          setEditingCredential(entry);
+                          setCredentialProviderId(entry.providerId);
+                          setCredentialLabel(entry.label);
+                          setCredentialBaseUrl(baseUrlForProviderInput(entry.providerKind, entry.baseUrl ?? provider?.defaultBaseUrl));
+                          setCredentialApiKey('');
+                          setCredentialOpen(true);
+                        }}>
+                          {t('admin.edit')}
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </ScrollArea>
+            </div>
+
+            <div className="workbench-surface overflow-hidden p-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-bold tracking-tight">{t('admin.aiPanel.presetsTitle')}</h3>
+                    <Badge variant="outline">{localPresets.length}</Badge>
+                  </div>
+                  <p className="mt-1 text-sm text-muted-foreground">{t('admin.aiPanel.presetsDescription')}</p>
+                </div>
+                <div className="flex w-full flex-col gap-2 sm:w-[260px]">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input className="pl-9" value={presetSearch} onChange={event => setPresetSearch(event.target.value)} placeholder={t('admin.aiPanel.filters.presetsSearch')} />
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => setPresetOpen(true)}>
+                    <Brain className="mr-1.5 h-3.5 w-3.5" /> {t('admin.aiPanel.actions.addPreset')}
+                  </Button>
+                </div>
+              </div>
+              <ScrollArea className="mt-4 h-[420px] pr-4">
+                <div className="space-y-3">
+                  {localPresets.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                      {t('admin.aiPanel.empty.noLocalPresets')}
+                    </div>
+                  ) : filteredLocalPresets.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                      {t('admin.aiPanel.empty.noMatchingPresets')}
+                    </div>
+                  ) : filteredLocalPresets.map(entry => {
+                    const model = modelById.get(entry.modelCatalogId);
+                    const presetModelUnavailable = model?.availabilityState === 'unavailable';
+                    return (
+                      <div key={entry.id} className="rounded-3xl border border-border/70 bg-surface-sunken p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold">{entry.presetName}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">{entry.providerName} · {entry.modelName}</div>
+                          </div>
+                          <Button size="sm" variant="outline" onClick={() => {
+                            setEditingPreset(entry);
+                            setPresetName(entry.presetName);
+                            setPresetModelId(entry.modelCatalogId);
+                            setPresetSystemPrompt(entry.systemPrompt ?? '');
+                            setPresetTemperature(entry.temperature !== undefined ? String(entry.temperature) : '');
+                            setPresetTopP(entry.topP !== undefined ? String(entry.topP) : '');
+                            setPresetMaxTokens(entry.maxOutputTokens !== undefined ? String(entry.maxOutputTokens) : '');
+                            setPresetOpen(true);
                           }}>
-                            <SelectTrigger className="mt-2 h-10 text-sm">
-                              <SelectValue placeholder={t('admin.aiPanel.placeholders.selectCredential')} />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {availableCredentials.map(entry => (
-                                <SelectItem key={entry.id} value={entry.id}>
-                                  {entry.label} · {scopeLabel(entry.scopeKind)}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                            {t('admin.edit')}
+                          </Button>
                         </div>
-                        <div>
-                          <Label className="text-xs font-semibold">{t('admin.aiPanel.fields.modelPreset')}</Label>
-                          <Select value={bindingPresetId} onValueChange={setBindingPresetId}>
-                            <SelectTrigger className="mt-2 h-10 text-sm">
-                              <SelectValue placeholder={t('admin.aiPanel.placeholders.selectPreset')} />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {presetOptions.map(entry => (
-                                <SelectItem key={entry.id} value={entry.id}>
-                                  {selectedCredentialModelSet !== null
-                                    && !selectedCredentialModelSet.has(entry.modelCatalogId)
-                                    ? `${formatPresetLabel(entry)} · ${t('admin.aiPanel.unavailableBadge')}`
-                                    : formatPresetLabel(entry)}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {entry.allowedBindingPurposes.map(purpose => (
+                            <Badge key={`${entry.id}-${purpose}`} variant="outline">{purposeLabel(purpose)}</Badge>
+                          ))}
                         </div>
+                        {presetModelUnavailable && (
+                          <div className="mt-3 flex items-center gap-2 text-sm text-status-warning">
+                            <AlertTriangle className="h-4 w-4" />
+                            {t('admin.aiPanel.messages.presetModelUnavailable', { model: entry.modelName })}
+                          </div>
+                        )}
                       </div>
-                      {selectedPresetUnavailable && (
-                        <div className="mt-3 flex items-center gap-2 text-sm text-status-warning">
-                          <AlertTriangle className="h-4 w-4" />
-                          {t('admin.aiPanel.messages.selectedPresetUnavailable')}
-                        </div>
-                      )}
-                      <div className="mt-4 flex gap-2">
-                        <Button size="sm" disabled={!bindingCredentialId || !bindingPresetId || bindingSaving || Boolean(selectedPresetUnavailable)} onClick={() => void saveBinding(purpose)}>
-                          {bindingSaving ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.save')}
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => setEditingPurpose(null)}>
-                          {t('admin.cancel')}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })}
                 </div>
-              );
-            })}
-          </div>
-
-          <div className="space-y-4">
-            <div className="workbench-surface p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-bold tracking-tight">{t('admin.aiPanel.credentialsTitle')}</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">{t('admin.aiPanel.credentialsDescription')}</p>
-                </div>
-                <Button size="sm" variant="outline" onClick={() => setCredentialOpen(true)}>
-                  <KeyRound className="mr-1.5 h-3.5 w-3.5" /> {t('admin.add')}
-                </Button>
-              </div>
-              <div className="mt-4 space-y-3">
-                {localCredentials.length === 0 ? (
-                  <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">{t('admin.aiPanel.empty.noLocalCredentials')}</div>
-                ) : localCredentials.map(entry => (
-                  <div key={entry.id} className="rounded-xl border border-border/60 p-4">
-                    <div className="text-sm font-semibold">{entry.label}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {entry.providerName}
-                      {entry.baseUrl ? ` · ${baseUrlForProviderInput(entry.providerKind, entry.baseUrl)}` : ''}
-                    </div>
-                    <div className="mt-1 text-xs font-mono text-muted-foreground">{entry.apiKeySummary || t('admin.aiPanel.tokenOptional')}</div>
-                    <div className="mt-3 flex items-center justify-between">
-                      <span className={`status-badge ${badgeClass(entry.state === 'active' ? 'ready' : entry.state === 'invalid' ? 'failed' : 'warning')}`}>{credentialStateLabel(entry.state)}</span>
-                      <Button size="sm" variant="outline" onClick={() => {
-                        const provider = providers.find(providerEntry => providerEntry.id === entry.providerId);
-                        setEditingCredential(entry);
-                        setCredentialProviderId(entry.providerId);
-                        setCredentialLabel(entry.label);
-                        setCredentialBaseUrl(baseUrlForProviderInput(entry.providerKind, entry.baseUrl ?? provider?.defaultBaseUrl));
-                        setCredentialApiKey('');
-                        setCredentialOpen(true);
-                      }}>
-                        {t('admin.edit')}
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="workbench-surface p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-bold tracking-tight">{t('admin.aiPanel.presetsTitle')}</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">{t('admin.aiPanel.presetsDescription')}</p>
-                </div>
-                <Button size="sm" variant="outline" onClick={() => setPresetOpen(true)}>
-                  <Brain className="mr-1.5 h-3.5 w-3.5" /> {t('admin.add')}
-                </Button>
-              </div>
-              <div className="mt-4 space-y-3">
-                {localPresets.length === 0 ? (
-                  <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">{t('admin.aiPanel.empty.noLocalPresets')}</div>
-                ) : localPresets.map(entry => (
-                  <div key={entry.id} className="rounded-xl border border-border/60 p-4">
-                    {(() => {
-                      const model = modelById.get(entry.modelCatalogId);
-                      const presetModelUnavailable =
-                        entry.providerKind === 'ollama' && model?.availabilityState === 'unavailable';
-                      return (
-                        <>
-                    <div className="text-sm font-semibold">{entry.presetName}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">{entry.providerName} · {entry.modelName}</div>
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      {t('admin.aiPanel.purposeSummary', { purposes: formatPurposeList(entry.allowedBindingPurposes) })}
-                    </div>
-                    {presetModelUnavailable && (
-                      <div className="mt-3 flex items-center gap-2 text-sm text-status-warning">
-                        <AlertTriangle className="h-4 w-4" />
-                        {t('admin.aiPanel.messages.presetModelUnavailable', { model: entry.modelName })}
-                      </div>
-                    )}
-                    <div className="mt-3 flex justify-end">
-                      <Button size="sm" variant="outline" onClick={() => {
-                        setEditingPreset(entry);
-                        setPresetName(entry.presetName);
-                        setPresetModelId(entry.modelCatalogId);
-                        setPresetSystemPrompt(entry.systemPrompt ?? '');
-                        setPresetTemperature(entry.temperature !== undefined ? String(entry.temperature) : '');
-                        setPresetTopP(entry.topP !== undefined ? String(entry.topP) : '');
-                        setPresetMaxTokens(entry.maxOutputTokens !== undefined ? String(entry.maxOutputTokens) : '');
-                        setPresetOpen(true);
-                      }}>
-                        {t('admin.edit')}
-                      </Button>
-                    </div>
-                        </>
-                      );
-                    })()}
-                  </div>
-                ))}
-              </div>
+              </ScrollArea>
             </div>
           </div>
-        </div>
+        </>
       )}
 
       <Dialog open={credentialOpen} onOpenChange={open => { if (!open) { resetCredentialDialog(); } else { setCredentialOpen(true); } }}>

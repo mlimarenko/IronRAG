@@ -35,6 +35,13 @@ use super::{
     PreparedSegmentRevisionInfo, RankedBundleReference, turn::query_runtime_stage_label,
 };
 
+fn execution_id_of(bundle: &KnowledgeContextBundleReferenceSetRow) -> Uuid {
+    bundle
+        .bundle
+        .query_execution_id
+        .expect("invariant: context bundle always carries query_execution_id")
+}
+
 pub(crate) fn build_prepared_segment_references(
     bundle: Option<&KnowledgeContextBundleReferenceSetRow>,
     blocks: &[KnowledgeStructuredBlockRow],
@@ -45,10 +52,7 @@ pub(crate) fn build_prepared_segment_references(
     let Some(bundle) = bundle else {
         return Vec::new();
     };
-    let execution_id = bundle
-        .bundle
-        .query_execution_id
-        .expect("query context bundle must carry query_execution_id");
+    let execution_id = execution_id_of(bundle);
     let query_focus_tokens = prepared_segment_focus_tokens(query_text);
     let explicit_document_literals = explicit_document_reference_literals(query_text);
     let explicit_document_literal = match explicit_document_literals.as_slice() {
@@ -149,6 +153,51 @@ pub(crate) fn build_prepared_segment_references(
         }
     }
     limited
+}
+
+pub(crate) fn build_assistant_document_references(
+    execution_id: Uuid,
+    references: &[crate::services::query::assistant_grounding::AssistantGroundingDocumentReference],
+) -> Vec<PreparedSegmentReference> {
+    references
+        .iter()
+        .map(|reference| {
+            let revision_id = reference.revision_id.unwrap_or_else(|| {
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("assistant-grounding-revision:{}", reference.document_id).as_bytes(),
+                )
+            });
+            let segment_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!(
+                    "assistant-grounding-segment:{}:{}:{}:{}",
+                    reference.document_id,
+                    revision_id,
+                    reference.slice_start_offset,
+                    reference.slice_end_offset
+                )
+                .as_bytes(),
+            );
+            PreparedSegmentReference {
+                execution_id,
+                segment_id,
+                revision_id,
+                block_kind:
+                    crate::shared::extraction::structured_document::StructuredBlockKind::Paragraph,
+                rank: reference.rank,
+                score: 1.0,
+                heading_trail: Vec::new(),
+                section_path: (!reference.excerpt.is_empty())
+                    .then(|| vec![reference.excerpt.clone()])
+                    .unwrap_or_default(),
+                document_id: Some(reference.document_id),
+                document_title: Some(reference.document_title.clone()),
+                source_uri: reference.source_uri.clone(),
+                source_access: reference.source_access.clone(),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn append_answer_source_links(
@@ -316,10 +365,7 @@ pub(crate) fn build_technical_fact_references(
     let Some(bundle) = bundle else {
         return Vec::new();
     };
-    let execution_id = bundle
-        .bundle
-        .query_execution_id
-        .expect("query context bundle must carry query_execution_id");
+    let execution_id = execution_id_of(bundle);
     let mut items = facts
         .iter()
         .filter_map(|fact| {
@@ -365,10 +411,7 @@ pub(crate) fn parse_query_verification_warnings(
 pub(crate) fn map_chunk_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryChunkReference> {
-    let execution_id = bundle
-        .bundle
-        .query_execution_id
-        .expect("query context bundle must carry query_execution_id");
+    let execution_id = execution_id_of(bundle);
     bundle
         .chunk_references
         .iter()
@@ -384,10 +427,7 @@ pub(crate) fn map_chunk_references(
 pub(crate) fn map_entity_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryGraphNodeReference> {
-    let execution_id = bundle
-        .bundle
-        .query_execution_id
-        .expect("query context bundle must carry query_execution_id");
+    let execution_id = execution_id_of(bundle);
     bundle
         .entity_references
         .iter()
@@ -449,10 +489,7 @@ pub(crate) async fn search_pg_entity_references(
 pub(crate) fn map_relation_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryGraphEdgeReference> {
-    let execution_id = bundle
-        .bundle
-        .query_execution_id
-        .expect("query context bundle must carry query_execution_id");
+    let execution_id = execution_id_of(bundle);
     bundle
         .relation_references
         .iter()
