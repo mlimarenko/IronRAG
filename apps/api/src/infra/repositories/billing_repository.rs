@@ -60,6 +60,14 @@ pub struct BillingExecutionCostRollupRow {
     pub provider_call_count: i64,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct BillingExecutionProviderCallDescriptorRow {
+    pub owning_execution_id: Uuid,
+    pub runtime_execution_id: Option<Uuid>,
+    pub provider_kind: String,
+    pub model_name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewBillingProviderCall<'a> {
     pub workspace_id: Uuid,
@@ -221,6 +229,34 @@ pub async fn list_provider_calls_by_execution(
     )
     .bind(owning_execution_kind)
     .bind(owning_execution_id)
+    .fetch_all(postgres)
+    .await
+}
+
+pub async fn list_provider_call_descriptors_by_execution_ids(
+    postgres: &PgPool,
+    owning_execution_kind: &str,
+    owning_execution_ids: &[Uuid],
+) -> Result<Vec<BillingExecutionProviderCallDescriptorRow>, sqlx::Error> {
+    if owning_execution_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, BillingExecutionProviderCallDescriptorRow>(
+        "select
+            bpc.owning_execution_id,
+            bpc.runtime_execution_id,
+            apc.provider_kind,
+            amc.model_name
+         from billing_provider_call bpc
+         join ai_provider_catalog apc on apc.id = bpc.provider_catalog_id
+         join ai_model_catalog amc on amc.id = bpc.model_catalog_id
+         where bpc.owning_execution_kind = $1::billing_owning_execution_kind
+           and bpc.owning_execution_id = any($2)
+         order by bpc.owning_execution_id asc, bpc.started_at desc, bpc.id desc",
+    )
+    .bind(owning_execution_kind)
+    .bind(owning_execution_ids)
     .fetch_all(postgres)
     .await
 }
@@ -401,6 +437,35 @@ pub async fn get_execution_cost(
     .bind(owning_execution_kind)
     .bind(owning_execution_id)
     .fetch_optional(postgres)
+    .await
+}
+
+pub async fn list_execution_costs_by_execution_ids(
+    postgres: &PgPool,
+    owning_execution_kind: &str,
+    owning_execution_ids: &[Uuid],
+) -> Result<Vec<BillingExecutionCostRow>, sqlx::Error> {
+    if owning_execution_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, BillingExecutionCostRow>(
+        "select
+            id,
+            owning_execution_kind::text as owning_execution_kind,
+            owning_execution_id,
+            total_cost,
+            currency_code,
+            provider_call_count,
+            updated_at
+         from billing_execution_cost
+         where owning_execution_kind = $1::billing_owning_execution_kind
+           and owning_execution_id = any($2)
+         order by updated_at desc, id desc",
+    )
+    .bind(owning_execution_kind)
+    .bind(owning_execution_ids)
+    .fetch_all(postgres)
     .await
 }
 

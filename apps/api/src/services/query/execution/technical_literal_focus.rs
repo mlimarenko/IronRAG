@@ -2,41 +2,69 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
+use crate::domains::query_ir::QueryIR;
+
 use super::retrieve::score_value;
 use super::types::RuntimeMatchedChunk;
 
-pub(super) fn technical_literal_focus_keywords(question: &str) -> Vec<String> {
-    let ignored_keywords = [
-        "если",
-        "агенту",
-        "ему",
-        "какой",
-        "какие",
-        "какая",
-        "какого",
-        "какому",
-        "endpoint",
-        "url",
-        "port",
-        "порт",
-        "path",
-        "путь",
-        "пути",
-        "метод",
-        "method",
-        "использует",
-        "используют",
-        "used",
-        "uses",
-        "возвращает",
-        "получить",
-        "нужно",
-        "нужен",
-        "нужны",
-        "отдельно",
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
+/// Fallback list used only when a compiled `QueryIR` is not available at the
+/// callsite. These are generic question-framing tokens that consistently
+/// produce noisy chunk hits when no typed literal is present. Once every
+/// caller has IR in scope the fallback disappears and this list goes with it.
+const LEGACY_IGNORED_KEYWORDS: &[&str] = &[
+    "если",
+    "агенту",
+    "ему",
+    "какой",
+    "какие",
+    "какая",
+    "какого",
+    "какому",
+    "endpoint",
+    "url",
+    "port",
+    "порт",
+    "path",
+    "путь",
+    "пути",
+    "метод",
+    "method",
+    "использует",
+    "используют",
+    "used",
+    "uses",
+    "возвращает",
+    "получить",
+    "нужно",
+    "нужен",
+    "нужны",
+    "отдельно",
+];
+
+/// Extracts focus keywords for technical chunk ranking.
+///
+/// When `ir` has at least one `literal_constraint`, the filter is driven by
+/// those constraints: a token is kept iff it appears inside some quoted /
+/// typed literal the compiler already extracted. That is the strongest
+/// possible signal and dominates the legacy stop list.
+///
+/// When `ir` is `None` or carries no literal constraints (the common case
+/// for Describe / ConfigureHow / Enumerate questions), we fall back to the
+/// legacy 27-word stop list. That keeps existing non-exact-literal ranking
+/// unchanged; the stop list is a transitional contract that shrinks to zero
+/// as more of the pipeline migrates to the ontology-backed IR.
+pub(super) fn technical_literal_focus_keywords(
+    question: &str,
+    ir: Option<&QueryIR>,
+) -> Vec<String> {
+    let literal_constraints = ir
+        .map(|ir| {
+            ir.literal_constraints
+                .iter()
+                .map(|literal| literal.text.to_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .filter(|literals| !literals.is_empty());
     let mut keywords = Vec::new();
     let mut seen = HashSet::new();
     for token in question
@@ -45,7 +73,11 @@ pub(super) fn technical_literal_focus_keywords(question: &str) -> Vec<String> {
         .filter(|token| token.chars().count() >= 4)
         .map(str::to_lowercase)
     {
-        if ignored_keywords.contains(token.as_str()) {
+        let keep = match literal_constraints.as_ref() {
+            Some(literals) => literals.iter().any(|literal| literal.contains(token.as_str())),
+            None => !LEGACY_IGNORED_KEYWORDS.contains(&token.as_str()),
+        };
+        if !keep {
             continue;
         }
         if seen.insert(token.clone()) {
@@ -103,14 +135,17 @@ pub(super) fn technical_literal_focus_segments_text(question: &str) -> Vec<Strin
         .collect::<Vec<_>>()
 }
 
-pub(super) fn technical_literal_focus_keyword_segments(question: &str) -> Vec<Vec<String>> {
+pub(super) fn technical_literal_focus_keyword_segments(
+    question: &str,
+    ir: Option<&QueryIR>,
+) -> Vec<Vec<String>> {
     let segments = technical_literal_focus_segments_text(question)
         .into_iter()
-        .map(|segment| technical_literal_focus_keywords(&segment))
+        .map(|segment| technical_literal_focus_keywords(&segment, ir))
         .filter(|keywords| !keywords.is_empty())
         .collect::<Vec<_>>();
     if segments.is_empty() {
-        let fallback = technical_literal_focus_keywords(question);
+        let fallback = technical_literal_focus_keywords(question, ir);
         if fallback.is_empty() { Vec::new() } else { vec![fallback] }
     } else {
         segments
@@ -119,6 +154,7 @@ pub(super) fn technical_literal_focus_keyword_segments(question: &str) -> Vec<Ve
 
 pub(super) fn document_local_focus_keywords(
     question: &str,
+    ir: Option<&QueryIR>,
     chunks: &[&RuntimeMatchedChunk],
     question_keywords: &[String],
 ) -> Vec<String> {
@@ -132,7 +168,7 @@ pub(super) fn document_local_focus_keywords(
         .collect::<Vec<_>>()
         .join("\n")
         .to_lowercase();
-    let best_segment = technical_literal_focus_keyword_segments(question)
+    let best_segment = technical_literal_focus_keyword_segments(question, ir)
         .into_iter()
         .map(|segment_keywords| {
             let score = segment_keywords
@@ -189,6 +225,7 @@ pub(super) fn technical_chunk_selection_score(
 
 pub(super) fn select_document_balanced_chunks<'a>(
     question: &str,
+    ir: Option<&QueryIR>,
     chunks: &'a [RuntimeMatchedChunk],
     keywords: &[String],
     pagination_requested: bool,
@@ -206,7 +243,7 @@ pub(super) fn select_document_balanced_chunks<'a>(
     }
 
     for document_chunks in per_document_chunks.values_mut() {
-        let local_keywords = document_local_focus_keywords(question, document_chunks, keywords);
+        let local_keywords = document_local_focus_keywords(question, ir, document_chunks, keywords);
         document_chunks.sort_by(|left, right| {
             let left_match = technical_chunk_selection_score(
                 &format!("{} {}", left.excerpt, left.source_text),

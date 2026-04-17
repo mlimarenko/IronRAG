@@ -19,7 +19,7 @@ import type {
 const DEFAULT_AUDIT_PAGE_LIMIT = 50;
 
 export function mapToken(raw: RawTokenResponse): APIToken {
-  const scopeSummary = raw.workspaceId ? `workspace:${raw.workspaceId}` : 'system';
+  const scopeKind = raw.scope?.kind;
   return {
     id: raw.principalId ?? raw.id ?? '',
     label: raw.label ?? '',
@@ -28,11 +28,45 @@ export function mapToken(raw: RawTokenResponse): APIToken {
       raw.status === 'active' ? 'active' : raw.status === 'expired' ? 'expired' : 'revoked',
     expiresAt: raw.expiresAt ?? undefined,
     revokedAt: raw.revokedAt ?? undefined,
-    issuedBy: raw.issuedByPrincipalId ?? 'system',
+    issuedBy: raw.issuer
+      ? {
+          id: raw.issuer.principalId,
+          displayLabel: raw.issuer.displayLabel,
+        }
+      : undefined,
     lastUsedAt: raw.lastUsedAt ?? undefined,
-    grants: [],
-    scopeSummary,
-    principalLabel: raw.label ?? '',
+    scope: {
+      kind: scopeKind === 'workspace' || scopeKind === 'library' ? scopeKind : 'system',
+      workspace: raw.scope?.workspace
+        ? {
+            id: raw.scope.workspace.id,
+            displayName: raw.scope.workspace.displayName,
+          }
+        : undefined,
+      libraries: (raw.scope?.libraries ?? []).map((library) => ({
+        id: library.id,
+        workspaceId: library.workspaceId,
+        displayName: library.displayName,
+      })),
+    },
+    grants: (raw.grants ?? []).map((grant) => ({
+      resourceKind: grant.resourceKind ?? '',
+      resourceId: grant.resourceId ?? '',
+      permission: grant.permissionKind ?? '',
+      workspace: grant.workspace
+        ? {
+            id: grant.workspace.id,
+            displayName: grant.workspace.displayName,
+          }
+        : undefined,
+      library: grant.library
+        ? {
+            id: grant.library.id,
+            workspaceId: grant.library.workspaceId,
+            displayName: grant.library.displayName,
+          }
+        : undefined,
+    })),
   };
 }
 
@@ -94,6 +128,27 @@ export function mapAudit(raw: RawAuditEventResponse): AuditEvent {
     raw.resultKind === 'rejected' || raw.resultKind === 'failed'
       ? raw.resultKind
       : 'succeeded';
+  const assistantCall = raw.assistantCall
+    ? {
+        queryExecutionId: raw.assistantCall.queryExecutionId ?? '',
+        conversationId: raw.assistantCall.conversationId ?? undefined,
+        runtimeExecutionId: raw.assistantCall.runtimeExecutionId ?? undefined,
+        models: Array.isArray(raw.assistantCall.models)
+          ? raw.assistantCall.models
+              .map((model) => ({
+                providerKind: model.providerKind ?? '',
+                modelName: model.modelName ?? '',
+              }))
+              .filter((model) => model.providerKind || model.modelName)
+          : [],
+        totalCost: raw.assistantCall.totalCost ?? null,
+        currencyCode: raw.assistantCall.currencyCode ?? null,
+        providerCallCount:
+          typeof raw.assistantCall.providerCallCount === 'number'
+            ? raw.assistantCall.providerCallCount
+            : 0,
+      }
+    : undefined;
   return {
     id: raw.id,
     action: raw.actionKind ?? '',
@@ -104,6 +159,7 @@ export function mapAudit(raw: RawAuditEventResponse): AuditEvent {
     subjectSummary:
       (raw.subjects ?? []).map((s) => `${s.subjectKind}:${s.subjectId}`).join(', ') || '',
     actor: raw.actorPrincipalId ?? 'system',
+    assistantCall,
   };
 }
 

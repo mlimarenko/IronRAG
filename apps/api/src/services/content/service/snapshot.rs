@@ -100,6 +100,12 @@ const MAX_IMPORT_LINE_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncludeKind {
+    /// `catalog_workspace` row that owns the library, plus the
+    /// `ai_provider_credential`, `ai_model_preset`, `ai_binding_assignment`
+    /// rows scoped to that workspace or library. Lets a restore on a
+    /// clean stack recreate the workspace FK + inherited AI bindings
+    /// without operator hand-seeding.
+    Workspace,
     /// Everything owned by a library that is NOT a raw source file —
     /// postgres rows (content + runtime graph) and arango documents /
     /// edges (knowledge base).
@@ -119,6 +125,7 @@ impl IncludeKind {
                 continue;
             }
             let kind = match trimmed {
+                "workspace" => Self::Workspace,
                 "library_data" => Self::LibraryData,
                 "blobs" => Self::Blobs,
                 // Back-compat shims for archives written by the old
@@ -139,7 +146,8 @@ impl IncludeKind {
 
     /// Enforce dependency ordering. Blobs without LibraryData would
     /// produce orphan files with no `content_revision` row pointing
-    /// at them — rejected.
+    /// at them — rejected. `Workspace` is independent and can travel
+    /// alone (useful for cloning AI settings between stands).
     pub fn validate(kinds: &[Self]) -> anyhow::Result<()> {
         let has_library = kinds.contains(&Self::LibraryData);
         if kinds.contains(&Self::Blobs) && !has_library {
@@ -334,9 +342,18 @@ where
     //    storage_key values along the way so we can export blobs later.
     let mut summary = SnapshotSummary::default();
     let mut storage_keys: HashSet<String> = HashSet::new();
-    // catalog_library is exported implicitly as the very first pg entry
-    // whenever the caller asked for library data, so a restore recreates
-    // the row before any child table points at it.
+    // When the caller asked for the workspace scope, its rows must land
+    // in the archive BEFORE `catalog_library` so a restore can satisfy
+    // the `catalog_library.workspace_id` FK without disabling replication.
+    if include_set.contains(&IncludeKind::Workspace) {
+        let counts = export_pg_workspace_scope(&mut builder, pool, library_id).await?;
+        for (table, count) in counts {
+            summary.postgres_row_counts.insert(table, count);
+        }
+    }
+    // catalog_library is exported implicitly as the very first library
+    // pg entry whenever the caller asked for library data, so a restore
+    // recreates the row before any child table points at it.
     if include_library_data {
         let count = export_pg_catalog_library(&mut builder, pool, library_id).await?;
         summary.postgres_row_counts.insert("catalog_library".to_string(), count);
@@ -540,6 +557,84 @@ where
     buffer.push(b'\n');
     append_raw_entry(builder, "postgres/catalog_library/part-000001.ndjson", &buffer).await?;
     Ok(1)
+}
+
+/// Exports the workspace row that owns `library_id` plus the AI catalog
+/// rows scoped to that workspace or library, so an import on a clean
+/// stack satisfies `catalog_library.workspace_id` and recreates inherited
+/// AI provider credentials, presets, and bindings in one shot.
+///
+/// Intentionally does NOT include `iam_api_token` / `iam_api_token_secret`
+/// / `iam_principal` — those hashes are tied to a specific deployment
+/// secret and must be re-issued on the target stack.
+async fn export_pg_workspace_scope<W>(
+    builder: &mut Builder<W>,
+    pool: &PgPool,
+    library_id: Uuid,
+) -> anyhow::Result<Vec<(String, u64)>>
+where
+    W: AsyncWrite + Unpin + Send,
+{
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT workspace_id FROM catalog_library WHERE id = $1")
+            .bind(library_id)
+            .fetch_optional(pool)
+            .await
+            .context("load workspace id for library")?
+            .ok_or_else(|| anyhow!("library {library_id} disappeared during export"))?;
+
+    let mut counts = Vec::<(String, u64)>::new();
+
+    // 1. catalog_workspace
+    let ws_row: serde_json::Value =
+        sqlx::query_scalar("SELECT row_to_json(w)::jsonb FROM catalog_workspace w WHERE w.id = $1")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .context("load catalog_workspace row")?
+            .ok_or_else(|| anyhow!("workspace {workspace_id} disappeared during export"))?;
+    let mut buffer = serde_json::to_vec(&ws_row).context("serialize catalog_workspace row")?;
+    buffer.push(b'\n');
+    append_raw_entry(builder, "postgres/catalog_workspace/part-000001.ndjson", &buffer).await?;
+    counts.push(("catalog_workspace".to_string(), 1));
+
+    // 2. Scoped AI catalog tables. The same table may appear in the
+    //    snapshot for both `workspace` and `library` scope — the
+    //    PgBatcher at restore uses ON CONFLICT DO NOTHING so re-inserts
+    //    are safe.
+    for table in ["ai_provider_credential", "ai_model_preset", "ai_binding_assignment"] {
+        let query = format!(
+            "SELECT row_to_json(t)::jsonb AS row \
+             FROM {table} t \
+             WHERE (t.scope_kind = 'workspace' AND t.workspace_id = $1) \
+                OR (t.scope_kind = 'library' AND t.library_id = $2) \
+             ORDER BY t.id"
+        );
+        let mut stream = sqlx::query(&query).bind(workspace_id).bind(library_id).fetch(pool);
+        let mut buffer: Vec<u8> = Vec::with_capacity(CHUNK_BYTES_SOFT_CAP + 1024);
+        let mut part_no: u32 = 0;
+        let mut row_count: u64 = 0;
+        while let Some(row) = stream.next().await {
+            let row = row.with_context(|| format!("stream {table}"))?;
+            let value: serde_json::Value = row
+                .try_get::<serde_json::Value, _>("row")
+                .with_context(|| format!("decode {table} row"))?;
+            let mut line = serde_json::to_vec(&value)
+                .with_context(|| format!("serialize {table} row to ndjson"))?;
+            line.push(b'\n');
+            buffer.extend_from_slice(&line);
+            row_count += 1;
+            if buffer.len() >= CHUNK_BYTES_SOFT_CAP {
+                flush_pg_part(builder, table, &mut part_no, &mut buffer).await?;
+            }
+        }
+        if !buffer.is_empty() {
+            flush_pg_part(builder, table, &mut part_no, &mut buffer).await?;
+        }
+        counts.push((table.to_string(), row_count));
+    }
+
+    Ok(counts)
 }
 
 async fn export_pg_table<W>(
@@ -1309,8 +1404,18 @@ async fn insert_pg_rows_bulk(
         return Ok(());
     }
     let count = rows.len();
-    let sql =
-        format!("INSERT INTO {table} SELECT * FROM jsonb_populate_recordset(null::{table}, $1)");
+    // Workspace-scope tables can legitimately pre-exist on the target
+    // stack (operator has already configured AI bindings, or a prior
+    // restore from the same source ran). The snapshot is additive for
+    // these — ON CONFLICT DO NOTHING keeps existing rows untouched.
+    let on_conflict = if workspace_scope_table_allows_existing_rows(table) {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "INSERT INTO {table} SELECT * FROM jsonb_populate_recordset(null::{table}, $1){on_conflict}"
+    );
     let payload = serde_json::Value::Array(rows);
     sqlx::query(&sql)
         .bind(&payload)
@@ -1318,6 +1423,20 @@ async fn insert_pg_rows_bulk(
         .await
         .with_context(|| format!("bulk insert {count} rows into {table}"))?;
     Ok(())
+}
+
+/// Tables whose rows may already exist on the target stack (workspace
+/// scope export). Collisions on their primary keys are not errors: an
+/// already-configured row wins over the imported one, so the operator's
+/// local tweaks survive a restore.
+fn workspace_scope_table_allows_existing_rows(table: &str) -> bool {
+    matches!(
+        table,
+        "catalog_workspace"
+            | "ai_provider_credential"
+            | "ai_model_preset"
+            | "ai_binding_assignment"
+    )
 }
 
 /// Bulk-insert an Arango batch (documents or edges) as a single AQL

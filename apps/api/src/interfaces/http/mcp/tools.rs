@@ -6,7 +6,7 @@ use crate::{
         auth::AuthContext,
         authorization::{
             POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE,
-            POLICY_MCP_MEMORY_READ, POLICY_RUNTIME_READ, POLICY_WORKSPACE_ADMIN,
+            POLICY_MCP_MEMORY_READ, POLICY_QUERY_RUN, POLICY_RUNTIME_READ, POLICY_WORKSPACE_ADMIN,
         },
         router_support::ApiError,
     },
@@ -20,6 +20,7 @@ use super::{
 pub(crate) mod catalog;
 pub(crate) mod documents;
 pub(crate) mod graph;
+pub(crate) mod grounded;
 pub(crate) mod runtime;
 pub(crate) mod web_ingest;
 
@@ -70,6 +71,13 @@ pub(crate) fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
         tools.push("get_graph_topology".to_string());
         tools.push("list_relations".to_string());
         tools.push("get_communities".to_string());
+    }
+    if auth.can_read_any_library_memory(POLICY_QUERY_RUN) {
+        // Canonical grounded-answer tool. Pinned to the same
+        // `query_run` scope the UI assistant uses, so UI parity is
+        // observable at the grant level: a token that can ask
+        // questions in UI can ask them over MCP.
+        tools.push("grounded_answer".to_string());
     }
     tools
 }
@@ -130,6 +138,10 @@ pub(super) async fn handle_tools_call(
     {
         result
     } else if let Some(result) =
+        grounded::call_tool(parsed.name.as_str(), context, &parsed.arguments).await
+    {
+        result
+    } else if let Some(result) =
         runtime::call_tool(parsed.name.as_str(), context, &parsed.arguments).await
     {
         result
@@ -154,6 +166,7 @@ pub(super) async fn handle_tools_call(
 fn descriptor_for(name: &str) -> Option<McpToolDescriptor> {
     catalog::descriptor(name)
         .or_else(|| documents::descriptor(name))
+        .or_else(|| grounded::descriptor(name))
         .or_else(|| runtime::descriptor(name))
         .or_else(|| web_ingest::descriptor(name))
         .or_else(|| graph::descriptor(name))

@@ -37,7 +37,7 @@ use crate::{
         router_support::ApiError,
     },
     services::{
-        iam::audit::AppendAuditEventCommand,
+        iam::audit::{AppendAuditEventCommand, AppendQueryExecutionAuditCommand},
         query::service::{
             CreateConversationCommand, ExecuteConversationTurnCommand, QueryTurnProgressEvent,
         },
@@ -311,12 +311,7 @@ async fn create_session_turn(
             },
         )
         .await?;
-    append_query_execution_audit(
-        state.clone(),
-        auth.principal_id,
-        QueryExecutionAuditEnvelope::from(&outcome),
-    )
-    .await;
+    append_query_execution_audit(state.clone(), auth.principal_id, &outcome).await;
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
     Ok(Json(map_turn_execution_response(outcome)).into_response())
 }
@@ -730,87 +725,26 @@ const fn map_graph_edge_reference(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct QueryExecutionAuditEnvelope {
-    conversation_id: Uuid,
-    execution_id: Uuid,
-    workspace_id: Uuid,
-    library_id: Uuid,
-    context_bundle_id: Uuid,
-}
-
-impl From<&crate::services::query::service::QueryTurnExecutionResult>
-    for QueryExecutionAuditEnvelope
-{
-    fn from(value: &crate::services::query::service::QueryTurnExecutionResult) -> Self {
-        Self {
-            conversation_id: value.conversation.id,
-            execution_id: value.execution.id,
-            workspace_id: value.execution.workspace_id,
-            library_id: value.execution.library_id,
-            context_bundle_id: value.context_bundle_id,
-        }
-    }
-}
-
 async fn append_query_execution_audit(
     state: AppState,
     principal_id: Uuid,
-    outcome: QueryExecutionAuditEnvelope,
+    outcome: &crate::services::query::service::QueryTurnExecutionResult,
 ) {
-    let Ok(async_operation) = state
-        .canonical_services
-        .ops
-        .get_latest_async_operation_by_subject(&state, "query_execution", outcome.execution_id)
-        .await
-    else {
-        return;
-    };
-    let mut subjects = vec![
-        state.canonical_services.audit.query_session_subject(
-            outcome.conversation_id,
-            outcome.workspace_id,
-            outcome.library_id,
-        ),
-        state.canonical_services.audit.query_execution_subject(
-            outcome.execution_id,
-            outcome.workspace_id,
-            outcome.library_id,
-        ),
-        state.canonical_services.audit.knowledge_bundle_subject(
-            outcome.context_bundle_id,
-            outcome.workspace_id,
-            outcome.library_id,
-        ),
-    ];
-    if let Some(operation) = async_operation {
-        subjects.push(state.canonical_services.audit.async_operation_subject(
-            operation.id,
-            outcome.workspace_id,
-            outcome.library_id,
-        ));
-    }
     if let Err(error) = state
         .canonical_services
         .audit
-        .append_event(
+        .append_query_execution_event(
             &state,
-            AppendAuditEventCommand {
-                actor_principal_id: Some(principal_id),
+            AppendQueryExecutionAuditCommand {
+                actor_principal_id: principal_id,
                 surface_kind: "rest".to_string(),
-                action_kind: "query.execution.run".to_string(),
                 request_id: None,
-                trace_id: None,
-                result_kind: "succeeded".to_string(),
-                redacted_message: Some("query execution completed".to_string()),
-                internal_message: Some(format!(
-                    "principal {} executed query session {}, execution {}, bundle {}",
-                    principal_id,
-                    outcome.conversation_id,
-                    outcome.execution_id,
-                    outcome.context_bundle_id
-                )),
-                subjects,
+                query_session_id: outcome.conversation.id,
+                query_execution_id: outcome.execution.id,
+                runtime_execution_id: outcome.execution.runtime_execution_id,
+                context_bundle_id: outcome.context_bundle_id,
+                workspace_id: outcome.execution.workspace_id,
+                library_id: outcome.execution.library_id,
             },
         )
         .await
@@ -859,12 +793,7 @@ fn create_session_turn_stream(
 
         match outcome {
             Ok(outcome) => {
-                append_query_execution_audit(
-                    state_for_task.clone(),
-                    principal_id,
-                    QueryExecutionAuditEnvelope::from(&outcome),
-                )
-                .await;
+                append_query_execution_audit(state_for_task.clone(), principal_id, &outcome).await;
                 let _ = sender
                     .send(QueryTurnStreamFrame::Completed(map_turn_execution_response(outcome)));
             }

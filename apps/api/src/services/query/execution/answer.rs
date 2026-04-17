@@ -121,13 +121,13 @@ pub(crate) fn build_deterministic_technical_answer(
 
 pub(crate) fn build_deterministic_grounded_answer(
     question: &str,
+    ir: Option<&crate::domains::query_ir::QueryIR>,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     build_table_summary_grounded_answer(question, chunks)
-        .or_else(|| build_table_row_grounded_answer(question, chunks))
+        .or_else(|| build_table_row_grounded_answer(question, ir, chunks))
         .or_else(|| build_focused_document_answer(question, chunks))
-        .or_else(|| build_graph_query_language_answer(question, evidence, chunks))
         .or_else(|| build_multi_document_role_answer(question, chunks))
         .or_else(|| build_deterministic_technical_answer(question, evidence, chunks))
 }
@@ -166,49 +166,6 @@ pub(crate) fn build_missing_explicit_document_answer(
     })
 }
 
-pub(super) fn build_graph_query_language_answer(
-    question: &str,
-    evidence: &CanonicalAnswerEvidence,
-    chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
-    let lowered = question.to_lowercase();
-    if !(lowered.contains("gremlin")
-        && lowered.contains("sparql")
-        && lowered.contains("cypher")
-        && lowered.contains("2019"))
-    {
-        return None;
-    }
-
-    if chunks.is_empty() {
-        return None;
-    }
-
-    let corpus = canonical_evidence_text_corpus(evidence, chunks);
-    let mentions_graph_database = corpus.contains("graph database");
-    let mentions_gremlin = corpus.contains("gremlin");
-    let mentions_sparql = corpus.contains("sparql");
-    let mentions_cypher = corpus.contains("cypher");
-    let mentions_2019 = corpus.contains("2019") || corpus.contains("september 2019");
-    let mentions_standard = corpus.contains("gql")
-        || corpus.contains("iso/iec 39075")
-        || corpus.contains("standard graph query language");
-    if !(mentions_graph_database
-        && mentions_gremlin
-        && mentions_sparql
-        && mentions_cypher
-        && mentions_2019
-        && mentions_standard)
-    {
-        return None;
-    }
-
-    Some(
-        "The technology is the Graph database.\n\nThe standard query language proposal approved in 2019 was GQL."
-            .to_string(),
-    )
-}
-
 pub(super) fn question_prefers_russian(question: &str) -> bool {
     question.chars().any(|character| matches!(character, 'А'..='я' | 'Ё' | 'ё'))
 }
@@ -224,35 +181,6 @@ pub(crate) fn build_unsupported_capability_answer(
         }
         None => None,
     }
-}
-
-pub(crate) fn canonical_evidence_text_corpus(
-    evidence: &CanonicalAnswerEvidence,
-    chunks: &[RuntimeMatchedChunk],
-) -> String {
-    let mut parts = Vec::new();
-    parts.extend(
-        evidence
-            .chunk_rows
-            .iter()
-            .flat_map(|chunk| [chunk.content_text.as_str(), chunk.normalized_text.as_str()]),
-    );
-    parts.extend(
-        evidence
-            .structured_blocks
-            .iter()
-            .flat_map(|block| [block.text.as_str(), block.normalized_text.as_str()]),
-    );
-    parts.extend(
-        evidence
-            .technical_facts
-            .iter()
-            .flat_map(|fact| [fact.display_value.as_str(), fact.canonical_value_text.as_str()]),
-    );
-    parts.extend(
-        chunks.iter().flat_map(|chunk| [chunk.excerpt.as_str(), chunk.source_text.as_str()]),
-    );
-    parts.join("\n").to_lowercase()
 }
 
 pub(crate) fn render_canonical_technical_fact_section(
@@ -310,6 +238,7 @@ pub(crate) fn render_prepared_segment_section(
 
 pub(crate) fn render_canonical_chunk_section(
     question: &str,
+    query_ir: &crate::domains::query_ir::QueryIR,
     chunks: &[RuntimeMatchedChunk],
     suppress_tabular_detail: bool,
 ) -> String {
@@ -327,10 +256,11 @@ pub(crate) fn render_canonical_chunk_section(
     if filtered_chunks.is_empty() {
         return String::new();
     }
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let pagination_requested = question_mentions_pagination(question);
     let mut selected = select_document_balanced_chunks(
         question,
+        Some(query_ir),
         &filtered_chunks,
         &question_keywords,
         pagination_requested,

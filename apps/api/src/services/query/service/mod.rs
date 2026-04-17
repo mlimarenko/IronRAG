@@ -43,30 +43,11 @@ pub(crate) const MAX_DETAIL_TECHNICAL_FACT_REFERENCES: usize = 24;
 pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES: usize = 48;
 pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION: usize = 8;
 pub(crate) const MAX_ANSWER_SOURCE_LINKS: usize = 5;
-pub(crate) const PREPARED_SEGMENT_FOCUS_STOPWORDS: &[&str] = &[
-    "a",
-    "an",
-    "and",
-    "are",
-    "for",
-    "how",
-    "in",
-    "is",
-    "of",
-    "the",
-    "to",
-    "what",
-    "как",
-    "какая",
-    "какие",
-    "какой",
-    "по",
-    "про",
-    "такое",
-    "этой",
-    "этот",
-    "это",
-];
+/// Minimum characters a token must have to count as a focus signal for
+/// prepared-segment ranking. Replaces the 22-word EN+RU stop-word list
+/// that used to live here — a length cutoff is language-agnostic and
+/// mirrors the same approach taken in `planner.rs::TOKEN_MIN_LEN`.
+pub(crate) const PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationRuntimeContext {

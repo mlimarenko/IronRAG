@@ -23,7 +23,7 @@ pub(super) fn build_exact_url_answer(
 ) -> Option<String> {
     let intents = classify_question_intents(question);
     let url_lookup_kind = classify_exact_url_lookup(question, &intents)?;
-    if question_requests_multi_document_scope(question) {
+    if question_requests_multi_document_scope(question, None) {
         return None;
     }
     let asks_wsdl = matches!(url_lookup_kind, ExactUrlLookupKind::Wsdl);
@@ -67,7 +67,7 @@ fn select_exact_url_literal(
     wants_wsdl: bool,
 ) -> Option<ExactUrlLiteralMatch> {
     let focused_document_id = focused_answer_document_id(question, chunks);
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
     let document_labels = build_document_labels(chunks);
 
     best_matching_fact(

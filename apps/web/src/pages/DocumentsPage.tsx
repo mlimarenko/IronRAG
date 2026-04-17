@@ -218,6 +218,7 @@ export default function DocumentsPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [costMap, setCostMap] = useState<Record<string, number>>({});
+  const [libraryTotalCost, setLibraryTotalCost] = useState<number | null>(null);
 
   // Debounced search — the query string updates immediately for shareable
   // URLs, but the actual API fetch waits 300ms so keystrokes don't trigger
@@ -411,7 +412,7 @@ export default function DocumentsPage() {
         // the previous counts. They snap on the next filter change or
         // explicit reload, which is far cheaper than recomputing the
         // aggregate every 2.5 s during a long batch rerun.
-        const [page, costs] = await Promise.all([
+        const [page, costs, libraryCostSummary] = await Promise.all([
           documentsApi.list({
             libraryId: activeLibrary.id,
             limit: pageSize,
@@ -427,6 +428,11 @@ export default function DocumentsPage() {
             ? billingApi
                 .getLibraryDocumentCosts(activeLibrary.id)
                 .catch(() => [])
+            : Promise.resolve(null),
+          refreshTotal
+            ? billingApi
+                .getLibraryCostSummary(activeLibrary.id)
+                .catch(() => null)
             : Promise.resolve(null),
         ]);
         const mapped = page.items.map((raw) => mapListItem(raw, t));
@@ -458,6 +464,12 @@ export default function DocumentsPage() {
         if (refreshTotal) {
           setTotalCount(page.totalCount ?? null);
           setStatusCounts(page.statusCounts ?? null);
+          if (libraryCostSummary) {
+            const parsed = parseFloat(libraryCostSummary.totalCost);
+            if (!Number.isNaN(parsed)) {
+              setLibraryTotalCost(parsed);
+            }
+          }
         }
       } catch (err) {
         setLoadError(errorMessage(err, t("documents.failedToLoad")));
@@ -1227,11 +1239,7 @@ export default function DocumentsPage() {
     return () => window.clearInterval(id);
   }, [hasInFlightDocs]);
   const totalCountForHeader = totalCount ?? items.length;
-  const loadedCount = items.length;
-  const totalCost = useMemo(
-    () => items.reduce((sum, d) => sum + (d.cost ?? 0), 0),
-    [items],
-  );
+  const totalCost = libraryTotalCost ?? 0;
 
   const { sortBy, sortOrder } = splitSortValue(sortValue);
   const sortIcon =
@@ -1458,33 +1466,6 @@ export default function DocumentsPage() {
                   )}
                 </button>
               ))}
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">
-              {t("documents.sortLabel")}
-            </span>
-            <Select
-              value={sortValue}
-              onValueChange={(v) => onSortChange(v as SortValue)}
-            >
-              <SelectTrigger className="h-9 w-[200px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="uploaded_at:desc">
-                  {t("documents.sortUploadedDesc")}
-                </SelectItem>
-                <SelectItem value="uploaded_at:asc">
-                  {t("documents.sortUploadedAsc")}
-                </SelectItem>
-                <SelectItem value="file_name:asc">
-                  {t("documents.sortNameAsc")}
-                </SelectItem>
-                <SelectItem value="file_name:desc">
-                  {t("documents.sortNameDesc")}
-                </SelectItem>
-              </SelectContent>
-            </Select>
           </div>
           {totalCost > 0 && (
             <span className="text-xs text-muted-foreground ml-auto mr-2">

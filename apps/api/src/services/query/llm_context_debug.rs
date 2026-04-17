@@ -60,6 +60,13 @@ pub struct LlmContextSnapshot {
     pub total_iterations: usize,
     pub final_answer: Option<String>,
     pub captured_at: chrono::DateTime<chrono::Utc>,
+    /// Canonical `QueryIR` produced by `QueryCompilerService` before the
+    /// assistant loop ran. Surfaced to the debug panel as a JSON tree so
+    /// operators see act / scope / target_types / literal_constraints /
+    /// confidence that actually drove routing and verification. `None`
+    /// on records written by older code paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_ir: Option<serde_json::Value>,
 }
 
 /// Bounded FIFO cache of recent snapshots, keyed by `execution_id`.
@@ -128,6 +135,7 @@ mod tests {
             total_iterations: 0,
             final_answer: None,
             captured_at: Utc::now(),
+            query_ir: None,
         }
     }
 

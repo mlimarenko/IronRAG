@@ -32,14 +32,14 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if !question_requests_multi_document_scope(question) {
+    if !question_requests_multi_document_scope(question, None) {
         return None;
     }
     if question_blocks_endpoint_lookup(question) {
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
     if question_keywords.is_empty() {
         return None;
     }
@@ -98,13 +98,14 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if question_requests_multi_document_scope(question) || question_blocks_endpoint_lookup(question)
+    if question_requests_multi_document_scope(question, None)
+        || question_blocks_endpoint_lookup(question)
     {
         return None;
     }
 
     let focused_document_id = focused_answer_document_id(question, chunks);
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
     if question_keywords.is_empty() {
         return None;
     }
@@ -203,7 +204,7 @@ pub(super) fn select_multi_document_scope_ids(
     per_document_chunks: &HashMap<Uuid, Vec<&RuntimeMatchedChunk>>,
 ) -> Vec<Uuid> {
     let pagination_requested = question_mentions_pagination(question);
-    let focus_segments = technical_literal_focus_keyword_segments(question);
+    let focus_segments = technical_literal_focus_keyword_segments(question, None);
     if focus_segments.is_empty() {
         return ordered_document_ids.to_vec();
     }

@@ -86,7 +86,7 @@ fn build_table_row_grounded_answer_supports_canonical_row_tokens() {
         .collect::<Vec<_>>();
 
     assert_eq!(
-        build_table_row_grounded_answer("Покажи значения из первых 5 строк sample-heavy-1.xls.", &chunks),
+        build_table_row_grounded_answer("Покажи значения из первых 5 строк sample-heavy-1.xls.", None, &chunks),
         Some(
             "- Row 1: col_1 = `1`\n- Row 2: col_1 = `2`\n- Row 3: col_1 = `3`\n- Row 4: col_1 = `4`\n- Row 5: col_1 = `5`"
                 .to_string()
@@ -111,6 +111,7 @@ fn build_table_row_grounded_answer_supports_russian_industry_synonym() {
     assert_eq!(
         build_table_row_grounded_answer(
             "В organizations-100.csv какая страна и индустрия у Ferrell LLC?",
+            None,
             &chunks,
         ),
         Some("Country: `Papua New Guinea`; Industry: `Plastics`".to_string())
@@ -140,7 +141,11 @@ fn build_table_row_grounded_answer_lists_values_for_targeted_single_value_sheets
     ];
 
     assert_eq!(
-        build_table_row_grounded_answer("Какие значения есть в sample-simple-2.xls?", &chunks),
+        build_table_row_grounded_answer(
+            "Какие значения есть в sample-simple-2.xls?",
+            None,
+            &chunks
+        ),
         Some("- test1 row 1: `test1`\n- test2 row 1: `test2`".to_string())
     );
 }

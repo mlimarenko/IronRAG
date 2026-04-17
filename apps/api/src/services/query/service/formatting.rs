@@ -31,7 +31,7 @@ use crate::{
 
 use super::{
     MAX_ANSWER_SOURCE_LINKS, MAX_DETAIL_PREPARED_SEGMENT_REFERENCES,
-    MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION, PREPARED_SEGMENT_FOCUS_STOPWORDS,
+    MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION, PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN,
     PreparedSegmentRevisionInfo, RankedBundleReference, turn::query_runtime_stage_label,
 };
 
@@ -258,8 +258,7 @@ fn answer_source_link_label(reference: &PreparedSegmentReference, fallback_href:
 pub(crate) fn prepared_segment_focus_tokens(query_text: &str) -> BTreeSet<String> {
     normalize_graph_identity_component(query_text)
         .split('_')
-        .filter(|token| token.len() >= 3)
-        .filter(|token| !PREPARED_SEGMENT_FOCUS_STOPWORDS.contains(token))
+        .filter(|token| token.chars().count() >= PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN)
         .map(str::to_string)
         .collect()
 }

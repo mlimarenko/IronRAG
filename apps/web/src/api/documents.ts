@@ -459,10 +459,21 @@ export interface DocumentCostSummary {
   providerCallCount: number;
 }
 
+export interface LibraryCostSummary {
+  totalCost: string;
+  currencyCode: string;
+  documentCount: number;
+  providerCallCount: number;
+}
+
 export const billingApi = {
   getLibraryDocumentCosts: (libraryId: string) =>
     apiFetch<DocumentCostSummary[]>(
       `/billing/library-document-costs?libraryId=${libraryId}`,
+    ),
+  getLibraryCostSummary: (libraryId: string) =>
+    apiFetch<LibraryCostSummary>(
+      `/billing/library-cost-summary?libraryId=${libraryId}`,
     ),
 };
 

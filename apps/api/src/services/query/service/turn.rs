@@ -282,6 +282,7 @@ impl QueryService {
                     state,
                     library.id,
                     enriched_query_text,
+                    conversation_context.prompt_history_text.as_deref(),
                     CANONICAL_QUERY_MODE,
                     top_k,
                     command.include_debug,
@@ -428,6 +429,7 @@ impl QueryService {
                         execution.id,
                         execution_context_bundle_id,
                         &conversation_context.effective_query_text,
+                        &prepared.query_ir,
                         CANONICAL_QUERY_MODE,
                         top_k,
                         command.include_debug,
@@ -1303,6 +1305,7 @@ fn record_query_runtime_stage(
 
 pub(crate) fn query_runtime_stage_label(stage_kind: RuntimeStageKind) -> &'static str {
     match stage_kind {
+        RuntimeStageKind::Compile => "compile",
         RuntimeStageKind::Plan => "plan",
         RuntimeStageKind::Retrieve => "retrieve",
         RuntimeStageKind::Answer => "answer",

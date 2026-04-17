@@ -52,11 +52,12 @@ pub(super) fn collect_technical_literal_groups(
     }
 
     let mut groups: Vec<TechnicalLiteralDocumentGroup> = Vec::new();
-    let literal_focus_keywords = technical_literal_focus_keywords(question);
+    let literal_focus_keywords = technical_literal_focus_keywords(question, None);
     let pagination_requested = question_mentions_pagination(question);
 
     for chunk in select_document_balanced_chunks(
         question,
+        None,
         chunks,
         &literal_focus_keywords,
         pagination_requested,

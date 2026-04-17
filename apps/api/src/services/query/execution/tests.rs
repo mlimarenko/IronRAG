@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::*;
 use serde_json::json;
 
+use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
 use crate::infra::arangodb::{
     document_store::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
@@ -20,6 +21,25 @@ use crate::services::query::{
     support::RerankOutcome,
 };
 use crate::shared::extraction::text_render::repair_technical_layout_noise;
+
+/// Descriptive/lenient fallback IR for test callsites that don't care about
+/// IR-driven filtering. Matches the fallback IR produced by the
+/// `QueryCompilerService` when the model call fails.
+fn fallback_query_ir() -> QueryIR {
+    QueryIR {
+        act: QueryAct::Describe,
+        scope: QueryScope::SingleDocument,
+        language: QueryLanguage::Auto,
+        target_types: Vec::new(),
+        target_entities: Vec::new(),
+        literal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: None,
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        confidence: 0.0,
+    }
+}
 
 #[test]
 fn build_references_keeps_chunk_node_edge_order_and_ranks() {
@@ -373,6 +393,7 @@ fn build_port_answer_returns_insufficient_when_focused_document_has_no_grounded_
 fn technical_literal_focus_keyword_segments_splits_english_multi_clause_questions() {
     let segments = technical_literal_focus_keyword_segments(
         "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+        None,
     );
 
     assert!(segments.len() >= 2);
@@ -585,6 +606,7 @@ fn build_deterministic_grounded_answer_uses_exact_wsdl_literal_without_agent_loo
     };
     let answer = build_deterministic_grounded_answer(
         "Какой WSDL у inventory soap api?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -617,6 +639,7 @@ fn build_deterministic_grounded_answer_uses_endpoint_fact_without_chunk_parsing(
 
     let answer = build_deterministic_grounded_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -647,6 +670,7 @@ fn build_deterministic_grounded_answer_uses_multi_document_endpoint_facts() {
 
     let answer = build_deterministic_grounded_answer(
         "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -716,6 +740,7 @@ fn build_deterministic_grounded_answer_uses_port_fact_without_chunk_parsing() {
 
     let answer = build_deterministic_grounded_answer(
         "Какой порт использует rewards accounts rest api?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -752,6 +777,7 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
 
     let answer = build_deterministic_grounded_answer(
         "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -827,6 +853,7 @@ fn build_deterministic_grounded_answer_reports_unconfirmed_port_without_fact() {
 
     let answer = build_deterministic_grounded_answer(
         "Какой порт использует Acme Control Center?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -871,6 +898,7 @@ fn build_deterministic_grounded_answer_prefers_exact_wsdl_document_over_foreign_
 
     let answer = build_deterministic_grounded_answer(
         "Какой WSDL у inventory soap api?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -936,6 +964,7 @@ fn build_deterministic_grounded_answer_uses_parameter_meaning_from_structured_bl
     };
     let answer = build_deterministic_grounded_answer(
         "Как называется параметр pageNumber в API пагинации?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -970,6 +999,7 @@ fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despit
 
     let answer = build_deterministic_grounded_answer(
         "Есть ли параметр withCards?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1026,6 +1056,7 @@ fn build_deterministic_grounded_answer_confirms_parameter_existence() {
     let block_id = Uuid::now_v7();
     let answer = build_deterministic_grounded_answer(
         "Есть ли параметр withCards?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1068,6 +1099,7 @@ fn build_deterministic_grounded_answer_does_not_infer_wsdl_from_chunks_without_f
 
     let answer = build_deterministic_grounded_answer(
         "Какой WSDL у inventory soap api?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1095,6 +1127,7 @@ fn build_deterministic_grounded_answer_does_not_infer_single_endpoint_from_chunk
 
     let answer = build_deterministic_grounded_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1124,6 +1157,7 @@ fn build_deterministic_grounded_answer_does_not_infer_multi_document_endpoints_f
 
     let answer = build_deterministic_grounded_answer(
         "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1165,6 +1199,7 @@ fn build_deterministic_grounded_answer_does_not_infer_parameter_from_chunks_with
 
     let answer = build_deterministic_grounded_answer(
         "Есть ли параметр withCards?",
+        None,
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1779,16 +1814,20 @@ fn question_mentions_port_does_not_match_report_word() {
 #[test]
 fn question_requests_multi_document_scope_detects_role_pairing_questions() {
     assert!(question_requests_multi_document_scope(
-        "If a system needs retrieval from external documents before answering and also semantic similarity over embeddings, which two technologies from this corpus fit those roles?"
+        "If a system needs retrieval from external documents before answering and also semantic similarity over embeddings, which two technologies from this corpus fit those roles?",
+        None,
     ));
     assert!(question_requests_multi_document_scope(
-        "Which technology in this corpus focuses on making Internet data machine-readable through standards like RDF and OWL, and which one stores interlinked descriptions of entities and concepts?"
+        "Which technology in this corpus focuses on making Internet data machine-readable through standards like RDF and OWL, and which one stores interlinked descriptions of entities and concepts?",
+        None,
     ));
     assert!(question_requests_multi_document_scope(
-        "Чем REST API rewards accounts отличается от inventory wsdl в транспортном контракте?"
+        "Чем REST API rewards accounts отличается от inventory wsdl в транспортном контракте?",
+        None,
     ));
     assert!(question_requests_multi_document_scope(
-        "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?"
+        "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?",
+        None,
     ));
 }
 
@@ -1856,6 +1895,7 @@ fn build_canonical_answer_context_limits_sections_to_focused_document() {
 
     let context = build_canonical_answer_context(
         "Which search engines and assistants or services are named as examples in the knowledge graph article?",
+        &fallback_query_ir(),
         None,
         &CanonicalAnswerEvidence {
             bundle: None,
@@ -1948,6 +1988,7 @@ fn render_canonical_chunk_section_uses_longer_question_focused_source_excerpt() 
     let document_id = Uuid::now_v7();
     let section = render_canonical_chunk_section(
             "Which search engines and assistants or services are named as examples in the knowledge graph article?",
+            &fallback_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 document_id,
@@ -2131,6 +2172,7 @@ fn canonical_preflight_answer_prefers_missing_explicit_document_before_other_pat
 
     let answer = build_canonical_preflight_answer(
         "Что сказано в missing-contract.md?",
+        None,
         &QueryIntentProfile::default(),
         &document_index,
         Some("table answer".to_string()),
@@ -2173,6 +2215,7 @@ fn canonical_preflight_answer_reuses_graphql_absence_override_for_live_path() {
 
     let answer = build_canonical_preflight_answer(
         "Есть ли в этой библиотеке GraphQL API?",
+        None,
         &QueryIntentProfile {
             exact_literal_technical: true,
             unsupported_capability: Some(UnsupportedCapabilityIntent::GraphQlApi),
@@ -2214,6 +2257,7 @@ fn canonical_preflight_answer_reuses_single_endpoint_override_for_live_path() {
     let revision_id = Uuid::now_v7();
     let answer = build_canonical_preflight_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        None,
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         &document_index,
         None,
@@ -2274,6 +2318,7 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
     let revision_id = Uuid::now_v7();
     let answer = build_canonical_preflight_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        None,
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         &document_index,
         None,
@@ -2709,7 +2754,7 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
         ],
         detect_technical_literal_intent(question),
         8,
-        &technical_literal_focus_keywords(question),
+        &technical_literal_focus_keywords(question, None),
         question_mentions_pagination(question),
     );
 
@@ -2751,7 +2796,7 @@ fn select_technical_literal_chunks_prefers_matching_wsdl_document_for_single_sou
         ],
         detect_technical_literal_intent(question),
         8,
-        &technical_literal_focus_keywords(question),
+        &technical_literal_focus_keywords(question, None),
         question_mentions_pagination(question),
     );
 
@@ -2937,6 +2982,7 @@ fn canonical_preflight_answer_uses_literal_scoped_evidence_for_parameter_questio
 
     let answer = build_canonical_preflight_answer(
         "Как называется параметр pageNumber в API пагинации?",
+        None,
         &profile,
         &document_index,
         None,
@@ -3090,6 +3136,7 @@ fn canonical_preflight_answer_handles_english_transport_comparison_without_graph
     let question = "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?";
     let answer = build_canonical_preflight_answer(
         question,
+        None,
         &QueryIntentProfile::default(),
         &document_index,
         None,
@@ -3312,80 +3359,10 @@ fn build_focused_document_answer_does_not_answer_semantic_ocr_conversion_questio
     assert!(answer.is_none());
 }
 
-#[test]
-fn build_graph_query_language_answer_requires_grounded_standard_literal() {
-    let question = "Which technology in this corpus mentions Gremlin, SPARQL, and Cypher, and what standard query language proposal was approved in 2019?";
-    let chunks = [RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            document_label: "graph_database_wikipedia.md".to_string(),
-            excerpt: "Early standardization efforts led to Gremlin, SPARQL, and Cypher."
-                .to_string(),
-            score: Some(1.0),
-            source_text: "Early standardization efforts led to multi-vendor query languages like Gremlin, SPARQL, and Cypher."
-                .to_string(),
-        }];
-
-    let answer = build_graph_query_language_answer(
-        question,
-        &CanonicalAnswerEvidence {
-            bundle: None,
-            chunk_rows: Vec::new(),
-            structured_blocks: Vec::new(),
-            technical_facts: Vec::new(),
-        },
-        &chunks,
-    );
-
-    assert!(answer.is_none());
-}
-
-#[test]
-fn verify_answer_rejects_unsupported_graph_query_language_claims() {
-    let verification = verify_answer_against_canonical_evidence(
-            "Which technology in this corpus mentions Gremlin, SPARQL, and Cypher, and what standard query language proposal was approved in 2019?",
-            "The technology is the Graph database. The standard query language proposal approved in 2019 was GQL.",
-            &QueryIntentProfile::default(),
-            &CanonicalAnswerEvidence {
-                bundle: None,
-                chunk_rows: vec![KnowledgeChunkRow {
-                    key: Uuid::now_v7().to_string(),
-                    arango_id: None,
-                    arango_rev: None,
-                    chunk_id: Uuid::now_v7(),
-                    workspace_id: Uuid::now_v7(),
-                    library_id: Uuid::now_v7(),
-                    document_id: Uuid::now_v7(),
-                    revision_id: Uuid::now_v7(),
-                    chunk_index: 0,
-                    chunk_kind: Some("paragraph".to_string()),
-                    content_text: "Early standardization efforts led to multi-vendor query languages like Gremlin, SPARQL, and Cypher.".to_string(),
-                    normalized_text: "Early standardization efforts led to multi-vendor query languages like Gremlin, SPARQL, and Cypher.".to_string(),
-                    span_start: Some(0),
-                    span_end: Some(90),
-                    token_count: Some(12),
-                    support_block_ids: vec![],
-                    section_path: vec![],
-                    heading_trail: vec![],
-                    literal_digest: None,
-                    chunk_state: "active".to_string(),
-                    text_generation: Some(1),
-                    vector_generation: Some(1),
-                    quality_score: None,
-                }],
-                structured_blocks: Vec::new(),
-                technical_facts: Vec::new(),
-            },
-            &[],
-            "",
-            &AssistantGroundingEvidence::default(),
-        );
-
-    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
-    assert!(
-        verification.warnings.iter().any(|warning| warning.code == "unsupported_canonical_claim")
-    );
-}
+// Removed with question_specific_verification_warnings — the hardcoded
+// gremlin/sparql/cypher/2019 branch no longer exists; grounding for such
+// claims runs through QueryIR.verification_level() + the generic
+// unsupported_literal path.
 
 #[test]
 fn apply_rerank_outcome_reorders_bundle_before_final_truncation() {

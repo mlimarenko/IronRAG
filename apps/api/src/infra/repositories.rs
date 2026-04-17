@@ -32,6 +32,8 @@ pub mod ingest_repository;
 #[allow(clippy::missing_errors_doc)]
 pub mod ops_repository;
 #[allow(clippy::missing_errors_doc)]
+pub mod query_ir_cache_repository;
+#[allow(clippy::missing_errors_doc)]
 pub mod query_repository;
 mod runtime_graph_repository;
 mod runtime_graph_summary_repository;

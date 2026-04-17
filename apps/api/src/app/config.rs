@@ -120,6 +120,8 @@ pub struct Settings {
     pub ui_bootstrap_extract_graph_model_name: Option<String>,
     pub ui_bootstrap_embed_chunk_provider_kind: Option<String>,
     pub ui_bootstrap_embed_chunk_model_name: Option<String>,
+    pub ui_bootstrap_query_compile_provider_kind: Option<String>,
+    pub ui_bootstrap_query_compile_model_name: Option<String>,
     pub ui_bootstrap_query_answer_provider_kind: Option<String>,
     pub ui_bootstrap_query_answer_model_name: Option<String>,
     pub ui_bootstrap_vision_provider_kind: Option<String>,
@@ -384,6 +386,11 @@ impl Settings {
                 "embed_chunk",
                 self.ui_bootstrap_embed_chunk_provider_kind.as_deref(),
                 self.ui_bootstrap_embed_chunk_model_name.as_deref(),
+            ),
+            resolved_ui_bootstrap_ai_binding_default(
+                "query_compile",
+                self.ui_bootstrap_query_compile_provider_kind.as_deref(),
+                self.ui_bootstrap_query_compile_model_name.as_deref(),
             ),
             resolved_ui_bootstrap_ai_binding_default(
                 "query_answer",

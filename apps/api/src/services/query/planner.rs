@@ -7,42 +7,13 @@ use crate::domains::query::{QueryPlanningMetadata, RuntimeQueryMode};
 const MAX_TOP_K: usize = 48;
 const DEFAULT_TOP_K: usize = 8;
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 22_000;
-const STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "are", "for", "from", "into", "that", "the", "this", "what", "which", "with",
-    "your", "about", "there", "their", "have", "will", "would", "should", "could", "does", "how",
-    "when", "where", "why", "can", "not", "all", "each", "every", "than", "then", "also", "but",
-    "only", "just", "like", "such", "its", "been", "being", "between", "both", "same", "other",
-    "more", "most", "very", "some", "any", "many", "much", "own", "out", "here", "one", "two",
-];
-
-/// Known synonym groups for query expansion. Each group maps related terms so that
-/// searching for one term also considers the others.
-const SYNONYM_GROUPS: &[&[&str]] = &[
-    &["authentication", "auth", "login", "signin", "oauth", "oidc"],
-    &["authorization", "authz", "permission", "rbac", "acl"],
-    &["database", "db", "datastore", "storage"],
-    &["kubernetes", "k8s"],
-    &["postgresql", "postgres", "pg"],
-    &["javascript", "js", "ecmascript"],
-    &["typescript", "ts"],
-    &["container", "docker", "containerization"],
-    &["endpoint", "route", "path", "url", "uri"],
-    &["api", "rest", "restful", "web service"],
-    &["configuration", "config", "settings", "setup"],
-    &["deployment", "deploy", "rollout", "release"],
-    &["environment", "env", "environment variable"],
-    &["dependency", "dependencies", "dep", "deps"],
-    &["function", "method", "procedure", "fn"],
-    &["error", "exception", "failure", "fault"],
-    &["monitor", "monitoring", "observability", "metrics"],
-    &["secret", "credential", "password", "token", "key"],
-    &["network", "networking", "connectivity", "dns"],
-    &["volume", "storage", "persistent", "disk"],
-    &["scaling", "autoscaling", "autoscaler", "replica"],
-    &["encryption", "tls", "ssl", "https", "cipher"],
-    &["message", "messaging", "queue", "broker", "kafka", "rabbitmq"],
-    &["cache", "caching", "redis", "memcached"],
-];
+/// Minimum token length after stripping punctuation. Tokens shorter than
+/// this are almost always articles / particles / single letters that
+/// carry zero retrieval signal across any language we serve ("a", "и",
+/// "by"). This replaces the English-only STOP_WORDS list that used to
+/// live here — a length cutoff is language-agnostic and doesn't
+/// hardcode a lexicon.
+const TOKEN_MIN_LEN: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,9 +96,8 @@ pub fn extract_keywords(question: &str) -> Vec<String> {
     question
         .split_whitespace()
         .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric()))
-        .filter(|token| token.len() > 2)
+        .filter(|token| token.chars().count() >= TOKEN_MIN_LEN)
         .map(str::to_ascii_lowercase)
-        .filter(|token| !STOP_WORDS.contains(&token.as_str()))
         .filter(|token| seen.insert(token.clone()))
         .collect()
 }
@@ -364,8 +334,7 @@ pub fn extract_keywords_preserving_case(question: &str) -> Vec<String> {
     question
         .split_whitespace()
         .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.'))
-        .filter(|token| token.len() > 2)
-        .filter(|token| !STOP_WORDS.contains(&token.to_ascii_lowercase().as_str()))
+        .filter(|token| token.chars().count() >= TOKEN_MIN_LEN)
         .filter(|token| seen.insert(token.to_ascii_lowercase()))
         .map(|token| token.to_string())
         .collect()
@@ -417,28 +386,19 @@ fn split_keywords(keywords: &[String]) -> (Vec<String>, Vec<String>) {
 }
 
 /// Expands the keyword set with synonyms from known synonym groups.
+/// Keyword expansion used to rewrite queries through a hardcoded
+/// synonym table (auth/oauth, db/database, k8s/kubernetes, …). Removed
+/// when the IR layer landed — the compiled `QueryIR.target_types` now
+/// ties synonyms together through a shared ontology tag (all of these
+/// words map to the same `"auth"` / `"database"` / `"orchestrator"`
+/// tag in Arango), so query expansion is no longer the right place
+/// for this. Kept as an identity function so existing callers still
+/// compile and retrieval still receives the raw keyword list; the
+/// expansion step will be deleted entirely in the next consumer
+/// migration PR.
 #[must_use]
 pub fn expand_keywords_with_synonyms(keywords: &[String]) -> Vec<String> {
-    let mut expanded = BTreeSet::new();
-    for keyword in keywords {
-        expanded.insert(keyword.clone());
-    }
-
-    for keyword in keywords {
-        let lowered = keyword.to_ascii_lowercase();
-        for group in SYNONYM_GROUPS {
-            if group.iter().any(|syn| *syn == lowered) {
-                for synonym in *group {
-                    let syn_str = (*synonym).to_string();
-                    if !keywords.iter().any(|k| k.to_ascii_lowercase() == syn_str) {
-                        expanded.insert(syn_str);
-                    }
-                }
-            }
-        }
-    }
-
-    expanded.into_iter().collect()
+    keywords.to_vec()
 }
 
 fn contains_any(question: &str, fragments: &[&str]) -> bool {
@@ -450,11 +410,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_keywords_deduplicates_and_skips_stop_words() {
-        assert_eq!(
-            extract_keywords("What themes and themes connect the documents?"),
-            vec!["themes".to_string(), "connect".to_string(), "documents".to_string()]
-        );
+    fn extract_keywords_deduplicates_and_filters_short_tokens() {
+        // The old STOP_WORDS list was replaced with a language-agnostic
+        // minimum token length (TOKEN_MIN_LEN=3). Tokens like "and"
+        // pass the length check now — that is intentional: the IR
+        // compiler handles routing semantics, not raw keyword lists.
+        let keywords = extract_keywords("What themes and themes connect the documents?");
+        assert!(keywords.contains(&"themes".to_string()));
+        assert!(keywords.contains(&"connect".to_string()));
+        assert!(keywords.contains(&"documents".to_string()));
+        // Duplicates still collapse.
+        assert_eq!(keywords.iter().filter(|k| *k == "themes").count(), 1);
     }
 
     #[test]
@@ -535,37 +501,21 @@ mod tests {
     }
 
     #[test]
-    fn expand_keywords_adds_synonyms() {
+    fn expand_keywords_is_identity_after_ontology_migration() {
+        // The old SYNONYM_GROUPS table is gone — synonyms now live as
+        // shared `target_types` ontology tags produced by QueryCompiler.
+        // The expansion helper is kept as an identity function so the
+        // rest of the pipeline still compiles; see function docstring.
         let keywords = vec!["auth".to_string(), "database".to_string()];
         let expanded = expand_keywords_with_synonyms(&keywords);
-
-        assert!(expanded.contains(&"auth".to_string()));
-        assert!(expanded.contains(&"database".to_string()));
-        // Auth synonyms
-        assert!(expanded.contains(&"authentication".to_string()));
-        assert!(expanded.contains(&"login".to_string()));
-        // Database synonyms
-        assert!(expanded.contains(&"db".to_string()));
-        assert!(expanded.contains(&"datastore".to_string()));
+        assert_eq!(expanded, keywords);
     }
 
     #[test]
-    fn expand_keywords_preserves_originals_without_synonyms() {
+    fn expand_keywords_preserves_originals() {
         let keywords = vec!["foobar".to_string(), "xyzzy".to_string()];
         let expanded = expand_keywords_with_synonyms(&keywords);
-
-        assert_eq!(expanded.len(), 2);
-        assert!(expanded.contains(&"foobar".to_string()));
-        assert!(expanded.contains(&"xyzzy".to_string()));
-    }
-
-    #[test]
-    fn query_plan_includes_expanded_keywords() {
-        let plan = build_query_plan("How does Kubernetes handle secrets?", None, None, None);
-
-        assert!(plan.keywords.contains(&"kubernetes".to_string()));
-        assert!(plan.expanded_keywords.contains(&"k8s".to_string()));
-        assert!(plan.expanded_keywords.contains(&"kubernetes".to_string()));
+        assert_eq!(expanded, keywords);
     }
 
     #[test]

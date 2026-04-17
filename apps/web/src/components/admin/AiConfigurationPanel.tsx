@@ -40,7 +40,13 @@ type BindingResolution = {
 
 type CredentialModelLoadState = 'loading' | 'ready' | 'failed';
 
-const PURPOSE_ORDER: AIPurpose[] = ['extract_graph', 'embed_chunk', 'query_answer', 'vision'];
+const PURPOSE_ORDER: AIPurpose[] = [
+  'extract_graph',
+  'embed_chunk',
+  'query_compile',
+  'query_answer',
+  'vision',
+];
 
 function purposeTranslationKey(value: AIPurpose) {
   return `admin.aiPanel.purposeLabels.${value}` as const;

@@ -56,7 +56,7 @@ pub(super) fn build_transport_contract_comparison_answer(
     if !question_asks_transport_comparison(question) {
         return None;
     }
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
 
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();

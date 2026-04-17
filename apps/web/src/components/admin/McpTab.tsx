@@ -16,33 +16,43 @@ type McpClientConfig = {
   config: string;
 };
 
+// All snippets assume the MCP Streamable HTTP transport (spec 2025-06-18)
+// that IronRAG now speaks natively. No stdio proxy, no bespoke SSE
+// endpoint — just the canonical `POST/GET/DELETE /v1/mcp` URL plus a
+// bearer token. `${IRONRAG_MCP_TOKEN}` placeholder reminds operators to
+// store the token in an env var, not inline in their dotfile.
 function getMcpConfigs(origin: string): McpClientConfig[] {
   const mcpUrl = `${origin}/v1/mcp`;
   return [
     {
-      name: 'Codex',
-      icon: Terminal,
-      config: `{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}`,
-    },
-    {
-      name: 'Cursor',
-      icon: Code2,
-      config: `// .cursor/mcp.json\n{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}`,
-    },
-    {
       name: 'Claude Code',
       icon: Terminal,
-      config: `claude mcp add ironrag -- \\\n  npx @anthropic-ai/mcp-proxy@latest \\\n  "${mcpUrl}"`,
+      config: `claude mcp add ironrag ${mcpUrl} \\\n  --transport http \\\n  --header "Authorization: Bearer $IRONRAG_MCP_TOKEN"`,
     },
     {
       name: 'Claude Desktop',
       icon: Brain,
-      config: `{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}`,
+      config: `{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "headers": {\n        "Authorization": "Bearer \${IRONRAG_MCP_TOKEN}"\n      }\n    }\n  }\n}`,
+    },
+    {
+      name: 'Cursor',
+      icon: Code2,
+      config: `// .cursor/mcp.json\n{\n  "mcpServers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "headers": {\n        "Authorization": "Bearer \${env:IRONRAG_MCP_TOKEN}"\n      }\n    }\n  }\n}`,
+    },
+    {
+      name: 'Codex',
+      icon: Terminal,
+      config: `# ~/.codex/config.toml\n[mcp_servers.ironrag]\nurl = "${mcpUrl}"\nbearer_token_env_var = "IRONRAG_MCP_TOKEN"`,
     },
     {
       name: 'VS Code',
       icon: Code2,
-      config: `// .vscode/settings.json\n{\n  "mcp.servers": {\n    "ironrag": {\n      "url": "${mcpUrl}",\n      "env": { "IRONRAG_MCP_TOKEN": "<your-token>" }\n    }\n  }\n}`,
+      config: `// .vscode/mcp.json\n{\n  "servers": {\n    "ironrag": {\n      "type": "http",\n      "url": "${mcpUrl}",\n      "headers": {\n        "Authorization": "Bearer \${env:IRONRAG_MCP_TOKEN}"\n      }\n    }\n  }\n}`,
+    },
+    {
+      name: 'OpenClaw',
+      icon: Terminal,
+      config: `openclaw mcp set ironrag '{"url":"${mcpUrl}","headers":{"Authorization":"Bearer $IRONRAG_MCP_TOKEN"}}'`,
     },
   ];
 }
@@ -83,7 +93,7 @@ export function McpTab({ t, activeLibraryId, active }: McpTabProps) {
         <h2 className="text-base font-bold tracking-tight">{t('admin.mcpTitle')}</h2>
         <p className="text-sm text-muted-foreground mt-1">{t('admin.mcpDesc')}</p>
       </div>
-      <div className="grid grid-cols-2 gap-3 mb-6 text-xs">
+      <div className="grid grid-cols-2 gap-3 mb-4 text-xs">
         <div className="workbench-surface p-4">
           <div className="section-label mb-1.5">{t('admin.mcpServerUrl')}</div>
           <code className="font-mono text-xs font-bold">{origin}/v1/mcp</code>
@@ -92,6 +102,10 @@ export function McpTab({ t, activeLibraryId, active }: McpTabProps) {
           <div className="section-label mb-1.5">{t('admin.capabilitiesProbe')}</div>
           <code className="font-mono text-xs font-bold">{origin}/v1/mcp/capabilities</code>
         </div>
+      </div>
+      <div className="workbench-surface p-4 mb-6 text-xs leading-relaxed">
+        <div className="section-label mb-1.5">{t('admin.mcpParityTitle')}</div>
+        <p className="text-muted-foreground">{t('admin.mcpParityDesc')}</p>
       </div>
       <div className="workbench-surface p-4 mb-4">
         <div className="flex items-center justify-between mb-2">

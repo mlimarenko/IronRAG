@@ -38,6 +38,8 @@ fn sample_settings() -> Settings {
         ui_bootstrap_extract_graph_model_name: None,
         ui_bootstrap_embed_chunk_provider_kind: None,
         ui_bootstrap_embed_chunk_model_name: None,
+        ui_bootstrap_query_compile_provider_kind: None,
+        ui_bootstrap_query_compile_model_name: None,
         ui_bootstrap_query_answer_provider_kind: None,
         ui_bootstrap_query_answer_model_name: None,
         ui_bootstrap_vision_provider_kind: None,
@@ -308,6 +310,8 @@ fn resolved_ui_bootstrap_ai_exposes_binding_defaults_without_provider_credential
     settings.ui_bootstrap_extract_graph_model_name = Some(" deepseek-chat ".into());
     settings.ui_bootstrap_embed_chunk_provider_kind = Some(" openai ".into());
     settings.ui_bootstrap_embed_chunk_model_name = Some(" text-embedding-3-large ".into());
+    settings.ui_bootstrap_query_compile_provider_kind = Some(" openai ".into());
+    settings.ui_bootstrap_query_compile_model_name = Some(" gpt-5.4-mini ".into());
     settings.ui_bootstrap_query_answer_provider_kind = Some(" openai ".into());
     settings.ui_bootstrap_query_answer_model_name = Some(" gpt-5.4 ".into());
     settings.ui_bootstrap_vision_provider_kind = Some(" openai ".into());
@@ -327,6 +331,11 @@ fn resolved_ui_bootstrap_ai_exposes_binding_defaults_without_provider_credential
                     binding_purpose: "embed_chunk".into(),
                     provider_kind: Some("openai".into()),
                     model_name: Some("text-embedding-3-large".into()),
+                },
+                UiBootstrapAiBindingDefault {
+                    binding_purpose: "query_compile".into(),
+                    provider_kind: Some("openai".into()),
+                    model_name: Some("gpt-5.4-mini".into()),
                 },
                 UiBootstrapAiBindingDefault {
                     binding_purpose: "query_answer".into(),

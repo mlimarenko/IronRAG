@@ -1161,8 +1161,28 @@ async fn run_canonical_ingest_pipeline(
         }
     }
 
-    // --- Entity resolution (post-graph) ---
-    if graph_ready {
+    // --- Graph maintenance (entity resolution + community detection) ---
+    //
+    // Entity resolution walks O(nodes) comparing pairs, community
+    // detection runs label-propagation over O(nodes + edges), and
+    // `generate_community_summaries` does one LLM call per community.
+    // On a mid-sized library one pass is a few CPU-seconds plus a
+    // handful of LLM round-trips.
+    //
+    // Without the throttle below, these three ran at the end of every
+    // single ingest job — under a burst of parallel workers each
+    // finishing job kicked another full-library pass while the previous
+    // one was still running, and the maintenance loop became the
+    // dominant CPU sink instead of the actual extract/merge work.
+    //
+    // The work is idempotent and library-wide, so compressing a burst
+    // of finalising jobs into one maintenance pass per library per
+    // interval is safe. `try_acquire_graph_maintenance_slot` gives us
+    // exactly that: the first job to finish in a window claims the
+    // pass, the rest skip the block entirely.
+    if graph_ready
+        && crate::services::graph::maintenance::try_acquire_graph_maintenance_slot(job.library_id)
+    {
         if let Err(error) = crate::services::graph::entity_resolution::resolve_after_ingestion(
             state,
             job.library_id,
@@ -1171,10 +1191,7 @@ async fn run_canonical_ingest_pipeline(
         {
             tracing::warn!(library_id = %job.library_id, ?error, "entity resolution failed, continuing");
         }
-    }
 
-    // --- Community detection (post entity-resolution) ---
-    if graph_ready {
         if let Err(error) = crate::services::graph::community_detection::detect_after_ingestion(
             state,
             job.library_id,
@@ -1193,6 +1210,38 @@ async fn run_canonical_ingest_pipeline(
             .await
         {
             tracing::warn!(library_id = %job.library_id, ?error, "community summary generation failed, continuing");
+        }
+    } else if graph_ready {
+        tracing::debug!(
+            library_id = %job.library_id,
+            "graph maintenance skipped — another ingest job already ran the pass in this window"
+        );
+    }
+
+    // --- Graph backfill (self-healing pass for failed extract_graph stages) ---
+    //
+    // When `extract_graph` fails at the stage level (canonical 600s timeout,
+    // projection write failure, cancellation) but individual chunk
+    // extractions already persisted `ready` rows in `runtime_graph_extraction`,
+    // this job's `reconcile_revision_graph` never runs — the document's
+    // entities sit ready in Postgres but never become graph nodes. The
+    // dashboard then shows the doc as "readable" while the graph viewer
+    // never learns it exists.
+    //
+    // Run regardless of the current job's `graph_ready` flag — the backfill
+    // target is the set of ALL library documents that got stuck, not
+    // whatever the current job produced. A dedicated 60s slot stops a
+    // queue burst from replaying the same pass in a tight loop.
+    if crate::services::graph::backfill::try_acquire_graph_backfill_slot(job.library_id) {
+        if let Err(error) =
+            crate::services::graph::backfill::run_library_graph_backfill(state, job.library_id)
+                .await
+        {
+            tracing::warn!(
+                library_id = %job.library_id,
+                ?error,
+                "graph backfill pass failed, continuing"
+            );
         }
     }
 

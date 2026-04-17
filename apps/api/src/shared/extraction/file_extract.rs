@@ -1055,11 +1055,7 @@ mod tests {
     #[test]
     fn still_rejects_explicit_unsupported_mime_type() {
         assert_eq!(
-            detect_upload_file_kind(
-                Some("clip.mp4"),
-                Some("video/mp4"),
-                b"plain text payload\n",
-            ),
+            detect_upload_file_kind(Some("clip.mp4"), Some("video/mp4"), b"plain text payload\n",),
             UploadFileKind::Binary
         );
     }

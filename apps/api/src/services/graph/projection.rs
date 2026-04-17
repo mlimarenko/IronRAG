@@ -150,10 +150,25 @@ pub async fn project_canonical_graph(
     state: &AppState,
     scope: &GraphProjectionScope,
 ) -> anyhow::Result<GraphProjectionOutcome> {
-    synchronize_projection_support_counts(state, scope).await?;
+    // `synchronize_projection_support_counts` runs three library-wide
+    // sweeps (recalculate support counts, prune zero-support edges,
+    // prune zero-support nodes). On a mid-sized graph (27k edges / 10k
+    // nodes / 37k canonical summaries) that sweep costs ~5s. Running
+    // it after **every** chunk merge is O(chunks × graph-size) and
+    // dominates worker throughput — a 147-job queue that used to drain
+    // in ~15s per doc stretches to >10 min because each chunk redoes
+    // the full-library walk.
+    //
+    // For a targeted refresh (one chunk's contribution) the incident
+    // nodes/edges we just upserted cannot create new zero-support
+    // orphans anywhere OUTSIDE their own subgraph — support counts
+    // only drop when a source_truth_version is superseded, and that
+    // happens during full projections. So the sync is safe to skip on
+    // targeted paths and run only on full rebuilds.
     if scope.is_targeted_refresh() {
         return project_targeted_canonical_graph(state, scope).await;
     }
+    synchronize_projection_support_counts(state, scope).await?;
     let nodes = repositories::list_admitted_runtime_graph_nodes_by_library(
         &state.persistence.postgres,
         scope.library_id,

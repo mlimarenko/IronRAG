@@ -11,6 +11,7 @@ pub enum AiBindingPurpose {
     ExtractText,
     ExtractGraph,
     EmbedChunk,
+    QueryCompile,
     QueryRetrieve,
     QueryAnswer,
     Vision,
@@ -23,6 +24,7 @@ impl AiBindingPurpose {
             Self::ExtractText => "extract_text",
             Self::ExtractGraph => "extract_graph",
             Self::EmbedChunk => "embed_chunk",
+            Self::QueryCompile => "query_compile",
             Self::QueryRetrieve => "query_retrieve",
             Self::QueryAnswer => "query_answer",
             Self::Vision => "vision",
@@ -32,12 +34,30 @@ impl AiBindingPurpose {
     #[must_use]
     pub const fn for_runtime_task_kind(task_kind: RuntimeTaskKind) -> Option<Self> {
         match task_kind {
+            RuntimeTaskKind::QueryCompile => Some(Self::QueryCompile),
             RuntimeTaskKind::QueryPlan
             | RuntimeTaskKind::QueryAnswer
             | RuntimeTaskKind::QueryVerify => Some(Self::QueryAnswer),
             RuntimeTaskKind::QueryRerank => Some(Self::QueryRetrieve),
             RuntimeTaskKind::GraphExtract => Some(Self::ExtractGraph),
             RuntimeTaskKind::StructuredPrepare | RuntimeTaskKind::TechnicalFactExtract => None,
+        }
+    }
+}
+
+impl std::str::FromStr for AiBindingPurpose {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "extract_text" => Ok(Self::ExtractText),
+            "extract_graph" => Ok(Self::ExtractGraph),
+            "embed_chunk" => Ok(Self::EmbedChunk),
+            "query_compile" => Ok(Self::QueryCompile),
+            "query_retrieve" => Ok(Self::QueryRetrieve),
+            "query_answer" => Ok(Self::QueryAnswer),
+            "vision" => Ok(Self::Vision),
+            other => Err(format!("unsupported AI binding purpose: {other}")),
         }
     }
 }

@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
+    domains::query_ir::QueryIR,
     infra::arangodb::{
         collections::KNOWLEDGE_CHUNK_COLLECTION,
         document_store::KnowledgeChunkRow,
@@ -61,20 +62,21 @@ impl SearchService {
         Self
     }
 
-    #[must_use]
-    pub fn is_exact_literal_technical_query(&self, query: &str) -> bool {
-        exact_literal_technical_query(query)
-    }
-
     pub async fn search_query_evidence(
         &self,
         state: &AppState,
         library_id: Uuid,
         query: &str,
+        query_ir: &QueryIR,
         limit: usize,
     ) -> Result<QueryEvidenceSearchResult> {
         let normalized_limit = limit.max(1);
-        let exact_literal_bias = self.is_exact_literal_technical_query(query);
+        // Bias fact retrieval for exact-literal technical asks (known URLs /
+        // paths / ports / config keys). Signal comes straight from the
+        // compiled IR — `QueryAct::RetrieveValue` with at least one literal
+        // constraint — instead of re-scanning the raw query for
+        // hand-maintained marker strings.
+        let exact_literal_bias = query_ir.is_exact_literal_technical();
         let fact_limit = if exact_literal_bias {
             normalized_limit.saturating_mul(FACT_FETCH_MULTIPLIER).max(FACT_FETCH_MIN)
         } else {
@@ -505,40 +507,6 @@ impl SearchService {
     }
 }
 
-fn exact_literal_technical_query(query: &str) -> bool {
-    let normalized = query.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return false;
-    }
-    let strong_markers = [
-        "http://",
-        "https://",
-        "wsdl",
-        "endpoint",
-        "method",
-        "path",
-        "port",
-        "status code",
-        "query parameter",
-        "parameter",
-        "url",
-        "graphql",
-        "rest",
-        "soap",
-        "/",
-    ];
-    let has_marker =
-        strong_markers.iter().any(|marker| normalized.contains(marker)) || query.contains("?");
-    let has_code_like_literal =
-        query.chars().any(|ch| ch == '/' || ch == ':' || ch == '_' || ch == '-')
-            || query.split_whitespace().any(|token| {
-                let has_letters = token.chars().any(|ch| ch.is_ascii_alphabetic());
-                let has_digits = token.chars().any(|ch| ch.is_ascii_digit());
-                has_letters && has_digits
-            });
-    has_marker || has_code_like_literal
-}
-
 async fn resolve_embedding_model_catalog_id(
     state: &AppState,
     provider_kind: &str,
@@ -823,13 +791,5 @@ mod tests {
         let selected =
             SearchService::new().select_current_entity_vector(&candidates).expect("entity vector");
         assert_eq!(selected.freshness_generation, new.freshness_generation);
-    }
-
-    #[test]
-    fn exact_literal_query_detection_prefers_technical_markers() {
-        let service = SearchService::new();
-        assert!(service.is_exact_literal_technical_query("Какой endpoint у GET /v1/system/info?"));
-        assert!(service.is_exact_literal_technical_query("WSDL URL inventory.wsdl"));
-        assert!(!service.is_exact_literal_technical_query("О чем вообще этот документ"));
     }
 }

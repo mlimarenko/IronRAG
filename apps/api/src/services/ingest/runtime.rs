@@ -156,14 +156,7 @@ impl RuntimeStageUsageSummary {
 }
 
 fn binding_purpose_label(binding_purpose: AiBindingPurpose) -> &'static str {
-    match binding_purpose {
-        AiBindingPurpose::ExtractText => "extract_text",
-        AiBindingPurpose::ExtractGraph => "extract_graph",
-        AiBindingPurpose::EmbedChunk => "embed_chunk",
-        AiBindingPurpose::QueryRetrieve => "query_retrieve",
-        AiBindingPurpose::QueryAnswer => "query_answer",
-        AiBindingPurpose::Vision => "vision",
-    }
+    binding_purpose.as_str()
 }
 
 async fn resolve_library_binding_selection(
@@ -203,6 +196,12 @@ pub async fn resolve_effective_provider_profile(
             state,
             library_id,
             AiBindingPurpose::EmbedChunk,
+        )
+        .await?,
+        query_compile: resolve_library_binding_selection(
+            state,
+            library_id,
+            AiBindingPurpose::QueryCompile,
         )
         .await?,
         answer: resolve_library_binding_selection(state, library_id, AiBindingPurpose::QueryAnswer)

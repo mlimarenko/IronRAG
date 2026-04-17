@@ -30,6 +30,7 @@ type ListAuditEventsParams = {
   limit?: number;
   offset?: number;
   internal?: boolean;
+  includeAssistant?: boolean;
 };
 
 type AiScopeParams = {
@@ -162,6 +163,7 @@ export const adminApi = {
         limit: params.limit,
         offset: params.offset,
         internal: params.internal,
+        includeAssistant: params.includeAssistant,
       })}`,
     ),
 

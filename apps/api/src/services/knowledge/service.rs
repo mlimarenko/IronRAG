@@ -620,17 +620,27 @@ impl KnowledgeService {
 
         let latest_generation = generations.into_iter().next();
 
-        // The Postgres aggregate doesn't split graph_ready vs graph_sparse —
-        // that split lives in ArangoDB's per-revision graph_state and would
-        // require a second round-trip. For the summary card we approximate
-        // using the graph-snapshot presence: if the snapshot reports any
-        // nodes, the library has at least one graph-ready document.
-        let graph_ready_document_count =
-            if graph_snapshot.as_ref().is_some_and(|snapshot| snapshot.node_count > 0) {
-                readiness.readable_count
-            } else {
-                0
-            };
+        // Canonical definition of "graph-ready": the document has a document
+        // node in the current projection. The old proxy (readable AND any
+        // graph snapshot exists) reported every readable document as
+        // graph-ready the moment the library had a single node, so when
+        // individual ingest jobs failed after LLM extraction but before the
+        // graph merge (timeouts, cancelled stage) the dashboard kept
+        // claiming full graph coverage while the graph viewer showed a
+        // fraction of the documents. Counting document-typed nodes directly
+        // in `runtime_graph_node` at the active projection version keeps
+        // the counter honest.
+        let graph_ready_document_count = if let Some(snapshot) = graph_snapshot.as_ref() {
+            repositories::count_runtime_graph_document_nodes_by_library(
+                &state.persistence.postgres,
+                library_id,
+                snapshot.projection_version,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        } else {
+            0
+        };
         let graph_sparse_document_count =
             readiness.readable_count.saturating_sub(graph_ready_document_count);
 

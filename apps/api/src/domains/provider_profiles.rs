@@ -52,6 +52,7 @@ pub struct ProviderModelSelection {
 pub struct EffectiveProviderProfile {
     pub indexing: ProviderModelSelection,
     pub embedding: ProviderModelSelection,
+    pub query_compile: ProviderModelSelection,
     pub answer: ProviderModelSelection,
     pub vision: ProviderModelSelection,
 }
@@ -65,6 +66,7 @@ impl EffectiveProviderProfile {
         match binding_purpose {
             AiBindingPurpose::ExtractText | AiBindingPurpose::ExtractGraph => &self.indexing,
             AiBindingPurpose::EmbedChunk | AiBindingPurpose::QueryRetrieve => &self.embedding,
+            AiBindingPurpose::QueryCompile => &self.query_compile,
             AiBindingPurpose::QueryAnswer => &self.answer,
             AiBindingPurpose::Vision => &self.vision,
         }

@@ -64,6 +64,7 @@ impl RuntimeExecutionOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeTaskKind {
+    QueryCompile,
     QueryPlan,
     QueryRerank,
     QueryAnswer,
@@ -77,6 +78,7 @@ impl RuntimeTaskKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::QueryCompile => "query_compile",
             Self::QueryPlan => "query_plan",
             Self::QueryRerank => "query_rerank",
             Self::QueryAnswer => "query_answer",
@@ -93,6 +95,7 @@ impl std::str::FromStr for RuntimeTaskKind {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "query_compile" => Ok(Self::QueryCompile),
             "query_plan" => Ok(Self::QueryPlan),
             "query_rerank" => Ok(Self::QueryRerank),
             "query_answer" => Ok(Self::QueryAnswer),
@@ -199,6 +202,7 @@ impl std::str::FromStr for RuntimeLifecycleState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeStageKind {
+    Compile,
     Plan,
     Retrieve,
     Rerank,
@@ -216,6 +220,7 @@ impl RuntimeStageKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Compile => "compile",
             Self::Plan => "plan",
             Self::Retrieve => "retrieve",
             Self::Rerank => "rerank",
@@ -236,6 +241,7 @@ impl std::str::FromStr for RuntimeStageKind {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "compile" => Ok(Self::Compile),
             "plan" => Ok(Self::Plan),
             "retrieve" => Ok(Self::Retrieve),
             "rerank" => Ok(Self::Rerank),

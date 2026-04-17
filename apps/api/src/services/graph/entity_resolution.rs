@@ -164,16 +164,50 @@ fn find_merge_candidates(nodes: &[RuntimeGraphNodeRow]) -> Vec<MergeCandidate> {
         key_index.entry(bare_key).or_default().push(node);
     }
 
+    // Precompute normalized forms once per node. Pass 1 below is O(N²);
+    // without caching, `check_alias_match` re-ran
+    // `normalize_graph_identity_component` on both labels AND every
+    // alias in both sides for every pair — at ~10k nodes and ~5 aliases
+    // each that is ~250 M NFKC/lowercase/fold passes per resolution
+    // round, which dominated the worker's CPU (a single resolution
+    // pass burned multiple cores for tens of seconds). After the
+    // precompute, each label and each alias is normalized exactly
+    // once; Pass 1 does the pair scan with string comparisons only.
+    let normalized: Vec<(String, Vec<String>)> = nodes
+        .iter()
+        .map(|node| {
+            let label_norm =
+                crate::services::graph::identity::normalize_graph_identity_component(&node.label);
+            let alias_norms = node_aliases(node)
+                .iter()
+                .map(|alias| {
+                    crate::services::graph::identity::normalize_graph_identity_component(alias)
+                })
+                .collect::<Vec<_>>();
+            (label_norm, alias_norms)
+        })
+        .collect();
+
     // Pass 1: exact alias match — if entity A's label appears in entity B's aliases.
     for (i, a) in nodes.iter().enumerate() {
         if a.node_type == "document" || already_removed.contains(&a.id) {
             continue;
         }
-        for b in &nodes[i + 1..] {
+        let (a_label_norm, a_alias_norms) = &normalized[i];
+        for (offset, b) in nodes[i + 1..].iter().enumerate() {
             if b.node_type == "document" || already_removed.contains(&b.id) {
                 continue;
             }
-            if let Some(candidate) = check_alias_match(a, b) {
+            let j = i + 1 + offset;
+            let (b_label_norm, b_alias_norms) = &normalized[j];
+            if let Some(candidate) = check_alias_match_precomputed(
+                a,
+                b,
+                a_label_norm,
+                a_alias_norms,
+                b_label_norm,
+                b_alias_norms,
+            ) {
                 already_removed.insert(candidate.remove_node_id);
                 candidates.push(candidate);
             }
@@ -263,15 +297,31 @@ fn check_alias_match(a: &RuntimeGraphNodeRow, b: &RuntimeGraphNodeRow) -> Option
     let b_aliases = node_aliases(b);
     let a_norm = crate::services::graph::identity::normalize_graph_identity_component(&a.label);
     let b_norm = crate::services::graph::identity::normalize_graph_identity_component(&b.label);
+    let a_alias_norms = a_aliases
+        .iter()
+        .map(|alias| crate::services::graph::identity::normalize_graph_identity_component(alias))
+        .collect::<Vec<_>>();
+    let b_alias_norms = b_aliases
+        .iter()
+        .map(|alias| crate::services::graph::identity::normalize_graph_identity_component(alias))
+        .collect::<Vec<_>>();
+    check_alias_match_precomputed(a, b, &a_norm, &a_alias_norms, &b_norm, &b_alias_norms)
+}
 
-    // Check if B's label appears (normalized) in A's aliases.
-    let b_in_a = a_aliases.iter().any(|alias| {
-        crate::services::graph::identity::normalize_graph_identity_component(alias) == b_norm
-    });
-    // Check if A's label appears (normalized) in B's aliases.
-    let a_in_b = b_aliases.iter().any(|alias| {
-        crate::services::graph::identity::normalize_graph_identity_component(alias) == a_norm
-    });
+/// Same contract as [`check_alias_match`] but with the normalized label
+/// and normalized-aliases vectors provided by the caller. Used by the
+/// O(N²) pass in [`find_merge_candidates`] so the expensive NFKC pass
+/// only runs once per node instead of once per pair.
+fn check_alias_match_precomputed(
+    a: &RuntimeGraphNodeRow,
+    b: &RuntimeGraphNodeRow,
+    a_label_norm: &str,
+    a_alias_norms: &[String],
+    b_label_norm: &str,
+    b_alias_norms: &[String],
+) -> Option<MergeCandidate> {
+    let b_in_a = a_alias_norms.iter().any(|alias| alias == b_label_norm);
+    let a_in_b = b_alias_norms.iter().any(|alias| alias == a_label_norm);
 
     if !b_in_a && !a_in_b {
         return None;

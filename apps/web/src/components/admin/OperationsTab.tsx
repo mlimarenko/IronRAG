@@ -252,6 +252,24 @@ function humanizeAuditResult(resultKind: AuditEvent['resultKind'], t: TFunction)
   return t(`admin.auditResultLabels.${resultKind}`);
 }
 
+function formatAuditAssistantModels(event: AuditEvent, t: TFunction): string {
+  const assistantCall = event.assistantCall;
+  if (!assistantCall || assistantCall.models.length === 0) {
+    return t('admin.auditAssistantNoModel');
+  }
+  return assistantCall.models
+    .map((model) => `${model.providerKind}:${model.modelName}`)
+    .join(', ');
+}
+
+function formatAuditAssistantCost(event: AuditEvent, t: TFunction): string {
+  const assistantCall = event.assistantCall;
+  if (!assistantCall || assistantCall.totalCost == null) {
+    return t('admin.auditAssistantCostUnavailable');
+  }
+  return `$${Number(assistantCall.totalCost).toFixed(4)}`;
+}
+
 export function OperationsTab({
   t,
   activeWorkspaceId,
@@ -311,6 +329,7 @@ export function OperationsTab({
         resultKind: auditResultFilter === 'all' ? undefined : auditResultFilter,
         limit: auditPageSize,
         offset: (auditPage - 1) * auditPageSize,
+        includeAssistant: true,
       })
       .then((data) => {
         const pageData = mapAuditPage(data);
@@ -495,6 +514,12 @@ export function OperationsTab({
                 <tbody>
                   {audit.items.map((evt) => {
                     const ResultIcon = getAuditResultIcon(evt.resultKind);
+                    const assistantModels = evt.assistantCall
+                      ? formatAuditAssistantModels(evt, t)
+                      : '';
+                    const assistantCost = evt.assistantCall
+                      ? formatAuditAssistantCost(evt, t)
+                      : '';
                     return (
                       <tr key={evt.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
                         <td className="px-3 py-2.5">
@@ -505,6 +530,11 @@ export function OperationsTab({
                         <td className="px-3 py-2.5">
                           <div className="font-semibold text-xs leading-tight">{evt.message}</div>
                           <div className="text-[11px] text-muted-foreground font-mono mt-0.5">{evt.action}</div>
+                          {evt.assistantCall && (
+                            <div className="mt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                              {t('admin.auditAssistantLabel')}
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-2.5 text-xs text-muted-foreground font-medium whitespace-nowrap">{evt.actor}</td>
                         <td className="px-3 py-2.5 text-xs whitespace-nowrap">
@@ -515,8 +545,24 @@ export function OperationsTab({
                         <td className="px-3 py-2.5 text-xs text-muted-foreground tabular-nums whitespace-nowrap">
                           {new Date(evt.timestamp).toLocaleString()}
                         </td>
-                        <td className="px-3 py-2.5 text-xs text-muted-foreground max-w-48 truncate" title={evt.subjectSummary ?? undefined}>
-                          {evt.subjectSummary || '\u2014'}
+                        <td className="px-3 py-2.5 text-xs text-muted-foreground max-w-64">
+                          {evt.assistantCall ? (
+                            <div className="space-y-0.5">
+                              <div className="font-medium text-foreground truncate" title={assistantModels}>
+                                {assistantModels}
+                              </div>
+                              <div className="truncate" title={assistantCost}>
+                                {t('admin.auditAssistantMeta', {
+                                  cost: assistantCost,
+                                  count: evt.assistantCall.providerCallCount,
+                                })}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="truncate" title={evt.subjectSummary ?? undefined}>
+                              {evt.subjectSummary || '\u2014'}
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-2.5 text-right">
                           <span className={`status-badge text-[10px] ${getAuditResultBadgeClass(evt.resultKind)}`}>

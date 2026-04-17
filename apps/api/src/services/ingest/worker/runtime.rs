@@ -53,6 +53,13 @@ pub(super) async fn run_ingestion_worker_pool(
     let lease_recovery_handle =
         tokio::spawn(run_canonical_lease_recovery_loop(state.clone(), shutdown.resubscribe()));
 
+    // Periodic self-healing pass for documents stuck with `ready` extraction
+    // but no graph node — see services/graph/backfill.rs for the background.
+    // The per-job hook in worker.rs only fires when ingest traffic is flowing;
+    // on an idle queue this loop makes sure the gap still closes on its own.
+    let graph_backfill_handle =
+        tokio::spawn(run_graph_backfill_loop(state.clone(), shutdown.resubscribe()));
+
     // Canonical out-of-band stale-lease reaper. Unlike the in-tokio
     // recovery loop above, this runs on a dedicated OS thread with its
     // own mini tokio runtime and its own pg pool handle. Whenever the
@@ -106,6 +113,9 @@ pub(super) async fn run_ingestion_worker_pool(
             .mark_error(format!("ingestion lease recovery task crashed: {error}"))
             .await;
         error!(?error, "ingestion lease recovery task crashed");
+    }
+    if let Err(error) = graph_backfill_handle.await {
+        error!(?error, "graph backfill loop crashed");
     }
 }
 
@@ -283,6 +293,65 @@ async fn reclaim_orphaned_leases_on_startup(state: &Arc<AppState>) {
                 ?error,
                 "startup lease sweep failed; dispatcher will proceed and rely on the periodic recovery loop"
             );
+        }
+    }
+}
+
+/// Tick interval for the idle-path graph backfill loop. Chosen to comfortably
+/// exceed the per-library backfill debounce (60 s) so the loop never races the
+/// per-job hook, while still catching up within a few minutes on an idle
+/// queue.
+const GRAPH_BACKFILL_TICK: std::time::Duration = std::time::Duration::from_secs(120);
+
+async fn run_graph_backfill_loop(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
+    info!("starting graph backfill loop");
+    loop {
+        tokio::select! {
+            _ = shutdown.recv() => {
+                info!("stopping graph backfill loop");
+                break;
+            }
+            _ = time::sleep(GRAPH_BACKFILL_TICK) => {
+                let libraries = match sqlx::query_scalar::<_, Uuid>(
+                    "select id from catalog_library",
+                )
+                .fetch_all(&state.persistence.postgres)
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warn!(?error, "graph backfill loop failed to list libraries");
+                        continue;
+                    }
+                };
+                for library_id in libraries {
+                    if crate::services::graph::backfill::try_acquire_graph_backfill_slot(library_id) {
+                        if let Err(error) = crate::services::graph::backfill::run_library_graph_backfill(
+                            &state,
+                            library_id,
+                        )
+                        .await
+                        {
+                            warn!(%library_id, ?error, "graph backfill tick failed");
+                        }
+                    }
+                    // Re-extract pass covers the World B case: readable
+                    // documents whose active revision has NO extraction
+                    // records at all. Its own 300 s debounce slot gates
+                    // the LLM budget separately from the much cheaper
+                    // backfill pass.
+                    if crate::services::graph::backfill::try_acquire_graph_reextract_slot(library_id) {
+                        if let Err(error) = crate::services::graph::backfill::run_library_graph_reextract(
+                            &state,
+                            library_id,
+                        )
+                        .await
+                        {
+                            warn!(%library_id, ?error, "graph re-extract tick failed");
+                        }
+                    }
+                }
+            }
         }
     }
 }

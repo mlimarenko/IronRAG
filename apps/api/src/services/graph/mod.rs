@@ -1,7 +1,9 @@
+pub(crate) mod backfill;
 pub(crate) mod community_detection;
 pub(crate) mod entity_resolution;
 pub(crate) mod extract;
 pub(crate) mod identity;
+pub(crate) mod maintenance;
 pub(super) mod merge;
 pub(super) mod projection;
 pub(crate) mod projection_guard;

@@ -13,7 +13,13 @@ import { Loader2, FileText, Share2, Brain, Database, AlertCircle, CheckCircle2, 
 import type { AIPurpose } from '@/types';
 import { AVAILABLE_LOCALES } from '@/types';
 
-const AI_PURPOSE_ORDER: AIPurpose[] = ['extract_graph', 'embed_chunk', 'query_answer', 'vision'];
+const AI_PURPOSE_ORDER: AIPurpose[] = [
+  'extract_graph',
+  'embed_chunk',
+  'query_compile',
+  'query_answer',
+  'vision',
+];
 
 export default function LoginPage() {
   const { t } = useTranslation();
@@ -29,6 +35,11 @@ export default function LoginPage() {
       purpose: 'embed_chunk',
       label: t('login.purposeEmbedChunk'),
       description: t('login.purposeEmbedChunkDesc'),
+    },
+    {
+      purpose: 'query_compile',
+      label: t('login.purposeQueryCompile'),
+      description: t('login.purposeQueryCompileDesc'),
     },
     {
       purpose: 'query_answer',

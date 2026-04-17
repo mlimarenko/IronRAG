@@ -74,17 +74,48 @@ export interface RawModelCatalogEntry {
 }
 
 /** Raw API token response */
+export interface RawTokenWorkspaceSummary {
+  id: string;
+  displayName: string;
+}
+
+export interface RawTokenLibrarySummary {
+  id: string;
+  workspaceId: string;
+  displayName: string;
+}
+
+export interface RawTokenIssuerSummary {
+  principalId: string;
+  displayLabel: string;
+}
+
+export interface RawTokenScope {
+  kind?: "system" | "workspace" | "library";
+  workspace?: RawTokenWorkspaceSummary;
+  libraries?: RawTokenLibrarySummary[];
+}
+
+export interface RawTokenGrantSummary {
+  resourceKind?: string;
+  resourceId?: string;
+  permissionKind?: string;
+  workspace?: RawTokenWorkspaceSummary;
+  library?: RawTokenLibrarySummary;
+}
+
 export interface RawTokenResponse {
   id?: string;
   principalId?: string;
-  workspaceId?: string;
   label?: string;
   tokenPrefix?: string;
   status?: string;
   expiresAt?: string;
   revokedAt?: string;
-  issuedByPrincipalId?: string;
   lastUsedAt?: string;
+  issuer?: RawTokenIssuerSummary;
+  scope?: RawTokenScope;
+  grants?: RawTokenGrantSummary[];
 }
 
 /** Raw pricing rule response */
@@ -131,6 +162,21 @@ export interface RawAuditSubject {
   subjectId: string;
 }
 
+export interface RawAuditAssistantModel {
+  providerKind?: string;
+  modelName?: string;
+}
+
+export interface RawAuditAssistantCall {
+  queryExecutionId?: string;
+  conversationId?: string | null;
+  runtimeExecutionId?: string | null;
+  models?: RawAuditAssistantModel[];
+  totalCost?: string | number | null;
+  currencyCode?: string | null;
+  providerCallCount?: number;
+}
+
 /** Raw audit event response */
 export interface RawAuditEventResponse {
   id: string;
@@ -141,6 +187,7 @@ export interface RawAuditEventResponse {
   redactedMessage?: string;
   subjects?: RawAuditSubject[];
   actorPrincipalId?: string;
+  assistantCall?: RawAuditAssistantCall | null;
 }
 
 /** Raw audit events page response */

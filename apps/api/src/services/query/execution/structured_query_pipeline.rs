@@ -454,7 +454,7 @@ async fn assemble_structured_query(
     )
     .await;
     let pagination_requested = question_mentions_pagination(question);
-    let literal_focus_keywords = technical_literal_focus_keywords(question);
+    let literal_focus_keywords = technical_literal_focus_keywords(question, None);
     let technical_literal_chunks = select_technical_literal_chunks(
         question,
         &bundle.chunks,

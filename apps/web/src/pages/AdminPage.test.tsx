@@ -76,12 +76,35 @@ describe('AdminPage integration', () => {
 
     adminApiMock.listTokens.mockResolvedValue([
       {
-        id: 'principal-1',
         principalId: 'principal-1',
         label: 'Ops token',
         tokenPrefix: 'irr_abc',
         status: 'active',
-        workspaceId: 'ws-1',
+        issuer: {
+          principalId: 'admin-1',
+          displayLabel: 'admin',
+        },
+        scope: {
+          kind: 'library',
+          workspace: { id: 'ws-1', displayName: 'Workspace 1' },
+          libraries: [{ id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' }],
+        },
+        grants: [
+          {
+            resourceKind: 'library',
+            resourceId: 'library-1',
+            permissionKind: 'library_write',
+            workspace: { id: 'ws-1', displayName: 'Workspace 1' },
+            library: { id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' },
+          },
+          {
+            resourceKind: 'library',
+            resourceId: 'library-1',
+            permissionKind: 'document_read',
+            workspace: { id: 'ws-1', displayName: 'Workspace 1' },
+            library: { id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' },
+          },
+        ],
       },
     ]);
     adminApiMock.listProviders.mockResolvedValue([]);
@@ -163,6 +186,9 @@ describe('AdminPage integration', () => {
 
     expect(adminApiMock.listTokens).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain('Ops token');
+    expect(container.textContent).toContain('Workspace 1');
+    expect(container.textContent).toContain('Library 1');
+    expect(container.textContent).toContain('Library write + import');
   });
 
   it('opens the operations tab from the URL and fetches ops + audit data', async () => {
