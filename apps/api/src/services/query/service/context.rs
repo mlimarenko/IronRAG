@@ -46,6 +46,7 @@ pub(crate) async fn assemble_context_bundle(
     execution_id: Uuid,
     bundle_id: Uuid,
     query_text: &str,
+    query_ir: &crate::domains::query_ir::QueryIR,
     requested_mode: RuntimeQueryMode,
     top_k: usize,
     include_debug: bool,
@@ -56,7 +57,13 @@ pub(crate) async fn assemble_context_bundle(
     let lexical_search = state
         .canonical_services
         .search
-        .search_query_evidence(state, conversation.library_id, query_text, candidate_limit)
+        .search_query_evidence(
+            state,
+            conversation.library_id,
+            query_text,
+            query_ir,
+            candidate_limit,
+        )
         .await
         .context(
             "failed canonical lexical evidence search while assembling query context bundle",

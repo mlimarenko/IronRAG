@@ -509,6 +509,70 @@ pub async fn get_execution_by_id(
     .transpose()
 }
 
+pub async fn list_executions_by_ids(
+    postgres: &PgPool,
+    execution_ids: &[Uuid],
+) -> Result<Vec<QueryExecutionRow>, sqlx::Error> {
+    if execution_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, QueryExecutionRowRecord>(
+        "select
+            id,
+            context_bundle_id,
+            workspace_id,
+            library_id,
+            conversation_id,
+            request_turn_id,
+            response_turn_id,
+            binding_id,
+            runtime_execution_id,
+            runtime_lifecycle_state_text,
+            runtime_active_stage_text,
+            turn_budget,
+            turn_count,
+            parallel_action_limit,
+            query_text,
+            failure_code,
+            failure_summary_redacted,
+            started_at,
+            completed_at
+         from (
+            select
+                execution.id,
+                execution.context_bundle_id,
+                execution.workspace_id,
+                execution.library_id,
+                execution.conversation_id,
+                execution.request_turn_id,
+                execution.response_turn_id,
+                execution.binding_id,
+                execution.runtime_execution_id,
+                runtime.lifecycle_state::text as runtime_lifecycle_state_text,
+                runtime.active_stage::text as runtime_active_stage_text,
+                runtime.turn_budget,
+                runtime.turn_count,
+                runtime.parallel_action_limit,
+                execution.query_text,
+                coalesce(runtime.failure_code, execution.failure_code) as failure_code,
+                runtime.failure_summary_redacted,
+                execution.started_at,
+                coalesce(runtime.completed_at, execution.completed_at) as completed_at
+            from query_execution execution
+            join runtime_execution runtime on runtime.id = execution.runtime_execution_id
+         ) execution_view
+         where id = any($1)
+         order by started_at desc, id desc",
+    )
+    .bind(execution_ids)
+    .fetch_all(postgres)
+    .await?
+    .into_iter()
+    .map(map_query_execution_row)
+    .collect()
+}
+
 pub async fn create_execution(
     postgres: &PgPool,
     input: &NewQueryExecution<'_>,

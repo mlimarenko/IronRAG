@@ -800,9 +800,22 @@ impl KnowledgeSearchHttpFixture {
         expected_fact_id: Uuid,
     ) -> Result<ironrag_backend::services::query::search::QueryEvidenceSearchResult> {
         let deadline = Instant::now() + SEARCH_WAIT_TIMEOUT;
+        let descriptive_ir = ironrag_backend::domains::query_ir::QueryIR {
+            act: ironrag_backend::domains::query_ir::QueryAct::Describe,
+            scope: ironrag_backend::domains::query_ir::QueryScope::SingleDocument,
+            language: ironrag_backend::domains::query_ir::QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            confidence: 1.0,
+        };
         loop {
             let result = SearchService::new()
-                .search_query_evidence(&self.state, self.library_id, query, 5)
+                .search_query_evidence(&self.state, self.library_id, query, &descriptive_ir, 5)
                 .await
                 .with_context(|| {
                     format!("failed to search query evidence for technical fact query {query}")

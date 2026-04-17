@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -55,4 +56,21 @@ pub struct AuditEventSubject {
     pub runtime_execution_id: Option<Uuid>,
     pub context_bundle_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditAssistantModel {
+    pub provider_kind: String,
+    pub model_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditAssistantCallSummary {
+    pub query_execution_id: Uuid,
+    pub conversation_id: Option<Uuid>,
+    pub runtime_execution_id: Option<Uuid>,
+    pub models: Vec<AuditAssistantModel>,
+    pub total_cost: Option<Decimal>,
+    pub currency_code: Option<String>,
+    pub provider_call_count: i64,
 }

@@ -176,6 +176,7 @@ const fn map_bootstrap_binding_purpose(value: AiBindingPurpose) -> Option<Bootst
     match value {
         AiBindingPurpose::ExtractGraph => Some(BootstrapBindingPurpose::ExtractGraph),
         AiBindingPurpose::EmbedChunk => Some(BootstrapBindingPurpose::EmbedChunk),
+        AiBindingPurpose::QueryCompile => Some(BootstrapBindingPurpose::QueryCompile),
         AiBindingPurpose::QueryAnswer | AiBindingPurpose::QueryRetrieve => {
             Some(BootstrapBindingPurpose::QueryAnswer)
         }

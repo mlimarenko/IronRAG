@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
+use crate::domains::query_ir::{QueryAct, QueryIR};
+
 use super::{
     focused_answer_document_id, requested_initial_table_row_count, retrieve::score_value,
     types::RuntimeMatchedChunk,
@@ -20,6 +22,7 @@ pub(crate) struct ParsedTableRow {
 
 pub(crate) fn build_table_row_grounded_answer(
     question: &str,
+    ir: Option<&QueryIR>,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let focused_document_id = focused_answer_document_id(question, chunks);
@@ -38,7 +41,7 @@ pub(crate) fn build_table_row_grounded_answer(
         return build_initial_table_rows_answer(&rows, row_count);
     }
 
-    if question_asks_table_value_inventory(question) {
+    if question_asks_table_value_inventory(question, ir) {
         return build_table_value_inventory_answer(&rows);
     }
 
@@ -177,7 +180,17 @@ fn build_table_value_inventory_answer(rows: &[ParsedTableRow]) -> Option<String>
     Some(lines.join("\n"))
 }
 
-pub(crate) fn question_asks_table_value_inventory(question: &str) -> bool {
+/// Does the user want the full inventory of values from a table?
+///
+/// The canonical signal is the compiled IR: an `Enumerate` act scoped
+/// to a `table_row` target type means "list values from this table".
+/// When IR is not available we fall back to the previous 10-marker
+/// trigger list so older callers keep working unchanged.
+pub(crate) fn question_asks_table_value_inventory(question: &str, ir: Option<&QueryIR>) -> bool {
+    if let Some(ir) = ir {
+        return matches!(ir.act, QueryAct::Enumerate)
+            && ir.target_types.iter().any(|tag| tag == "table_row");
+    }
     let lowered = question.to_lowercase();
     [
         "какие значения",

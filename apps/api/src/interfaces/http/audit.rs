@@ -3,16 +3,21 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::audit::{AuditEventInternalView, AuditEventRedactedView, AuditEventSubject},
+    domains::audit::{
+        AuditAssistantCallSummary, AuditAssistantModel, AuditEventInternalView,
+        AuditEventRedactedView, AuditEventSubject,
+    },
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_MCP_AUDIT_REVIEW, authorize_mcp_audit_review, load_library_and_authorize,
+            POLICY_MCP_AUDIT_REVIEW, POLICY_USAGE_READ, authorize_mcp_audit_review,
+            load_library_and_authorize,
         },
         router_support::ApiError,
     },
@@ -41,6 +46,7 @@ pub struct AuditEventsQuery {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
     pub internal: Option<bool>,
+    pub include_assistant: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +69,25 @@ pub struct AuditEventSubjectResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AuditAssistantModelResponse {
+    pub provider_kind: String,
+    pub model_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAssistantCallResponse {
+    pub query_execution_id: Uuid,
+    pub conversation_id: Option<Uuid>,
+    pub runtime_execution_id: Option<Uuid>,
+    pub models: Vec<AuditAssistantModelResponse>,
+    pub total_cost: Option<Decimal>,
+    pub currency_code: Option<String>,
+    pub provider_call_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditEventResponse {
     pub id: Uuid,
     pub actor_principal_id: Option<Uuid>,
@@ -76,6 +101,8 @@ pub struct AuditEventResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub internal_message: Option<String>,
     pub subjects: Vec<AuditEventSubjectResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_call: Option<AuditAssistantCallResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,6 +210,9 @@ async fn list_audit_events(
         total
     };
 
+    if query.include_assistant.unwrap_or(false) {
+        attach_assistant_call_summaries(&state, &auth, &mut response_items).await?;
+    }
     span.record("item_count", response_items.len());
     Ok(Json(AuditEventPageResponse {
         items: response_items,
@@ -270,6 +300,52 @@ async fn visible_subjects(
         .collect())
 }
 
+async fn attach_assistant_call_summaries(
+    state: &AppState,
+    auth: &AuthContext,
+    items: &mut [AuditEventResponse],
+) -> Result<(), ApiError> {
+    let query_execution_ids = items
+        .iter()
+        .filter(|event| event.action_kind == "query.execution.run")
+        .filter_map(query_execution_id_from_event)
+        .collect::<Vec<_>>();
+    if query_execution_ids.is_empty() {
+        return Ok(());
+    }
+
+    let summaries = state
+        .canonical_services
+        .audit
+        .list_assistant_call_summaries(state, &query_execution_ids)
+        .await?;
+
+    for event in items.iter_mut().filter(|event| event.action_kind == "query.execution.run") {
+        let Some(query_execution_id) = query_execution_id_from_event(event) else {
+            continue;
+        };
+        let Some((workspace_id, library_id)) = audit_scope_from_event(event) else {
+            continue;
+        };
+        if !auth.has_library_permission(workspace_id, library_id, POLICY_USAGE_READ) {
+            continue;
+        }
+        if let Some(summary) = summaries.get(&query_execution_id) {
+            event.assistant_call = Some(map_assistant_call(summary));
+        }
+    }
+
+    Ok(())
+}
+
+fn query_execution_id_from_event(event: &AuditEventResponse) -> Option<Uuid> {
+    event.subjects.iter().find_map(|subject| subject.query_execution_id)
+}
+
+fn audit_scope_from_event(event: &AuditEventResponse) -> Option<(Uuid, Uuid)> {
+    event.subjects.iter().find_map(|subject| Some((subject.workspace_id?, subject.library_id?)))
+}
+
 fn map_internal_event(
     event: AuditEventInternalView,
     subjects: Vec<AuditEventSubjectResponse>,
@@ -286,6 +362,7 @@ fn map_internal_event(
         redacted_message: event.redacted_message,
         internal_message: event.internal_message,
         subjects,
+        assistant_call: None,
     }
 }
 
@@ -305,6 +382,26 @@ fn map_redacted_event(
         redacted_message: event.redacted_message,
         internal_message: None,
         subjects,
+        assistant_call: None,
+    }
+}
+
+fn map_assistant_call(summary: &AuditAssistantCallSummary) -> AuditAssistantCallResponse {
+    AuditAssistantCallResponse {
+        query_execution_id: summary.query_execution_id,
+        conversation_id: summary.conversation_id,
+        runtime_execution_id: summary.runtime_execution_id,
+        models: summary.models.iter().map(map_assistant_model).collect(),
+        total_cost: summary.total_cost,
+        currency_code: summary.currency_code.clone(),
+        provider_call_count: summary.provider_call_count,
+    }
+}
+
+fn map_assistant_model(model: &AuditAssistantModel) -> AuditAssistantModelResponse {
+    AuditAssistantModelResponse {
+        provider_kind: model.provider_kind.clone(),
+        model_name: model.model_name.clone(),
     }
 }
 

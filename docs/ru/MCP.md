@@ -10,19 +10,40 @@
 
 ## Endpoint
 
-- JSON-RPC: `POST http://127.0.0.1:19000/v1/mcp`
-- Capabilities: `GET http://127.0.0.1:19000/v1/mcp/capabilities`
-- Заголовок авторизации: `Authorization: Bearer <token>`
-- Имя MCP-сервера на протокольном уровне: `ironrag-mcp-memory`
-- Имя клиента в готовых сниппетах админки: `ironragMemory`
+- Canonical URL: `http://127.0.0.1:19000/v1/mcp`
+- Transport: **MCP Streamable HTTP, spec `2025-06-18`**. Один endpoint принимает `POST`, `GET` и `DELETE` — никакого отдельного SSE-канала, никакого stdio-прокси.
+  - `POST` — все JSON-RPC сообщения. Content-negotiation по заголовку `Accept`:
+    - `Accept: application/json` → тело ответа в виде обычного JSON (дефолт, удобно для curl).
+    - `Accept: application/json, text/event-stream` → один SSE-фрейм `event: message\ndata: …\n\n`; клиент-SDK, который объявляет оба формата, получает тот транспорт, который ждёт.
+    - Notification-only запросы (без `id`) подтверждаются голым `202 Accepted`.
+  - `GET` — зарезервирован для server-push stream. IronRAG сейчас не отправляет фоновых уведомлений, поэтому возвращает `200 OK` + `Content-Type: text/event-stream` с одним SSE-комментарием `: ready` и больше ничего не шлёт. Спека 2025-06-18 разрешает и 405, и пустой SSE-поток; мы выбрали второе потому что некоторые bundled-клиенты (OpenClaw `bundle-mcp`) считают non-200 на handshake фатальной ошибкой и выбрасывают весь MCP-сервер из runtime для этого agent-контекста.
+  - `DELETE` — сигнал завершения сессии. Сервер stateless между запросами, поэтому всегда отвечает `200 OK`, чтобы cleanup-флоу клиента завершался чисто.
+- Ответ на `initialize` содержит заголовок `Mcp-Session-Id` (UUIDv7). Клиенты, которые эхнут его на последующих запросах, принимаются без дополнительной валидации.
+- Capabilities (для мониторинга и UI): `GET http://127.0.0.1:19000/v1/mcp/capabilities` — это не часть MCP-протокола, а отдельный probe endpoint.
+- Авторизация: `Authorization: Bearer <token>` на каждом запросе (включая `GET`/`DELETE`).
+- Имя MCP-сервера на протокольном уровне: `ironrag-mcp-memory`.
+- Имя клиента в готовых сниппетах админки: `ironragMemory`.
 
-Быстрая проверка:
+Быстрая проверка (JSON):
 
 ```bash
 export IRONRAG_MCP_TOKEN='irt_...'
 
-curl -sS http://127.0.0.1:19000/v1/mcp/capabilities \
-  -H "Authorization: Bearer $IRONRAG_MCP_TOKEN"
+curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
+  -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+```
+
+Быстрая проверка (SSE-фрейм, как у SDK-клиентов):
+
+```bash
+curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
+  -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}'
 ```
 
 Если IronRAG стоит за прокси или под другим доменом, подставьте тот origin, который реально видит клиент.
@@ -39,6 +60,14 @@ curl -sS http://127.0.0.1:19000/v1/mcp/capabilities \
 Аргументы инструментов принимаются только в каноническом camelCase-виде.
 
 ## Инструменты
+
+### Grounded Q&A (использовать первым для содержательных вопросов)
+
+| Инструмент | Описание | Обязательные параметры |
+|------------|----------|----------------------|
+| `grounded_answer` | Задать вопрос естественным языком и получить grounded ответ с цитатами — **тот же самый pipeline, что использует встроенный UI-ассистент** (QueryCompiler → гибридный поиск → graph-aware context → answer generation → verifier). Предпочитайте этот инструмент `search_documents` + `read_document`, когда пользователю нужен ответ, а не список хитов. | `libraryId`, `query` |
+
+Response структура: `answer` (текст), `citations` (чанки + сущности графа), `verifier` (`level` + `warnings`), `runtimeExecutionId` (ключ для `get_runtime_execution_trace`), `executionId`, `conversationId`. MCP-клиент получает ровно тот ответ, который увидел бы пользователь в UI для того же вопроса и библиотеки — MCP и UI используют один и тот же пайплайн grounded Q&A, без параллельных реализаций.
 
 ### Обнаружение
 
@@ -135,7 +164,51 @@ url = "http://127.0.0.1:19000/v1/mcp"
 bearer_token_env_var = "IRONRAG_MCP_TOKEN"
 ```
 
-## VS Code или любой generic HTTP MCP client
+## Claude Code (remote MCP)
+
+```bash
+claude mcp add ironrag http://127.0.0.1:19000/v1/mcp \
+  --transport http \
+  --header "Authorization: Bearer $IRONRAG_MCP_TOKEN"
+```
+
+`claude` подключается напрямую через Streamable HTTP — отдельный stdio-прокси не нужен.
+
+## Claude Desktop
+
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) или эквивалент на другой OS:
+
+```json
+{
+  "mcpServers": {
+    "ironragMemory": {
+      "url": "http://127.0.0.1:19000/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer ${IRONRAG_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+## Cursor
+
+`.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ironragMemory": {
+      "url": "http://127.0.0.1:19000/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:IRONRAG_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+## VS Code или любой generic HTTP MCP-клиент
 
 `.vscode/mcp.json`:
 
@@ -153,4 +226,29 @@ bearer_token_env_var = "IRONRAG_MCP_TOKEN"
 }
 ```
 
-Если клиент умеет принимать сырой HTTP MCP-конфиг, достаточно URL endpoint и bearer token header.
+## OpenClaw
+
+`~/.openclaw/openclaw.json`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "ironrag": {
+        "url": "http://127.0.0.1:19000/v1/mcp",
+        "headers": {
+          "Authorization": "Bearer irt_..."
+        }
+      }
+    }
+  }
+}
+```
+
+Или эквивалент через CLI:
+
+```bash
+openclaw mcp set ironrag '{"url":"http://127.0.0.1:19000/v1/mcp","headers":{"Authorization":"Bearer irt_..."}}'
+```
+
+Если клиент умеет принимать сырой HTTP MCP-конфиг, достаточно URL endpoint и bearer token header — Streamable HTTP transport стандартный, никаких адаптеров поверх не требуется.

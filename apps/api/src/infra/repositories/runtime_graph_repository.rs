@@ -216,6 +216,115 @@ pub async fn count_admitted_runtime_graph_entities_by_library(
     .await
 }
 
+/// Counts document-typed nodes in the current projection of a library. This is
+/// the canonical measure of "how many documents actually appear in the graph",
+/// distinct from `revision.graph_state = 'ready'` which only reports LLM
+/// extraction success and can diverge from the graph projection when the
+/// reconcile stage fails after extraction.
+pub async fn count_runtime_graph_document_nodes_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and node_type = 'document'",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_one(pool)
+    .await
+}
+
+/// Lists library documents whose active revision has NO extraction record
+/// at all — neither `ready` nor `processing` nor `failed` — yet other
+/// revisions of the same document do. These are "orphaned on revision
+/// transition": when a document got a new revision, the old revision's
+/// extraction records stayed put but no job ever ran extract_graph against
+/// the new one. Surfaced by the graph re-extract pass so a new ingest job
+/// can fill the gap.
+pub async fn list_library_documents_needing_graph_reextract(
+    pool: &PgPool,
+    library_id: Uuid,
+    limit: i64,
+) -> Result<Vec<(Uuid, Uuid, Uuid)>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "select d.workspace_id, h.document_id, h.active_revision_id
+         from content_document_head h
+         join content_document d on d.id = h.document_id
+         where d.library_id = $1
+           and h.active_revision_id is not null
+           and not exists (
+                select 1 from runtime_graph_node n
+                 where n.library_id = $1
+                   and n.node_type = 'document'
+                   and n.canonical_key = 'document:' || h.document_id::text
+           )
+           and not exists (
+                select 1 from runtime_graph_extraction e
+                 where e.document_id = h.document_id
+                   and (e.raw_output_json->'lifecycle'->>'revision_id')::uuid
+                       = h.active_revision_id
+           )
+           and exists (
+                select 1 from runtime_graph_extraction e
+                 where e.document_id = h.document_id
+           )
+           and not exists (
+                select 1 from ingest_job j
+                 where j.knowledge_document_id = h.document_id
+                   and j.queue_state in ('queued', 'leased')
+           )
+         order by h.document_id
+         limit $2",
+    )
+    .bind(library_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists library documents whose active revision has ready extraction records
+/// yet produced no document node in the graph projection. Emitted by the
+/// graph backfill pass so a subsequent `reconcile_revision_graph` can merge
+/// the already-persisted extraction into the projection without calling the
+/// LLM again.
+pub async fn list_library_documents_missing_graph_node(
+    pool: &PgPool,
+    library_id: Uuid,
+    limit: i64,
+) -> Result<Vec<(Uuid, Uuid)>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, Uuid)>(
+        "select h.document_id, h.active_revision_id
+         from content_document_head h
+         join content_document d on d.id = h.document_id
+         where d.library_id = $1
+           and h.active_revision_id is not null
+           and not exists (
+                select 1 from runtime_graph_node n
+                 where n.library_id = $1
+                   and n.node_type = 'document'
+                   and n.canonical_key = 'document:' || h.document_id::text
+           )
+           and exists (
+                select 1 from runtime_graph_extraction e
+                 where e.document_id = h.document_id
+                   and e.status = 'ready'
+                   and (e.raw_output_json->'lifecycle'->>'revision_id')::uuid
+                       = h.active_revision_id
+           )
+         order by h.document_id
+         limit $2",
+    )
+    .bind(library_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 /// Lists the strongest admitted non-document runtime graph nodes for one
 /// projection version, ranked by support count and label stability.
 ///

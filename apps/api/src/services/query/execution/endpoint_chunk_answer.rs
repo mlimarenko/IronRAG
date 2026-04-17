@@ -28,14 +28,14 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if !question_requests_multi_document_scope(question) {
+    if !question_requests_multi_document_scope(question, None) {
         return None;
     }
     if question_blocks_endpoint_lookup(question) {
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
     if question_keywords.is_empty() {
         return None;
     }
@@ -57,7 +57,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
             continue;
         };
         let local_keywords =
-            document_local_focus_keywords(question, document_chunks, &question_keywords);
+            document_local_focus_keywords(question, None, document_chunks, &question_keywords);
         let mut ranked_chunks = document_chunks.clone();
         ranked_chunks.sort_by(|left, right| {
             let left_match = technical_chunk_selection_score(
@@ -120,7 +120,8 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if question_requests_multi_document_scope(question) || question_blocks_endpoint_lookup(question)
+    if question_requests_multi_document_scope(question, None)
+        || question_blocks_endpoint_lookup(question)
     {
         return None;
     }
@@ -128,7 +129,7 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
     if question_keywords.is_empty() {
         return None;
     }
@@ -141,7 +142,7 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
 
     let pagination_requested = question_mentions_pagination(question);
     let local_keywords =
-        document_local_focus_keywords(question, &candidate_chunks, &question_keywords);
+        document_local_focus_keywords(question, None, &candidate_chunks, &question_keywords);
     let mut ranked_chunks = candidate_chunks;
     ranked_chunks.sort_by(|left, right| {
         let left_match = prioritized_technical_chunk_score(

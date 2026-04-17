@@ -2,6 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use uuid::Uuid;
 
+use crate::domains::query_ir::QueryIR;
+
 use super::{retrieve::score_value, types::RuntimeMatchedChunk};
 
 /// Score gap multiplier for dominant-document detection in answer assembly.
@@ -105,7 +107,18 @@ pub(crate) fn explicit_document_reference_literals(question: &str) -> Vec<String
         .collect()
 }
 
-pub(crate) fn question_requests_multi_document_scope(question: &str) -> bool {
+/// Does the user's question request retrieval to span multiple documents?
+///
+/// With a compiled IR in scope the answer is direct: `ir.is_multi_document()`
+/// covers the `QueryScope::MultiDocument` case (compare / contrast /
+/// "across documents" / "which two" and so on) by construction. The three
+/// bilingual marker lists below are kept only as a transitional fallback
+/// for callers the IR plumbing hasn't reached yet; once every caller
+/// threads IR through, the fallback disappears.
+pub(crate) fn question_requests_multi_document_scope(question: &str, ir: Option<&QueryIR>) -> bool {
+    if let Some(ir) = ir {
+        return ir.is_multi_document();
+    }
     let lowered = question.to_lowercase();
     if [
         "compare",
@@ -187,7 +200,7 @@ pub(crate) fn focused_answer_document_id(
     question: &str,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<Uuid> {
-    if chunks.is_empty() || question_requests_multi_document_scope(question) {
+    if chunks.is_empty() || question_requests_multi_document_scope(question, None) {
         return None;
     }
 

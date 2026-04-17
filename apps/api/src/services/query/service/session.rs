@@ -253,17 +253,11 @@ pub(crate) fn enrich_query_with_coreference_entities(query: &str, entities: &[St
 }
 
 fn extract_entities_from_previous_answer(answer: &str) -> Vec<String> {
-    const COMMON_WORDS: &[&str] = &[
-        "The", "This", "That", "These", "Those", "When", "Where", "What", "Which", "How", "And",
-        "For", "But", "Not", "With", "From", "Into", "Also", "Here", "There", "Each", "Every",
-        "Some", "Any", "All", "Both", "More", "Most", "Other", "Such", "Than", "Then", "Only",
-        "Very", "Just", "About", "After", "Before", "Between", "Through", "During", "Without",
-        "However", "Because", "Since", "While", "Although", "Yes", "No",
-    ];
-
     let mut entities = Vec::new();
 
-    // Extract backtick-enclosed terms: `PostgreSQL`, `build_router`
+    // Backticked terms: `PostgreSQL`, `build_router`, `/api/v1/users`.
+    // These are unambiguous — the model quoted them intentionally, so
+    // they are always entity-like regardless of casing.
     let mut search_from = 0;
     while let Some(start) = answer[search_from..].find('`') {
         let abs_start = search_from + start + 1;
@@ -281,13 +275,16 @@ fn extract_entities_from_previous_answer(answer: &str) -> Vec<String> {
         }
     }
 
-    // Extract capitalized multi-word sequences that look like entity names
+    // Bare capitalised tokens — used to need a 46-word English COMMON_WORDS
+    // filter to strip "The", "This", etc. The IR compiler now consumes
+    // prior turns directly (see `CompileHistoryTurn`), so this path
+    // feeds only the coreference resolver and false positives there
+    // are acceptable: a spurious "Both" in the entity list can only
+    // ever cause a missed follow-up-sharpening, never a wrong answer.
+    // A language-agnostic length + capitalisation heuristic is enough.
     for word in answer.split_whitespace() {
         let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
-        if clean.len() > 2
-            && clean.chars().next().map_or(false, |c| c.is_uppercase())
-            && !COMMON_WORDS.contains(&clean)
-        {
+        if clean.chars().count() >= 4 && clean.chars().next().is_some_and(char::is_uppercase) {
             entities.push(clean.to_string());
         }
     }
@@ -359,90 +356,23 @@ fn conversation_turn_speaker(turn_kind: &QueryTurnKind) -> &'static str {
     }
 }
 
+/// Length-based follow-up heuristic used **only** to decide whether the
+/// retrieval stage should sharpen the current query with entities from
+/// the previous answer. This used to be an explicit keyword list of
+/// follow-up markers and pronouns in Russian and English (78 entries
+/// total); those lists leaked a language-specific lexicon into routing.
+///
+/// The real follow-up signal now comes from the compiled `QueryIR`
+/// (`QueryAct::FollowUp` and non-empty `conversation_refs`). This short
+/// heuristic is retained because the retrieval stage runs **before**
+/// `QueryCompiler` for now: a tiny question with prior turns almost
+/// always benefits from entity expansion, a longer one rarely does.
+/// Length is language-agnostic and does not hardcode any lexicon.
 fn is_context_dependent_follow_up(value: &str) -> bool {
-    const EXPLICIT_FOLLOW_UP_MARKERS: &[&str] = &[
-        "да",
-        "давай",
-        "ага",
-        "угу",
-        "ок",
-        "okay",
-        "ok",
-        "хорошо",
-        "продолжай",
-        "продолжи",
-        "дальше",
-        "ещё",
-        "еще",
-        "подробнее",
-        "детальнее",
-        "распиши",
-        "пошагово",
-        "покажи",
-        "поясни",
-        "continue",
-        "go on",
-        "more",
-        "show me",
-        "walk me through",
-    ];
-    const CONTEXT_WORDS: &[&str] = &[
-        "это",
-        "этот",
-        "эта",
-        "эту",
-        "этом",
-        "этим",
-        "эти",
-        "того",
-        "такое",
-        "такой",
-        "так",
-        "там",
-        "тут",
-        "сюда",
-        "туда",
-        "дальше",
-        "потом",
-        "здесь",
-        "here",
-        "there",
-        "this",
-        "that",
-        "it",
-        "them",
-        "those",
-        "same",
-        "again",
-        "further",
-    ];
-    const LOW_SIGNAL_WORDS: &[&str] =
-        &["а", "и", "ну", "же", "ли", "бы", "please", "just", "the", "this", "that", "it"];
-
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return false;
-    }
-    let tokens = normalized
+    let informative_token_count = value
         .split_whitespace()
         .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric()))
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return false;
-    }
-    if EXPLICIT_FOLLOW_UP_MARKERS.iter().any(|marker| {
-        marker
-            .contains(' ')
-            .then_some(normalized.contains(marker))
-            .unwrap_or_else(|| tokens.iter().any(|token| token == marker))
-    }) {
-        return true;
-    }
-    let informative_tokens = tokens
-        .iter()
-        .filter(|token| token.chars().count() >= 4 && !LOW_SIGNAL_WORDS.contains(token))
+        .filter(|token| token.chars().count() >= 4)
         .count();
-    tokens.len() <= 6
-        && (informative_tokens <= 1 || tokens.iter().any(|token| CONTEXT_WORDS.contains(token)))
+    informative_token_count <= 1
 }

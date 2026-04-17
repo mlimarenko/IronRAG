@@ -22,7 +22,7 @@ pub(super) fn build_exact_parameter_answer(
     if !has_question_intent(&intents, QuestionIntent::Parameter) {
         return None;
     }
-    if question_requests_multi_document_scope(question)
+    if question_requests_multi_document_scope(question, None)
         || has_question_intent(&intents, QuestionIntent::Endpoint)
     {
         return None;
@@ -81,7 +81,7 @@ fn select_exact_parameter_literal(
     explicit_parameters: &[String],
 ) -> Option<String> {
     let focused_document_id = focused_answer_document_id(question, chunks);
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
     let document_labels = build_document_labels(chunks);
 
     best_matching_fact(

@@ -3,7 +3,7 @@ use std::error::Error as _;
 use axum::{
     Json, Router, body,
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -11,6 +11,7 @@ use chrono::Utc;
 use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
@@ -58,11 +59,28 @@ pub const MCP_CANONICAL_TOOL_NAMES: &[&str] = &[
     "get_graph_topology",
     "list_relations",
     "get_communities",
+    // Canonical grounded-answer entry point — parity with the UI
+    // assistant: same pipeline, same citations, same verifier.
+    "grounded_answer",
 ];
 
 pub const MCP_CANONICAL_METHOD_NAMES: &[&str] = &["initialize", "tools/list", "tools/call"];
 
 pub const MCP_CANONICAL_NOTIFICATION_METHOD_NAMES: &[&str] = &["notifications/initialized"];
+
+/// Session identifier header defined by the MCP Streamable HTTP transport
+/// (spec 2025-06-18). The server sets it on the HTTP response to
+/// `initialize`; the client MUST echo it on every subsequent request
+/// belonging to that session. IronRAG is stateless between requests —
+/// the header is generated for protocol compliance but the server does
+/// not validate or correlate sessions across calls.
+pub const MCP_SESSION_HEADER: &str = "mcp-session-id";
+
+/// Protocol-version header defined by the MCP Streamable HTTP transport.
+/// Clients MUST include this header on non-`initialize` requests after a
+/// successful `initialize`. IronRAG tolerates its absence for
+/// compatibility with simpler clients.
+pub const MCP_PROTOCOL_HEADER: &str = "mcp-protocol-version";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,9 +164,77 @@ pub(crate) struct McpContentBlock {
 }
 
 pub fn router() -> Router<AppState> {
+    // Single canonical MCP surface: the Streamable HTTP transport
+    // defined by spec 2025-06-18. One endpoint handles POST (JSON-RPC
+    // messages from client), GET (server-initiated SSE stream), and
+    // DELETE (client-requested session termination). No legacy
+    // HTTP+SSE split, no second transport, no alias routes.
     Router::new()
-        .route(MCP_JSONRPC_ROUTE, post(handle_jsonrpc))
+        .route(
+            MCP_JSONRPC_ROUTE,
+            post(handle_jsonrpc).get(handle_get_stream).delete(handle_delete_session),
+        )
         .route(MCP_CAPABILITIES_ROUTE, get(get_capabilities))
+}
+
+/// `GET /v1/mcp` — server-initiated SSE stream per MCP Streamable HTTP.
+///
+/// Spec 2025-06-18 lets the server either refuse the GET with 405 or
+/// open an SSE stream that emits zero events (the server simply never
+/// has anything to push to this client). Both are compliant.
+///
+/// IronRAG's MCP surface is purely request/response today — there are
+/// no server-initiated notifications to push. We still answer 200 with
+/// an empty `text/event-stream`: some bundled MCP clients (notably
+/// `openclaw`'s `bundle-mcp`, spawned per Telegram conversation)
+/// treat a non-200 handshake response as fatal and drop the entire
+/// MCP server registration for that agent context, which leaves the
+/// agent tool-less even though `POST` initialize/tools/list work.
+/// Returning a well-formed but silent SSE stream satisfies those
+/// clients without introducing real event traffic.
+///
+/// The stream emits one spec-harmless SSE comment (`: ready`) so the
+/// client's parser has something to consume on first read, then keeps
+/// the connection idle until either side closes. No `retry:` / `event:`
+/// / `data:` frames ever leave this handler.
+///
+/// Auth is intentionally *not* required on this handler: the same
+/// bundled clients open the stream before propagating the session's
+/// Bearer, and a 401 here was the previous fatal mode. The handler
+/// discloses nothing beyond the presence of an idle SSE endpoint.
+#[tracing::instrument(level = "debug", name = "http.mcp.get_stream", skip_all)]
+async fn handle_get_stream(headers: HeaderMap) -> Response {
+    let request_id = ensure_or_generate_request_id(&headers);
+    // `: ready\n\n` is a valid SSE comment line. The body is
+    // deliberately tiny and self-contained: bundle-mcp style clients
+    // accept a well-formed empty stream as a successful handshake, and
+    // the connection can close immediately after — they do not
+    // require long-lived streams when the server declares no events.
+    let sse_body = ": ready\n\n";
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .header(header::CONNECTION, "keep-alive")
+        .body(body::Body::from(sse_body))
+        .expect("static SSE handshake response must build");
+    attach_request_id_header(response.headers_mut(), &request_id);
+    response
+}
+
+/// `DELETE /v1/mcp` — client-requested session termination per MCP
+/// Streamable HTTP. IronRAG is stateless between requests (no session
+/// store, no pending streams), so termination is a no-op; we always
+/// respond 200 OK so cleanup flows succeed. Auth is optional for the
+/// same reason as `handle_get_stream` — clients may issue DELETE during
+/// shutdown with a stale or missing header and the cleanup flow must
+/// still terminate cleanly on the client side.
+#[tracing::instrument(level = "debug", name = "http.mcp.delete_session", skip_all)]
+async fn handle_delete_session(headers: HeaderMap) -> Response {
+    let request_id = ensure_or_generate_request_id(&headers);
+    let mut response = StatusCode::OK.into_response();
+    attach_request_id_header(response.headers_mut(), &request_id);
+    response
 }
 
 async fn capability_snapshot(
@@ -233,9 +319,12 @@ async fn handle_jsonrpc(
     request: Request,
 ) -> Response {
     let request_id = ensure_or_generate_request_id(request.headers());
+    let accept = accept_preference(request.headers());
     let request = match parse_mcp_jsonrpc_request(&state, request).await {
         Ok(request) => request,
-        Err(response) => return with_request_id(Json(response).into_response(), &request_id),
+        Err(response) => {
+            return finalize_mcp_response(response, accept, None, &request_id);
+        }
     };
     if request.jsonrpc != MCP_JSONRPC_VERSION {
         let response = error_response(
@@ -244,13 +333,17 @@ async fn handle_jsonrpc(
             "invalid request",
             Some(json!({ "errorKind": "invalid_jsonrpc_version" })),
         );
-        return with_request_id(Json(response).into_response(), &request_id);
+        return finalize_mcp_response(response, accept, None, &request_id);
     }
 
+    // Notifications carry no `id`; per MCP Streamable HTTP the server
+    // acknowledges them with a bare 202 Accepted and no body.
     if request.id.is_none() && request.method.starts_with("notifications/") {
         return with_request_id(StatusCode::ACCEPTED.into_response(), &request_id);
     }
 
+    let is_initialize = request.method == "initialize";
+    let session_id = is_initialize.then(|| Uuid::now_v7().as_hyphenated().to_string());
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(&auth, &state, &request_id, request.id).await,
         "tools/list" => tools::handle_tools_list(&auth, &state, &request_id, request.id).await,
@@ -265,7 +358,98 @@ async fn handle_jsonrpc(
         ),
     };
 
-    with_request_id(Json(response).into_response(), &request_id)
+    finalize_mcp_response(response, accept, session_id.as_deref(), &request_id)
+}
+
+/// Content-negotiated view of the client's `Accept` header. Clients that
+/// follow the MCP Streamable HTTP spec include both
+/// `application/json` and `text/event-stream`; the server picks the
+/// one it prefers to emit. Clients that omit `Accept` or send `*/*`
+/// get the default JSON representation.
+#[derive(Debug, Clone, Copy)]
+enum McpAcceptPreference {
+    Json,
+    EventStream,
+}
+
+fn accept_preference(headers: &HeaderMap) -> McpAcceptPreference {
+    // We render SSE only when the client asks for it explicitly. This
+    // keeps curl/debugging friendly (default = JSON) while remaining
+    // spec-compliant for SDK clients that advertise
+    // `Accept: application/json, text/event-stream` on every request.
+    let accept_header =
+        headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let wants_event_stream = accept_header
+        .split(',')
+        .map(|segment| segment.split(';').next().unwrap_or("").trim())
+        .any(|segment| segment.eq_ignore_ascii_case("text/event-stream"));
+    let wants_json = accept_header.is_empty()
+        || accept_header
+            .split(',')
+            .map(|segment| segment.split(';').next().unwrap_or("").trim())
+            .any(|segment| {
+                segment.eq_ignore_ascii_case("application/json")
+                    || segment.eq_ignore_ascii_case("application/*")
+                    || segment == "*/*"
+            });
+    if wants_event_stream && !wants_json {
+        McpAcceptPreference::EventStream
+    } else if wants_event_stream {
+        // When both are acceptable, honour the client's explicit
+        // SSE request — agents that advertise it usually keep the
+        // stream open for progress / notifications on long tool calls.
+        McpAcceptPreference::EventStream
+    } else {
+        McpAcceptPreference::Json
+    }
+}
+
+fn finalize_mcp_response(
+    payload: McpJsonRpcResponse,
+    accept: McpAcceptPreference,
+    session_id: Option<&str>,
+    request_id: &str,
+) -> Response {
+    let body_json = serde_json::to_string(&payload).unwrap_or_else(|error| {
+        // Serialization of a known-small Serialize struct cannot
+        // realistically fail; fall back to a hand-rolled JSON-RPC
+        // error frame so we still emit valid JSON-RPC on the wire.
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":\"internal serialization error: {}\"}}}}",
+            error
+        )
+    });
+    let mut response = match accept {
+        McpAcceptPreference::Json => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body::Body::from(body_json))
+            .expect("static JSON response must build"),
+        McpAcceptPreference::EventStream => {
+            // Single-event SSE response. MCP Streamable HTTP treats
+            // POST replies as short-lived streams: one `message`
+            // event carrying the JSON-RPC frame, then the server
+            // may close immediately. We do not keep the stream open
+            // because IronRAG emits no progress notifications — the
+            // client receives the final frame and the connection
+            // ends.
+            let sse_body = format!("event: message\ndata: {body_json}\n\n");
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+                .header(header::CONNECTION, "keep-alive")
+                .body(body::Body::from(sse_body))
+                .expect("static SSE response must build")
+        }
+    };
+    if let Some(sid) = session_id {
+        if let Ok(value) = HeaderValue::from_str(sid) {
+            response.headers_mut().insert(HeaderName::from_static(MCP_SESSION_HEADER), value);
+        }
+    }
+    attach_request_id_header(response.headers_mut(), request_id);
+    response
 }
 
 fn canonical_capabilities_response(

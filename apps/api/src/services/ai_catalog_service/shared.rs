@@ -47,6 +47,7 @@ pub(super) fn parse_binding_purpose(value: &str) -> Result<AiBindingPurpose, Api
         "extract_text" => Ok(AiBindingPurpose::ExtractText),
         "extract_graph" => Ok(AiBindingPurpose::ExtractGraph),
         "embed_chunk" => Ok(AiBindingPurpose::EmbedChunk),
+        "query_compile" => Ok(AiBindingPurpose::QueryCompile),
         "query_retrieve" => Ok(AiBindingPurpose::QueryRetrieve),
         "query_answer" => Ok(AiBindingPurpose::QueryAnswer),
         "vision" => Ok(AiBindingPurpose::Vision),
@@ -173,14 +174,7 @@ pub(super) fn scope_can_use_resource(owner_scope: AiScopeRef, resource_scope: Ai
 }
 
 pub(crate) fn binding_purpose_key(value: AiBindingPurpose) -> &'static str {
-    match value {
-        AiBindingPurpose::ExtractText => "extract_text",
-        AiBindingPurpose::ExtractGraph => "extract_graph",
-        AiBindingPurpose::EmbedChunk => "embed_chunk",
-        AiBindingPurpose::QueryRetrieve => "query_retrieve",
-        AiBindingPurpose::QueryAnswer => "query_answer",
-        AiBindingPurpose::Vision => "vision",
-    }
+    value.as_str()
 }
 
 pub(crate) fn canonical_runtime_preset_name(
@@ -192,6 +186,7 @@ pub(crate) fn canonical_runtime_preset_name(
         AiBindingPurpose::ExtractText => "Extract Text",
         AiBindingPurpose::ExtractGraph => "Extract Graph",
         AiBindingPurpose::EmbedChunk => "Embed Chunk",
+        AiBindingPurpose::QueryCompile => "Query Compile",
         AiBindingPurpose::QueryRetrieve => "Query Retrieve",
         AiBindingPurpose::QueryAnswer => "Query Answer",
         AiBindingPurpose::Vision => "Vision",

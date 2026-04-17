@@ -918,6 +918,17 @@ pub async fn list_resolved_grants_by_principal(
     postgres: &PgPool,
     principal_id: Uuid,
 ) -> Result<Vec<ResolvedIamGrantScopeRow>, sqlx::Error> {
+    list_resolved_grants_by_principal_ids(postgres, &[principal_id]).await
+}
+
+pub async fn list_resolved_grants_by_principal_ids(
+    postgres: &PgPool,
+    principal_ids: &[Uuid],
+) -> Result<Vec<ResolvedIamGrantScopeRow>, sqlx::Error> {
+    if principal_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
     sqlx::query_as::<_, ResolvedIamGrantScopeRow>(
         "select
             grant_row.id,
@@ -974,11 +985,11 @@ pub async fn list_resolved_grants_by_principal(
          left join ai_binding_assignment binding
            on grant_row.resource_kind = 'library_binding'
           and binding.id = grant_row.resource_id
-         where grant_row.principal_id = $1
+         where grant_row.principal_id = any($1)
            and (grant_row.expires_at is null or grant_row.expires_at > now())
-         order by grant_row.granted_at desc",
+         order by grant_row.principal_id asc, grant_row.granted_at desc",
     )
-    .bind(principal_id)
+    .bind(principal_ids)
     .fetch_all(postgres)
     .await
 }

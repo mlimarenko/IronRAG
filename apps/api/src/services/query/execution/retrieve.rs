@@ -310,11 +310,11 @@ pub(crate) fn build_lexical_queries(question: &str, plan: &RuntimeQueryPlan) -> 
     push_query(request_safe_query(plan));
     push_query(question.trim().to_string());
     if plan.intent_profile.exact_literal_technical {
-        for segment in technical_literal_focus_keyword_segments(question) {
+        for segment in technical_literal_focus_keyword_segments(question, None) {
             push_query(segment.join(" "));
         }
     }
-    if super::question_requests_multi_document_scope(question) {
+    if super::question_requests_multi_document_scope(question, None) {
         for clause in super::extract_multi_document_role_clauses(question) {
             push_query(clause.clone());
             let clause_keywords = crate::services::query::planner::extract_keywords(&clause);

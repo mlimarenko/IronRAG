@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { adminApi } from '@/api';
 import type { CatalogLibraryResponse, CatalogWorkspaceResponse } from '@/api/admin';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -148,6 +149,70 @@ function humanizeTokenStatus(status: APIToken['status'], t: TFunction): string {
   }
 }
 
+function permissionMeta(permission: string): PermMeta | undefined {
+  return PERM_META.find((perm) => perm.key === permission);
+}
+
+function permissionLabel(permission: string): string {
+  return permissionMeta(permission)?.label ?? permission.replaceAll('_', ' ');
+}
+
+function tokenScopeHeading(token: APIToken, t: TFunction): string {
+  switch (token.scope.kind) {
+    case 'workspace':
+      return t('admin.workspace');
+    case 'library':
+      return t('admin.library');
+    default:
+      return t('admin.system');
+  }
+}
+
+function tokenScopeSummary(token: APIToken, t: TFunction): string {
+  if (token.scope.kind === 'system') {
+    return t('admin.system');
+  }
+  if (token.scope.kind === 'workspace') {
+    return token.scope.workspace?.displayName ?? t('admin.workspace');
+  }
+  const libraryNames = token.scope.libraries.map((library) => library.displayName);
+  if (libraryNames.length === 0) {
+    return token.scope.workspace?.displayName ?? t('admin.library');
+  }
+  if (libraryNames.length <= 2) {
+    return libraryNames.join(', ');
+  }
+  const workspaceName = token.scope.workspace?.displayName;
+  return workspaceName
+    ? `${workspaceName} · ${libraryNames.length} ${t('admin.tokenLibraries').toLowerCase()}`
+    : `${libraryNames.length} ${t('admin.tokenLibraries').toLowerCase()}`;
+}
+
+function tokenScopeLine(token: APIToken, t: TFunction): string {
+  if (token.scope.kind === 'system') {
+    return t('admin.system');
+  }
+  return `${tokenScopeHeading(token, t)}: ${tokenScopeSummary(token, t)}`;
+}
+
+function groupTokenPermissions(token: APIToken): { group: string; permissions: string[] }[] {
+  const grouped = token.grants.reduce<Record<string, Set<string>>>((acc, grant) => {
+    const group = permissionMeta(grant.permission)?.group ?? 'operations';
+    (acc[group] ??= new Set<string>()).add(grant.permission);
+    return acc;
+  }, {});
+  return Object.entries(grouped)
+    .map(([group, permissions]) => ({
+      group,
+      permissions: Array.from(permissions).sort((left, right) => left.localeCompare(right)),
+    }))
+    .sort((left, right) => left.group.localeCompare(right.group));
+}
+
+function uniquePermissionLabels(token: APIToken): string[] {
+  return Array.from(new Set(token.grants.map((grant) => permissionLabel(grant.permission))));
+}
+
 export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
   const [tokens, setTokens] = useState<APIToken[]>([]);
   const [loading, setLoading] = useState(false);
@@ -187,7 +252,14 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
       .listTokens()
       .then((data) => {
         const list = Array.isArray(data) ? data : [];
-        setTokens(list.map(mapToken));
+        const mapped = list.map(mapToken);
+        setTokens(mapped);
+        setSelectedToken((current) => {
+          if (!current) {
+            return mapped[0] ?? null;
+          }
+          return mapped.find((token) => token.id === current.id) ?? mapped[0] ?? null;
+        });
       })
       .catch((err: unknown) =>
         setLoadError(errorMessage(err, t('admin.loadTokensFailed'))),
@@ -357,6 +429,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
             !tokenLibrariesError &&
             selectedActiveLibraryIds.length > 0)),
     ) && !minting;
+  const selectedTokenPermissionGroups = selectedToken ? groupTokenPermissions(selectedToken) : [];
 
   return (
     <>
@@ -395,30 +468,50 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
         </div>
       </div>
 
-      <div className="flex gap-6">
+      <div className="flex flex-col gap-6 xl:flex-row xl:items-start">
         <div className="flex-1 space-y-1.5">
           {filteredTokens.map((token) => (
             <button
               key={token.id}
-              className={`w-full flex items-center gap-3 p-4 rounded-xl text-left transition-all duration-200 ${
+              className={`w-full rounded-xl border p-4 text-left transition-all duration-200 ${
                 selectedToken?.id === token.id
-                  ? 'bg-card shadow-lifted border border-primary/15'
-                  : 'hover:bg-accent/50 border border-transparent hover:shadow-soft'
+                  ? 'border-primary/15 bg-card shadow-lifted'
+                  : 'border-transparent hover:bg-accent/50 hover:shadow-soft'
               }`}
               onClick={() => setSelectedToken(token)}
             >
-              <div className="w-9 h-9 rounded-xl bg-surface-sunken flex items-center justify-center shrink-0">
-                <Key className="h-4 w-4 text-muted-foreground" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-bold truncate">{token.label}</div>
-                <div className="text-xs text-muted-foreground mt-0.5 font-medium">
-                  {token.tokenPrefix}... · {token.scopeSummary}
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-surface-sunken">
+                  <Key className="h-4 w-4 text-muted-foreground" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-bold">{token.label}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs font-medium text-muted-foreground">
+                        <span className="font-mono">{token.tokenPrefix}...</span>
+                        <span className="text-border">&middot;</span>
+                        <span className="min-w-0 truncate">
+                          {tokenScopeLine(token, t)}
+                        </span>
+                      </div>
+                    </div>
+                    <span className={`status-badge shrink-0 ${tokenStatusCls(token.status)}`}>
+                      {humanizeTokenStatus(token.status, t)}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {uniquePermissionLabels(token).slice(0, 3).map((label) => (
+                        <Badge key={label} variant="outline" className="max-w-full truncate">
+                          {label}
+                        </Badge>
+                      ))}
+                    {uniquePermissionLabels(token).length > 3 ? (
+                      <Badge variant="outline">+{uniquePermissionLabels(token).length - 3}</Badge>
+                    ) : null}
+                  </div>
                 </div>
               </div>
-              <span className={`status-badge ${tokenStatusCls(token.status)}`}>
-                {humanizeTokenStatus(token.status, t)}
-              </span>
             </button>
           ))}
           {!loading && !loadError && filteredTokens.length === 0 && (
@@ -429,48 +522,133 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
         </div>
 
         {selectedToken && (
-          <div className="w-80 shrink-0 workbench-surface p-5 space-y-4 animate-slide-in-right">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold">{selectedToken.label}</h3>
-              <span className={`status-badge ${tokenStatusCls(selectedToken.status)}`}>
-                {humanizeTokenStatus(selectedToken.status, t)}
-              </span>
-            </div>
-            <div className="space-y-2.5 text-sm">
-              {[
-                [t('admin.prefix'), selectedToken.tokenPrefix + '...'],
-                [t('admin.scope'), selectedToken.scopeSummary],
-                [t('admin.principal'), selectedToken.principalLabel],
-                [t('admin.issuedBy'), selectedToken.issuedBy],
-                [
-                  t('admin.expires'),
-                  selectedToken.expiresAt
-                    ? new Date(selectedToken.expiresAt).toLocaleDateString()
-                    : t('admin.never'),
-                ],
-                [
-                  t('admin.lastUsed'),
-                  selectedToken.lastUsedAt
-                    ? new Date(selectedToken.lastUsedAt).toLocaleDateString()
-                    : t('admin.never'),
-                ],
-              ].map(([k, v]) => (
-                <div key={k} className="flex justify-between">
-                  <span className="text-muted-foreground">{k}</span>
-                  <span className="font-mono text-xs font-bold">{v}</span>
+          <div className="w-full shrink-0 animate-slide-in-right xl:w-[380px]">
+            <div className="workbench-surface space-y-4 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="break-words text-sm font-bold">{selectedToken.label}</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {tokenScopeLine(selectedToken, t)}
+                  </p>
                 </div>
-              ))}
+                <span className={`status-badge shrink-0 ${tokenStatusCls(selectedToken.status)}`}>
+                  {humanizeTokenStatus(selectedToken.status, t)}
+                </span>
+              </div>
+
+              <div className="rounded-xl border bg-surface-sunken/70 p-4">
+                <div className="space-y-4">
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t('admin.prefix')}
+                    </div>
+                    <div className="mt-1 break-all font-mono text-xs font-bold">
+                      {selectedToken.tokenPrefix}...
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t('admin.issuedBy')}
+                    </div>
+                    <div className="mt-1 break-words text-sm font-medium">
+                      {selectedToken.issuedBy?.displayLabel ?? t('admin.system')}
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t('admin.expires')}
+                      </div>
+                      <div className="mt-1 text-sm font-medium">
+                        {selectedToken.expiresAt
+                          ? new Date(selectedToken.expiresAt).toLocaleDateString()
+                          : t('admin.never')}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t('admin.lastUsed')}
+                      </div>
+                      <div className="mt-1 text-sm font-medium">
+                        {selectedToken.lastUsedAt
+                          ? new Date(selectedToken.lastUsedAt).toLocaleDateString()
+                          : t('admin.never')}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border bg-surface-sunken/70 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {t('admin.scope')}
+                </div>
+                <div className="mt-1 text-sm font-semibold">
+                  {tokenScopeHeading(selectedToken, t)}
+                </div>
+                {selectedToken.scope.workspace ? (
+                  <div className="mt-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t('admin.tokenWorkspace')}
+                    </div>
+                    <div className="mt-1 break-words text-sm font-medium">
+                      {selectedToken.scope.workspace.displayName}
+                    </div>
+                  </div>
+                ) : null}
+                {selectedToken.scope.libraries.length > 0 ? (
+                  <div className="mt-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t('admin.tokenLibraries')}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {selectedToken.scope.libraries.map((library) => (
+                        <Badge key={library.id} variant="outline" className="max-w-full break-all">
+                          {library.displayName}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="rounded-xl border bg-surface-sunken/70 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {t('admin.tokenPermissions')}
+                </div>
+                {selectedTokenPermissionGroups.length === 0 ? (
+                  <p className="mt-2 text-sm text-muted-foreground">{t('admin.tokenNoPermissions')}</p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {selectedTokenPermissionGroups.map(({ group, permissions }) => (
+                      <div key={group}>
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          {PERM_GROUP_LABELS[group] ?? group}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {permissions.map((permission) => (
+                            <Badge key={permission} variant="outline" className="max-w-full break-all">
+                              {permissionLabel(permission)}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {selectedToken.status === 'active' && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => handleRevoke(selectedToken)}
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('admin.revokeToken')}
+                </Button>
+              )}
             </div>
-            {selectedToken.status === 'active' && (
-              <Button
-                variant="destructive"
-                size="sm"
-                className="w-full"
-                onClick={() => handleRevoke(selectedToken)}
-              >
-                <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('admin.revokeToken')}
-              </Button>
-            )}
           </div>
         )}
       </div>

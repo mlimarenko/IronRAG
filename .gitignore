@@ -38,3 +38,4 @@ __pycache__/
 # Local tool cache
 .tools/bin/**
 .tools/tmp/**
+.claude/

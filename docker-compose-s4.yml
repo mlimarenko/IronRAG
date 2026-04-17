@@ -52,6 +52,30 @@ x-ironrag-app-env: &ironrag-app-env
   IRONRAG_ARANGODB_BOOTSTRAP_GRAPH: ${IRONRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
   IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
 
+x-ironrag-resources-small: &ironrag-resources-small
+  limits:
+    cpus: "1.00"
+    memory: 1G
+  reservations:
+    cpus: "0.20"
+    memory: 256M
+
+x-ironrag-resources-medium: &ironrag-resources-medium
+  limits:
+    cpus: "2.00"
+    memory: 3072M
+  reservations:
+    cpus: "0.50"
+    memory: 768M
+
+x-ironrag-resources-large: &ironrag-resources-large
+  limits:
+    cpus: "4.00"
+    memory: 4G
+  reservations:
+    cpus: "1.00"
+    memory: 1G
+
 services:
   postgres:
     image: ${IRONRAG_POSTGRES_IMAGE:-postgres:18-alpine}
@@ -71,6 +95,9 @@ services:
       retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql
+    deploy:
+      resources:
+        <<: *ironrag-resources-medium
 
   redis:
     image: ${IRONRAG_REDIS_IMAGE:-redis:8.6}
@@ -81,6 +108,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    deploy:
+      resources:
+        <<: *ironrag-resources-small
 
   arangodb:
     image: ${IRONRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
@@ -105,6 +135,9 @@ services:
       - "8529"
     volumes:
       - arangodb_data:/var/lib/arangodb3
+    deploy:
+      resources:
+        <<: *ironrag-resources-large
 
   s4core:
     image: ${IRONRAG_S4CORE_IMAGE:-s4core/s4core:latest}
@@ -123,6 +156,9 @@ services:
       - "9000"
     volumes:
       - s4core_data:/data
+    deploy:
+      resources:
+        <<: *ironrag-resources-medium
 
   startup:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
@@ -144,6 +180,9 @@ services:
       IRONRAG_SERVICE_NAME: ironrag-startup
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        <<: *ironrag-resources-medium
 
   backend:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
@@ -169,10 +208,7 @@ services:
       - "host.docker.internal:host-gateway"
     deploy:
       resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 512M
+        <<: *ironrag-resources-large
 
   worker:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
@@ -198,10 +234,7 @@ services:
       - "host.docker.internal:host-gateway"
     deploy:
       resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 512M
+        <<: *ironrag-resources-large
 
   frontend:
     image: ${IRONRAG_FRONTEND_IMAGE:-pipingspace/ironrag-frontend:latest}
@@ -218,6 +251,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        <<: *ironrag-resources-small
 
 volumes:
   postgres_data:

@@ -27,6 +27,7 @@ export interface Library {
 export type AIPurpose =
   | "extract_graph"
   | "embed_chunk"
+  | "query_compile"
   | "query_answer"
   | "vision";
 
@@ -413,16 +414,40 @@ export interface APIToken {
   status: "active" | "expired" | "revoked";
   expiresAt?: string;
   revokedAt?: string;
-  issuedBy: string;
+  issuedBy?: TokenIssuer;
   lastUsedAt?: string;
+  scope: TokenScope;
   grants: TokenGrant[];
-  scopeSummary: string;
-  principalLabel: string;
+}
+
+export interface TokenIssuer {
+  id: string;
+  displayLabel: string;
+}
+
+export interface TokenScopeWorkspace {
+  id: string;
+  displayName: string;
+}
+
+export interface TokenScopeLibrary {
+  id: string;
+  workspaceId: string;
+  displayName: string;
+}
+
+export interface TokenScope {
+  kind: "system" | "workspace" | "library";
+  workspace?: TokenScopeWorkspace;
+  libraries: TokenScopeLibrary[];
 }
 
 export interface TokenGrant {
-  scope: "workspace" | "library";
+  resourceKind: string;
+  resourceId: string;
   permission: string;
+  workspace?: TokenScopeWorkspace;
+  library?: TokenScopeLibrary;
 }
 
 export type AIScopeKind = "instance" | "workspace" | "library";
@@ -544,6 +569,21 @@ export interface OperationsWarning {
   resolvedAt?: string;
 }
 
+export interface AuditAssistantModel {
+  providerKind: string;
+  modelName: string;
+}
+
+export interface AuditAssistantCall {
+  queryExecutionId: string;
+  conversationId?: string;
+  runtimeExecutionId?: string;
+  models: AuditAssistantModel[];
+  totalCost?: string | number | null;
+  currencyCode?: string | null;
+  providerCallCount: number;
+}
+
 export interface AuditEvent {
   id: string;
   action: string;
@@ -553,6 +593,7 @@ export interface AuditEvent {
   message: string;
   subjectSummary: string;
   actor: string;
+  assistantCall?: AuditAssistantCall;
 }
 
 export interface AuditEventPage {

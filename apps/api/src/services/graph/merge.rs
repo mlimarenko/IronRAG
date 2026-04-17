@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
+use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::{
     domains::{
@@ -13,6 +14,18 @@ use crate::{
         graph::quality_guard::GraphQualityGuardService,
     },
 };
+
+/// How many per-entity (upsert node + upsert mentions-edge) pipelines we
+/// allow to run in parallel while merging one chunk's extraction output.
+/// The entity loop used to be serial — 15 entities × 2 Postgres round-trips
+/// = 30 serial awaits per chunk, so a round-trip cost of 5-10 ms bound the
+/// whole merge to 150-300 ms even when extraction returned cheap rows.
+///
+/// 4 is well under the Postgres pool ceiling (worker pool is 40, and a
+/// single job never monopolises more than its own slot), and round-trips
+/// in the pipeline are ON CONFLICT upserts so racing tasks reconcile
+/// through the unique index rather than deadlocking.
+const ENTITY_UPSERT_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct GraphMergeScope {
@@ -157,37 +170,80 @@ pub async fn merge_chunk_graph_candidates(
     let mut evidence_count = 1usize;
     let mut filtered_artifact_count = 0usize;
 
-    for entity in &candidates.entities {
-        let aliases = normalize_graph_aliases(&entity.label, &entity.aliases);
-        let canonical_node_key = entity_key_index.canonical_node_key_for_label(&entity.label);
-        let canonical_node_type =
-            crate::services::graph::identity::runtime_node_type_from_key(&canonical_node_key);
-        let node = upsert_graph_node(
-            pool,
-            scope,
-            &entity.label,
-            canonical_node_type,
-            &aliases,
-            entity.summary.as_deref(),
-            entity.sub_type.as_deref(),
-            extraction_recovery,
-        )
-        .await?;
+    // Fan the per-entity pipeline out across ENTITY_UPSERT_CONCURRENCY
+    // concurrent tasks. Each task runs two Postgres round-trips (node
+    // upsert + mentions-edge upsert); bounding the fan-out keeps us
+    // polite to the shared pool while still hiding the round-trip
+    // latency that used to dominate `elapsed_ms` for merge-heavy chunks.
+    //
+    // Order-independence is safe here because:
+    //   * Node + edge upserts use ON CONFLICT unique indexes, so two
+    //     concurrent tasks writing the same canonical key reconcile
+    //     through the DB rather than via in-process coordination.
+    //   * The results are reassembled into `nodes`, `edges` and
+    //     `evidence_targets` sequentially after the stream drains, so
+    //     the resulting vectors still match the input order of
+    //     `candidates.entities`.
+    let entity_inputs: Vec<_> = candidates
+        .entities
+        .iter()
+        .map(|entity| {
+            let aliases = normalize_graph_aliases(&entity.label, &entity.aliases);
+            let canonical_node_key = entity_key_index.canonical_node_key_for_label(&entity.label);
+            let canonical_node_type =
+                crate::services::graph::identity::runtime_node_type_from_key(&canonical_node_key);
+            (
+                entity.label.clone(),
+                canonical_node_type,
+                aliases,
+                entity.summary.clone(),
+                entity.sub_type.clone(),
+            )
+        })
+        .collect();
+    let document_node_for_edges = document_node.clone();
+    let extraction_recovery_for_edges = extraction_recovery.cloned();
+    let entity_results: Vec<(RuntimeGraphNodeRow, EdgePersistenceOutcome)> =
+        stream::iter(entity_inputs)
+            .map(|(label, node_type, aliases, summary, sub_type)| {
+                let pool = pool.clone();
+                let scope = scope.clone();
+                let document_node_for_edge = document_node_for_edges.clone();
+                let extraction_recovery = extraction_recovery_for_edges.clone();
+                async move {
+                    let node = upsert_graph_node(
+                        &pool,
+                        &scope,
+                        &label,
+                        node_type,
+                        &aliases,
+                        summary.as_deref(),
+                        sub_type.as_deref(),
+                        extraction_recovery.as_ref(),
+                    )
+                    .await?;
+                    let document_edge = upsert_graph_edge(
+                        &pool,
+                        &scope,
+                        &document_node_for_edge,
+                        &node,
+                        "mentions",
+                        Some("Document mentions extracted entity"),
+                        extraction_recovery.as_ref(),
+                    )
+                    .await?;
+                    anyhow::Ok((node, document_edge))
+                }
+            })
+            .buffered(ENTITY_UPSERT_CONCURRENCY)
+            .try_collect()
+            .await?;
+    for (node, document_edge) in entity_results {
         evidence_targets.push(repositories::GraphEvidenceTarget {
             target_kind: "node",
             target_id: node.id,
             evidence_context_key: "entity_node",
         });
-        let document_edge = upsert_graph_edge(
-            pool,
-            scope,
-            &document_node,
-            &node,
-            "mentions",
-            Some("Document mentions extracted entity"),
-            extraction_recovery,
-        )
-        .await?;
         nodes.push(node);
         match document_edge {
             EdgePersistenceOutcome::Admitted(document_edge) => {

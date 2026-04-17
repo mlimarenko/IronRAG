@@ -25,10 +25,11 @@ const MAX_CANONICAL_ANSWER_TECHNICAL_FACTS: usize = 24;
 pub(crate) async fn load_direct_targeted_table_answer(
     state: &AppState,
     question: &str,
+    ir: Option<&crate::domains::query_ir::QueryIR>,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) -> anyhow::Result<Option<String>> {
     let row_count = requested_initial_table_row_count(question);
-    let inventory_requested = question_asks_table_value_inventory(question);
+    let inventory_requested = question_asks_table_value_inventory(question, ir);
     if row_count.is_none() && !inventory_requested {
         return Ok(None);
     }
@@ -90,7 +91,7 @@ pub(crate) async fn load_direct_targeted_table_answer(
         return Ok(None);
     }
 
-    Ok(build_table_row_grounded_answer(question, &initial_rows))
+    Ok(build_table_row_grounded_answer(question, ir, &initial_rows))
 }
 
 pub(crate) async fn load_canonical_answer_chunks(
@@ -446,6 +447,7 @@ pub(crate) fn format_community_context(matches: &[(i32, String, String)]) -> Opt
 
 pub(crate) fn build_canonical_answer_context(
     question: &str,
+    query_ir: &crate::domains::query_ir::QueryIR,
     technical_literals_text: Option<&str>,
     evidence: &CanonicalAnswerEvidence,
     canonical_answer_chunks: &[RuntimeMatchedChunk],
@@ -537,8 +539,12 @@ pub(crate) fn build_canonical_answer_context(
         sections.push(prepared_segment_section);
     }
 
-    let chunk_section =
-        render_canonical_chunk_section(question, &filtered_chunks, suppress_tabular_detail);
+    let chunk_section = render_canonical_chunk_section(
+        question,
+        query_ir,
+        &filtered_chunks,
+        suppress_tabular_detail,
+    );
     if !chunk_section.is_empty() {
         sections.push(chunk_section);
     }

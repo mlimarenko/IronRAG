@@ -16,6 +16,7 @@ pub enum UiLocale {
 pub enum BootstrapBindingPurpose {
     ExtractGraph,
     EmbedChunk,
+    QueryCompile,
     QueryAnswer,
     Vision,
 }

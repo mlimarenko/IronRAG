@@ -1,7 +1,7 @@
 mod session;
 mod types;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json, Router,
@@ -20,8 +20,9 @@ use self::{
     types::{
         CreateGrantRequest, GrantResponse, IamGrantResourceKind, IamPermissionKind,
         IamPrincipalKind, ListGrantsQuery, ListTokensQuery, MeResponse, MintTokenRequest,
-        MintTokenResponse, PrincipalResponse, TokenResponse, UserResponse,
-        WorkspaceMembershipResponse,
+        MintTokenResponse, PrincipalResponse, TokenGrantSummaryResponse, TokenIssuerResponse,
+        TokenLibrarySummaryResponse, TokenResponse, TokenScopeKind, TokenScopeResponse,
+        TokenWorkspaceSummaryResponse, UserResponse, WorkspaceMembershipResponse,
     },
 };
 use crate::{
@@ -139,7 +140,38 @@ async fn list_tokens(
         "listed api tokens",
     );
 
-    let items: Vec<_> = rows.into_iter().map(map_token_row).collect();
+    let principal_ids = rows.iter().map(|row| row.principal_id).collect::<Vec<_>>();
+    let grant_rows = iam_repository::list_resolved_grants_by_principal_ids(
+        &state.persistence.postgres,
+        &principal_ids,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            requested_workspace_id = ?workspace_filter,
+            ?error,
+            "failed to resolve api token grants",
+        );
+        ApiError::Internal
+    })?;
+    let lookups = load_token_response_lookups(&state, &rows, &grant_rows).await?;
+    let mut grants_by_principal =
+        BTreeMap::<Uuid, Vec<iam_repository::ResolvedIamGrantScopeRow>>::new();
+    for grant_row in grant_rows {
+        grants_by_principal.entry(grant_row.principal_id).or_default().push(grant_row);
+    }
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let principal_id = row.principal_id;
+            build_token_response(
+                row,
+                grants_by_principal.remove(&principal_id).unwrap_or_default(),
+                &lookups,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     span.record("item_count", items.len());
     Ok(Json(items))
 }
@@ -274,7 +306,25 @@ async fn mint_token(
     )
     .await;
 
-    Ok(Json(MintTokenResponse { token: outcome.token, api_token: map_token_row(row) }))
+    let grant_rows = iam_repository::list_resolved_grants_by_principal(
+        &state.persistence.postgres,
+        row.principal_id,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            api_token_principal_id = %row.principal_id,
+            ?error,
+            "failed to resolve minted api token grants",
+        );
+        ApiError::Internal
+    })?;
+    let lookups =
+        load_token_response_lookups(&state, std::slice::from_ref(&row), &grant_rows).await?;
+    let api_token = build_token_response(row, grant_rows, &lookups)?;
+
+    Ok(Json(MintTokenResponse { token: outcome.token, api_token }))
 }
 
 #[tracing::instrument(
@@ -955,6 +1005,166 @@ fn map_membership_row(row: WorkspaceMembership) -> WorkspaceMembershipResponse {
     }
 }
 
+#[derive(Debug, Default)]
+struct TokenResponseLookups {
+    workspaces: BTreeMap<Uuid, TokenWorkspaceSummaryResponse>,
+    libraries: BTreeMap<Uuid, TokenLibrarySummaryResponse>,
+    issuers: BTreeMap<Uuid, TokenIssuerResponse>,
+}
+
+async fn load_token_response_lookups(
+    state: &AppState,
+    token_rows: &[iam_repository::IamApiTokenRow],
+    grant_rows: &[iam_repository::ResolvedIamGrantScopeRow],
+) -> Result<TokenResponseLookups, ApiError> {
+    let workspace_ids = token_rows
+        .iter()
+        .filter_map(|row| row.workspace_id)
+        .chain(grant_rows.iter().filter_map(|row| row.workspace_id))
+        .collect::<BTreeSet<_>>();
+    let library_ids = grant_rows.iter().filter_map(|row| row.library_id).collect::<BTreeSet<_>>();
+    let issuer_ids =
+        token_rows.iter().filter_map(|row| row.issued_by_principal_id).collect::<BTreeSet<_>>();
+
+    let workspace_rows = catalog_repository::list_workspaces(&state.persistence.postgres)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let workspaces = workspace_rows
+        .into_iter()
+        .filter(|row| workspace_ids.contains(&row.id))
+        .map(|row| {
+            (row.id, TokenWorkspaceSummaryResponse { id: row.id, display_name: row.display_name })
+        })
+        .collect();
+
+    let library_rows = catalog_repository::list_libraries(&state.persistence.postgres, None)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let libraries = library_rows
+        .into_iter()
+        .filter(|row| library_ids.contains(&row.id))
+        .map(|row| {
+            (
+                row.id,
+                TokenLibrarySummaryResponse {
+                    id: row.id,
+                    workspace_id: row.workspace_id,
+                    display_name: row.display_name,
+                },
+            )
+        })
+        .collect();
+
+    let mut issuers = BTreeMap::new();
+    for principal_id in issuer_ids {
+        if let Some(principal_row) =
+            iam_repository::get_principal_by_id(&state.persistence.postgres, principal_id)
+                .await
+                .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        {
+            issuers.insert(
+                principal_id,
+                TokenIssuerResponse { principal_id, display_label: principal_row.display_label },
+            );
+        }
+    }
+
+    Ok(TokenResponseLookups { workspaces, libraries, issuers })
+}
+
+fn workspace_summary(
+    workspace_id: Uuid,
+    lookups: &TokenResponseLookups,
+) -> TokenWorkspaceSummaryResponse {
+    lookups.workspaces.get(&workspace_id).cloned().unwrap_or(TokenWorkspaceSummaryResponse {
+        id: workspace_id,
+        display_name: workspace_id.to_string(),
+    })
+}
+
+fn library_summary(
+    library_id: Uuid,
+    workspace_id: Option<Uuid>,
+    lookups: &TokenResponseLookups,
+) -> TokenLibrarySummaryResponse {
+    lookups.libraries.get(&library_id).cloned().unwrap_or(TokenLibrarySummaryResponse {
+        id: library_id,
+        workspace_id: workspace_id.unwrap_or(Uuid::nil()),
+        display_name: library_id.to_string(),
+    })
+}
+
+fn build_token_response(
+    row: iam_repository::IamApiTokenRow,
+    grant_rows: Vec<iam_repository::ResolvedIamGrantScopeRow>,
+    lookups: &TokenResponseLookups,
+) -> Result<TokenResponse, ApiError> {
+    let grants = grant_rows
+        .into_iter()
+        .map(|grant_row| {
+            let workspace =
+                grant_row.workspace_id.map(|workspace_id| workspace_summary(workspace_id, lookups));
+            let library = grant_row
+                .library_id
+                .map(|library_id| library_summary(library_id, grant_row.workspace_id, lookups));
+            Ok(TokenGrantSummaryResponse {
+                resource_kind: map_grant_resource_kind(&grant_row.resource_kind)?,
+                resource_id: grant_row.resource_id,
+                permission_kind: map_permission_kind(&grant_row.permission_kind)?,
+                workspace,
+                library,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    let mut libraries = grants
+        .iter()
+        .filter_map(|grant| grant.library.clone())
+        .fold(BTreeMap::<Uuid, TokenLibrarySummaryResponse>::new(), |mut acc, library| {
+            acc.entry(library.id).or_insert(library);
+            acc
+        })
+        .into_values()
+        .collect::<Vec<_>>();
+    libraries.sort_by(|left, right| {
+        left.display_name
+            .to_ascii_lowercase()
+            .cmp(&right.display_name.to_ascii_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let workspace = row
+        .workspace_id
+        .map(|workspace_id| workspace_summary(workspace_id, lookups))
+        .or_else(|| grants.iter().find_map(|grant| grant.workspace.clone()));
+    let issuer = row.issued_by_principal_id.map(|principal_id| {
+        lookups.issuers.get(&principal_id).cloned().unwrap_or(TokenIssuerResponse {
+            principal_id,
+            display_label: principal_id.to_string(),
+        })
+    });
+    let scope_kind = if !libraries.is_empty() {
+        TokenScopeKind::Library
+    } else if workspace.is_some() {
+        TokenScopeKind::Workspace
+    } else {
+        TokenScopeKind::System
+    };
+
+    Ok(TokenResponse {
+        principal_id: row.principal_id,
+        label: row.label,
+        token_prefix: row.token_prefix,
+        status: row.status,
+        expires_at: row.expires_at,
+        revoked_at: row.revoked_at,
+        last_used_at: row.last_used_at,
+        issuer,
+        scope: TokenScopeResponse { kind: scope_kind, workspace, libraries },
+        grants,
+    })
+}
+
 fn map_principal_row_contract(
     row: iam_repository::IamPrincipalRow,
 ) -> Result<ironrag_contracts::auth::PrincipalProfile, ApiError> {
@@ -989,20 +1199,6 @@ fn map_membership_row_contract(
         membership_state: row.membership_state,
         joined_at: row.joined_at,
         ended_at: row.ended_at,
-    }
-}
-
-fn map_token_row(row: iam_repository::IamApiTokenRow) -> TokenResponse {
-    TokenResponse {
-        principal_id: row.principal_id,
-        workspace_id: row.workspace_id,
-        label: row.label,
-        token_prefix: row.token_prefix,
-        status: row.status,
-        expires_at: row.expires_at,
-        revoked_at: row.revoked_at,
-        issued_by_principal_id: row.issued_by_principal_id,
-        last_used_at: row.last_used_at,
     }
 }
 
@@ -1182,6 +1378,7 @@ mod tests {
         domains::iam::PrincipalKind,
         interfaces::http::auth::{AuthContext, AuthGrant, AuthTokenKind},
     };
+    use chrono::Utc;
 
     fn workspace_iam_admin_auth(workspace_id: Uuid) -> AuthContext {
         AuthContext {
@@ -1307,5 +1504,82 @@ mod tests {
             authorize_workspace_scope_for_row(&auth, None),
             Err(ApiError::Unauthorized)
         ));
+    }
+
+    #[test]
+    fn build_token_response_includes_resolved_scope_and_permissions() {
+        let principal_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        let issuer_id = Uuid::now_v7();
+        let token = build_token_response(
+            iam_repository::IamApiTokenRow {
+                principal_id,
+                workspace_id: Some(workspace_id),
+                label: "Library token".to_string(),
+                token_prefix: "irt_demo".to_string(),
+                status: "active".to_string(),
+                expires_at: None,
+                revoked_at: None,
+                issued_by_principal_id: Some(issuer_id),
+                last_used_at: None,
+            },
+            vec![iam_repository::ResolvedIamGrantScopeRow {
+                id: Uuid::now_v7(),
+                principal_id,
+                resource_kind: "library".to_string(),
+                resource_id: library_id,
+                permission_kind: "library_read".to_string(),
+                granted_at: Utc::now(),
+                granted_by_principal_id: Some(issuer_id),
+                expires_at: None,
+                workspace_id: Some(workspace_id),
+                library_id: Some(library_id),
+                document_id: None,
+            }],
+            &TokenResponseLookups {
+                workspaces: [(
+                    workspace_id,
+                    TokenWorkspaceSummaryResponse {
+                        id: workspace_id,
+                        display_name: "Workspace One".to_string(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                libraries: [(
+                    library_id,
+                    TokenLibrarySummaryResponse {
+                        id: library_id,
+                        workspace_id,
+                        display_name: "Library One".to_string(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                issuers: [(
+                    issuer_id,
+                    TokenIssuerResponse {
+                        principal_id: issuer_id,
+                        display_label: "Admin".to_string(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        )
+        .expect("token response should build");
+
+        assert_eq!(token.scope.kind, TokenScopeKind::Library);
+        assert_eq!(
+            token.scope.workspace.as_ref().map(|workspace| workspace.display_name.as_str()),
+            Some("Workspace One")
+        );
+        assert_eq!(token.scope.libraries[0].display_name, "Library One");
+        assert_eq!(token.grants[0].permission_kind, IamPermissionKind::LibraryRead);
+        assert_eq!(
+            token.issuer.as_ref().map(|issuer| issuer.display_label.as_str()),
+            Some("Admin")
+        );
     }
 }

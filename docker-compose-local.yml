@@ -28,6 +28,10 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
   IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
   IRONRAG_UI_DEFAULT_LOCALE: ${IRONRAG_UI_DEFAULT_LOCALE:-ru}
+  TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-2}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL:-24}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE:-24}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY:-24}
   IRONRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
   IRONRAG_DEPENDENCY_POSTGRES_MODE: bundled
   IRONRAG_DEPENDENCY_REDIS_MODE: bundled
@@ -38,13 +42,36 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_CONTENT_STORAGE_KEY_PREFIX: ${IRONRAG_CONTENT_STORAGE_KEY_PREFIX:-}
   IRONRAG_CONTENT_STORAGE_ROOT: /var/lib/ironrag/content-storage
   RUST_BACKTRACE: full
-
 x-ironrag-app-env: &ironrag-app-env
   <<: *ironrag-runtime-env
   IRONRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: ${IRONRAG_ARANGODB_BOOTSTRAP_COLLECTIONS:-true}
   IRONRAG_ARANGODB_BOOTSTRAP_VIEWS: ${IRONRAG_ARANGODB_BOOTSTRAP_VIEWS:-true}
   IRONRAG_ARANGODB_BOOTSTRAP_GRAPH: ${IRONRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
   IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
+
+x-ironrag-resources-small: &ironrag-resources-small
+  limits:
+    cpus: "1.00"
+    memory: 1G
+  reservations:
+    cpus: "0.20"
+    memory: 256M
+
+x-ironrag-resources-medium: &ironrag-resources-medium
+  limits:
+    cpus: "2.00"
+    memory: 3072M
+  reservations:
+    cpus: "0.50"
+    memory: 768M
+
+x-ironrag-resources-large: &ironrag-resources-large
+  limits:
+    cpus: "4.00"
+    memory: 4G
+  reservations:
+    cpus: "1.00"
+    memory: 1G
 
 services:
   postgres:
@@ -65,7 +92,9 @@ services:
       retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql
-
+    deploy:
+      resources:
+        <<: *ironrag-resources-medium
   redis:
     image: ${IRONRAG_REDIS_IMAGE:-redis:8.6}
     restart: unless-stopped
@@ -75,7 +104,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-
+    deploy:
+      resources:
+        <<: *ironrag-resources-small
   arangodb:
     image: ${IRONRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
     restart: unless-stopped
@@ -99,7 +130,9 @@ services:
       - "8529"
     volumes:
       - arangodb_data:/var/lib/arangodb3
-
+    deploy:
+      resources:
+        <<: *ironrag-resources-large
   startup:
     image: ${IRONRAG_BACKEND_IMAGE:-ironrag-backend:local}
     build:
@@ -123,7 +156,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
-
+    deploy:
+      resources:
+        <<: *ironrag-resources-medium
   backend:
     image: ${IRONRAG_BACKEND_IMAGE:-ironrag-backend:local}
     build:
@@ -155,11 +190,7 @@ services:
       start_period: 15s
     deploy:
       resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 512M
-
+        <<: *ironrag-resources-large
   worker:
     image: ${IRONRAG_BACKEND_IMAGE:-ironrag-backend:local}
     build:
@@ -189,11 +220,7 @@ services:
       start_period: 15s
     deploy:
       resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 512M
-
+        <<: *ironrag-resources-large
   frontend:
     image: ${IRONRAG_FRONTEND_IMAGE:-ironrag-frontend:local}
     build:
@@ -212,7 +239,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
+    deploy:
+      resources:
+        <<: *ironrag-resources-small
 volumes:
   postgres_data:
   arangodb_data:

@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * Visual QA pass for release 0.3.0 against the live backend. Every
+ * Visual QA pass for release 0.3.1 against the live backend. Every
  * scenario uses the session persisted by `global-setup.ts`, so the page
  * renders real workspace / library data — not a mocked fixture.
  *

@@ -1,11 +1,15 @@
+use std::collections::{BTreeSet, HashMap};
+
+use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::audit::{
-        AuditEvent, AuditEventInternalView, AuditEventRedactedView, AuditEventSubject,
+        AuditAssistantCallSummary, AuditAssistantModel, AuditEvent, AuditEventInternalView,
+        AuditEventRedactedView, AuditEventSubject,
     },
-    infra::repositories::audit_repository,
+    infra::repositories::{audit_repository, billing_repository, query_repository},
     interfaces::http::router_support::ApiError,
 };
 
@@ -63,6 +67,19 @@ pub struct AuditEventPage<T> {
     pub offset: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct AppendQueryExecutionAuditCommand {
+    pub actor_principal_id: Uuid,
+    pub surface_kind: String,
+    pub request_id: Option<String>,
+    pub query_session_id: Uuid,
+    pub query_execution_id: Uuid,
+    pub runtime_execution_id: Option<Uuid>,
+    pub context_bundle_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+}
+
 #[derive(Clone, Default)]
 pub struct AuditService;
 
@@ -109,6 +126,87 @@ impl AuditService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_internal_event(event))
+    }
+
+    /// Persists the canonical assistant/query execution audit event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Internal`] when the audit repository write fails.
+    pub async fn append_query_execution_event(
+        &self,
+        state: &AppState,
+        command: AppendQueryExecutionAuditCommand,
+    ) -> Result<(), ApiError> {
+        let async_operation = state
+            .canonical_services
+            .ops
+            .get_latest_async_operation_by_subject(
+                state,
+                "query_execution",
+                command.query_execution_id,
+            )
+            .await?;
+
+        let mut subjects = vec![
+            self.query_session_subject(
+                command.query_session_id,
+                command.workspace_id,
+                command.library_id,
+            ),
+            self.query_execution_subject(
+                command.query_execution_id,
+                command.workspace_id,
+                command.library_id,
+            ),
+            self.knowledge_bundle_subject(
+                command.context_bundle_id,
+                command.workspace_id,
+                command.library_id,
+            ),
+        ];
+        if let Some(runtime_execution_id) = command.runtime_execution_id {
+            subjects.push(self.runtime_execution_subject(
+                runtime_execution_id,
+                Some(command.workspace_id),
+                Some(command.library_id),
+            ));
+        }
+        if let Some(operation) = async_operation {
+            subjects.push(self.async_operation_subject(
+                operation.id,
+                command.workspace_id,
+                command.library_id,
+            ));
+        }
+
+        self.append_event(
+            state,
+            AppendAuditEventCommand {
+                actor_principal_id: Some(command.actor_principal_id),
+                surface_kind: command.surface_kind,
+                action_kind: "query.execution.run".to_string(),
+                request_id: command.request_id,
+                trace_id: None,
+                result_kind: "succeeded".to_string(),
+                redacted_message: Some("assistant call completed".to_string()),
+                internal_message: Some(format!(
+                    "principal {} executed assistant session {}, execution {}, runtime {}, bundle {}",
+                    command.actor_principal_id,
+                    command.query_session_id,
+                    command.query_execution_id,
+                    command.runtime_execution_id.map_or_else(
+                        || "none".to_string(),
+                        |runtime_execution_id| runtime_execution_id.to_string(),
+                    ),
+                    command.context_bundle_id
+                )),
+                subjects,
+            },
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// Lists redacted audit events visible to the caller and optional workspace scope.
@@ -200,6 +298,126 @@ impl AuditService {
             limit: query.limit,
             offset: query.offset,
         })
+    }
+
+    /// Loads assistant-call summaries keyed by `query_execution_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Internal`] when any backing repository query fails.
+    pub async fn list_assistant_call_summaries(
+        &self,
+        state: &AppState,
+        query_execution_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, AuditAssistantCallSummary>, ApiError> {
+        if query_execution_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut unique_query_execution_ids = query_execution_ids.to_vec();
+        unique_query_execution_ids.sort_unstable();
+        unique_query_execution_ids.dedup();
+
+        let executions = query_repository::list_executions_by_ids(
+            &state.persistence.postgres,
+            &unique_query_execution_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let provider_calls = billing_repository::list_provider_call_descriptors_by_execution_ids(
+            &state.persistence.postgres,
+            "query_execution",
+            &unique_query_execution_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let costs = billing_repository::list_execution_costs_by_execution_ids(
+            &state.persistence.postgres,
+            "query_execution",
+            &unique_query_execution_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+
+        let mut summaries = HashMap::<Uuid, AuditAssistantCallSummary>::new();
+        let mut models_by_execution = HashMap::<Uuid, BTreeSet<(String, String)>>::with_capacity(
+            unique_query_execution_ids.len(),
+        );
+
+        for execution in executions {
+            summaries.insert(
+                execution.id,
+                AuditAssistantCallSummary {
+                    query_execution_id: execution.id,
+                    conversation_id: Some(execution.conversation_id),
+                    runtime_execution_id: Some(execution.runtime_execution_id),
+                    models: Vec::new(),
+                    total_cost: None,
+                    currency_code: None,
+                    provider_call_count: 0,
+                },
+            );
+        }
+
+        for row in provider_calls {
+            let summary = summaries.entry(row.owning_execution_id).or_insert_with(|| {
+                AuditAssistantCallSummary {
+                    query_execution_id: row.owning_execution_id,
+                    conversation_id: None,
+                    runtime_execution_id: row.runtime_execution_id,
+                    models: Vec::new(),
+                    total_cost: None,
+                    currency_code: None,
+                    provider_call_count: 0,
+                }
+            });
+            if summary.runtime_execution_id.is_none() {
+                summary.runtime_execution_id = row.runtime_execution_id;
+            }
+            summary.provider_call_count += 1;
+            models_by_execution
+                .entry(row.owning_execution_id)
+                .or_default()
+                .insert((row.provider_kind, row.model_name));
+        }
+
+        for row in costs {
+            let summary = summaries.entry(row.owning_execution_id).or_insert_with(|| {
+                AuditAssistantCallSummary {
+                    query_execution_id: row.owning_execution_id,
+                    conversation_id: None,
+                    runtime_execution_id: None,
+                    models: Vec::new(),
+                    total_cost: None,
+                    currency_code: None,
+                    provider_call_count: 0,
+                }
+            });
+            summary.total_cost = Some(row.total_cost);
+            summary.currency_code = Some(row.currency_code);
+            summary.provider_call_count = i64::from(row.provider_call_count);
+        }
+
+        for (execution_id, models) in models_by_execution {
+            if let Some(summary) = summaries.get_mut(&execution_id) {
+                summary.models = models
+                    .into_iter()
+                    .map(|(provider_kind, model_name)| AuditAssistantModel {
+                        provider_kind,
+                        model_name,
+                    })
+                    .collect();
+            }
+        }
+
+        for summary in summaries.values_mut() {
+            if summary.total_cost.is_none() && summary.provider_call_count == 0 {
+                summary.total_cost = Some(Decimal::ZERO);
+                summary.currency_code = Some("USD".to_string());
+            }
+        }
+
+        Ok(summaries)
     }
 
     #[must_use]

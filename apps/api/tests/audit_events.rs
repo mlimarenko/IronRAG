@@ -8,7 +8,9 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
+use chrono::Utc;
 use http_body_util::BodyExt;
+use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
@@ -19,10 +21,19 @@ use ironrag_backend::{
     infra::{
         arangodb::client::ArangoClient,
         persistence::Persistence,
-        repositories::{ai_repository, audit_repository, catalog_repository, iam_repository},
+        repositories::{
+            ai_repository, audit_repository, billing_repository, catalog_repository,
+            iam_repository, query_repository, runtime_repository,
+        },
     },
     interfaces::http::{auth::hash_token, router},
-    services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
+    services::{
+        iam::audit::{
+            AppendAuditEventCommand, AppendAuditEventSubjectCommand,
+            AppendQueryExecutionAuditCommand,
+        },
+        query::service::CreateConversationCommand,
+    },
 };
 
 const TEST_TOKEN_PREFIX: &str = "audit-events";
@@ -94,6 +105,8 @@ struct AuditEventsFixture {
     library_id: Uuid,
     provider_catalog_id: Uuid,
     model_catalog_id: Uuid,
+    provider_kind: String,
+    model_name: String,
 }
 
 impl AuditEventsFixture {
@@ -122,6 +135,8 @@ impl AuditEventsFixture {
             library_id: Uuid::nil(),
             provider_catalog_id: Uuid::nil(),
             model_catalog_id: Uuid::nil(),
+            provider_kind: String::new(),
+            model_name: String::new(),
         };
         fixture.seed().await?;
         Ok(fixture)
@@ -169,6 +184,8 @@ impl AuditEventsFixture {
         self.library_id = library.id;
         self.provider_catalog_id = provider_catalog.id;
         self.model_catalog_id = model_catalog.id;
+        self.provider_kind = provider_catalog.provider_kind;
+        self.model_name = model_catalog.model_name;
         Ok(())
     }
 
@@ -269,6 +286,19 @@ impl AuditEventsFixture {
         .await
     }
 
+    async fn mint_audit_read_workspace_token(&self, label: &str) -> Result<String> {
+        self.mint_token_with_grants(
+            Some(self.workspace_id),
+            label,
+            &[GrantSpec {
+                resource_kind: "workspace",
+                resource_id: self.workspace_id,
+                permission_kind: "audit_read".to_string(),
+            }],
+        )
+        .await
+    }
+
     async fn rest_post(
         &self,
         token: &str,
@@ -354,6 +384,146 @@ impl AuditEventsFixture {
             .await
             .context("failed to append audit event")?;
         Ok(event.id)
+    }
+
+    async fn seed_assistant_call_audit(
+        &self,
+        actor_principal_id: Uuid,
+        surface_kind: &str,
+        request_id: Option<&str>,
+        provider_kind: &str,
+        model_name: &str,
+        total_cost: Decimal,
+    ) -> Result<Uuid> {
+        let conversation = self
+            .state
+            .canonical_services
+            .query
+            .create_conversation(
+                &self.state,
+                CreateConversationCommand {
+                    workspace_id: self.workspace_id,
+                    library_id: self.library_id,
+                    created_by_principal_id: Some(actor_principal_id),
+                    title: Some(format!("[{}] audit assistant call", surface_kind)),
+                },
+            )
+            .await
+            .context("failed to create assistant conversation")?;
+
+        let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
+        let context_bundle_id = Uuid::now_v7();
+
+        runtime_repository::create_runtime_execution(
+            self.pool(),
+            &runtime_repository::NewRuntimeExecution {
+                id: runtime_execution_id,
+                owner_kind: "query_execution",
+                owner_id: execution_id,
+                task_kind: "query_answer",
+                surface_kind,
+                contract_name: "audit-events",
+                contract_version: "test",
+                lifecycle_state: "completed",
+                active_stage: None,
+                turn_budget: 4,
+                turn_count: 1,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+            },
+        )
+        .await
+        .context("failed to create runtime execution")?;
+
+        query_repository::create_execution(
+            self.pool(),
+            &query_repository::NewQueryExecution {
+                execution_id,
+                context_bundle_id,
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                conversation_id: conversation.id,
+                request_turn_id: None,
+                response_turn_id: None,
+                binding_id: None,
+                runtime_execution_id,
+                query_text: "Which model handled this assistant call?",
+                failure_code: None,
+            },
+        )
+        .await
+        .context("failed to create query execution")?;
+
+        let provider_catalog =
+            ai_repository::get_provider_catalog_by_kind(self.pool(), provider_kind)
+                .await
+                .context("failed to resolve provider catalog")?
+                .with_context(|| format!("missing provider catalog for {provider_kind}"))?;
+        let model_catalog = ai_repository::get_model_catalog_by_provider_and_name(
+            self.pool(),
+            provider_kind,
+            model_name,
+        )
+        .await
+        .context("failed to resolve model catalog")?
+        .with_context(|| format!("missing model catalog for {provider_kind}/{model_name}"))?;
+
+        billing_repository::create_provider_call(
+            self.pool(),
+            &billing_repository::NewBillingProviderCall {
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                binding_id: None,
+                owning_execution_kind: "query_execution",
+                owning_execution_id: execution_id,
+                runtime_execution_id: Some(runtime_execution_id),
+                runtime_task_kind: Some("query_answer"),
+                provider_catalog_id: provider_catalog.id,
+                model_catalog_id: model_catalog.id,
+                call_kind: "chat_completion",
+                call_state: "completed",
+                completed_at: Some(Utc::now()),
+            },
+        )
+        .await
+        .context("failed to create provider call")?;
+
+        billing_repository::upsert_execution_cost(
+            self.pool(),
+            &billing_repository::UpsertBillingExecutionCost {
+                owning_execution_kind: "query_execution",
+                owning_execution_id: execution_id,
+                total_cost,
+                currency_code: "USD",
+                provider_call_count: 1,
+            },
+        )
+        .await
+        .context("failed to upsert execution cost")?;
+
+        self.state
+            .canonical_services
+            .audit
+            .append_query_execution_event(
+                &self.state,
+                AppendQueryExecutionAuditCommand {
+                    actor_principal_id,
+                    surface_kind: surface_kind.to_string(),
+                    request_id: request_id.map(ToString::to_string),
+                    query_session_id: conversation.id,
+                    query_execution_id: execution_id,
+                    runtime_execution_id: Some(runtime_execution_id),
+                    context_bundle_id,
+                    workspace_id: self.workspace_id,
+                    library_id: self.library_id,
+                },
+            )
+            .await
+            .context("failed to append assistant query audit event")?;
+
+        Ok(execution_id)
     }
 }
 
@@ -854,6 +1024,119 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
         assert_eq!(denied_subjects[0].subject_kind, "workspace");
         assert_eq!(denied_subjects[0].subject_id, fixture.workspace_id);
         assert_eq!(denied_subjects[0].workspace_id, Some(fixture.workspace_id));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn audit_events_surface_assistant_models_cost_and_runtime_subjects() -> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let workspace_admin = fixture.mint_workspace_admin_token("workspace-admin").await?;
+        let actor_principal_id = Uuid::now_v7();
+        let request_id = "assistant-mcp-audit";
+        let execution_id = fixture
+            .seed_assistant_call_audit(
+                actor_principal_id,
+                "mcp",
+                Some(request_id),
+                &fixture.provider_kind,
+                &fixture.model_name,
+                Decimal::new(123, 4),
+            )
+            .await?;
+
+        let (status, body) = fixture
+            .rest_get(
+                &workspace_admin,
+                &format!("/v1/audit/events?libraryId={}&includeAssistant=true", fixture.library_id),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let events =
+            body["items"].as_array().context("audit events response must include items")?;
+        let event = events
+            .iter()
+            .find(|event| event["requestId"] == json!(request_id))
+            .context("expected assistant audit event in feed")?;
+
+        assert_eq!(event["actionKind"], json!("query.execution.run"));
+        assert_eq!(event["surfaceKind"], json!("mcp"));
+        assert_eq!(event["actorPrincipalId"], json!(actor_principal_id));
+        assert_eq!(event["assistantCall"]["queryExecutionId"], json!(execution_id));
+        assert_eq!(event["assistantCall"]["totalCost"], json!("0.0123"));
+        assert_eq!(event["assistantCall"]["currencyCode"], json!("USD"));
+        assert_eq!(event["assistantCall"]["providerCallCount"], json!(1));
+        assert_eq!(
+            event["assistantCall"]["models"][0]["providerKind"],
+            json!(fixture.provider_kind.as_str())
+        );
+        assert_eq!(
+            event["assistantCall"]["models"][0]["modelName"],
+            json!(fixture.model_name.as_str())
+        );
+
+        let subjects =
+            event["subjects"].as_array().context("audit event subjects must be an array")?;
+        assert!(
+            subjects.iter().any(|subject| subject["subjectKind"] == json!("runtime_execution")),
+            "assistant audit event must include runtime_execution subject"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango services"]
+async fn audit_events_hide_assistant_costs_without_usage_read() -> Result<()> {
+    let fixture = AuditEventsFixture::create().await?;
+
+    let result = async {
+        let audit_reader = fixture.mint_audit_read_workspace_token("audit-reader").await?;
+        let request_id = "assistant-audit-redacted";
+        fixture
+            .seed_assistant_call_audit(
+                Uuid::now_v7(),
+                "rest",
+                Some(request_id),
+                &fixture.provider_kind,
+                &fixture.model_name,
+                Decimal::new(55, 4),
+            )
+            .await?;
+
+        let (status, body) = fixture
+            .rest_get(
+                &audit_reader,
+                &format!("/v1/audit/events?libraryId={}&includeAssistant=true", fixture.library_id),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let events =
+            body["items"].as_array().context("audit events response must include items")?;
+        let event = events
+            .iter()
+            .find(|event| event["requestId"] == json!(request_id))
+            .context("expected assistant audit event in feed")?;
+
+        assert!(
+            event.get("assistantCall").is_none(),
+            "assistantCall must be hidden without usage_read"
+        );
 
         Ok(())
     }

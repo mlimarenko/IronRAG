@@ -10,19 +10,40 @@
 
 ## Endpoint
 
-- JSON-RPC: `POST http://127.0.0.1:19000/v1/mcp`
-- Capabilities: `GET http://127.0.0.1:19000/v1/mcp/capabilities`
-- Auth header: `Authorization: Bearer <token>`
-- Protocol server name: `ironrag-mcp-memory`
-- Default client alias used in the admin UI: `ironragMemory`
+- Canonical URL: `http://127.0.0.1:19000/v1/mcp`
+- Transport: **MCP Streamable HTTP, spec `2025-06-18`**. One endpoint handles `POST`, `GET`, and `DELETE` — no separate SSE channel, no stdio proxy.
+  - `POST` — every JSON-RPC message. Content negotiated from the `Accept` header:
+    - `Accept: application/json` → a plain JSON body (default, curl-friendly).
+    - `Accept: application/json, text/event-stream` → a single SSE frame `event: message\ndata: …\n\n`; SDK clients that advertise both formats get the transport they expect.
+    - Notification-only requests (no `id`) are acknowledged with a bare `202 Accepted`.
+  - `GET` — reserved for server-push streams. IronRAG emits no background notifications today, so it returns `200 OK` + `Content-Type: text/event-stream` with a single `: ready` SSE comment and no further events. Spec 2025-06-18 permits either 405 or an empty SSE stream; we pick the latter because some bundled clients (OpenClaw `bundle-mcp`) treat any non-200 handshake as fatal and drop the whole MCP server for that agent context.
+  - `DELETE` — session termination signal. The server is stateless between requests, so it always returns `200 OK` so client cleanup flows finish cleanly.
+- The `initialize` response carries an `Mcp-Session-Id` header (UUIDv7). Clients that echo it on subsequent requests are accepted without additional validation.
+- Capabilities (for monitoring and UI): `GET http://127.0.0.1:19000/v1/mcp/capabilities` — this is not part of the MCP protocol, just a sidecar probe.
+- Auth: `Authorization: Bearer <token>` on every request (including `GET` / `DELETE`).
+- Protocol server name: `ironrag-mcp-memory`.
+- Default client alias used in the admin UI: `ironragMemory`.
 
-Quick probe:
+Quick probe (plain JSON):
 
 ```bash
 export IRONRAG_MCP_TOKEN='irt_...'
 
-curl -sS http://127.0.0.1:19000/v1/mcp/capabilities \
-  -H "Authorization: Bearer $IRONRAG_MCP_TOKEN"
+curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
+  -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+```
+
+Quick probe (SSE frame, matching the SDK client default):
+
+```bash
+curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
+  -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}'
 ```
 
 If your IronRAG instance is behind another domain or TLS terminator, replace the origin with the address your client can reach.
@@ -39,6 +60,14 @@ The canonical JSON-RPC surface is intentionally small: `initialize`, `tools/list
 Tool arguments use canonical camelCase fields only.
 
 ## Tools
+
+### Grounded Q&A (prefer this for knowledge questions)
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `grounded_answer` | Ask a natural-language question and get a grounded answer with citations — **the same pipeline the built-in UI assistant uses** (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `libraryId`, `query` |
+
+Response shape: `answer` (text), `citations` (chunks + graph entities), `verifier` (`level` + `warnings`), `runtimeExecutionId` (feed it to `get_runtime_execution_trace` for the full execution graph), `executionId`, `conversationId`. An MCP client receives exactly the answer a user would see in the UI for the same library and question — MCP and UI share the same grounded-answer pipeline, no parallel implementation.
 
 ### Discovery
 
@@ -134,6 +163,50 @@ url = "http://127.0.0.1:19000/v1/mcp"
 bearer_token_env_var = "IRONRAG_MCP_TOKEN"
 ```
 
+## Claude Code (remote MCP)
+
+```bash
+claude mcp add ironrag http://127.0.0.1:19000/v1/mcp \
+  --transport http \
+  --header "Authorization: Bearer $IRONRAG_MCP_TOKEN"
+```
+
+`claude` talks Streamable HTTP directly — no separate stdio proxy required.
+
+## Claude Desktop
+
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on your OS:
+
+```json
+{
+  "mcpServers": {
+    "ironragMemory": {
+      "url": "http://127.0.0.1:19000/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer ${IRONRAG_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+## Cursor
+
+`.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ironragMemory": {
+      "url": "http://127.0.0.1:19000/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:IRONRAG_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
 ## VS Code or any generic HTTP MCP client
 
 `.vscode/mcp.json`:
@@ -152,4 +225,29 @@ bearer_token_env_var = "IRONRAG_MCP_TOKEN"
 }
 ```
 
-If your client accepts raw HTTP MCP configuration, the endpoint URL and bearer token header are enough.
+## OpenClaw
+
+`~/.openclaw/openclaw.json`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "ironrag": {
+        "url": "http://127.0.0.1:19000/v1/mcp",
+        "headers": {
+          "Authorization": "Bearer irt_..."
+        }
+      }
+    }
+  }
+}
+```
+
+Or via the CLI:
+
+```bash
+openclaw mcp set ironrag '{"url":"http://127.0.0.1:19000/v1/mcp","headers":{"Authorization":"Bearer irt_..."}}'
+```
+
+If your client accepts raw HTTP MCP configuration, the endpoint URL plus the bearer token header is enough — Streamable HTTP is the standard remote transport and no adapter layer is required.

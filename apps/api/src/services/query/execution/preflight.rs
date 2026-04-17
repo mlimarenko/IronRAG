@@ -38,8 +38,13 @@ pub(super) async fn prepare_canonical_answer_preflight(
     prepared: &PreparedAnswerQueryResult,
 ) -> anyhow::Result<CanonicalAnswerPreflight> {
     let document_index = load_document_index(state, library_id).await?;
-    let direct_targeted_table_answer =
-        load_direct_targeted_table_answer(state, question, &document_index).await?;
+    let direct_targeted_table_answer = load_direct_targeted_table_answer(
+        state,
+        question,
+        Some(&prepared.query_ir),
+        &document_index,
+    )
+    .await?;
     let canonical_answer_chunks = load_canonical_answer_chunks(
         state,
         execution_id,
@@ -67,6 +72,7 @@ pub(super) async fn prepare_canonical_answer_preflight(
     );
     let prompt_context = build_canonical_answer_context(
         question,
+        &prepared.query_ir,
         prepared.structured.technical_literals_text.as_deref(),
         &preflight_evidence,
         &preflight_answer_chunks,
@@ -75,6 +81,7 @@ pub(super) async fn prepare_canonical_answer_preflight(
     );
     let answer_override = build_canonical_preflight_answer(
         question,
+        Some(&prepared.query_ir),
         &prepared.structured.intent_profile,
         &document_index,
         direct_targeted_table_answer,
@@ -91,6 +98,7 @@ pub(super) async fn prepare_canonical_answer_preflight(
 
 pub(super) fn build_canonical_preflight_answer(
     question: &str,
+    ir: Option<&crate::domains::query_ir::QueryIR>,
     intent_profile: &QueryIntentProfile,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     direct_targeted_table_answer: Option<String>,
@@ -101,8 +109,12 @@ pub(super) fn build_canonical_preflight_answer(
         build_missing_explicit_document_answer(question, document_index);
     let unsupported_capability_answer =
         build_unsupported_capability_answer(intent_profile, question, canonical_answer_chunks);
-    let deterministic_grounded_answer =
-        build_deterministic_grounded_answer(question, canonical_evidence, canonical_answer_chunks);
+    let deterministic_grounded_answer = build_deterministic_grounded_answer(
+        question,
+        ir,
+        canonical_evidence,
+        canonical_answer_chunks,
+    );
 
     if intent_profile.exact_literal_technical {
         let top_documents = canonical_answer_chunks
@@ -193,6 +205,7 @@ pub(super) fn select_technical_literal_chunks(
     let candidate_chunks = focused_chunks.as_deref().unwrap_or(chunks);
     select_document_balanced_chunks(
         question,
+        None,
         candidate_chunks,
         literal_focus_keywords,
         pagination_requested,
@@ -244,7 +257,7 @@ pub(super) fn preflight_exact_literal_document_scope(
 }
 
 pub(super) fn question_prefers_single_exact_literal_scope(question: &str) -> bool {
-    if question_requests_multi_document_scope(question) {
+    if question_requests_multi_document_scope(question, None) {
         return false;
     }
 
@@ -290,7 +303,7 @@ pub(super) fn select_preflight_literal_document_id(
         first_rank: usize,
     }
 
-    let question_keywords = technical_literal_focus_keywords(question);
+    let question_keywords = technical_literal_focus_keywords(question, None);
     let pagination_requested = question_mentions_pagination(question);
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
@@ -307,7 +320,7 @@ pub(super) fn select_preflight_literal_document_id(
         .filter_map(|(first_rank, document_id)| {
             let document_chunks = per_document_chunks.get(document_id)?;
             let local_keywords =
-                document_local_focus_keywords(question, document_chunks, &question_keywords);
+                document_local_focus_keywords(question, None, document_chunks, &question_keywords);
             let document_label = document_chunks.first()?.document_label.as_str();
             let lowered_label = document_label.to_lowercase();
             let label_score = question_keywords

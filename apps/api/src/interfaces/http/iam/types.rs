@@ -139,6 +139,54 @@ pub struct UserResponse {
     pub external_subject: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenWorkspaceSummaryResponse {
+    pub id: Uuid,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenLibrarySummaryResponse {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenScopeKind {
+    System,
+    Workspace,
+    Library,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenScopeResponse {
+    pub kind: TokenScopeKind,
+    pub workspace: Option<TokenWorkspaceSummaryResponse>,
+    pub libraries: Vec<TokenLibrarySummaryResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenIssuerResponse {
+    pub principal_id: Uuid,
+    pub display_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenGrantSummaryResponse {
+    pub resource_kind: IamGrantResourceKind,
+    pub resource_id: Uuid,
+    pub permission_kind: IamPermissionKind,
+    pub workspace: Option<TokenWorkspaceSummaryResponse>,
+    pub library: Option<TokenLibrarySummaryResponse>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceMembershipResponse {
@@ -153,14 +201,15 @@ pub struct WorkspaceMembershipResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TokenResponse {
     pub principal_id: Uuid,
-    pub workspace_id: Option<Uuid>,
     pub label: String,
     pub token_prefix: String,
     pub status: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
-    pub issued_by_principal_id: Option<Uuid>,
     pub last_used_at: Option<DateTime<Utc>>,
+    pub issuer: Option<TokenIssuerResponse>,
+    pub scope: TokenScopeResponse,
+    pub grants: Vec<TokenGrantSummaryResponse>,
 }
 
 #[derive(Debug, Serialize)]

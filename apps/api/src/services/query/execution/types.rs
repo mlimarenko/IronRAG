@@ -147,6 +147,10 @@ pub(crate) struct AnswerGenerationStage {
     /// including library summary lines and document metadata that aren't
     /// part of the chunk corpus.
     pub(crate) prompt_context: String,
+    /// Canonical IR produced by `QueryCompilerService`. Drives the
+    /// verifier's strictness policy via `QueryIR::verification_level`
+    /// instead of blanket suppression on every unsupported literal.
+    pub(crate) query_ir: crate::domains::query_ir::QueryIR,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +171,11 @@ pub(crate) struct PreparedAnswerQueryResult {
     pub(crate) structured: RuntimeStructuredQueryResult,
     pub(crate) answer_context: String,
     pub(crate) embedding_usage: Option<QuestionEmbeddingResult>,
+    /// Canonical typed representation of the user's question produced by
+    /// `QueryCompilerService`. Downstream stages (verification, ranking,
+    /// answer generation) should read routing signals from this instead
+    /// of re-classifying the raw question with keyword lists.
+    pub(crate) query_ir: crate::domains::query_ir::QueryIR,
 }
 
 #[derive(Debug, Clone)]

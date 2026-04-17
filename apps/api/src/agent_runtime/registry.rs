@@ -78,7 +78,8 @@ impl RuntimeTaskRegistry {
         owner_kind: RuntimeExecutionOwnerKind,
     ) -> bool {
         match task_kind {
-            RuntimeTaskKind::QueryPlan
+            RuntimeTaskKind::QueryCompile
+            | RuntimeTaskKind::QueryPlan
             | RuntimeTaskKind::QueryRerank
             | RuntimeTaskKind::QueryAnswer
             | RuntimeTaskKind::QueryVerify => {

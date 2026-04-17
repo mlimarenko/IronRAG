@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * Self-contained Playwright config for release 0.3.0 visual QA.
+ * Self-contained Playwright config for release 0.3.1 visual QA.
  * Boots its own vite dev server (which proxies `/v1` to the real
  * backend at 127.0.0.1:19000), logs in once via `global-setup.ts`, and
  * runs each scenario against the live backend with a persisted session

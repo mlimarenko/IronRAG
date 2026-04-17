@@ -7,7 +7,7 @@ import { chromium, type FullConfig } from '@playwright/test';
  * at 127.0.0.1:19000) so the cookie domain matches the test's baseURL.
  *
  * Credentials are injected via `QA_LOGIN` / `QA_PASSWORD` env vars. The
- * release 0.3.0 dev default is `admin` / `rustrag123`.
+ * release 0.3.1 dev default is `admin` / `rustrag123`.
  */
 async function globalSetup(_config: FullConfig) {
   const login = process.env.QA_LOGIN ?? 'admin';

@@ -23,6 +23,7 @@ const { useAppMock, documentsApiMock, billingApiMock, apiFetchMock } = vi.hoiste
   },
   billingApiMock: {
     getLibraryDocumentCosts: vi.fn(),
+    getLibraryCostSummary: vi.fn(),
   },
   apiFetchMock: vi.fn(),
 }));
@@ -146,6 +147,12 @@ describe('DocumentsPage', () => {
     documentsApiMock.listWebRuns.mockResolvedValue([]);
     documentsApiMock.listWebRunPages.mockResolvedValue([]);
     billingApiMock.getLibraryDocumentCosts.mockResolvedValue([]);
+    billingApiMock.getLibraryCostSummary.mockResolvedValue({
+      totalCost: '0',
+      currencyCode: 'USD',
+      documentCount: 0,
+      providerCallCount: 0,
+    });
     apiFetchMock.mockResolvedValue([]);
   });
 
@@ -260,6 +267,24 @@ describe('DocumentsPage', () => {
     await renderPage();
 
     expect(container.textContent).toContain('$0.000');
+  });
+
+  it('shows the library-wide total cost instead of summing the visible page', async () => {
+    billingApiMock.getLibraryDocumentCosts.mockResolvedValue([
+      { documentId: 'doc-1', totalCost: '1.000', currencyCode: 'USD', providerCallCount: 1 },
+    ]);
+    billingApiMock.getLibraryCostSummary.mockResolvedValue({
+      totalCost: '3.500',
+      currencyCode: 'USD',
+      documentCount: 2,
+      providerCallCount: 4,
+    });
+
+    await renderPage();
+
+    expect(container.textContent).toContain('Total cost');
+    expect(container.textContent).toContain('$3.500');
+    expect(container.textContent).toContain('$1.000');
   });
 
   it('loads code-like documents from raw source text instead of prepared segments', async () => {

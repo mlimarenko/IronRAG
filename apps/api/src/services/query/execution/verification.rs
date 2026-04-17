@@ -41,7 +41,7 @@ pub(crate) fn verify_answer_against_canonical_evidence(
         };
     }
 
-    let backticked_literals = extract_backticked_literals(answer);
+    let (inline_literals, fenced_line_literals) = extract_answer_literals(answer);
     let mut normalized_corpus = build_verification_corpus(evidence, chunks, assistant_grounding);
     // Library summary, document file names, document titles and other prompt
     // metadata are part of what the LLM saw — include the whole rendered
@@ -52,7 +52,7 @@ pub(crate) fn verify_answer_against_canonical_evidence(
         normalized_corpus.push(normalized_prompt_context);
     }
     let mut warnings = Vec::<QueryVerificationWarning>::new();
-    for literal in &backticked_literals {
+    for literal in inline_literals.iter().chain(fenced_line_literals.iter()) {
         let normalized_literal = normalize_verification_literal(literal);
         if normalized_literal.is_empty() {
             continue;
@@ -66,11 +66,11 @@ pub(crate) fn verify_answer_against_canonical_evidence(
             });
         }
     }
-
     let has_unsupported_literals =
         warnings.iter().any(|warning| warning.code == "unsupported_literal");
-    let has_grounded_backticked_literals =
-        !backticked_literals.is_empty() && !has_unsupported_literals;
+    let has_any_backticked_literals =
+        !inline_literals.is_empty() || !fenced_line_literals.is_empty();
+    let has_grounded_backticked_literals = has_any_backticked_literals && !has_unsupported_literals;
     let should_check_conflicting_evidence = intent_profile.exact_literal_technical
         && intent_profile.unsupported_capability.is_none()
         && !has_grounded_backticked_literals;
@@ -105,7 +105,14 @@ pub(crate) fn verify_answer_against_canonical_evidence(
             });
         }
     }
-    warnings.extend(question_specific_verification_warnings(question, answer, &normalized_corpus));
+    // `question_specific_verification_warnings` used to pattern-match on
+    // the specific gremlin / sparql / cypher / 2019 benchmark question and
+    // add an `unsupported_canonical_claim` warning when the answer named a
+    // concept not grounded in corpus. That whole check was a hardcoded
+    // keyword workaround: the compiler-produced QueryIR (read via
+    // `answer_pipeline.rs`) now handles claim grounding through the
+    // general `unsupported_literal` path and strict verification level,
+    // so no question-specific branch is required here.
 
     let insufficient = lower_answer.contains("no grounded evidence")
         || lower_answer.contains("exact value is not grounded")
@@ -131,40 +138,14 @@ pub(crate) fn verify_answer_against_canonical_evidence(
     RuntimeAnswerVerification { state, warnings }
 }
 
-fn question_specific_verification_warnings(
-    question: &str,
-    answer: &str,
-    normalized_corpus: &[String],
-) -> Vec<QueryVerificationWarning> {
-    let lowered_question = question.to_lowercase();
-    let lowered_answer = answer.to_lowercase();
-    let mut warnings = Vec::<QueryVerificationWarning>::new();
-
-    if lowered_question.contains("gremlin")
-        && lowered_question.contains("sparql")
-        && lowered_question.contains("cypher")
-        && lowered_question.contains("2019")
-    {
-        for literal in ["graph database", "gql"] {
-            if lowered_answer.contains(literal)
-                && !literal_is_supported_by_canonical_corpus(literal, normalized_corpus)
-            {
-                warnings.push(QueryVerificationWarning {
-                    code: "unsupported_canonical_claim".to_string(),
-                    message: format!(
-                        "Answer claims `{literal}` without grounded support in selected evidence."
-                    ),
-                    related_segment_id: None,
-                    related_fact_id: None,
-                });
-            }
-        }
-    }
-
-    warnings
-}
-
 fn expected_cross_document_answer_targets(question: &str) -> Vec<CanonicalTarget> {
+    // Cross-document role clauses ("which one of these handles X?") are
+    // still extracted syntactically — no keyword markers involved, just
+    // structural patterns — so this helper is kept. The old
+    // graph-database / gql hardcoded branch below was removed along with
+    // `question_specific_verification_warnings`; QueryIR now encodes
+    // cross-document scope via `ir.is_multi_document()` and the
+    // canonical target through ontology tags.
     let clauses = extract_multi_document_role_clauses(question);
     if !clauses.is_empty() {
         return clauses
@@ -185,20 +166,94 @@ fn expected_cross_document_answer_targets(question: &str) -> Vec<CanonicalTarget
     Vec::new()
 }
 
-fn extract_backticked_literals(answer: &str) -> Vec<String> {
-    let mut literals = Vec::new();
-    let mut seen = HashSet::new();
-    for literal in answer
-        .split('`')
-        .enumerate()
-        .filter_map(|(index, segment)| (index % 2 == 1).then_some(segment.trim().to_string()))
-        .filter(|segment| !segment.is_empty())
-    {
-        if seen.insert(literal.clone()) {
-            literals.push(literal);
+fn extract_answer_literals(answer: &str) -> (Vec<String>, Vec<String>) {
+    let mut inline = Vec::<String>::new();
+    let mut fenced_lines = Vec::<String>::new();
+    let mut seen_inline = HashSet::<String>::new();
+    let mut seen_fenced = HashSet::<String>::new();
+
+    let bytes = answer.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor..].starts_with(b"```") {
+            let body_start = cursor + 3;
+            if let Some(relative) = find_subslice(&bytes[body_start..], b"```") {
+                let body_end = body_start + relative;
+                let body = &answer[body_start..body_end];
+                for line in fenced_block_content_lines(body) {
+                    if seen_fenced.insert(line.clone()) {
+                        fenced_lines.push(line);
+                    }
+                }
+                cursor = body_end + 3;
+                continue;
+            } else {
+                break;
+            }
+        }
+        if bytes[cursor] == b'`' {
+            let literal_start = cursor + 1;
+            if let Some(relative) = find_byte(&bytes[literal_start..], b'`') {
+                let literal_end = literal_start + relative;
+                let literal = answer[literal_start..literal_end].trim().to_string();
+                if !literal.is_empty() && seen_inline.insert(literal.clone()) {
+                    inline.push(literal);
+                }
+                cursor = literal_end + 1;
+                continue;
+            } else {
+                break;
+            }
+        }
+        cursor += utf8_char_len(bytes[cursor]);
+    }
+
+    (inline, fenced_lines)
+}
+
+fn fenced_block_content_lines(body: &str) -> Vec<String> {
+    let trimmed = body.strip_prefix('\n').or_else(|| body.strip_prefix("\r\n")).unwrap_or(body);
+    let mut raw_lines: Vec<&str> = trimmed.split('\n').collect();
+    if let Some(first) = raw_lines.first() {
+        if is_language_hint(first.trim()) {
+            raw_lines.remove(0);
         }
     }
-    literals
+    raw_lines
+        .into_iter()
+        .map(|line| line.trim_end_matches('\r').trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn is_language_hint(candidate: &str) -> bool {
+    if candidate.is_empty() || candidate.len() > 20 {
+        return false;
+    }
+    candidate
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '+' || ch == '_' || ch == '.')
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn find_byte(haystack: &[u8], needle: u8) -> Option<usize> {
+    haystack.iter().position(|byte| *byte == needle)
+}
+
+fn utf8_char_len(first_byte: u8) -> usize {
+    match first_byte {
+        b if b < 0x80 => 1,
+        b if b & 0xE0 == 0xC0 => 2,
+        b if b & 0xF0 == 0xE0 => 3,
+        b if b & 0xF8 == 0xF0 => 4,
+        _ => 1,
+    }
 }
 
 fn build_verification_corpus(
