@@ -1728,8 +1728,8 @@ pub async fn aggregate_document_list_status_counts(
         .map(|value| format!("%{}%", value.to_lowercase()));
     // The `ingest_job` join MUST be a LATERAL pick-one to prevent
     // Cartesian fanout: historically a single mutation can own many
-    // ingest_job rows (retry, requeue, plus one legacy bulk-import
-    // mutation on the reference library that carries 4927 jobs). A
+    // ingest_job rows (retry, requeue, plus legacy bulk-import
+    // mutations that can carry thousands of jobs). A
     // straight `left join ingest_job on mutation_id` multiplies every
     // document row by the number of jobs on its latest mutation, which
     // blows the counts into millions. The lateral subquery returns at
