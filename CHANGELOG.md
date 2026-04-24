@@ -2,16 +2,6 @@
 
 ## 0.3.2 — 2026-04-24
 
-> ⚠️ **Breaking changes.**
->
-> 1. **Clean-slate migration.** Migrations 0003–0009 were collapsed
->    into a single `0003_schema_rollup.sql`. Upgrading an existing
->    v0.3.1 deployment requires dropping Postgres and ArangoDB
->    volumes; data cannot be preserved. New deployments are unaffected.
-> 2. **`WebClassificationReason` enum rename.** The `system_page`
->    variant is now `ignore_pattern`. External clients that parse the
->    web-ingest classification field must update their enum handling.
-
 ### Web ingest
 
 - **Library-owned web ingest ignore policy.** A new `web_ingest_policy`
