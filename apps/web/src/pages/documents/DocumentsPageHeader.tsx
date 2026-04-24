@@ -1,6 +1,6 @@
 import { useEffect, type ChangeEvent, type RefObject } from "react";
 import type { TFunction } from "i18next";
-import { FolderOpen, Link as LinkIcon, Upload } from "lucide-react";
+import { FolderOpen, Link as LinkIcon, Loader2, RotateCw, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
@@ -21,7 +21,9 @@ type DocumentsPageHeaderProps = {
   setMaxDepth: (value: string) => void;
   setMaxPages: (value: string) => void;
   setSeedUrl: (value: string) => void;
+  onRefreshWebRuns: () => void;
   t: TFunction;
+  webRunsRefreshing: boolean;
   webRunsCount: number;
 };
 
@@ -40,7 +42,9 @@ export function DocumentsPageHeader({
   setMaxDepth,
   setMaxPages,
   setSeedUrl,
+  onRefreshWebRuns,
   t,
+  webRunsRefreshing,
   webRunsCount,
 }: DocumentsPageHeaderProps) {
   useEffect(() => {
@@ -115,21 +119,36 @@ export function DocumentsPageHeader({
             </>
           )}
           {activeTab === "web" && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setSeedUrl("");
-                setCrawlMode("recursive_crawl");
-                setBoundaryPolicy("same_host");
-                setMaxDepth("3");
-                setMaxPages("30");
-                setAddLinkOpen(true);
-              }}
-            >
-              <LinkIcon className="h-3.5 w-3.5 mr-1.5" />{" "}
-              {t("documents.addLink")}
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={webRunsRefreshing}
+                onClick={onRefreshWebRuns}
+              >
+                {webRunsRefreshing ? (
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                ) : (
+                  <RotateCw className="h-3.5 w-3.5 mr-1.5" />
+                )}{" "}
+                {t("documents.refreshRuns")}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setSeedUrl("");
+                  setCrawlMode("recursive_crawl");
+                  setBoundaryPolicy("same_host");
+                  setMaxDepth("3");
+                  setMaxPages("30");
+                  setAddLinkOpen(true);
+                }}
+              >
+                <LinkIcon className="h-3.5 w-3.5 mr-1.5" />{" "}
+                {t("documents.addLink")}
+              </Button>
+            </>
           )}
           <input
             ref={fileInputRef}

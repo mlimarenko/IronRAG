@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use uuid::Uuid;
 
 use crate::{
@@ -8,12 +10,14 @@ use crate::{
     },
     infra::repositories::query_repository,
     interfaces::http::router_support::ApiError,
+    services::query::text_match::{near_token_match, normalized_alnum_tokens},
 };
 
 use super::{
-    ConversationRuntimeContext, CreateConversationCommand, MAX_EFFECTIVE_QUERY_HISTORY_TURNS,
-    MAX_EFFECTIVE_QUERY_TURN_CHARS, MAX_LIBRARY_CONVERSATIONS, MAX_PROMPT_HISTORY_TURN_CHARS,
-    MAX_PROMPT_HISTORY_TURNS, QUERY_CONVERSATION_TITLE_LIMIT, QueryService,
+    ConversationRuntimeContext, CreateConversationCommand, ExternalConversationTurn,
+    MAX_EFFECTIVE_QUERY_HISTORY_TURNS, MAX_EFFECTIVE_QUERY_TURN_CHARS, MAX_LIBRARY_CONVERSATIONS,
+    MAX_PROMPT_HISTORY_TURN_CHARS, MAX_PROMPT_HISTORY_TURNS, QUERY_CONVERSATION_TITLE_LIMIT,
+    QueryService,
 };
 
 impl QueryService {
@@ -85,6 +89,7 @@ impl QueryService {
                 created_by_principal_id: command.created_by_principal_id,
                 title: title.as_deref(),
                 conversation_state: "active",
+                request_surface: command.request_surface.as_str(),
             },
             MAX_LIBRARY_CONVERSATIONS,
         )
@@ -193,6 +198,69 @@ pub(crate) fn build_conversation_runtime_context(
     turns: &[query_repository::QueryTurnRow],
     current_turn_id: Uuid,
 ) -> ConversationRuntimeContext {
+    let current_index = turns
+        .iter()
+        .position(|turn| turn.id == current_turn_id)
+        .unwrap_or_else(|| turns.len().saturating_sub(1));
+    let relevant_turns = &turns[..=current_index.min(turns.len().saturating_sub(1))];
+    let views = relevant_turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| RuntimeContextTurn {
+            turn_index: i32::try_from(index.saturating_add(1)).unwrap_or(i32::MAX),
+            turn_kind: turn.turn_kind.clone(),
+            content_text: turn.content_text.as_str(),
+        })
+        .collect::<Vec<_>>();
+    build_conversation_runtime_context_from_views(&views)
+}
+
+pub(crate) fn build_conversation_runtime_context_with_external_history(
+    turns: &[query_repository::QueryTurnRow],
+    current_turn_id: Uuid,
+    external_prior_turns: &[ExternalConversationTurn],
+) -> ConversationRuntimeContext {
+    let current_index = turns
+        .iter()
+        .position(|turn| turn.id == current_turn_id)
+        .unwrap_or_else(|| turns.len().saturating_sub(1));
+    let relevant_turns = &turns[..=current_index.min(turns.len().saturating_sub(1))];
+    let mut views =
+        Vec::with_capacity(relevant_turns.len().saturating_add(external_prior_turns.len()));
+    for turn in relevant_turns.iter().take(relevant_turns.len().saturating_sub(1)) {
+        views.push(RuntimeContextTurn {
+            turn_index: i32::try_from(views.len().saturating_add(1)).unwrap_or(i32::MAX),
+            turn_kind: turn.turn_kind.clone(),
+            content_text: turn.content_text.as_str(),
+        });
+    }
+    for turn in external_prior_turns {
+        views.push(RuntimeContextTurn {
+            turn_index: i32::try_from(views.len().saturating_add(1)).unwrap_or(i32::MAX),
+            turn_kind: turn.turn_kind.clone(),
+            content_text: turn.content_text.as_str(),
+        });
+    }
+    if let Some(current_turn) = relevant_turns.last() {
+        views.push(RuntimeContextTurn {
+            turn_index: i32::try_from(views.len().saturating_add(1)).unwrap_or(i32::MAX),
+            turn_kind: current_turn.turn_kind.clone(),
+            content_text: current_turn.content_text.as_str(),
+        });
+    }
+    build_conversation_runtime_context_from_views(&views)
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeContextTurn<'a> {
+    turn_index: i32,
+    turn_kind: QueryTurnKind,
+    content_text: &'a str,
+}
+
+fn build_conversation_runtime_context_from_views(
+    turns: &[RuntimeContextTurn<'_>],
+) -> ConversationRuntimeContext {
     if turns.is_empty() {
         return ConversationRuntimeContext {
             effective_query_text: String::new(),
@@ -200,32 +268,38 @@ pub(crate) fn build_conversation_runtime_context(
             coreference_entities: Vec::new(),
         };
     }
-    let current_index = turns
-        .iter()
-        .position(|turn| turn.id == current_turn_id)
-        .unwrap_or_else(|| turns.len().saturating_sub(1));
-    let relevant_turns = &turns[..=current_index.min(turns.len().saturating_sub(1))];
-    let current_turn = relevant_turns.last();
+    let current_turn = turns.last();
     let current_text = current_turn
         .map(|turn| turn.content_text.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_default();
-    let previous_turns =
-        relevant_turns[..relevant_turns.len().saturating_sub(1)].iter().collect::<Vec<_>>();
-    let prompt_history_text = render_turn_history(
-        &previous_turns,
-        MAX_PROMPT_HISTORY_TURNS,
-        MAX_PROMPT_HISTORY_TURN_CHARS,
-    );
+    let previous_turns = turns[..turns.len().saturating_sub(1)].iter().collect::<Vec<_>>();
+    let is_follow_up = is_context_dependent_follow_up(&current_text);
+    let follow_up_focus_tokens =
+        if is_follow_up { effective_query_focus_tokens(&current_text) } else { Vec::new() };
+    let prompt_history_text = if is_follow_up {
+        render_follow_up_prompt_history(&previous_turns, &follow_up_focus_tokens)
+    } else {
+        None
+    };
 
     let coreference_entities = previous_turns
         .iter()
         .rev()
         .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-        .map(|turn| extract_entities_from_previous_answer(&turn.content_text))
+        .map(|turn| {
+            let focused_source = (!follow_up_focus_tokens.is_empty())
+                .then(|| {
+                    focused_conversation_turn_text(&turn.content_text, &follow_up_focus_tokens)
+                })
+                .flatten();
+            extract_entities_from_previous_answer(
+                focused_source.as_deref().unwrap_or(&turn.content_text),
+            )
+        })
         .unwrap_or_default();
 
-    let effective_query_text = if is_context_dependent_follow_up(&current_text) {
+    let effective_query_text = if is_follow_up {
         render_effective_query_text(&previous_turns, &current_text).unwrap_or(current_text)
     } else {
         current_text
@@ -296,29 +370,55 @@ fn extract_entities_from_previous_answer(answer: &str) -> Vec<String> {
 }
 
 fn render_effective_query_text(
-    previous_turns: &[&query_repository::QueryTurnRow],
+    previous_turns: &[&RuntimeContextTurn<'_>],
     current_text: &str,
 ) -> Option<String> {
-    let mut lines = previous_turns
-        .iter()
-        .rev()
-        .filter_map(|turn| {
-            let text =
-                compact_conversation_turn_text(&turn.content_text, MAX_EFFECTIVE_QUERY_TURN_CHARS);
-            (!text.is_empty()).then_some(text)
-        })
-        .take(MAX_EFFECTIVE_QUERY_HISTORY_TURNS)
-        .collect::<Vec<_>>();
+    let focus_tokens = effective_query_focus_tokens(current_text);
+    let focused_lines = if focus_tokens.is_empty() {
+        Vec::new()
+    } else {
+        previous_turns
+            .iter()
+            .rev()
+            .filter_map(|turn| focused_conversation_turn_text(&turn.content_text, &focus_tokens))
+            .take(MAX_EFFECTIVE_QUERY_HISTORY_TURNS)
+            .collect::<Vec<_>>()
+    };
+    let mut lines = if !focused_lines.is_empty() {
+        let mut lines = focused_lines;
+        if let Some(anchor) = latest_previous_user_turn_text(previous_turns) {
+            lines.push(anchor);
+        }
+        lines
+    } else if !focus_tokens.is_empty() {
+        latest_previous_user_turn_text(previous_turns)
+            .map(|anchor| vec![anchor])
+            .unwrap_or_default()
+    } else {
+        previous_turns
+            .iter()
+            .rev()
+            .filter_map(|turn| {
+                let text = compact_conversation_turn_text(
+                    &turn.content_text,
+                    MAX_EFFECTIVE_QUERY_TURN_CHARS,
+                );
+                (!text.is_empty()).then_some(text)
+            })
+            .take(MAX_EFFECTIVE_QUERY_HISTORY_TURNS)
+            .collect::<Vec<_>>()
+    };
     if lines.is_empty() {
         return None;
     }
     lines.reverse();
+    dedup_history_lines(&mut lines);
     lines.push(current_text.to_string());
     Some(lines.join("\n"))
 }
 
 fn render_turn_history(
-    turns: &[&query_repository::QueryTurnRow],
+    turns: &[&RuntimeContextTurn<'_>],
     limit: usize,
     max_chars_per_turn: usize,
 ) -> Option<String> {
@@ -339,6 +439,55 @@ fn render_turn_history(
     }
 }
 
+fn render_follow_up_prompt_history(
+    previous_turns: &[&RuntimeContextTurn<'_>],
+    focus_tokens: &[String],
+) -> Option<String> {
+    let mut selected = Vec::<(i32, String)>::new();
+
+    if let Some(user_turn) =
+        previous_turns.iter().rev().find(|turn| matches!(turn.turn_kind, QueryTurnKind::User))
+    {
+        let text =
+            compact_conversation_turn_text(&user_turn.content_text, MAX_PROMPT_HISTORY_TURN_CHARS);
+        if !text.is_empty() {
+            selected.push((
+                user_turn.turn_index,
+                format!("{}: {}", conversation_turn_speaker(&user_turn.turn_kind), text),
+            ));
+        }
+    }
+
+    if let Some(assistant_turn) =
+        previous_turns.iter().rev().find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+    {
+        let text = focused_conversation_turn_text(&assistant_turn.content_text, focus_tokens)
+            .unwrap_or_else(|| {
+                compact_conversation_turn_text(
+                    &assistant_turn.content_text,
+                    MAX_PROMPT_HISTORY_TURN_CHARS,
+                )
+            });
+        if !text.is_empty() {
+            selected.push((
+                assistant_turn.turn_index,
+                format!("{}: {}", conversation_turn_speaker(&assistant_turn.turn_kind), text),
+            ));
+        }
+    }
+
+    if selected.is_empty() {
+        return render_turn_history(
+            previous_turns,
+            MAX_PROMPT_HISTORY_TURNS.min(2),
+            MAX_PROMPT_HISTORY_TURN_CHARS,
+        );
+    }
+
+    selected.sort_by_key(|(turn_index, _)| *turn_index);
+    Some(selected.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n"))
+}
+
 fn compact_conversation_turn_text(value: &str, max_chars: usize) -> String {
     let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max_chars {
@@ -347,6 +496,78 @@ fn compact_conversation_turn_text(value: &str, max_chars: usize) -> String {
     let cutoff =
         collapsed.char_indices().nth(max_chars).map_or(collapsed.len(), |(index, _)| index);
     format!("{}…", collapsed[..cutoff].trim_end())
+}
+
+fn latest_previous_user_turn_text(previous_turns: &[&RuntimeContextTurn<'_>]) -> Option<String> {
+    previous_turns.iter().rev().find(|turn| matches!(turn.turn_kind, QueryTurnKind::User)).and_then(
+        |turn| {
+            let text =
+                compact_conversation_turn_text(&turn.content_text, MAX_EFFECTIVE_QUERY_TURN_CHARS);
+            (!text.is_empty()).then_some(text)
+        },
+    )
+}
+
+fn dedup_history_lines(lines: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    lines.retain(|line| seen.insert(line.to_lowercase()));
+}
+
+fn focused_conversation_turn_text(value: &str, focus_tokens: &[String]) -> Option<String> {
+    let segments = conversation_text_segments(value)
+        .into_iter()
+        .filter(|segment| segment_mentions_focus_token(segment, focus_tokens))
+        .map(|segment| compact_conversation_turn_text(segment, MAX_EFFECTIVE_QUERY_TURN_CHARS))
+        .filter(|segment| !segment.is_empty())
+        .take(3)
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        None
+    } else {
+        Some(compact_conversation_turn_text(&segments.join(" "), MAX_EFFECTIVE_QUERY_TURN_CHARS))
+    }
+}
+
+fn conversation_text_segments(value: &str) -> Vec<&str> {
+    let mut segments =
+        value.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
+    if segments.len() > 1 {
+        return segments;
+    }
+    segments.clear();
+    let mut start = 0;
+    for (index, ch) in value.char_indices() {
+        if matches!(ch, '.' | '!' | '?' | ';') {
+            let segment = value[start..index].trim();
+            if !segment.is_empty() {
+                segments.push(segment);
+            }
+            start = index + ch.len_utf8();
+        }
+    }
+    let tail = value[start..].trim();
+    if !tail.is_empty() {
+        segments.push(tail);
+    }
+    segments
+}
+
+fn segment_mentions_focus_token(segment: &str, focus_tokens: &[String]) -> bool {
+    if focus_tokens.is_empty() {
+        return false;
+    }
+    let segment_lower = segment.to_lowercase();
+    if focus_tokens.iter().any(|token| segment_lower.contains(token)) {
+        return true;
+    }
+    let segment_tokens = normalized_alnum_tokens(segment, 4);
+    focus_tokens
+        .iter()
+        .any(|focus| segment_tokens.iter().any(|candidate| near_token_match(focus, candidate)))
+}
+
+fn effective_query_focus_tokens(value: &str) -> Vec<String> {
+    normalized_alnum_tokens(value, 4).into_iter().collect()
 }
 
 fn conversation_turn_speaker(turn_kind: &QueryTurnKind) -> &'static str {
@@ -369,10 +590,11 @@ fn conversation_turn_speaker(turn_kind: &QueryTurnKind) -> &'static str {
 /// always benefits from entity expansion, a longer one rarely does.
 /// Length is language-agnostic and does not hardcode any lexicon.
 fn is_context_dependent_follow_up(value: &str) -> bool {
-    let informative_token_count = value
-        .split_whitespace()
-        .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric()))
-        .filter(|token| token.chars().count() >= 4)
-        .count();
-    informative_token_count <= 1
+    let tokens = value
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let informative_token_count = tokens.iter().filter(|token| token.chars().count() >= 4).count();
+    tokens.len() <= 2 && informative_token_count <= 1
 }

@@ -124,7 +124,7 @@ pub async fn load_document_lifecycle(
             });
         }
     }
-    attempts.sort_by(|a, b| b.queue_started_at.cmp(&a.queue_started_at));
+    attempts.sort_by_key(|attempt| std::cmp::Reverse(attempt.queue_started_at));
 
     // Single canonical billing query: raw billing_charge → per-stage + total
     let billing = load_canonical_billing(state, document_id).await;

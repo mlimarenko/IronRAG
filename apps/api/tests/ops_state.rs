@@ -452,6 +452,7 @@ impl OpsStateFixture {
                 created_by_principal_id: None,
                 title: Some("Ops State Failure Conversation"),
                 conversation_state: "active",
+                request_surface: "ui",
             },
             5,
         )

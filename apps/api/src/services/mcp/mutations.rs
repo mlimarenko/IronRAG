@@ -43,10 +43,10 @@ pub async fn upload_documents(
 ) -> Result<Vec<McpMutationReceipt>, ApiError> {
     auth.require_any_scope(POLICY_DOCUMENTS_WRITE)?;
     let settings = &state.mcp_memory;
-    let library = crate::interfaces::http::authorization::load_library_and_authorize(
+    let library = crate::services::mcp::access::load_library_by_catalog_ref(
         auth,
         state,
-        request.library_id,
+        &request.library,
         POLICY_LIBRARY_WRITE,
     )
     .await?;
@@ -59,7 +59,8 @@ pub async fn upload_documents(
     for (index, document) in request.documents.into_iter().enumerate() {
         let file_name = resolve_upload_file_name(&document, index)?;
         let mime_type = resolve_upload_mime_type(&document);
-        let file_bytes = resolve_upload_file_bytes(&document, index)?;
+        let file_bytes =
+            resolve_upload_file_bytes(&document, index, settings.max_upload_file_bytes()).await?;
         if file_bytes.is_empty() {
             return Err(ApiError::invalid_mcp_tool_call(format!(
                 "documents[{index}] upload body must not be empty"
@@ -120,10 +121,10 @@ pub async fn update_document(
 ) -> Result<McpMutationReceipt, ApiError> {
     auth.require_any_scope(POLICY_DOCUMENTS_WRITE)?;
     let settings = &state.mcp_memory;
-    let library = crate::interfaces::http::authorization::load_library_and_authorize(
+    let library = crate::services::mcp::access::load_library_by_catalog_ref(
         auth,
         state,
-        request.library_id,
+        &request.library,
         POLICY_LIBRARY_WRITE,
     )
     .await?;
@@ -300,10 +301,10 @@ pub async fn submit_web_ingest_run(
     request: McpSubmitWebIngestRunRequest,
 ) -> Result<WebIngestRunReceipt, ApiError> {
     auth.require_any_scope(POLICY_LIBRARY_WRITE)?;
-    let library = crate::interfaces::http::authorization::load_library_and_authorize(
+    let library = crate::services::mcp::access::load_library_by_catalog_ref(
         auth,
         state,
-        request.library_id,
+        &request.library,
         POLICY_LIBRARY_WRITE,
     )
     .await?;
@@ -320,6 +321,7 @@ pub async fn submit_web_ingest_run(
                 boundary_policy: request.boundary_policy,
                 max_depth: request.max_depth,
                 max_pages: request.max_pages,
+                extra_ignore_patterns: request.extra_ignore_patterns,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "mcp".to_string(),
                 idempotency_key: request.idempotency_key,
@@ -478,6 +480,29 @@ fn resolve_upload_file_name(
         return Ok(file_name.to_string());
     }
 
+    // When the caller provided `fetchUrl` and no explicit `fileName`,
+    // derive one from the URL path. This is the normal path for the
+    // "download this link and ingest it" flow — expecting the LLM to
+    // also generate a filename would just add an extra failure mode
+    // when the URL and desired name are already implied by each
+    // other. `reqwest::Url::parse` does the path split; the last
+    // non-empty path segment becomes the filename.
+    if let Some(fetch_url) =
+        document.fetch_url.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    {
+        if let Ok(parsed) = reqwest::Url::parse(fetch_url) {
+            if let Some(candidate) = parsed
+                .path_segments()
+                .and_then(|segments| segments.filter(|s| !s.is_empty()).last())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Ok(candidate.to_string());
+            }
+        }
+        return Ok(default_inline_file_name(document.title.as_deref(), Some(fetch_url), index));
+    }
+
     if document.body.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_some() {
         return Ok(default_inline_file_name(
             document.title.as_deref(),
@@ -506,9 +531,10 @@ fn resolve_upload_mime_type(document: &McpUploadDocumentInput) -> Option<String>
         })
 }
 
-fn resolve_upload_file_bytes(
+async fn resolve_upload_file_bytes(
     document: &McpUploadDocumentInput,
     index: usize,
+    max_file_bytes: u64,
 ) -> Result<Vec<u8>, ApiError> {
     let source_type = document
         .source_type
@@ -524,10 +550,12 @@ fn resolve_upload_file_bytes(
         .is_some();
     let has_body =
         document.body.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_some();
+    let fetch_url = document.fetch_url.as_deref().map(str::trim).filter(|value| !value.is_empty());
 
-    if has_base64 && has_body {
+    let source_count = [has_base64, has_body, fetch_url.is_some()].iter().filter(|v| **v).count();
+    if source_count > 1 {
         return Err(ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}] must provide either contentBase64 or body, not both"
+            "documents[{index}] must provide exactly one of contentBase64, body, or fetchUrl"
         )));
     }
     if matches!(source_type.as_deref(), Some("inline")) && !has_body {
@@ -535,11 +563,18 @@ fn resolve_upload_file_bytes(
             "documents[{index}].sourceType=inline requires body"
         )));
     }
-    if matches!(source_type.as_deref(), Some("file" | "binary")) && !has_base64 {
+    if matches!(source_type.as_deref(), Some("file" | "binary"))
+        && !has_base64
+        && fetch_url.is_none()
+    {
         return Err(ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}].sourceType={} requires contentBase64",
+            "documents[{index}].sourceType={} requires contentBase64 or fetchUrl",
             source_type.as_deref().unwrap_or("file")
         )));
+    }
+
+    if let Some(url) = fetch_url {
+        return fetch_upload_bytes_from_url(url, index, max_file_bytes).await;
     }
 
     if let Some(content_base64) =
@@ -557,8 +592,133 @@ fn resolve_upload_file_bytes(
     }
 
     Err(ApiError::invalid_mcp_tool_call(format!(
-        "documents[{index}] requires either contentBase64 or body"
+        "documents[{index}] requires one of contentBase64, body, or fetchUrl"
     )))
+}
+
+/// Fetch an MCP-supplied upload URL into memory, with SSRF guards and
+/// a hard size cap. The MCP tool is exposed to LLM-generated inputs,
+/// so we have to defend against:
+///   * Internal hosts (localhost, link-local, RFC 1918, metadata
+///     endpoints) — blocked by resolving the URL host and rejecting
+///     any address that is loopback, private, or link-local.
+///   * Unbounded responses — `Content-Length` checked against
+///     `max_file_bytes` before any body read, and the body stream
+///     itself is capped to the same value so chunked responses can't
+///     silently blow past the limit.
+///   * Non-HTTP schemes — only `http` and `https` are permitted.
+async fn fetch_upload_bytes_from_url(
+    raw_url: &str,
+    index: usize,
+    max_file_bytes: u64,
+) -> Result<Vec<u8>, ApiError> {
+    use std::net::IpAddr;
+
+    let parsed = reqwest::Url::parse(raw_url).map_err(|error| {
+        ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].fetchUrl is not a valid URL: {error}"
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].fetchUrl must use http(s); got {}",
+            parsed.scheme()
+        )));
+    }
+    let host = parsed.host_str().ok_or_else(|| {
+        ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].fetchUrl is missing a host component"
+        ))
+    })?;
+    // Resolve the host once up-front and reject any address that
+    // points back at the network the backend itself is on. This stops
+    // the LLM from being tricked (or tricking itself) into reading
+    // IronRAG's own metadata endpoints.
+    let resolved_addresses: Vec<IpAddr> = tokio::net::lookup_host(format!(
+        "{}:{}",
+        host,
+        parsed.port_or_known_default().unwrap_or(80)
+    ))
+    .await
+    .map_err(|error| {
+        ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].fetchUrl host could not be resolved: {error}"
+        ))
+    })?
+    .map(|addr| addr.ip())
+    .collect();
+    if resolved_addresses.is_empty() {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].fetchUrl host resolved to no addresses"
+        )));
+    }
+    for addr in &resolved_addresses {
+        let blocked = match addr {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_broadcast()
+                    || v4.is_unspecified()
+                    || v4.is_multicast()
+            }
+            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_multicast(),
+        };
+        if blocked {
+            return Err(ApiError::invalid_mcp_tool_call(format!(
+                "documents[{index}].fetchUrl resolves to a non-public address ({addr}); \
+                 point the URL at an externally-reachable host instead"
+            )));
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|error| {
+            ApiError::BadRequest(format!("failed to build HTTP client for fetchUrl: {error}"))
+        })?;
+    let response = client.get(parsed).send().await.map_err(|error| {
+        ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].fetchUrl request failed: {error}"
+        ))
+    })?;
+    if !response.status().is_success() {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "documents[{index}].fetchUrl returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_file_bytes {
+            return Err(ApiError::invalid_mcp_tool_call(format!(
+                "documents[{index}].fetchUrl Content-Length {content_length} exceeds upload cap {max_file_bytes}"
+            )));
+        }
+    }
+    // Stream the body into memory, stopping the moment we go over
+    // the cap. This defends against responses that omit
+    // `Content-Length` (chunked) and against a cooperative server
+    // advertising a small length but then sending more.
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    use futures::stream::StreamExt;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|error| {
+            ApiError::invalid_mcp_tool_call(format!(
+                "documents[{index}].fetchUrl body read failed: {error}"
+            ))
+        })?;
+        if buffer.len().saturating_add(chunk.len()) as u64 > max_file_bytes {
+            return Err(ApiError::invalid_mcp_tool_call(format!(
+                "documents[{index}].fetchUrl body exceeds upload cap {max_file_bytes}"
+            )));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
 }
 
 fn default_inline_file_name(title: Option<&str>, source_uri: Option<&str>, index: usize) -> String {

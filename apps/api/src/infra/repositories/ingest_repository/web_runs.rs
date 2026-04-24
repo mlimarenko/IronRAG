@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
@@ -15,6 +16,7 @@ pub struct WebIngestRunRow {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
+    pub ignore_patterns: Value,
     pub run_state: String,
     pub requested_by_principal_id: Option<Uuid>,
     pub requested_at: DateTime<Utc>,
@@ -36,6 +38,7 @@ pub struct NewWebIngestRun<'a> {
     pub boundary_policy: &'a str,
     pub max_depth: i32,
     pub max_pages: i32,
+    pub ignore_patterns: Value,
     pub run_state: &'a str,
     pub requested_by_principal_id: Option<Uuid>,
     pub requested_at: Option<DateTime<Utc>>,
@@ -84,6 +87,7 @@ pub async fn create_web_ingest_run(
             boundary_policy,
             max_depth,
             max_pages,
+            ignore_patterns,
             run_state,
             requested_by_principal_id,
             requested_at,
@@ -103,12 +107,13 @@ pub async fn create_web_ingest_run(
             $9::web_boundary_policy,
             $10,
             $11,
-            $12::web_run_state,
-            $13,
-            coalesce($14, now()),
-            $15,
+            $12,
+            $13::web_run_state,
+            $14,
+            coalesce($15, now()),
             $16,
-            $17
+            $17,
+            $18
         )
         returning
             id,
@@ -122,6 +127,7 @@ pub async fn create_web_ingest_run(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
+            ignore_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -140,6 +146,7 @@ pub async fn create_web_ingest_run(
     .bind(input.boundary_policy)
     .bind(input.max_depth)
     .bind(input.max_pages)
+    .bind(&input.ignore_patterns)
     .bind(input.run_state)
     .bind(input.requested_by_principal_id)
     .bind(input.requested_at)
@@ -167,6 +174,7 @@ pub async fn get_web_ingest_run_by_id(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
+            ignore_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -198,6 +206,7 @@ pub async fn get_web_ingest_run_by_mutation_id(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
+            ignore_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -215,6 +224,7 @@ pub async fn get_web_ingest_run_by_mutation_id(
 pub async fn list_web_ingest_runs(
     postgres: &PgPool,
     library_id: Uuid,
+    limit: i64,
 ) -> Result<Vec<WebIngestRunRow>, sqlx::Error> {
     sqlx::query_as::<_, WebIngestRunRow>(
         "select
@@ -229,6 +239,7 @@ pub async fn list_web_ingest_runs(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
+            ignore_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -237,9 +248,64 @@ pub async fn list_web_ingest_runs(
             cancel_requested_at
          from content_web_ingest_run
          where library_id = $1
-         order by requested_at desc, id desc",
+         order by requested_at desc, id desc
+         limit $2",
     )
     .bind(library_id)
+    .bind(limit)
+    .fetch_all(postgres)
+    .await
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct WebRunCountsByRunRow {
+    pub run_id: Uuid,
+    pub discovered: i64,
+    pub eligible: i64,
+    pub processed: i64,
+    pub queued: i64,
+    pub processing: i64,
+    pub duplicates: i64,
+    pub excluded: i64,
+    pub blocked: i64,
+    pub failed: i64,
+    pub canceled: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Batched version of [`get_web_run_counts`] — returns one row per
+/// requested `run_id` in a single indexed aggregation. Callers that
+/// render a list of runs MUST use this helper; the per-id variant in a
+/// loop is an N+1 hazard that on reference-sized libraries pushes the
+/// web-runs endpoint past the browser timeout.
+pub async fn list_web_run_counts_by_run_ids(
+    postgres: &PgPool,
+    run_ids: &[Uuid],
+) -> Result<Vec<WebRunCountsByRunRow>, sqlx::Error> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, WebRunCountsByRunRow>(
+        "select
+            run_id,
+            count(*)::bigint as discovered,
+            count(*) filter (
+                where candidate_state in ('eligible', 'queued', 'processing', 'processed', 'failed', 'canceled')
+            )::bigint as eligible,
+            count(*) filter (where candidate_state = 'processed')::bigint as processed,
+            count(*) filter (where candidate_state = 'queued')::bigint as queued,
+            count(*) filter (where candidate_state = 'processing')::bigint as processing,
+            count(*) filter (where candidate_state = 'duplicate')::bigint as duplicates,
+            count(*) filter (where candidate_state = 'excluded')::bigint as excluded,
+            count(*) filter (where candidate_state = 'blocked')::bigint as blocked,
+            count(*) filter (where candidate_state = 'failed')::bigint as failed,
+            count(*) filter (where candidate_state = 'canceled')::bigint as canceled,
+            max(updated_at) as last_activity_at
+         from content_web_discovered_page
+         where run_id = any($1)
+         group by run_id",
+    )
+    .bind(run_ids)
     .fetch_all(postgres)
     .await
 }
@@ -268,6 +334,7 @@ pub async fn update_web_ingest_run(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
+            ignore_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,

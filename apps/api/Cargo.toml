@@ -1,7 +1,8 @@
 [package]
 name = "ironrag-backend"
-version = "0.3.1"
+version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 license = "MIT"
 build = "build.rs"
 
@@ -120,6 +121,18 @@ percent-encoding = "2"
 [[bin]]
 name = "ironrag-cli"
 path = "src/bin/ironrag_cli.rs"
+
+[[bin]]
+name = "ironrag-embed-chunks-backfill"
+path = "src/bin/embed_chunks_backfill.rs"
+
+[[bin]]
+name = "ironrag-promote-null-heads"
+path = "src/bin/promote_null_heads.rs"
+
+[[bin]]
+name = "ironrag-gc-stale-chunks"
+path = "src/bin/gc_stale_chunks.rs"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

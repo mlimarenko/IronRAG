@@ -60,9 +60,18 @@ pub async fn extract_chunk_graph_candidates(
             .await
             .map_err(|error| map_graph_runtime_execution_error(request, None, error))?;
 
+    // ExtractGraph is the required binding for this task; the caller
+    // (`resolve_effective_provider_profile`) enforces its presence, so
+    // `selection_for_binding_purpose` always returns `Some` here. The
+    // `.expect` stays as a documented invariant — a panic here is
+    // exactly the right signal that the enforcement invariant above
+    // was broken, and the function's error type does not have a
+    // `From<ApiError>` impl to route it through.
+    #[allow(clippy::expect_used)]
     let initial_selection = runtime_context
         .provider_profile
-        .selection_for_binding_purpose(AiBindingPurpose::ExtractGraph);
+        .selection_for_binding_purpose(AiBindingPurpose::ExtractGraph)
+        .expect("extract_graph selection is required for graph extraction runtime");
     repositories::create_runtime_graph_extraction_record(
         &state.persistence.postgres,
         &repositories::CreateRuntimeGraphExtractionRecordInput {
@@ -324,6 +333,7 @@ async fn run_graph_extraction_runtime(
             RuntimeStageState::Failed,
             false,
             Some(&failure),
+            None,
         );
         let error = graph_extraction_execution_error(
             request,
@@ -348,6 +358,7 @@ async fn run_graph_extraction_runtime(
                 RuntimeStageState::Completed,
                 false,
                 None,
+                None,
             );
 
             let runtime_execution_id = runtime_session.execution.id;
@@ -370,6 +381,7 @@ async fn run_graph_extraction_runtime(
                         RuntimeStageState::Failed,
                         false,
                         Some(&failure),
+                        None,
                     );
                     let error = graph_extraction_execution_error(
                         request,
@@ -386,6 +398,7 @@ async fn run_graph_extraction_runtime(
                     RuntimeStageKind::Recovery,
                     RuntimeStageState::Recovered,
                     false,
+                    None,
                     None,
                 );
             }
@@ -464,6 +477,7 @@ async fn run_graph_extraction_runtime(
                     code: graph_failure_code_from_outcome(&failure).to_string(),
                     summary: failure.error_message.clone(),
                 }),
+                None,
             );
             let task_failure = GraphExtractionTaskFailure {
                 code: graph_failure_code_from_outcome(&failure).to_string(),

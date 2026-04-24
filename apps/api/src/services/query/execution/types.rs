@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use uuid::Uuid;
 
@@ -7,13 +7,12 @@ use crate::{
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
         query::RuntimeQueryMode,
     },
-    infra::arangodb::{
-        document_store::{
-            KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow,
-            KnowledgeTechnicalFactRow,
-        },
-        graph_store::{GraphViewEdgeWrite, GraphViewNodeWrite},
+    infra::arangodb::document_store::{
+        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow,
+        KnowledgeTechnicalFactRow,
     },
+    infra::repositories::{RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+    services::knowledge::runtime_read::ActiveRuntimeGraphProjection,
     services::query::assistant_grounding::AssistantGroundingEvidence,
     services::query::planner::{QueryIntentProfile, RuntimeQueryPlan},
 };
@@ -44,6 +43,16 @@ pub(crate) struct RuntimeMatchedRelationship {
 pub(crate) struct RuntimeMatchedChunk {
     pub chunk_id: Uuid,
     pub document_id: Uuid,
+    /// Canonical revision the chunk was fetched from. Needed by the
+    /// focused-document consolidation stage so it can group chunks by
+    /// the revision they actually came from (not just by `document_id`,
+    /// which could in principle span revisions during index swap).
+    pub revision_id: Uuid,
+    /// Position of the chunk inside its document's linear ordering.
+    /// Consolidation uses this to compute contiguous anchor ranges
+    /// around already-retrieved chunks and to sort winner chunks back
+    /// into reading order for the LLM prompt.
+    pub chunk_index: i32,
     pub document_label: String,
     pub excerpt: String,
     pub score: Option<f32>,
@@ -55,6 +64,13 @@ pub(crate) struct RuntimeMatchedChunk {
 pub(crate) struct RuntimeRetrievedDocumentBrief {
     pub(crate) title: String,
     pub(crate) preview_excerpt: String,
+    /// Canonical source pointer for the document. For web-ingested
+    /// pages this carries the original URL so the assistant can
+    /// quote it inline ("see <url>"). For file uploads it may be
+    /// `None` or a logical reference like `file://<key>`. The value
+    /// comes from `content_revision.source_uri` on the document's
+    /// readable (or active) revision.
+    pub(crate) source_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -123,6 +139,22 @@ pub(crate) struct RuntimeStructuredQueryResult {
     pub(crate) technical_literal_chunks: Vec<RuntimeMatchedChunk>,
     pub(crate) diagnostics: RuntimeStructuredQueryDiagnostics,
     pub(crate) retrieved_documents: Vec<RuntimeRetrievedDocumentBrief>,
+    /// Final ranked chunks that survived consolidation + truncation and
+    /// actually shaped the answer context. Captured here so the turn
+    /// layer can persist a chunk-to-execution audit trail in
+    /// `query_chunk_reference` without having to reach back into the
+    /// internal `RetrievalBundle`.
+    pub(crate) chunk_references: Vec<QueryChunkReferenceSnapshot>,
+}
+
+/// Persisted chunk-to-execution reference snapshot. Mirrors the
+/// `query_chunk_reference` table schema so the turn-layer insert is
+/// a 1:1 mapping.
+#[derive(Debug, Clone)]
+pub(crate) struct QueryChunkReferenceSnapshot {
+    pub(crate) chunk_id: Uuid,
+    pub(crate) rank: i32,
+    pub(crate) score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +198,16 @@ pub(crate) struct CanonicalAnswerEvidence {
     pub(crate) technical_facts: Vec<KnowledgeTechnicalFactRow>,
 }
 
+/// Captures the billing-relevant fields of a live QueryCompiler LLM
+/// call. `None` at the call site means the compiler served the IR from
+/// cache or from a fallback path, so there is no token usage to bill.
+#[derive(Debug, Clone)]
+pub(crate) struct QueryCompileUsage {
+    pub(crate) provider_kind: String,
+    pub(crate) model_name: String,
+    pub(crate) usage_json: serde_json::Value,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedAnswerQueryResult {
     pub(crate) structured: RuntimeStructuredQueryResult,
@@ -176,12 +218,88 @@ pub(crate) struct PreparedAnswerQueryResult {
     /// answer generation) should read routing signals from this instead
     /// of re-classifying the raw question with keyword lists.
     pub(crate) query_ir: crate::domains::query_ir::QueryIR,
+    /// Billing-relevant usage from the QueryCompiler LLM call, if any.
+    /// `None` when the IR was served from cache or from a fallback
+    /// path. Captured separately from `embedding_usage` because the
+    /// two hit different bindings (`QueryCompile` vs `ExtractText`),
+    /// different models, and different per-call costs.
+    pub(crate) query_compile_usage: Option<QueryCompileUsage>,
+    /// Outcome of the IR-aware focused-document consolidation stage
+    /// that runs between rerank and context assembly. Captured on the
+    /// prepared result (rather than inside
+    /// `RuntimeStructuredQueryDiagnostics`) because the structured
+    /// result is produced by `finalize_structured_query` AFTER
+    /// consolidation has already reshaped the bundle; surfacing it
+    /// here keeps both prod logs and tests able to assert on the
+    /// decision independently of the assembled context text.
+    ///
+    /// Currently consumed by the `stage = "answer.prepare"` tracing
+    /// log and test-level assertions; read consumers in `turn.rs`
+    /// will wire up once the operator dashboard takes a dependency
+    /// on the new diagnostic.
+    #[allow(dead_code)]
+    pub(crate) consolidation:
+        crate::services::query::execution::consolidation::ConsolidationDiagnostics,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct QueryGraphIndex {
-    pub(crate) nodes: HashMap<Uuid, GraphViewNodeWrite>,
-    pub(crate) edges: HashMap<Uuid, GraphViewEdgeWrite>,
+    projection: Arc<ActiveRuntimeGraphProjection>,
+    node_positions: HashMap<Uuid, usize>,
+    edge_positions: HashMap<Uuid, usize>,
+}
+
+impl QueryGraphIndex {
+    #[must_use]
+    pub(crate) fn new(
+        projection: Arc<ActiveRuntimeGraphProjection>,
+        node_positions: HashMap<Uuid, usize>,
+        edge_positions: HashMap<Uuid, usize>,
+    ) -> Self {
+        Self { projection, node_positions, edge_positions }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn empty() -> Self {
+        Self::new(
+            Arc::new(ActiveRuntimeGraphProjection { nodes: Vec::new(), edges: Vec::new() }),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn node(&self, node_id: Uuid) -> Option<&RuntimeGraphNodeRow> {
+        self.node_positions.get(&node_id).and_then(|position| self.projection.nodes.get(*position))
+    }
+
+    #[must_use]
+    pub(crate) fn edge(&self, edge_id: Uuid) -> Option<&RuntimeGraphEdgeRow> {
+        self.edge_positions.get(&edge_id).and_then(|position| self.projection.edges.get(*position))
+    }
+
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &RuntimeGraphNodeRow> + '_ {
+        self.node_positions
+            .values()
+            .filter_map(move |position| self.projection.nodes.get(*position))
+    }
+
+    pub(crate) fn edges(&self) -> impl Iterator<Item = &RuntimeGraphEdgeRow> + '_ {
+        self.edge_positions
+            .values()
+            .filter_map(move |position| self.projection.edges.get(*position))
+    }
+
+    #[must_use]
+    pub(crate) fn node_count(&self) -> usize {
+        self.node_positions.len()
+    }
+
+    #[must_use]
+    pub(crate) fn edge_count(&self) -> usize {
+        self.edge_positions.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -226,7 +344,6 @@ pub(crate) struct RuntimeQueryLibraryContext {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeVectorSearchContext {
     pub(crate) model_catalog_id: Uuid,
-    pub(crate) freshness_generation: i64,
 }
 
 #[derive(Debug, Clone)]

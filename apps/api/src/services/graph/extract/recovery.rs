@@ -198,7 +198,7 @@ pub(crate) async fn begin_graph_runtime_stage(
     executor: &crate::agent_runtime::executor::RuntimeExecutor,
     session: &mut RuntimeExecutionSession,
     stage_kind: RuntimeStageKind,
-) -> std::result::Result<(), GraphExtractionTaskFailure> {
+) -> std::result::Result<chrono::DateTime<chrono::Utc>, GraphExtractionTaskFailure> {
     executor.begin_stage(session, stage_kind).await.map_err(|error| match error {
         RuntimeExecutionError::TurnBudgetExhausted => GraphExtractionTaskFailure {
             code: "runtime_budget_exhausted".to_string(),
@@ -234,7 +234,9 @@ pub(crate) fn record_graph_runtime_stage(
     stage_state: RuntimeStageState,
     deterministic: bool,
     failure: Option<&GraphExtractionTaskFailure>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
 ) {
+    let resolved_started_at = started_at.unwrap_or_else(chrono::Utc::now);
     executor.complete_stage(
         session,
         stage_kind,
@@ -242,6 +244,7 @@ pub(crate) fn record_graph_runtime_stage(
         deterministic,
         failure.map(|value| value.code.clone()),
         failure.map(|value| truncate_failure_code(&value.summary).to_string()),
+        resolved_started_at,
     );
 }
 

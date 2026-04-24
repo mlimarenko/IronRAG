@@ -24,7 +24,7 @@ use ironrag_contracts::{
     documents::{
         DashboardAttentionItem, DashboardMetric, DashboardSurface, DocumentFilterState,
         DocumentReadiness, DocumentStatus, DocumentSummary, DocumentsOverview, DocumentsSurface,
-        WebIngestRunState, WebIngestRunSummary, WebRunCounts,
+        LibraryDocumentMetrics, WebIngestRunState, WebIngestRunSummary, WebRunCounts,
     },
     graph::{
         GraphConvergenceStatus, GraphFilterState, GraphNode, GraphNodeType, GraphStatus,
@@ -186,6 +186,7 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
             boundary_policy: "same_host".to_string(),
             max_depth: 1,
             max_pages: 8,
+            ignore_patterns: Vec::new(),
             run_state: WebIngestRunState::Completed,
             seed_url: "https://example.test".to_string(),
             counts: WebRunCounts {
@@ -213,6 +214,17 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
             value: "2".to_string(),
             level: MessageLevel::Info,
         }],
+        document_metrics: LibraryDocumentMetrics {
+            total: 2,
+            ready: 2,
+            processing: 0,
+            queued: 0,
+            failed: 0,
+            canceled: 0,
+            graph_ready: 2,
+            graph_sparse: 0,
+            recomputed_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        },
         recent_documents: documents.documents.clone(),
         recent_web_runs: documents.web_runs,
         graph: graph.clone(),

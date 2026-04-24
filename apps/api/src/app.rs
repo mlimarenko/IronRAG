@@ -221,6 +221,8 @@ async fn run_http_api(
     graph_backend: &str,
     shutdown: shutdown::ShutdownSignal,
 ) -> anyhow::Result<()> {
+    spawn_boot_graph_topology_prewarm(state.clone());
+    spawn_boot_arango_healthcheck(state.clone(), shutdown.subscribe());
     let router = build_router(config, state.clone());
     let addr: SocketAddr = config.bind_addr.parse()?;
     info!(
@@ -400,6 +402,133 @@ fn spawn_signal_listener(shutdown: shutdown::ShutdownSignal) -> tokio::task::Joi
             warn!(signal = signal_name, "shutdown signal received");
         }
     })
+}
+
+/// Detached startup task that walks every active library and prewarms
+/// the Redis NDJSON topology cache. The projection pipeline already
+/// prewarms on publish (see `services::graph::projection::schedule_topology_prewarm`),
+/// but after a container restart the cache is empty and the first
+/// operator GET pays the full 3-query load (~20 s on a reference
+/// library) before the cache repopulates. The boot task closes that
+/// gap. Runs in the background so the HTTP listener starts immediately;
+/// any library that happens to get a GET before the task reaches it
+/// falls back on the existing lazy build — the prewarm only changes
+/// the common case, not the contract.
+fn spawn_boot_graph_topology_prewarm(state: state::AppState) {
+    tokio::spawn(async move {
+        use crate::infra::repositories::{self, catalog_repository};
+        use crate::services::knowledge::graph_stream::prewarm_graph_topology_cache;
+        let started_at = std::time::Instant::now();
+        let libraries = match catalog_repository::list_libraries(&state.persistence.postgres, None)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(error = format!("{error:#}"), "boot graph prewarm: list_libraries failed");
+                return;
+            }
+        };
+        let mut prewarmed = 0usize;
+        let mut skipped = 0usize;
+        for library in libraries {
+            if library.lifecycle_state != "active" {
+                skipped += 1;
+                continue;
+            }
+            let snapshot = match repositories::get_runtime_graph_snapshot(
+                &state.persistence.postgres,
+                library.id,
+            )
+            .await
+            {
+                Ok(Some(row)) if row.graph_status == "ready" && row.projection_version > 0 => row,
+                Ok(_) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => {
+                    warn!(
+                        %library.id,
+                        error = format!("{error:#}"),
+                        "boot graph prewarm: snapshot lookup failed",
+                    );
+                    skipped += 1;
+                    continue;
+                }
+            };
+            // Canonical prewarm: rebuilds in memory then SET EX's
+            // under the current projection_version key atomically.
+            // `prewarm_graph_topology_cache` logs its own success /
+            // failure lines with bytes + projection_version, so this
+            // code path only tracks the scheduled/skipped counter for
+            // the summary line below.
+            let _ = snapshot;
+            prewarm_graph_topology_cache(&state, library.id).await;
+
+            // Also warm the in-memory `runtime_graph_projection_cache`
+            // used by the query retrieve path. This cache is distinct
+            // from the Redis NDJSON above — it holds full node/edge
+            // rows (with `summary`, `metadata_json`, etc.) that the
+            // assistant loop consults for graph-aware context. A cold
+            // first turn had to wait 8–11 s for the two sequential
+            // Postgres reads; the prewarm turns that into a cache hit.
+            if let Err(error) =
+                crate::services::knowledge::runtime_read::load_active_runtime_graph_projection(
+                    &state, library.id,
+                )
+                .await
+            {
+                warn!(
+                    %library.id,
+                    error = format!("{error:#}"),
+                    "boot runtime graph projection prewarm failed",
+                );
+            }
+            prewarmed += 1;
+        }
+        info!(
+            prewarmed,
+            skipped,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "boot graph prewarm: done",
+        );
+    });
+}
+
+/// Detached healthcheck that pings ArangoDB every 30 s. The query path
+/// hits Arango for context bundle assembly and graph topology; if
+/// Arango saturates, we start seeing `error sending request for url
+/// (http://arangodb:8529/_db/ironrag/_api/cursor)` buried inside the
+/// turn handler with no early warning. The periodic ping surfaces
+/// saturation in `ironrag-backend` logs ahead of the user-visible
+/// timeout so operators have a chance to react.
+fn spawn_boot_arango_healthcheck(
+    state: state::AppState,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let started_at = std::time::Instant::now();
+            let result = state.arango_client.ping().await;
+            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+            match result {
+                Ok(()) => {
+                    if elapsed_ms > 1000 {
+                        warn!(elapsed_ms, "arango ping slow");
+                    } else {
+                        tracing::debug!(elapsed_ms, "arango ping ok");
+                    }
+                }
+                Err(error) => {
+                    warn!(elapsed_ms, error = format!("{error:#}"), "arango ping failed",);
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
+                _ = shutdown_rx.recv() => return,
+            }
+        }
+    });
 }
 
 fn parse_allowed_origins(origins: &config::PublicOriginSettings) -> AllowOrigin {

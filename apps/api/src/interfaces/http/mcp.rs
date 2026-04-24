@@ -1,4 +1,13 @@
+// `Response::builder()` is only called with hard-coded status codes,
+// header names, and header values in this file — all of which are
+// `const` / static and infallible by construction. The `expect()`s
+// on `.body()` document that invariant; they cannot panic in practice.
+// Swapping them to `?` would force every handler to pick an ApiError
+// for a code path that is unreachable by construction.
+#![allow(clippy::expect_used)]
+
 use std::error::Error as _;
+use std::time::Duration;
 
 use axum::{
     Json, Router, body,
@@ -8,10 +17,21 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
+use futures::stream::StreamExt;
 use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+/// Interval between SSE keep-alive comments emitted on the idle
+/// `GET /v1/mcp` stream. 25 s sits comfortably below every proxy
+/// idle-read timeout we care about (nginx default 60 s, the gateway's
+/// default 75 s) so the connection stays warm without generating
+/// meaningful traffic. mcp-remote treats a cleanly kept-alive stream
+/// as healthy and stops its reconnect storm — previously it was
+/// reopening the GET every ~300 ms because our handshake closed
+/// immediately after emitting a single ready comment.
+const MCP_GET_STREAM_KEEPALIVE: Duration = Duration::from_secs(25);
 
 use crate::{
     app::state::AppState,
@@ -30,14 +50,21 @@ pub mod agent_bridge;
 
 pub const MCP_JSONRPC_ROUTE: &str = "/mcp";
 pub const MCP_CAPABILITIES_ROUTE: &str = "/mcp/capabilities";
+pub const MCP_DIAGNOSTICS_JSONRPC_ROUTE: &str = "/mcp/diagnostics";
+pub const MCP_DIAGNOSTICS_CAPABILITIES_ROUTE: &str = "/mcp/diagnostics/capabilities";
 pub const MCP_PUBLIC_JSONRPC_ROUTE: &str = "/v1/mcp";
 pub const MCP_PUBLIC_CAPABILITIES_ROUTE: &str = "/v1/mcp/capabilities";
+pub const MCP_PUBLIC_DIAGNOSTICS_JSONRPC_ROUTE: &str = "/v1/mcp/diagnostics";
+pub const MCP_PUBLIC_DIAGNOSTICS_CAPABILITIES_ROUTE: &str = "/v1/mcp/diagnostics/capabilities";
 pub(super) const MCP_JSONRPC_VERSION: &str = "2.0";
 pub(super) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub(super) const MCP_SERVER_NAME: &str = "ironrag-mcp-memory";
 pub(super) const MCP_SERVER_VERSION: &str = "0.1.0";
 
-pub const MCP_CANONICAL_TOOL_NAMES: &[&str] = &[
+pub const MCP_ANSWER_TOOL_NAMES: &[&str] =
+    &["list_workspaces", "list_libraries", "list_documents", "grounded_answer"];
+
+pub const MCP_DIAGNOSTICS_TOOL_NAMES: &[&str] = &[
     "list_workspaces",
     "list_libraries",
     "create_workspace",
@@ -81,6 +108,42 @@ pub const MCP_SESSION_HEADER: &str = "mcp-session-id";
 /// successful `initialize`. IronRAG tolerates its absence for
 /// compatibility with simpler clients.
 pub const MCP_PROTOCOL_HEADER: &str = "mcp-protocol-version";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpToolSurface {
+    Answer,
+    Diagnostics,
+}
+
+impl McpToolSurface {
+    const fn jsonrpc_route(self) -> &'static str {
+        match self {
+            Self::Answer => MCP_PUBLIC_JSONRPC_ROUTE,
+            Self::Diagnostics => MCP_PUBLIC_DIAGNOSTICS_JSONRPC_ROUTE,
+        }
+    }
+
+    const fn capabilities_route(self) -> &'static str {
+        match self {
+            Self::Answer => MCP_PUBLIC_CAPABILITIES_ROUTE,
+            Self::Diagnostics => MCP_PUBLIC_DIAGNOSTICS_CAPABILITIES_ROUTE,
+        }
+    }
+
+    const fn canonical_tool_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Answer => MCP_ANSWER_TOOL_NAMES,
+            Self::Diagnostics => MCP_DIAGNOSTICS_TOOL_NAMES,
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Answer => "answer",
+            Self::Diagnostics => "diagnostics",
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,60 +227,86 @@ pub(crate) struct McpContentBlock {
 }
 
 pub fn router() -> Router<AppState> {
-    // Single canonical MCP surface: the Streamable HTTP transport
-    // defined by spec 2025-06-18. One endpoint handles POST (JSON-RPC
-    // messages from client), GET (server-initiated SSE stream), and
-    // DELETE (client-requested session termination). No legacy
-    // HTTP+SSE split, no second transport, no alias routes.
+    // IronRAG exposes two canonical MCP surfaces:
+    //   * `/mcp` — answer-first surface for ordinary user questions.
+    //   * `/mcp/diagnostics` — explicit raw inspection / ops surface.
+    //
+    // Both use the same Streamable HTTP transport and handlers; the
+    // only difference is the tool contract returned by `initialize`
+    // + `tools/list`, which is parameterized by `McpToolSurface`.
     Router::new()
         .route(
             MCP_JSONRPC_ROUTE,
-            post(handle_jsonrpc).get(handle_get_stream).delete(handle_delete_session),
+            post(handle_answer_jsonrpc).get(handle_get_stream).delete(handle_delete_session),
         )
-        .route(MCP_CAPABILITIES_ROUTE, get(get_capabilities))
+        .route(MCP_CAPABILITIES_ROUTE, get(get_answer_capabilities))
+        .route(
+            MCP_DIAGNOSTICS_JSONRPC_ROUTE,
+            post(handle_diagnostics_jsonrpc).get(handle_get_stream).delete(handle_delete_session),
+        )
+        .route(MCP_DIAGNOSTICS_CAPABILITIES_ROUTE, get(get_diagnostics_capabilities))
 }
 
 /// `GET /v1/mcp` — server-initiated SSE stream per MCP Streamable HTTP.
 ///
 /// Spec 2025-06-18 lets the server either refuse the GET with 405 or
-/// open an SSE stream that emits zero events (the server simply never
-/// has anything to push to this client). Both are compliant.
+/// open an SSE stream. IronRAG emits no server-initiated
+/// notifications today, so the stream is effectively idle — but it
+/// must stay *open* and be kept alive, otherwise mcp-remote style
+/// clients interpret an immediate close as "stream broken" and
+/// reopen the GET every ~300 ms in a tight loop. That reconnect
+/// storm was burning gateway CPU, polluting access logs, and
+/// starving the same Tokio runtime that serves the actual
+/// `POST /v1/mcp` tool calls.
 ///
-/// IronRAG's MCP surface is purely request/response today — there are
-/// no server-initiated notifications to push. We still answer 200 with
-/// an empty `text/event-stream`: some bundled MCP clients (notably
-/// `openclaw`'s `bundle-mcp`, spawned per Telegram conversation)
-/// treat a non-200 handshake response as fatal and drop the entire
-/// MCP server registration for that agent context, which leaves the
-/// agent tool-less even though `POST` initialize/tools/list work.
-/// Returning a well-formed but silent SSE stream satisfies those
-/// clients without introducing real event traffic.
+/// The stream now:
+///   1. Emits one `: ready` comment so the parser has something to
+///      consume on the first read.
+///   2. Emits `: keep-alive` SSE comments every
+///      `MCP_GET_STREAM_KEEPALIVE` seconds so every intervening
+///      proxy, hyper's write buffer, and the client's read loop all
+///      see traffic before any idle timeout fires.
+///   3. Keeps going forever, ending only when the client disconnects
+///      (axum/hyper drops the stream on TCP close) or the runtime
+///      shuts down.
 ///
-/// The stream emits one spec-harmless SSE comment (`: ready`) so the
-/// client's parser has something to consume on first read, then keeps
-/// the connection idle until either side closes. No `retry:` / `event:`
-/// / `data:` frames ever leave this handler.
+/// SSE comments (`:`-prefix lines) are ignored by every compliant
+/// SSE parser, so the client never sees a synthetic "message" — the
+/// channel stays semantically silent while the transport stays alive.
 ///
-/// Auth is intentionally *not* required on this handler: the same
+/// Auth is intentionally *not* required on this handler: some
 /// bundled clients open the stream before propagating the session's
-/// Bearer, and a 401 here was the previous fatal mode. The handler
+/// Bearer, and a 401 here was a prior fatal mode. The handler
 /// discloses nothing beyond the presence of an idle SSE endpoint.
 #[tracing::instrument(level = "debug", name = "http.mcp.get_stream", skip_all)]
 async fn handle_get_stream(headers: HeaderMap) -> Response {
     let request_id = ensure_or_generate_request_id(&headers);
-    // `: ready\n\n` is a valid SSE comment line. The body is
-    // deliberately tiny and self-contained: bundle-mcp style clients
-    // accept a well-formed empty stream as a successful handshake, and
-    // the connection can close immediately after — they do not
-    // require long-lived streams when the server declares no events.
-    let sse_body = ": ready\n\n";
+
+    // Initial ready frame followed by an infinite heartbeat stream.
+    // We chain two streams rather than write a stateful generator so
+    // the ordering ("ready first, then keep-alive forever") is
+    // structurally obvious and impossible to reorder by accident.
+    let ready = futures::stream::once(async {
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b": ready\n\n"))
+    });
+    let heartbeat = futures::stream::unfold((), |()| async {
+        tokio::time::sleep(MCP_GET_STREAM_KEEPALIVE).await;
+        Some((Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b": keep-alive\n\n")), ()))
+    });
+    let stream = ready.chain(heartbeat);
+
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
         .header(header::CONNECTION, "keep-alive")
-        .body(body::Body::from(sse_body))
-        .expect("static SSE handshake response must build");
+        // X-Accel-Buffering: no tells nginx/traefik style proxies to
+        // flush bytes as they arrive instead of buffering the stream —
+        // without this the `: ready` comment can sit in a proxy buffer
+        // for 30+ seconds, re-triggering client-side reconnect loops.
+        .header(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no"))
+        .body(body::Body::from_stream(stream))
+        .expect("streaming SSE response must build");
     attach_request_id_header(response.headers_mut(), &request_id);
     response
 }
@@ -240,6 +329,7 @@ async fn handle_delete_session(headers: HeaderMap) -> Response {
 async fn capability_snapshot(
     auth: &AuthContext,
     state: &AppState,
+    surface: McpToolSurface,
 ) -> Result<McpCapabilitySnapshot, ApiError> {
     // Issue the workspace and library queries concurrently and derive
     // BOTH snapshots from one library load. The old path did:
@@ -260,19 +350,37 @@ async fn capability_snapshot(
         workspace_scope: auth.workspace_id,
         visible_workspace_count: workspaces.len(),
         visible_library_count: libraries.len(),
-        tools: tools::visible_tool_names(auth),
+        tools: tools::visible_tool_names(auth, surface),
         generated_at: Some(Utc::now()),
     })
 }
 
 #[tracing::instrument(level = "info", name = "http.mcp.get_capabilities", skip_all)]
-async fn get_capabilities(
+async fn get_answer_capabilities(
     auth: AuthContext,
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
+    get_capabilities_for_surface(auth, State(state), headers, McpToolSurface::Answer).await
+}
+
+#[tracing::instrument(level = "info", name = "http.mcp.get_diagnostics_capabilities", skip_all)]
+async fn get_diagnostics_capabilities(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    get_capabilities_for_surface(auth, State(state), headers, McpToolSurface::Diagnostics).await
+}
+
+async fn get_capabilities_for_surface(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    surface: McpToolSurface,
+) -> Response {
     let request_id = ensure_or_generate_request_id(&headers);
-    let result = capability_snapshot(&auth, &state).await;
+    let result = capability_snapshot(&auth, &state, surface).await;
 
     let mut response = match result {
         Ok(capabilities) => {
@@ -287,7 +395,7 @@ async fn get_capabilities(
                 Vec::new(),
             )
             .await;
-            canonical_capabilities_response(capabilities).into_response()
+            canonical_capabilities_response(surface, capabilities).into_response()
         }
         Err(error) => {
             audit::record_canonical_mcp_audit(
@@ -313,10 +421,28 @@ async fn get_capabilities(
 }
 
 #[tracing::instrument(level = "info", name = "http.mcp.handle_jsonrpc", skip_all)]
-async fn handle_jsonrpc(
+async fn handle_answer_jsonrpc(
     auth: AuthContext,
     State(state): State<AppState>,
     request: Request,
+) -> Response {
+    handle_jsonrpc_for_surface(auth, State(state), request, McpToolSurface::Answer).await
+}
+
+#[tracing::instrument(level = "info", name = "http.mcp.handle_diagnostics_jsonrpc", skip_all)]
+async fn handle_diagnostics_jsonrpc(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request: Request,
+) -> Response {
+    handle_jsonrpc_for_surface(auth, State(state), request, McpToolSurface::Diagnostics).await
+}
+
+async fn handle_jsonrpc_for_surface(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request: Request,
+    surface: McpToolSurface,
 ) -> Response {
     let request_id = ensure_or_generate_request_id(request.headers());
     let accept = accept_preference(request.headers());
@@ -345,10 +471,20 @@ async fn handle_jsonrpc(
     let is_initialize = request.method == "initialize";
     let session_id = is_initialize.then(|| Uuid::now_v7().as_hyphenated().to_string());
     let response = match request.method.as_str() {
-        "initialize" => handle_initialize(&auth, &state, &request_id, request.id).await,
-        "tools/list" => tools::handle_tools_list(&auth, &state, &request_id, request.id).await,
+        "initialize" => handle_initialize(&auth, &state, &request_id, request.id, surface).await,
+        "tools/list" => {
+            tools::handle_tools_list(&auth, &state, &request_id, request.id, surface).await
+        }
         "tools/call" => {
-            tools::handle_tools_call(&auth, &state, &request_id, request.id, request.params).await
+            tools::handle_tools_call(
+                &auth,
+                &state,
+                &request_id,
+                request.id,
+                request.params,
+                surface,
+            )
+            .await
         }
         _ => error_response(
             request.id,
@@ -453,14 +589,15 @@ fn finalize_mcp_response(
 }
 
 fn canonical_capabilities_response(
+    surface: McpToolSurface,
     capabilities: McpCapabilitySnapshot,
 ) -> Json<McpCapabilitiesHttpResponse> {
     Json(McpCapabilitiesHttpResponse {
-        route: MCP_PUBLIC_CAPABILITIES_ROUTE,
-        json_rpc_route: MCP_PUBLIC_JSONRPC_ROUTE,
+        route: surface.capabilities_route(),
+        json_rpc_route: surface.jsonrpc_route(),
         canonical_method_names: MCP_CANONICAL_METHOD_NAMES,
         canonical_notification_method_names: MCP_CANONICAL_NOTIFICATION_METHOD_NAMES,
-        canonical_tool_names: MCP_CANONICAL_TOOL_NAMES,
+        canonical_tool_names: surface.canonical_tool_names(),
         capabilities,
     })
 }
@@ -589,8 +726,9 @@ async fn handle_initialize(
     state: &AppState,
     request_id: &str,
     id: Option<Value>,
+    surface: McpToolSurface,
 ) -> McpJsonRpcResponse {
-    match capability_snapshot(auth, state).await {
+    match capability_snapshot(auth, state, surface).await {
         Ok(mut capabilities) => {
             audit::record_canonical_mcp_audit(
                 state,

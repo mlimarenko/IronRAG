@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use uuid::Uuid;
 
+use crate::domains::query_ir::QueryIR;
 use crate::shared::extraction::technical_facts::TechnicalFactKind;
 
 use super::concise_document_subject_label;
@@ -179,6 +180,7 @@ fn port_fact_score(
 
 pub(super) fn build_port_and_protocol_answer_from_facts(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
@@ -192,7 +194,7 @@ pub(super) fn build_port_and_protocol_answer_from_facts(
     let focus_segments = technical_literal_focus_segments_text(question)
         .into_iter()
         .map(|segment| {
-            let keywords = technical_literal_focus_keywords(&segment, None);
+            let keywords = technical_literal_focus_keywords(&segment, Some(query_ir));
             (segment, keywords)
         })
         .filter(|(_, keywords)| !keywords.is_empty())
@@ -243,18 +245,19 @@ pub(super) fn build_port_and_protocol_answer_from_facts(
 
 pub(super) fn build_port_answer_from_facts(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     if !question_mentions_port(question)
         || question_mentions_protocol(question)
-        || technical_literal_focus_keyword_segments(question, None).len() > 1
+        || technical_literal_focus_keyword_segments(question, Some(query_ir)).len() > 1
     {
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question, None);
-    let focus_segments = technical_literal_focus_keyword_segments(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
+    let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir));
     let (ordered_document_ids, per_document_chunks) = chunks_by_document(chunks);
     let document_labels = build_document_labels(chunks);
     let focused_document_id = if focus_segments.len() == 1 {
@@ -384,6 +387,7 @@ pub(super) fn extract_port_literals(text: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 pub(super) fn build_port_and_protocol_answer(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     if !question_mentions_port(question)
@@ -393,11 +397,11 @@ pub(super) fn build_port_and_protocol_answer(
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let focus_segments = technical_literal_focus_segments_text(question)
         .into_iter()
         .map(|segment| {
-            let keywords = technical_literal_focus_keywords(&segment, None);
+            let keywords = technical_literal_focus_keywords(&segment, Some(query_ir));
             (segment, keywords)
         })
         .filter(|(_, keywords)| !keywords.is_empty())
@@ -459,8 +463,12 @@ pub(super) fn build_port_and_protocol_answer(
         let Some(document_chunks) = per_document_chunks.get(&document_id) else {
             continue;
         };
-        let local_keywords =
-            document_local_focus_keywords(question, None, document_chunks, &question_keywords);
+        let local_keywords = document_local_focus_keywords(
+            question,
+            Some(query_ir),
+            document_chunks,
+            &question_keywords,
+        );
         let mut ranked_chunks = document_chunks.clone();
         ranked_chunks.sort_by(|left, right| {
             let left_match = technical_chunk_selection_score(
@@ -521,17 +529,21 @@ pub(super) fn build_port_and_protocol_answer(
 }
 
 #[cfg(test)]
-pub(super) fn build_port_answer(question: &str, chunks: &[RuntimeMatchedChunk]) -> Option<String> {
+pub(super) fn build_port_answer(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
     if !question_mentions_port(question)
         || question_mentions_protocol(question)
-        || technical_literal_focus_keyword_segments(question, None).len() > 1
+        || technical_literal_focus_keyword_segments(question, Some(query_ir)).len() > 1
         || chunks.is_empty()
     {
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question, None);
-    let focus_segments = technical_literal_focus_keyword_segments(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
+    let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir));
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
     for chunk in chunks {
@@ -590,8 +602,12 @@ pub(super) fn build_port_answer(question: &str, chunks: &[RuntimeMatchedChunk]) 
         let Some(document_chunks) = per_document_chunks.get(&document_id) else {
             continue;
         };
-        let local_keywords =
-            document_local_focus_keywords(question, None, document_chunks, &question_keywords);
+        let local_keywords = document_local_focus_keywords(
+            question,
+            Some(query_ir),
+            document_chunks,
+            &question_keywords,
+        );
         let mut ranked_chunks = document_chunks.clone();
         ranked_chunks.sort_by(|left, right| {
             let left_match = technical_chunk_selection_score(

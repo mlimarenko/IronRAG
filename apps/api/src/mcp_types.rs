@@ -12,6 +12,7 @@ use crate::domains::{
     },
     ai::AiBindingPurpose,
 };
+use crate::shared::web::ingest::{WebIngestIgnorePattern, WebIngestPolicy};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,7 +41,8 @@ pub struct McpCapabilitySnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct McpWorkspaceDescriptor {
     pub workspace_id: Uuid,
-    pub slug: String,
+    #[serde(rename = "ref")]
+    pub catalog_ref: String,
     pub name: String,
     pub status: String,
     pub visible_library_count: usize,
@@ -59,9 +61,11 @@ pub struct McpLibraryIngestionReadiness {
 pub struct McpLibraryDescriptor {
     pub library_id: Uuid,
     pub workspace_id: Uuid,
-    pub slug: String,
+    #[serde(rename = "ref")]
+    pub catalog_ref: String,
     pub name: String,
     pub description: Option<String>,
+    pub web_ingest_policy: WebIngestPolicy,
     pub ingestion_readiness: McpLibraryIngestionReadiness,
     pub document_count: usize,
     pub readable_document_count: usize,
@@ -79,32 +83,33 @@ pub struct McpLibraryDescriptor {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListLibrariesRequest {
-    pub workspace_id: Option<Uuid>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSearchDocumentsRequest {
     pub query: String,
-    pub library_ids: Option<Vec<Uuid>>,
+    pub libraries: Option<Vec<String>>,
     pub limit: Option<usize>,
     pub include_references: Option<bool>,
+    pub include_unreadable: Option<bool>,
 }
 
 /// Hard cap on library IDs per MCP request. Prevents an unbounded
 /// clone + a fan-out that would turn one search call into an O(N)
 /// database scatter. Agents rarely reference more than 5 libraries
 /// in a single tool call; 50 gives headroom for batch-style scripts.
-const MCP_MAX_LIBRARY_IDS: usize = 50;
+const MCP_MAX_LIBRARY_REFS: usize = 50;
 
 impl McpSearchDocumentsRequest {
     #[must_use]
-    pub fn requested_library_ids(&self) -> Option<Vec<Uuid>> {
-        self.library_ids.as_ref().map(|ids| {
-            if ids.len() > MCP_MAX_LIBRARY_IDS {
-                ids[..MCP_MAX_LIBRARY_IDS].to_vec()
+    pub fn requested_library_refs(&self) -> Option<Vec<String>> {
+        self.libraries.as_ref().map(|refs| {
+            if refs.len() > MCP_MAX_LIBRARY_REFS {
+                refs[..MCP_MAX_LIBRARY_REFS].to_vec()
             } else {
-                ids.clone()
+                refs.clone()
             }
         })
     }
@@ -113,16 +118,15 @@ impl McpSearchDocumentsRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCreateWorkspaceRequest {
-    pub slug: Option<String>,
-    pub name: String,
+    pub workspace: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCreateLibraryRequest {
-    pub workspace_id: Uuid,
-    pub slug: Option<String>,
-    pub name: String,
+    pub library: String,
+    pub title: Option<String>,
     pub description: Option<String>,
 }
 
@@ -241,7 +245,7 @@ pub struct McpDocumentHit {
 pub struct McpSearchDocumentsResponse {
     pub query: String,
     pub limit: usize,
-    pub library_ids: Vec<Uuid>,
+    pub libraries: Vec<String>,
     pub hits: Vec<McpDocumentHit>,
 }
 
@@ -274,12 +278,21 @@ pub struct McpUploadDocumentInput {
     pub source_uri: Option<String>,
     pub mime_type: Option<String>,
     pub title: Option<String>,
+    /// HTTP(S) URL the backend will fetch the file from. Preferred
+    /// over `content_base64` for anything larger than a few kB — LLM
+    /// tool-call outputs cap at a few thousand tokens, so a 22 kB
+    /// file's ~30 kB base64 payload gets truncated inside the
+    /// `tool_calls.arguments_json` the model emits and the upload
+    /// fails. Passing a URL keeps the tool-call arguments tiny and
+    /// moves the transfer into the backend where it only has to fit
+    /// the normal upload-size limit.
+    pub fetch_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUploadDocumentsRequest {
-    pub library_id: Uuid,
+    pub library: String,
     pub idempotency_key: Option<String>,
     pub documents: Vec<McpUploadDocumentInput>,
 }
@@ -294,7 +307,7 @@ pub enum McpDocumentMutationKind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUpdateDocumentRequest {
-    pub library_id: Uuid,
+    pub library: String,
     pub document_id: Uuid,
     pub operation_kind: McpDocumentMutationKind,
     pub idempotency_key: Option<String>,
@@ -325,12 +338,14 @@ pub struct McpGetRuntimeExecutionTraceRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSubmitWebIngestRunRequest {
-    pub library_id: Uuid,
+    pub library: String,
     pub seed_url: String,
     pub mode: String,
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
+    #[serde(default)]
+    pub extra_ignore_patterns: Vec<WebIngestIgnorePattern>,
     pub idempotency_key: Option<String>,
 }
 
@@ -355,7 +370,7 @@ pub struct McpCancelWebIngestRunRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSearchEntitiesRequest {
-    pub library_id: Uuid,
+    pub library: String,
     pub query: String,
     pub limit: Option<usize>,
 }
@@ -364,7 +379,7 @@ pub struct McpSearchEntitiesRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListDocumentsRequest {
     /// When omitted, auto-filled from the token's sole library grant.
-    pub library_id: Option<Uuid>,
+    pub library: Option<String>,
     pub limit: Option<usize>,
     pub status_filter: Option<String>,
 }
@@ -378,21 +393,21 @@ pub struct McpDeleteDocumentRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetGraphTopologyRequest {
-    pub library_id: Uuid,
+    pub library: String,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListRelationsRequest {
-    pub library_id: Uuid,
+    pub library: String,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetCommunitiesRequest {
-    pub library_id: Uuid,
+    pub library: String,
     pub limit: Option<usize>,
 }
 
@@ -588,15 +603,15 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn search_documents_request_accepts_canonical_library_ids() {
+    fn search_documents_request_accepts_canonical_library_refs() {
         let request: McpSearchDocumentsRequest = serde_json::from_value(json!({
             "query": "alpha",
-            "libraryIds": [Uuid::nil()],
+            "libraries": ["default/alpha"],
             "limit": 3
         }))
         .expect("request should deserialize");
 
-        assert_eq!(request.requested_library_ids(), Some(vec![Uuid::nil()]));
+        assert_eq!(request.requested_library_refs(), Some(vec!["default/alpha".to_string()]));
     }
 
     #[test]
@@ -616,9 +631,8 @@ mod tests {
 
     #[test]
     fn upload_documents_request_accepts_canonical_fields() {
-        let library_id = Uuid::now_v7();
         let request: McpUploadDocumentsRequest = serde_json::from_value(json!({
-            "libraryId": library_id,
+            "library": "default/demo",
             "idempotencyKey": "idem",
             "documents": [{
                 "fileName": "demo.txt",
@@ -628,16 +642,15 @@ mod tests {
         }))
         .expect("request should deserialize");
 
-        assert_eq!(request.library_id, library_id);
+        assert_eq!(request.library, "default/demo");
         assert_eq!(request.idempotency_key.as_deref(), Some("idem"));
         assert_eq!(request.documents.len(), 1);
     }
 
     #[test]
     fn upload_documents_request_accepts_inline_body_fields() {
-        let library_id = Uuid::now_v7();
         let request: McpUploadDocumentsRequest = serde_json::from_value(json!({
-            "libraryId": library_id,
+            "library": "default/demo",
             "documents": [{
                 "body": "hello world",
                 "sourceType": "inline",
@@ -646,7 +659,7 @@ mod tests {
         }))
         .expect("request should deserialize");
 
-        assert_eq!(request.library_id, library_id);
+        assert_eq!(request.library, "default/demo");
         assert_eq!(request.documents.len(), 1);
         assert_eq!(request.documents[0].body.as_deref(), Some("hello world"));
         assert_eq!(request.documents[0].source_type.as_deref(), Some("inline"));
@@ -655,13 +668,14 @@ mod tests {
     #[test]
     fn update_document_request_accepts_canonical_fields() {
         let request: McpUpdateDocumentRequest = serde_json::from_value(json!({
-            "libraryId": Uuid::nil(),
+            "library": "default/demo",
             "documentId": Uuid::now_v7(),
             "operationKind": "append",
             "appendedText": "hello"
         }))
         .expect("request should deserialize");
 
+        assert_eq!(request.library, "default/demo");
         assert_eq!(request.appended_text.as_deref(), Some("hello"));
     }
 
@@ -700,24 +714,25 @@ mod tests {
 
     #[test]
     fn submit_web_ingest_run_request_accepts_canonical_fields() {
-        let library_id = Uuid::now_v7();
         let request: McpSubmitWebIngestRunRequest = serde_json::from_value(json!({
-            "libraryId": library_id,
+            "library": "default/demo",
             "seedUrl": "https://example.com/docs",
             "mode": "single_page",
             "boundaryPolicy": "same_host",
             "maxDepth": 0,
             "maxPages": 1,
+            "extraIgnorePatterns": [{"kind": "path_prefix", "value": "/labels/viewlabel.action"}],
             "idempotencyKey": "web-seed-1"
         }))
         .expect("request should deserialize");
 
-        assert_eq!(request.library_id, library_id);
+        assert_eq!(request.library, "default/demo");
         assert_eq!(request.seed_url, "https://example.com/docs");
         assert_eq!(request.mode, "single_page");
         assert_eq!(request.boundary_policy.as_deref(), Some("same_host"));
         assert_eq!(request.max_depth, Some(0));
         assert_eq!(request.max_pages, Some(1));
+        assert_eq!(request.extra_ignore_patterns.len(), 1);
         assert_eq!(request.idempotency_key.as_deref(), Some("web-seed-1"));
     }
 
@@ -786,7 +801,7 @@ mod tests {
     fn search_documents_request_rejects_legacy_aliases() {
         let error = serde_json::from_value::<McpSearchDocumentsRequest>(json!({
             "query": "alpha",
-            "library_id": Uuid::nil()
+            "libraryIds": [Uuid::nil()]
         }))
         .expect_err("legacy alias must be rejected");
 
@@ -807,7 +822,7 @@ mod tests {
     #[test]
     fn upload_documents_request_rejects_legacy_aliases() {
         let error = serde_json::from_value::<McpUploadDocumentsRequest>(json!({
-            "libraryId": Uuid::now_v7(),
+            "library": "default/demo",
             "documents": [{
                 "file_name": "demo.txt",
                 "contentBase64": "ZGVtbw=="
@@ -821,7 +836,7 @@ mod tests {
     #[test]
     fn update_document_request_rejects_legacy_aliases() {
         let error = serde_json::from_value::<McpUpdateDocumentRequest>(json!({
-            "libraryId": Uuid::nil(),
+            "library": "default/demo",
             "documentId": Uuid::now_v7(),
             "operationKind": "append",
             "appended_text": "hello"
@@ -834,7 +849,7 @@ mod tests {
     #[test]
     fn submit_web_ingest_run_request_rejects_legacy_aliases() {
         let error = serde_json::from_value::<McpSubmitWebIngestRunRequest>(json!({
-            "libraryId": Uuid::now_v7(),
+            "library": "default/demo",
             "seedUrl": "https://example.com/docs",
             "mode": "single_page",
             "max_depth": 0

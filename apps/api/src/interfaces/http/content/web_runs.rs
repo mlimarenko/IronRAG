@@ -15,13 +15,23 @@ use crate::{
         router_support::ApiError,
     },
     services::ingest::web::CreateWebIngestRunCommand,
+    shared::web::ingest::WebIngestIgnorePattern,
 };
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ListWebIngestRunsQuery {
     pub library_id: Option<Uuid>,
+    /// Upper bound on returned runs (newest first). Defaults to
+    /// [`DEFAULT_WEB_RUNS_LIMIT`], clamped to [1, [`MAX_WEB_RUNS_LIMIT`]].
+    /// The endpoint is surface-only; once a user needs deeper history
+    /// the canonical move is cursor pagination rather than raising the
+    /// cap further.
+    pub limit: Option<i64>,
 }
+
+const DEFAULT_WEB_RUNS_LIMIT: i64 = 50;
+const MAX_WEB_RUNS_LIMIT: i64 = 200;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +42,8 @@ pub(super) struct CreateWebIngestRunRequest {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
+    #[serde(default)]
+    pub extra_ignore_patterns: Vec<WebIngestIgnorePattern>,
     pub idempotency_key: Option<String>,
 }
 
@@ -61,6 +73,7 @@ pub(super) async fn create_web_ingest_run(
                 boundary_policy: request.boundary_policy,
                 max_depth: request.max_depth,
                 max_pages: request.max_pages,
+                extra_ignore_patterns: request.extra_ignore_patterns,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
                 idempotency_key: request.idempotency_key,
@@ -99,7 +112,8 @@ pub(super) async fn list_web_ingest_runs(
         .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
-    let runs = state.canonical_services.web_ingest.list_runs(&state, library.id).await?;
+    let limit = query.limit.unwrap_or(DEFAULT_WEB_RUNS_LIMIT).clamp(1, MAX_WEB_RUNS_LIMIT);
+    let runs = state.canonical_services.web_ingest.list_runs(&state, library.id, limit).await?;
     span.record("item_count", runs.len());
     Ok(Json(runs))
 }

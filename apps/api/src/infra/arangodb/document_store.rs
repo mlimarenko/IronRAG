@@ -44,7 +44,7 @@ pub struct StructuredRevisionCounts {
 /// Output of [`ArangoDocumentStore::aggregate_library_generation_signals`].
 /// Mirrors the per-state aggregates used to derive the synthetic library
 /// generation row — one AQL round-trip instead of per-document fetches.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct LibraryGenerationSignals {
     #[serde(default)]
     pub active_text_generation: i64,
@@ -760,6 +760,43 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to list knowledge chunks by revision")?;
+        decode_many_results(cursor)
+    }
+
+    /// Range variant of [`Self::list_chunks_by_revision`]. Fetches only
+    /// the chunks whose `chunk_index` falls in the inclusive window
+    /// `[min_chunk_index, max_chunk_index]`. Used by the focused-
+    /// document consolidation stage to pull winner-document neighbours
+    /// around already-retrieved anchor positions without round-tripping
+    /// the whole revision (which can be 100s of chunks for large guides).
+    pub async fn list_chunks_by_revision_range(
+        &self,
+        revision_id: Uuid,
+        min_chunk_index: i32,
+        max_chunk_index: i32,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if max_chunk_index < min_chunk_index {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.revision_id == @revision_id
+                 FILTER chunk.chunk_index >= @min_chunk_index
+                 FILTER chunk.chunk_index <= @max_chunk_index
+                 SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT 2000
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_id": revision_id,
+                    "min_chunk_index": min_chunk_index,
+                    "max_chunk_index": max_chunk_index,
+                }),
+            )
+            .await
+            .context("failed to list knowledge chunks by revision range")?;
         decode_many_results(cursor)
     }
 

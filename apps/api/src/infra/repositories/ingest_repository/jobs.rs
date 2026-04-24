@@ -563,16 +563,31 @@ pub async fn claim_next_queued_ingest_job(
     // The zombie-lease problem is handled by `recover_stale_canonical_leases`
     // (the stale-lease reaper) on its own tick. The dispatcher should not
     // try to detect zombies — its only job is to enforce limits.
+    // Fairness: libraries with FEWER running jobs claim first. Without
+    // this, a library with thousands of queued docs (e.g. a bulk web
+    // crawl) holds the FIFO head and a neighbour library with just two
+    // freshly uploaded docs sits queued for hours even though
+    // per-library limits are nowhere near saturated. `library_running`
+    // is a one-pass GROUP BY over the same `active_leases` CTE we
+    // already scan for the limit checks — no extra table hits.
+    // `priority` remains the outermost key so system/priority jobs
+    // still pre-empt the round-robin.
     sqlx::query_as::<_, IngestJobRow>(
         "with active_leases as (
              select j.id, j.library_id, j.workspace_id
              from ingest_job j
              where j.queue_state = 'leased'
+         ),
+         library_running as (
+             select library_id, count(*)::bigint as running_count
+             from active_leases
+             group by library_id
          )
          update ingest_job
          set queue_state = 'leased'::ingest_queue_state
          where id = (
-             select id from ingest_job j
+             select j.id from ingest_job j
+             left join library_running lr on lr.library_id = j.library_id
              where j.queue_state = 'queued'
                and j.available_at <= now()
                and (select count(*) from active_leases) < $3::bigint
@@ -584,7 +599,12 @@ pub async fn claim_next_queued_ingest_job(
                    select count(*) from active_leases al
                    where al.library_id = j.library_id
                ) < $1::bigint
-             order by j.priority asc, j.available_at asc, j.queued_at asc, j.id asc
+             order by
+                 j.priority asc,
+                 coalesce(lr.running_count, 0) asc,
+                 j.available_at asc,
+                 j.queued_at asc,
+                 j.id asc
              limit 1
              for update skip locked
          )
@@ -617,14 +637,39 @@ pub async fn recover_stale_canonical_leases(
     stale_threshold: chrono::Duration,
 ) -> Result<u64, sqlx::Error> {
     let cutoff = Utc::now() - stale_threshold;
+
+    // Two classes of stale-lease recovery in one statement:
+    //
+    //   1. Job and attempt both `leased`: a worker held the lease and
+    //      stopped heartbeating (crash mid-stage, runtime starvation,
+    //      network partition to Postgres). We mark the attempt
+    //      `failed` with `lease_expired`/`stale_heartbeat` AND push
+    //      the job back to `queued` so another worker picks it up.
+    //
+    //   2. Attempt `leased`, but job already reached a terminal state
+    //      (`completed`, `failed`, `canceled`): the previous worker
+    //      crashed between writing the terminal job row and
+    //      finalising its own attempt. The job is done — re-queuing
+    //      would double-process the document. We only clean up the
+    //      orphaned attempt so it stops occupying an `active
+    //      operations` slot on the dashboard and the dedicated
+    //      heartbeat pool. Without this branch such attempts stayed
+    //      `leased` forever (observed in the field: attempt rows
+    //      with multi-hour heartbeat staleness pinned to jobs that
+    //      completed hours earlier).
+    //
+    // Both branches write through `retryable = true` so operator
+    // tooling that surfaces stalled documents still treats them as
+    // recoverable; orphaned-attempt rows inherit that flag too but
+    // their underlying job is already finalised so no retry runs.
     let result = sqlx::query(
         "with stale_attempts as (
-             select distinct a.job_id
+             select a.id as attempt_id, a.job_id, j.queue_state::text as job_state
              from ingest_attempt a
              join ingest_job j on j.id = a.job_id
-             where j.queue_state = 'leased'
-               and a.attempt_state = 'leased'
+             where a.attempt_state = 'leased'
                and a.heartbeat_at < $1
+               and j.queue_state in ('leased', 'completed', 'failed', 'canceled')
          ),
          failed_attempts as (
              update ingest_attempt
@@ -633,13 +678,14 @@ pub async fn recover_stale_canonical_leases(
                  failure_code = 'stale_heartbeat',
                  finished_at = now(),
                  retryable = true
-             where job_id in (select job_id from stale_attempts)
-               and attempt_state = 'leased'
+             where id in (select attempt_id from stale_attempts)
          )
          update ingest_job
          set queue_state = 'queued',
              available_at = now()
-         where id in (select job_id from stale_attempts)",
+         where id in (
+             select job_id from stale_attempts where job_state = 'leased'
+         )",
     )
     .bind(cutoff)
     .execute(postgres)

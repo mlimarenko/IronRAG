@@ -102,6 +102,8 @@ pub enum ApiError {
     },
     #[error("internal server error")]
     Internal,
+    #[error("internal server error: {0}")]
+    InternalMessage(String),
 }
 
 impl ApiError {
@@ -197,7 +199,7 @@ impl ApiError {
             | Self::SettlementRefreshFailed(_)
             | Self::ProviderFailure(_) => StatusCode::CONFLICT,
             Self::ArangoBootstrapFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal | Self::InternalMessage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -225,7 +227,7 @@ impl ApiError {
             Self::SettlementRefreshFailed(_) => "graph_state_refresh_failed",
             Self::ProviderFailure(_) => "provider_failure",
             Self::UploadRejected { error_kind, .. } => error_kind,
-            Self::Internal => "internal",
+            Self::Internal | Self::InternalMessage(_) => "internal",
         }
     }
 
@@ -556,6 +558,7 @@ pub struct RequestId(pub String);
 mod tests {
     use std::{borrow::Cow, error::Error as StdError, fmt};
 
+    use axum::http::StatusCode;
     use sqlx::error::{DatabaseError, ErrorKind};
     use uuid::Uuid;
 
@@ -714,6 +717,14 @@ mod tests {
             ApiError::bootstrap_already_claimed("already claimed").kind(),
             "bootstrap_already_claimed"
         );
+    }
+
+    #[test]
+    fn internal_message_preserves_internal_kind_and_explicit_text() {
+        let error = ApiError::InternalMessage("knowledge mirror sync failed".to_string());
+        assert_eq!(error.kind(), "internal");
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.to_string(), "internal server error: knowledge mirror sync failed");
     }
 
     #[test]

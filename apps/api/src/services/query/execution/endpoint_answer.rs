@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
+    domains::query_ir::QueryIR,
     shared::extraction::technical_facts::{TechnicalFactKind, TechnicalFactQualifier},
     shared::extraction::text_render::repair_technical_layout_noise,
 };
@@ -25,6 +26,7 @@ use super::{
 
 pub(crate) fn build_multi_document_endpoint_answer_from_facts(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
@@ -39,7 +41,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     if question_keywords.is_empty() {
         return None;
     }
@@ -52,8 +54,12 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
         }
     }
     let document_labels = build_document_labels(chunks);
-    let scoped_document_ids =
-        select_multi_document_scope_ids(question, &ordered_document_ids, &per_document_chunks);
+    let scoped_document_ids = select_multi_document_scope_ids(
+        question,
+        query_ir,
+        &ordered_document_ids,
+        &per_document_chunks,
+    );
 
     let mut lines = Vec::new();
     for document_id in scoped_document_ids {
@@ -91,6 +97,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
 
 pub(crate) fn build_single_endpoint_answer_from_facts(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
@@ -105,7 +112,7 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
     }
 
     let focused_document_id = focused_answer_document_id(question, chunks);
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     if question_keywords.is_empty() {
         return None;
     }
@@ -200,11 +207,12 @@ fn chunks_by_document(chunks: &[RuntimeMatchedChunk]) -> HashMap<Uuid, Vec<&Runt
 
 pub(super) fn select_multi_document_scope_ids(
     question: &str,
+    query_ir: &QueryIR,
     ordered_document_ids: &[Uuid],
     per_document_chunks: &HashMap<Uuid, Vec<&RuntimeMatchedChunk>>,
 ) -> Vec<Uuid> {
     let pagination_requested = question_mentions_pagination(question);
-    let focus_segments = technical_literal_focus_keyword_segments(question, None);
+    let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir));
     if focus_segments.is_empty() {
         return ordered_document_ids.to_vec();
     }

@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState, infra::arangodb::document_store::KnowledgeDocumentRow,
+    app::state::AppState, domains::query_ir::QueryIR,
+    infra::arangodb::document_store::KnowledgeDocumentRow,
     services::query::planner::QueryIntentProfile,
 };
 
@@ -58,6 +59,7 @@ pub(super) async fn prepare_canonical_answer_preflight(
     let community_context_text = format_community_context(&community_matches);
     let scoped_document_ids = preflight_exact_literal_document_scope(
         question,
+        &prepared.query_ir,
         &prepared.structured.intent_profile,
         &prepared.structured.technical_literal_chunks,
     );
@@ -81,7 +83,7 @@ pub(super) async fn prepare_canonical_answer_preflight(
     );
     let answer_override = build_canonical_preflight_answer(
         question,
-        Some(&prepared.query_ir),
+        &prepared.query_ir,
         &prepared.structured.intent_profile,
         &document_index,
         direct_targeted_table_answer,
@@ -98,7 +100,7 @@ pub(super) async fn prepare_canonical_answer_preflight(
 
 pub(super) fn build_canonical_preflight_answer(
     question: &str,
-    ir: Option<&crate::domains::query_ir::QueryIR>,
+    query_ir: &crate::domains::query_ir::QueryIR,
     intent_profile: &QueryIntentProfile,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     direct_targeted_table_answer: Option<String>,
@@ -111,7 +113,7 @@ pub(super) fn build_canonical_preflight_answer(
         build_unsupported_capability_answer(intent_profile, question, canonical_answer_chunks);
     let deterministic_grounded_answer = build_deterministic_grounded_answer(
         question,
-        ir,
+        query_ir,
         canonical_evidence,
         canonical_answer_chunks,
     );
@@ -162,12 +164,17 @@ pub(super) fn build_canonical_preflight_answer(
 #[cfg(test)]
 pub(super) fn build_preflight_answer_chunks(
     question: &str,
+    query_ir: &QueryIR,
     intent_profile: &QueryIntentProfile,
     canonical_answer_chunks: &[RuntimeMatchedChunk],
     technical_literal_chunks: &[RuntimeMatchedChunk],
 ) -> Vec<RuntimeMatchedChunk> {
-    let scoped_document_ids =
-        preflight_exact_literal_document_scope(question, intent_profile, technical_literal_chunks);
+    let scoped_document_ids = preflight_exact_literal_document_scope(
+        question,
+        query_ir,
+        intent_profile,
+        technical_literal_chunks,
+    );
     build_preflight_answer_chunks_for_scope(
         canonical_answer_chunks,
         technical_literal_chunks,
@@ -177,6 +184,7 @@ pub(super) fn build_preflight_answer_chunks(
 
 pub(super) fn select_technical_literal_chunks(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
     technical_literal_intent: TechnicalLiteralIntent,
     top_k: usize,
@@ -192,7 +200,7 @@ pub(super) fn select_technical_literal_chunks(
     let focused_chunks = if technical_literal_intent.any()
         && question_prefers_single_exact_literal_scope(question)
     {
-        select_preflight_literal_document_id(question, chunks).map(|document_id| {
+        select_preflight_literal_document_id(question, query_ir, chunks).map(|document_id| {
             chunks
                 .iter()
                 .filter(|chunk| chunk.document_id == document_id)
@@ -205,7 +213,7 @@ pub(super) fn select_technical_literal_chunks(
     let candidate_chunks = focused_chunks.as_deref().unwrap_or(chunks);
     select_document_balanced_chunks(
         question,
-        None,
+        Some(query_ir),
         candidate_chunks,
         literal_focus_keywords,
         pagination_requested,
@@ -220,17 +228,23 @@ pub(super) fn select_technical_literal_chunks(
 #[cfg(test)]
 pub(super) fn build_preflight_canonical_evidence(
     question: &str,
+    query_ir: &QueryIR,
     intent_profile: &QueryIntentProfile,
     canonical_evidence: &CanonicalAnswerEvidence,
     technical_literal_chunks: &[RuntimeMatchedChunk],
 ) -> CanonicalAnswerEvidence {
-    let scoped_document_ids =
-        preflight_exact_literal_document_scope(question, intent_profile, technical_literal_chunks);
+    let scoped_document_ids = preflight_exact_literal_document_scope(
+        question,
+        query_ir,
+        intent_profile,
+        technical_literal_chunks,
+    );
     build_preflight_canonical_evidence_for_scope(canonical_evidence, scoped_document_ids.as_ref())
 }
 
 pub(super) fn preflight_exact_literal_document_scope(
     question: &str,
+    query_ir: &QueryIR,
     intent_profile: &QueryIntentProfile,
     technical_literal_chunks: &[RuntimeMatchedChunk],
 ) -> Option<HashSet<Uuid>> {
@@ -244,7 +258,7 @@ pub(super) fn preflight_exact_literal_document_scope(
         );
     }
 
-    select_preflight_literal_document_id(question, technical_literal_chunks)
+    select_preflight_literal_document_id(question, query_ir, technical_literal_chunks)
         .map(|document_id| HashSet::from([document_id]))
         .or_else(|| {
             Some(
@@ -286,6 +300,7 @@ pub(super) fn question_prefers_single_exact_literal_scope(question: &str) -> boo
 
 pub(super) fn select_preflight_literal_document_id(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<Uuid> {
     if chunks.is_empty() {
@@ -303,7 +318,7 @@ pub(super) fn select_preflight_literal_document_id(
         first_rank: usize,
     }
 
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let pagination_requested = question_mentions_pagination(question);
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
@@ -319,8 +334,12 @@ pub(super) fn select_preflight_literal_document_id(
         .enumerate()
         .filter_map(|(first_rank, document_id)| {
             let document_chunks = per_document_chunks.get(document_id)?;
-            let local_keywords =
-                document_local_focus_keywords(question, None, document_chunks, &question_keywords);
+            let local_keywords = document_local_focus_keywords(
+                question,
+                Some(query_ir),
+                document_chunks,
+                &question_keywords,
+            );
             let document_label = document_chunks.first()?.document_label.as_str();
             let lowered_label = document_label.to_lowercase();
             let label_score = question_keywords

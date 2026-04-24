@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::{
-    catalog::{describe_libraries, load_visible_library_contexts},
+    catalog::{describe_libraries, load_library_by_catalog_ref, load_visible_library_contexts},
     types::{
         ArangoChunkMentionReferenceRow, ArangoRelationSupportReferenceRow, McpDocumentAccumulator,
         McpRevisionGroundingReferences, McpSearchEmbeddingContext, ResolvedDocumentState,
@@ -42,6 +42,7 @@ pub async fn search_documents(
     auth.require_any_scope(POLICY_MCP_MEMORY_READ)?;
     let settings = &state.mcp_memory;
     let include_references = request.include_references.unwrap_or(false);
+    let include_unreadable = request.include_unreadable.unwrap_or(false);
     let query = request.query.trim();
     if query.is_empty() {
         return Err(ApiError::BadRequest("query must not be empty".into()));
@@ -49,9 +50,11 @@ pub async fn search_documents(
 
     let limit =
         request.limit.unwrap_or(settings.default_search_limit).clamp(1, settings.max_search_limit);
-    let requested_library_ids = request.requested_library_ids();
-    let libraries = resolve_search_libraries(auth, state, requested_library_ids.as_deref()).await?;
-    let library_ids = libraries.iter().map(|item| item.library.id).collect::<Vec<_>>();
+    let requested_library_refs = request.requested_library_refs();
+    let libraries =
+        resolve_search_libraries(auth, state, requested_library_refs.as_deref()).await?;
+    let library_refs =
+        libraries.iter().map(|item| item.descriptor.catalog_ref.clone()).collect::<Vec<_>>();
     let mut hits = Vec::new();
     for library in libraries {
         let lexical_limit = limit.saturating_mul(3).max(6);
@@ -76,7 +79,6 @@ pub async fn search_documents(
                 .search_chunk_vectors_by_similarity(
                     library.library.id,
                     &context.model_catalog_id.to_string(),
-                    context.freshness_generation,
                     &context.query_vector,
                     lexical_limit.saturating_mul(2),
                     Some(16),
@@ -88,7 +90,6 @@ pub async fn search_documents(
                     warn!(
                         library_id = %library.library.id,
                         model_catalog_id = %context.model_catalog_id,
-                        freshness_generation = context.freshness_generation,
                         error = ?error,
                         "mcp search vector lookup failed; degrading to lexical-only MCP search",
                     );
@@ -214,10 +215,8 @@ pub async fn search_documents(
             accumulator.populate_excerpt_from_text(&chunk.normalized_text, query);
         }
 
-        let mut library_hits = document_accumulators.into_values().collect::<Vec<_>>();
-        library_hits.sort_by(|left, right| right.score.total_cmp(&left.score));
-        library_hits.truncate(limit);
-        for accumulator in library_hits {
+        let mut library_hits = Vec::new();
+        for accumulator in document_accumulators.into_values() {
             let chunk_references = accumulator.clone().into_chunk_references();
             let content_summary = state
                 .canonical_services
@@ -225,6 +224,10 @@ pub async fn search_documents(
                 .get_document(state, accumulator.document_id)
                 .await?;
             let readiness_summary = content_summary.readiness_summary.ok_or(ApiError::Internal)?;
+            let readability_state = readability_state_from_kind(&readiness_summary.readiness_kind);
+            if !include_unreadable && readability_state != McpReadabilityState::Readable {
+                continue;
+            }
             let grounding = collect_revision_grounding_references(
                 state,
                 accumulator.readable_revision_id,
@@ -233,7 +236,7 @@ pub async fn search_documents(
             )
             .await?;
             let status_reason = readable_status_reason(&readiness_summary, &grounding);
-            hits.push(McpDocumentHit {
+            library_hits.push(McpDocumentHit {
                 document_id: accumulator.document_id,
                 library_id: accumulator.library_id,
                 workspace_id: accumulator.workspace_id,
@@ -244,7 +247,7 @@ pub async fn search_documents(
                 excerpt_start_offset: accumulator.excerpt_start_offset,
                 excerpt_end_offset: accumulator.excerpt_end_offset,
                 suggested_start_offset: accumulator.suggested_start_offset,
-                readability_state: readability_state_from_kind(&readiness_summary.readiness_kind),
+                readability_state,
                 readiness_kind: readiness_summary.readiness_kind.clone(),
                 graph_coverage_kind: readiness_summary.graph_coverage_kind.clone(),
                 status_reason,
@@ -255,8 +258,11 @@ pub async fn search_documents(
                 evidence_references: grounding.evidence_references,
             });
         }
+        library_hits.sort_by(search_document_hit_order);
+        library_hits.truncate(limit);
+        hits.extend(library_hits);
     }
-    hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+    hits.sort_by(search_document_hit_order);
     hits.truncate(limit);
 
     if !include_references {
@@ -269,7 +275,28 @@ pub async fn search_documents(
         }
     }
 
-    Ok(McpSearchDocumentsResponse { query: query.to_string(), limit, library_ids, hits })
+    Ok(McpSearchDocumentsResponse {
+        query: query.to_string(),
+        limit,
+        libraries: library_refs,
+        hits,
+    })
+}
+
+fn search_readability_rank(state: &McpReadabilityState) -> u8 {
+    match state {
+        McpReadabilityState::Readable => 0,
+        McpReadabilityState::Processing => 1,
+        McpReadabilityState::Failed => 2,
+        McpReadabilityState::Unavailable => 3,
+    }
+}
+
+fn search_document_hit_order(left: &McpDocumentHit, right: &McpDocumentHit) -> std::cmp::Ordering {
+    search_readability_rank(&left.readability_state)
+        .cmp(&search_readability_rank(&right.readability_state))
+        .then_with(|| right.score.total_cmp(&left.score))
+        .then_with(|| left.document_id.cmp(&right.document_id))
 }
 
 pub async fn read_document(
@@ -396,10 +423,9 @@ pub async fn read_document(
 pub async fn authorize_library_for_mcp(
     auth: &AuthContext,
     state: &AppState,
-    library_id: Uuid,
-) -> Result<(), ApiError> {
-    load_library_and_authorize(auth, state, library_id, POLICY_MCP_MEMORY_READ).await?;
-    Ok(())
+    library_ref: &str,
+) -> Result<crate::infra::repositories::catalog_repository::CatalogLibraryRow, ApiError> {
+    load_library_by_catalog_ref(auth, state, library_ref, POLICY_MCP_MEMORY_READ).await
 }
 
 pub async fn list_documents(
@@ -418,11 +444,8 @@ pub async fn list_documents(
     let filtered: Vec<_> = summaries
         .into_iter()
         .filter(|summary| summary.document.document_state != "deleted")
-        .filter(|summary| match status_filter {
-            Some(filter) => {
-                summary.readiness_summary.as_ref().is_some_and(|row| row.readiness_kind == filter)
-            }
-            None => true,
+        .filter(|summary| {
+            list_documents_matches_status_filter(summary.readiness_summary.as_ref(), status_filter)
         })
         .take(limit)
         .collect();
@@ -461,6 +484,34 @@ pub async fn list_documents(
         "count": documents.len(),
         "limit": limit,
     }))
+}
+
+fn list_documents_matches_status_filter(
+    readiness_summary: Option<&crate::domains::content::DocumentReadinessSummary>,
+    status_filter: Option<&str>,
+) -> bool {
+    let Some(filter) = status_filter.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let Some(readiness_summary) = readiness_summary else {
+        return false;
+    };
+
+    match filter {
+        "readable" => {
+            readability_state_from_kind(&readiness_summary.readiness_kind)
+                == McpReadabilityState::Readable
+        }
+        "processing" => {
+            readability_state_from_kind(&readiness_summary.readiness_kind)
+                == McpReadabilityState::Processing
+        }
+        "failed" => {
+            readability_state_from_kind(&readiness_summary.readiness_kind)
+                == McpReadabilityState::Failed
+        }
+        _ => false,
+    }
 }
 
 pub async fn delete_document(
@@ -766,23 +817,19 @@ async fn load_source_visual_description(
 pub(crate) async fn resolve_search_libraries(
     auth: &AuthContext,
     state: &AppState,
-    requested_library_ids: Option<&[Uuid]>,
+    requested_library_refs: Option<&[String]>,
 ) -> Result<Vec<VisibleLibraryContext>, ApiError> {
-    if let Some(library_ids) = requested_library_ids {
-        if library_ids.is_empty() {
+    if let Some(library_refs) = requested_library_refs {
+        if library_refs.is_empty() {
             return Err(ApiError::invalid_mcp_tool_call(
-                "libraryIds must not be empty when provided",
+                "libraries must not be empty when provided",
             ));
         }
-        let mut rows = Vec::with_capacity(library_ids.len());
-        for library_id in library_ids {
-            let library = crate::interfaces::http::authorization::load_library_and_authorize(
-                auth,
-                state,
-                *library_id,
-                POLICY_MCP_MEMORY_READ,
-            )
-            .await?;
+        let mut rows = Vec::with_capacity(library_refs.len());
+        for library_ref in library_refs {
+            let library =
+                load_library_by_catalog_ref(auth, state, library_ref, POLICY_MCP_MEMORY_READ)
+                    .await?;
             rows.push(library);
         }
         return describe_libraries(auth, state, rows).await;
@@ -842,9 +889,9 @@ pub(crate) async fn resolve_search_embedding_context(
             ApiError::ProviderFailure(format!("failed to embed MCP memory search query: {error}"))
         })?;
 
+    let _ = generation;
     Ok(Some(McpSearchEmbeddingContext {
         model_catalog_id: binding.model_catalog_id,
-        freshness_generation: generation.active_vector_generation,
         query_vector: embedding.embedding,
     }))
 }
@@ -1110,7 +1157,16 @@ fn technical_fact_support_score(
 
 #[cfg(test)]
 mod tests {
-    use super::merge_visual_description_into_content;
+    use crate::{
+        domains::content::{DocumentReadinessSummary, RuntimeDocumentActivityStatus},
+        mcp_types::{McpDocumentHit, McpReadabilityState},
+        services::mcp::access::documents::{
+            list_documents_matches_status_filter, merge_visual_description_into_content,
+            readability_state_from_kind, search_document_hit_order,
+        },
+    };
+    use chrono::Utc;
+    use uuid::Uuid;
 
     #[test]
     fn image_visual_description_appends_to_existing_text_once() {
@@ -1135,5 +1191,114 @@ mod tests {
             merged,
             "Visible text\n\n## Source Image Description\nA restaurant sign with menu items."
         );
+    }
+
+    #[test]
+    fn readability_state_treats_graph_ready_as_readable() {
+        assert_eq!(readability_state_from_kind("graph_ready"), McpReadabilityState::Readable);
+        assert_eq!(readability_state_from_kind("graph_sparse"), McpReadabilityState::Readable);
+        assert_eq!(readability_state_from_kind("readable"), McpReadabilityState::Readable);
+    }
+
+    #[test]
+    fn list_documents_readable_filter_includes_graph_ready_and_sparse() {
+        let graph_ready = DocumentReadinessSummary {
+            document_id: Uuid::nil(),
+            active_revision_id: None,
+            readiness_kind: "graph_ready".to_string(),
+            activity_status: RuntimeDocumentActivityStatus::Ready,
+            stalled_reason: None,
+            preparation_state: "ready".to_string(),
+            graph_coverage_kind: "graph_ready".to_string(),
+            typed_fact_coverage: None,
+            last_mutation_id: None,
+            last_job_stage: None,
+            updated_at: Utc::now(),
+        };
+        let graph_sparse = DocumentReadinessSummary {
+            document_id: Uuid::nil(),
+            active_revision_id: None,
+            readiness_kind: "graph_sparse".to_string(),
+            activity_status: RuntimeDocumentActivityStatus::Ready,
+            stalled_reason: None,
+            preparation_state: "ready".to_string(),
+            graph_coverage_kind: "graph_sparse".to_string(),
+            typed_fact_coverage: None,
+            last_mutation_id: None,
+            last_job_stage: None,
+            updated_at: Utc::now(),
+        };
+        let readable = DocumentReadinessSummary {
+            document_id: Uuid::nil(),
+            active_revision_id: None,
+            readiness_kind: "readable".to_string(),
+            activity_status: RuntimeDocumentActivityStatus::Ready,
+            stalled_reason: None,
+            preparation_state: "ready".to_string(),
+            graph_coverage_kind: "none".to_string(),
+            typed_fact_coverage: None,
+            last_mutation_id: None,
+            last_job_stage: None,
+            updated_at: Utc::now(),
+        };
+
+        assert!(list_documents_matches_status_filter(Some(&graph_ready), Some("readable")));
+        assert!(list_documents_matches_status_filter(Some(&graph_sparse), Some("readable")));
+        assert!(list_documents_matches_status_filter(Some(&readable), Some("readable")));
+        assert!(!list_documents_matches_status_filter(Some(&graph_ready), Some("failed")));
+        assert!(!list_documents_matches_status_filter(None, Some("readable")));
+    }
+
+    #[test]
+    fn search_document_hits_rank_readable_before_failed_even_with_lower_score() {
+        let mut hits = vec![
+            McpDocumentHit {
+                document_id: Uuid::from_u128(2),
+                library_id: Uuid::nil(),
+                workspace_id: Uuid::nil(),
+                document_title: "failed".to_string(),
+                latest_revision_id: None,
+                score: 1000.0,
+                excerpt: None,
+                excerpt_start_offset: None,
+                excerpt_end_offset: None,
+                suggested_start_offset: None,
+                readability_state: McpReadabilityState::Failed,
+                readiness_kind: "failed".to_string(),
+                graph_coverage_kind: "failed".to_string(),
+                status_reason: None,
+                chunk_references: Vec::new(),
+                technical_fact_references: Vec::new(),
+                entity_references: Vec::new(),
+                relation_references: Vec::new(),
+                evidence_references: Vec::new(),
+            },
+            McpDocumentHit {
+                document_id: Uuid::from_u128(1),
+                library_id: Uuid::nil(),
+                workspace_id: Uuid::nil(),
+                document_title: "readable".to_string(),
+                latest_revision_id: None,
+                score: 10.0,
+                excerpt: None,
+                excerpt_start_offset: None,
+                excerpt_end_offset: None,
+                suggested_start_offset: None,
+                readability_state: McpReadabilityState::Readable,
+                readiness_kind: "graph_ready".to_string(),
+                graph_coverage_kind: "graph_ready".to_string(),
+                status_reason: None,
+                chunk_references: Vec::new(),
+                technical_fact_references: Vec::new(),
+                entity_references: Vec::new(),
+                relation_references: Vec::new(),
+                evidence_references: Vec::new(),
+            },
+        ];
+
+        hits.sort_by(search_document_hit_order);
+
+        assert_eq!(hits[0].document_title, "readable");
+        assert_eq!(hits[1].document_title, "failed");
     }
 }

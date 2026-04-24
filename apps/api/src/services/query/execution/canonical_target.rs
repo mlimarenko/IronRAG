@@ -22,19 +22,10 @@ impl CanonicalTarget {
         }
     }
 
-    pub(crate) const fn query_aliases(self) -> &'static [&'static str] {
-        match self {
-            Self::VectorDatabase => &["vector database", "embeddings semantic similarity"],
-            Self::LargeLanguageModel => &["large language model", "language generation reasoning"],
-            Self::RetrievalAugmentedGeneration => {
-                &["retrieval-augmented generation", "external documents before answering"]
-            }
-            Self::RustProgrammingLanguage => &["rust programming language", "memory safety"],
-            Self::SemanticWeb => &["semantic web", "rdf owl machine-readable"],
-            Self::KnowledgeGraph => &["knowledge graph", "interlinked descriptions entities"],
-            Self::GraphDatabase => &["graph database", "gremlin sparql cypher gql"],
-        }
-    }
+    // `query_aliases` removed — the retrieval path now routes through
+    // QueryIR's canonical `target_entities` / `target_types` vectors,
+    // which are compiled from the raw question and carry the same
+    // alias coverage without a hardcoded ontology list here.
 
     pub(crate) fn matches_subject_label(self, subject_label: &str) -> bool {
         subject_label.trim().eq_ignore_ascii_case(self.subject_label())

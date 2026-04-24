@@ -7,52 +7,20 @@ use crate::domains::query_ir::QueryIR;
 use super::retrieve::score_value;
 use super::types::RuntimeMatchedChunk;
 
-/// Fallback list used only when a compiled `QueryIR` is not available at the
-/// callsite. These are generic question-framing tokens that consistently
-/// produce noisy chunk hits when no typed literal is present. Once every
-/// caller has IR in scope the fallback disappears and this list goes with it.
-const LEGACY_IGNORED_KEYWORDS: &[&str] = &[
-    "если",
-    "агенту",
-    "ему",
-    "какой",
-    "какие",
-    "какая",
-    "какого",
-    "какому",
-    "endpoint",
-    "url",
-    "port",
-    "порт",
-    "path",
-    "путь",
-    "пути",
-    "метод",
-    "method",
-    "использует",
-    "используют",
-    "used",
-    "uses",
-    "возвращает",
-    "получить",
-    "нужно",
-    "нужен",
-    "нужны",
-    "отдельно",
-];
-
 /// Extracts focus keywords for technical chunk ranking.
 ///
-/// When `ir` has at least one `literal_constraint`, the filter is driven by
-/// those constraints: a token is kept iff it appears inside some quoted /
-/// typed literal the compiler already extracted. That is the strongest
-/// possible signal and dominates the legacy stop list.
+/// When `ir` carries at least one `literal_constraint`, the filter is driven
+/// by those constraints: a token is kept iff it appears inside some quoted /
+/// typed literal the compiler already extracted. This is the strongest
+/// possible signal for exact-literal technical questions.
 ///
-/// When `ir` is `None` or carries no literal constraints (the common case
-/// for Describe / ConfigureHow / Enumerate questions), we fall back to the
-/// legacy 27-word stop list. That keeps existing non-exact-literal ranking
-/// unchanged; the stop list is a transitional contract that shrinks to zero
-/// as more of the pipeline migrates to the ontology-backed IR.
+/// When `ir` is `None` (retrieval runs in parallel with IR compilation, so
+/// the lexical query builder cannot see the IR yet) or carries no literal
+/// constraints (Describe / ConfigureHow / Enumerate questions), every
+/// ≥4-char token from the question is kept. Downstream ranking already
+/// weighs tokens by their presence in document text, so tokens that do not
+/// appear in candidate chunks contribute nothing without needing a
+/// hard-coded stop list.
 pub(super) fn technical_literal_focus_keywords(
     question: &str,
     ir: Option<&QueryIR>,
@@ -73,11 +41,9 @@ pub(super) fn technical_literal_focus_keywords(
         .filter(|token| token.chars().count() >= 4)
         .map(str::to_lowercase)
     {
-        let keep = match literal_constraints.as_ref() {
-            Some(literals) => literals.iter().any(|literal| literal.contains(token.as_str())),
-            None => !LEGACY_IGNORED_KEYWORDS.contains(&token.as_str()),
-        };
-        if !keep {
+        if let Some(literals) = literal_constraints.as_ref()
+            && !literals.iter().any(|literal| literal.contains(token.as_str()))
+        {
             continue;
         }
         if seen.insert(token.clone()) {

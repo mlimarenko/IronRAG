@@ -1,4 +1,5 @@
 import type { DocumentReadiness, DocumentStatus, SourceAccess } from "@/types";
+import type { WebIngestIgnorePattern } from "./admin";
 
 import { ApiError, type ApiErrorBody, apiFetch } from "./client";
 
@@ -26,6 +27,14 @@ export interface DocumentListItem {
   sourceKind?: string;
   sourceUri?: string;
   sourceAccess?: SourceAccess;
+  /**
+   * Summed cost across every billable execution attributed to this
+   * document. Decimal-as-string to avoid IEEE-754 rounding on large
+   * totals; parse with `parseFloat` at the render boundary. Always
+   * present — zero cost is the string "0".
+   */
+  cost: string;
+  costCurrencyCode: string;
 }
 
 export interface DocumentListPageResponse {
@@ -103,11 +112,14 @@ interface BatchMutationErrorResult {
   error: string | null;
 }
 
-export interface BatchDeleteResponse {
-  deletedCount: number;
-  failedCount: number;
-  results: Array<BatchMutationErrorResult & { deleted: boolean }>;
+export interface BatchDocumentOperationAcceptedResponse {
+  batchOperationId: string;
+  total: number;
+  libraryId: string;
+  workspaceId: string;
 }
+
+export type BatchDeleteResponse = BatchDocumentOperationAcceptedResponse;
 
 export interface BatchCancelResponse {
   cancelledCount: number;
@@ -124,12 +136,8 @@ export interface BatchCancelResponse {
  * per-document mutations are linked back to this parent, so a single
  * indexed count query covers "completed / total / failed".
  */
-export interface BatchReprocessAcceptedResponse {
-  batchOperationId: string;
-  total: number;
-  libraryId: string;
-  workspaceId: string;
-}
+export type BatchReprocessAcceptedResponse =
+  BatchDocumentOperationAcceptedResponse;
 
 /**
  * Raw detail payload returned by `/v1/content/documents/{id}`. The detail
@@ -206,22 +214,43 @@ export interface RawWebIngestRunResponse {
 
 interface RawWebIngestRunListItem {
   runId?: string;
+  libraryId?: string;
   seedUrl?: string;
   runState?: string;
   mode?: string;
   boundaryPolicy?: string;
   maxDepth?: number;
   maxPages?: number;
+  ignorePatterns?: WebIngestIgnorePattern[];
+  lastActivityAt?: string;
   counts?: {
     discovered?: number;
+    eligible?: number;
     processed?: number;
+    queued?: number;
+    processing?: number;
+    duplicates?: number;
+    excluded?: number;
+    blocked?: number;
+    failed?: number;
+    canceled?: number;
   };
 }
 
 interface RawWebIngestRunPage {
+  candidateId?: string;
+  runId?: string;
   normalizedUrl?: string;
   discoveredUrl?: string;
+  finalUrl?: string;
+  canonicalUrl?: string;
+  depth?: number;
   candidateState?: string;
+  classificationReason?: string | null;
+  classificationDetail?: string | null;
+  contentType?: string | null;
+  httpStatus?: number | null;
+  documentId?: string | null;
 }
 
 interface ListEnvelope<T> {
@@ -230,22 +259,56 @@ interface ListEnvelope<T> {
 
 export interface WebIngestRunListItem {
   runId: string;
+  libraryId?: string;
   seedUrl: string;
   runState: string;
   mode: string;
   boundaryPolicy?: string;
   maxDepth?: number;
   maxPages?: number;
-  counts?: {
-    discovered?: number;
-    processed?: number;
-  };
+  ignorePatterns?: WebIngestIgnorePattern[];
+  lastActivityAt?: string;
+  counts?: WebRunCounts;
+}
+
+export interface WebRunCounts {
+  discovered?: number;
+  eligible?: number;
+  processed?: number;
+  queued?: number;
+  processing?: number;
+  duplicates?: number;
+  excluded?: number;
+  blocked?: number;
+  failed?: number;
+  canceled?: number;
 }
 
 export interface WebIngestRunPageItem {
+  candidateId?: string;
+  runId?: string;
   normalizedUrl?: string;
   discoveredUrl?: string;
+  finalUrl?: string;
+  canonicalUrl?: string;
+  depth?: number;
   candidateState?: string;
+  classificationReason?: string | null;
+  classificationDetail?: string | null;
+  contentType?: string | null;
+  httpStatus?: number | null;
+  documentId?: string | null;
+}
+
+export interface WebIngestRunReceipt {
+  runId?: string;
+  libraryId?: string;
+  mode?: string;
+  runState?: string;
+  asyncOperationId?: string | null;
+  counts?: WebRunCounts;
+  failureCode?: string | null;
+  cancelRequestedAt?: string | null;
 }
 
 export interface PreparedSegmentsPageResponse {
@@ -288,12 +351,15 @@ function mapWebIngestRunListItem(
 ): WebIngestRunListItem {
   return {
     runId: raw.runId ?? "",
+    libraryId: raw.libraryId,
     seedUrl: raw.seedUrl ?? "",
     runState: raw.runState ?? "accepted",
     mode: raw.mode ?? "single_page",
     boundaryPolicy: raw.boundaryPolicy,
     maxDepth: raw.maxDepth,
     maxPages: raw.maxPages,
+    ignorePatterns: raw.ignorePatterns,
+    lastActivityAt: raw.lastActivityAt,
     counts: raw.counts,
   };
 }
@@ -302,9 +368,19 @@ function mapWebIngestRunPageItem(
   raw: RawWebIngestRunPage,
 ): WebIngestRunPageItem {
   return {
+    candidateId: raw.candidateId,
+    runId: raw.runId,
     normalizedUrl: raw.normalizedUrl,
     discoveredUrl: raw.discoveredUrl,
+    finalUrl: raw.finalUrl,
+    canonicalUrl: raw.canonicalUrl,
+    depth: raw.depth,
     candidateState: raw.candidateState,
+    classificationReason: raw.classificationReason,
+    classificationDetail: raw.classificationDetail,
+    contentType: raw.contentType,
+    httpStatus: raw.httpStatus,
+    documentId: raw.documentId,
   };
 }
 
@@ -315,6 +391,7 @@ export interface CreateWebIngestRunRequest {
   boundaryPolicy?: string;
   maxDepth?: number;
   maxPages?: number;
+  extraIgnorePatterns?: WebIngestIgnorePattern[];
 }
 
 export const documentsApi = {
@@ -372,10 +449,13 @@ export const documentsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  listWebRuns: async (libraryId: string): Promise<WebIngestRunListItem[]> => {
+  listWebRuns: async (
+    libraryId: string,
+    limit: number = 50,
+  ): Promise<WebIngestRunListItem[]> => {
     const response = await apiFetch<
       RawWebIngestRunListItem[] | ListEnvelope<RawWebIngestRunListItem>
-    >(`/content/web-runs?libraryId=${libraryId}`);
+    >(`/content/web-runs?libraryId=${libraryId}&limit=${limit}`);
     return normalizeListItems(response).map(mapWebIngestRunListItem);
   },
   listWebRunPages: async (runId: string): Promise<WebIngestRunPageItem[]> => {
@@ -384,6 +464,11 @@ export const documentsApi = {
     >(`/content/web-runs/${runId}/pages`);
     return normalizeListItems(response).map(mapWebIngestRunPageItem);
   },
+  cancelWebRun: (runId: string) =>
+    apiFetch<WebIngestRunReceipt>(`/content/web-runs/${runId}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   edit: (documentId: string, markdown: string) =>
     apiFetch<DocumentMutationResponse>(
       `/content/documents/${documentId}/edit`,

@@ -1,8 +1,8 @@
-import type { RefObject } from 'react';
-import type { TFunction } from 'i18next';
-import { File, Loader2, RotateCw, Trash2, Upload, XCircle } from 'lucide-react';
+import type { RefObject } from "react";
+import type { TFunction } from "i18next";
+import { File, Loader2, RotateCw, Trash2, Upload, XCircle } from "lucide-react";
 
-import { Button } from '@/components/ui/button';
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -10,17 +10,24 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import type { DocumentItem } from '@/types';
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import type { DocumentItem } from "@/types";
 
-import { formatSize } from '@/adapters/documents';
-import { DOCUMENT_FILE_INPUT_ACCEPT } from './uploadAccept';
+import { formatSize } from "@/adapters/documents";
+import { DOCUMENT_FILE_INPUT_ACCEPT } from "./uploadAccept";
 
 type DocumentsOverlaysProps = {
-  activeTab: 'documents' | 'web';
+  activeTab: "documents" | "web";
   addLinkOpen: boolean;
   boundaryPolicy: string;
   clearSelection: () => void;
@@ -32,6 +39,8 @@ type DocumentsOverlaysProps = {
   handleDelete: () => void;
   handleReplaceFile: () => void;
   handleStartWebIngest: () => void;
+  libraryIgnorePatternsLoading: boolean;
+  libraryIgnorePatternsText: string;
   maxDepth: string;
   maxPages: string;
   replaceFile: File | null;
@@ -45,6 +54,7 @@ type DocumentsOverlaysProps = {
   setBoundaryPolicy: (value: string) => void;
   setCrawlMode: (value: string) => void;
   setDeleteDocOpen: (open: boolean) => void;
+  setLibraryIgnorePatternsText: (value: string) => void;
   setMaxDepth: (value: string) => void;
   setMaxPages: (value: string) => void;
   setReplaceFile: (file: File | null) => void;
@@ -67,6 +77,8 @@ export function DocumentsOverlays({
   handleDelete,
   handleReplaceFile,
   handleStartWebIngest,
+  libraryIgnorePatternsLoading,
+  libraryIgnorePatternsText,
   maxDepth,
   maxPages,
   replaceFile,
@@ -80,6 +92,7 @@ export function DocumentsOverlays({
   setBoundaryPolicy,
   setCrawlMode,
   setDeleteDocOpen,
+  setLibraryIgnorePatternsText,
   setMaxDepth,
   setMaxPages,
   setReplaceFile,
@@ -90,82 +103,143 @@ export function DocumentsOverlays({
 }: DocumentsOverlaysProps) {
   return (
     <>
-      {activeTab === 'documents' && selectedCount > 0 && (
+      {activeTab === "documents" && selectedCount > 0 && (
         <div className="sticky bottom-0 z-10 flex items-center gap-3 border-t bg-background px-4 py-3 shadow-lg">
           <span className="text-sm font-medium tabular-nums">
-            {t('documents.nSelected', { count: selectedCount })}
+            {t("documents.nSelected", { count: selectedCount })}
           </span>
           <Button variant="destructive" size="sm" onClick={handleBulkDelete}>
-            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('documents.deleteSelected')}
+            <Trash2 className="h-3.5 w-3.5 mr-1.5" />{" "}
+            {t("documents.deleteSelected")}
           </Button>
           <Button variant="outline" size="sm" onClick={handleBulkCancel}>
-            <XCircle className="h-3.5 w-3.5 mr-1.5" /> {t('documents.cancelProcessing')}
+            <XCircle className="h-3.5 w-3.5 mr-1.5" />{" "}
+            {t("documents.cancelProcessing")}
           </Button>
           <Button variant="outline" size="sm" onClick={handleBulkReprocess}>
-            <RotateCw className="h-3.5 w-3.5 mr-1.5" /> {t('documents.retrySelected')}
+            <RotateCw className="h-3.5 w-3.5 mr-1.5" />{" "}
+            {t("documents.retrySelected")}
           </Button>
           <div className="flex-1" />
           <Button variant="ghost" size="sm" onClick={clearSelection}>
-            {t('documents.clearSelection')}
+            {t("documents.clearSelection")}
           </Button>
         </div>
       )}
 
       <Dialog open={addLinkOpen} onOpenChange={setAddLinkOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{t('documents.addWebContent')}</DialogTitle>
-            <DialogDescription>{t('documents.addWebContentDesc')}</DialogDescription>
+            <DialogTitle>{t("documents.addWebContent")}</DialogTitle>
+            <DialogDescription>
+              {t("documents.addWebContentDesc")}
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>{t('documents.seedUrl')}</Label>
+              <Label>{t("documents.seedUrl")}</Label>
               <Input
                 value={seedUrl}
-                onChange={event => setSeedUrl(event.target.value)}
-                placeholder={t('documents.seedUrlPlaceholder')}
+                onChange={(event) => setSeedUrl(event.target.value)}
+                placeholder={t("documents.seedUrlPlaceholder")}
                 className="mt-2"
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label>{t('documents.mode')}</Label>
+                <Label>{t("documents.mode")}</Label>
                 <Select value={crawlMode} onValueChange={setCrawlMode}>
-                  <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="mt-2">
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="single_page">{t('documents.singlePage')}</SelectItem>
-                    <SelectItem value="recursive_crawl">{t('documents.recursiveCrawl')}</SelectItem>
+                    <SelectItem value="single_page">
+                      {t("documents.singlePage")}
+                    </SelectItem>
+                    <SelectItem value="recursive_crawl">
+                      {t("documents.recursiveCrawl")}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div>
-                <Label>{t('documents.boundary')}</Label>
-                <Select value={boundaryPolicy} onValueChange={setBoundaryPolicy}>
-                  <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+                <Label>{t("documents.boundary")}</Label>
+                <Select
+                  value={boundaryPolicy}
+                  onValueChange={setBoundaryPolicy}
+                >
+                  <SelectTrigger className="mt-2">
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="same_host">{t('documents.sameHost')}</SelectItem>
-                    <SelectItem value="allow_external">{t('documents.allowExternal')}</SelectItem>
+                    <SelectItem value="same_host">
+                      {t("documents.sameHost")}
+                    </SelectItem>
+                    <SelectItem value="allow_external">
+                      {t("documents.allowExternal")}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
-            {crawlMode === 'recursive_crawl' && (
+            {crawlMode === "recursive_crawl" && (
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label>{t('documents.maxDepth')}</Label>
-                  <Input type="number" value={maxDepth} onChange={event => setMaxDepth(event.target.value)} min="1" max="10" className="mt-2" />
+                  <Label>{t("documents.maxDepth")}</Label>
+                  <Input
+                    type="number"
+                    value={maxDepth}
+                    onChange={(event) => setMaxDepth(event.target.value)}
+                    min="1"
+                    max="10"
+                    className="mt-2"
+                  />
                 </div>
                 <div>
-                  <Label>{t('documents.maxPages')}</Label>
-                  <Input type="number" value={maxPages} onChange={event => setMaxPages(event.target.value)} min="1" max="500" className="mt-2" />
+                  <Label>{t("documents.maxPages")}</Label>
+                  <Input
+                    type="number"
+                    value={maxPages}
+                    onChange={(event) => setMaxPages(event.target.value)}
+                    min="1"
+                    max="500"
+                    className="mt-2"
+                  />
                 </div>
               </div>
             )}
+            <div>
+              <Label>{t("documents.ignorePatterns")}</Label>
+              <Textarea
+                value={libraryIgnorePatternsText}
+                onChange={(event) =>
+                  setLibraryIgnorePatternsText(event.target.value)
+                }
+                placeholder={t("documents.ignorePatternsPlaceholder")}
+                className="mt-2 min-h-[118px] resize-y font-mono text-xs"
+              />
+            </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAddLinkOpen(false)}>{t('documents.cancel')}</Button>
-            <Button disabled={!seedUrl.trim() || webIngestLoading} onClick={handleStartWebIngest}>
-              {webIngestLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {t('documents.starting')}</> : t('documents.startIngest')}
+            <Button variant="outline" onClick={() => setAddLinkOpen(false)}>
+              {t("documents.cancel")}
+            </Button>
+            <Button
+              disabled={
+                !seedUrl.trim() ||
+                webIngestLoading ||
+                libraryIgnorePatternsLoading
+              }
+              onClick={handleStartWebIngest}
+            >
+              {webIngestLoading || libraryIgnorePatternsLoading ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{" "}
+                  {t("documents.starting")}
+                </>
+              ) : (
+                t("documents.startIngest")
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -174,27 +248,41 @@ export function DocumentsOverlays({
       <Dialog open={deleteDocOpen} onOpenChange={setDeleteDocOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t('documents.deleteDoc')}</DialogTitle>
-            <DialogDescription>{t('documents.confirmDelete', { name: selectedDoc?.fileName })}</DialogDescription>
+            <DialogTitle>{t("documents.deleteDoc")}</DialogTitle>
+            <DialogDescription>
+              {t("documents.confirmDelete", { name: selectedDoc?.fileName })}
+            </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteDocOpen(false)}>{t('documents.cancel')}</Button>
-            <Button variant="destructive" onClick={handleDelete}>{t('documents.delete')}</Button>
+            <Button variant="outline" onClick={() => setDeleteDocOpen(false)}>
+              {t("documents.cancel")}
+            </Button>
+            <Button variant="destructive" onClick={handleDelete}>
+              {t("documents.delete")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={replaceFileOpen} onOpenChange={open => { setReplaceFileOpen(open); if (!open) setReplaceFile(null); }}>
+      <Dialog
+        open={replaceFileOpen}
+        onOpenChange={(open) => {
+          setReplaceFileOpen(open);
+          if (!open) setReplaceFile(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t('documents.replaceFileTitle')}</DialogTitle>
-            <DialogDescription>{t('documents.replaceFileDesc', { name: selectedDoc?.fileName })}</DialogDescription>
+            <DialogTitle>{t("documents.replaceFileTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("documents.replaceFileDesc", { name: selectedDoc?.fileName })}
+            </DialogDescription>
           </DialogHeader>
           <div
             className="border-2 border-dashed rounded-xl p-10 text-center transition-all duration-200 hover:border-primary/40 hover:bg-primary/5 cursor-pointer hover:shadow-soft"
             onClick={() => replaceFileInputRef.current?.click()}
-            onDragOver={event => event.preventDefault()}
-            onDrop={event => {
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
               event.preventDefault();
               const file = event.dataTransfer.files[0];
               if (file) {
@@ -207,32 +295,54 @@ export function DocumentsOverlays({
               type="file"
               accept={DOCUMENT_FILE_INPUT_ACCEPT}
               className="hidden"
-              onChange={event => {
+              onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) {
                   setReplaceFile(file);
                 }
-                event.target.value = '';
+                event.target.value = "";
               }}
             />
             {replaceFile ? (
               <>
                 <File className="h-8 w-8 text-primary mx-auto mb-3" />
                 <p className="text-sm font-bold">{replaceFile.name}</p>
-                <p className="text-xs text-muted-foreground mt-1.5">{formatSize(replaceFile.size)}</p>
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  {formatSize(replaceFile.size)}
+                </p>
               </>
             ) : (
               <>
                 <Upload className="h-8 w-8 text-muted-foreground mx-auto mb-3" />
-                <p className="text-sm font-bold">{t('documents.selectFile')}</p>
-                <p className="text-xs text-muted-foreground mt-1.5">{t('documents.selectFileHint')}</p>
+                <p className="text-sm font-bold">{t("documents.selectFile")}</p>
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  {t("documents.selectFileHint")}
+                </p>
               </>
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setReplaceFileOpen(false); setReplaceFile(null); }}>{t('documents.cancel')}</Button>
-            <Button disabled={!replaceFile || replaceLoading} onClick={handleReplaceFile}>
-              {replaceLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {t('documents.replace')}...</> : t('documents.replace')}
+            <Button
+              variant="outline"
+              onClick={() => {
+                setReplaceFileOpen(false);
+                setReplaceFile(null);
+              }}
+            >
+              {t("documents.cancel")}
+            </Button>
+            <Button
+              disabled={!replaceFile || replaceLoading}
+              onClick={handleReplaceFile}
+            >
+              {replaceLoading ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{" "}
+                  {t("documents.replace")}...
+                </>
+              ) : (
+                t("documents.replace")
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

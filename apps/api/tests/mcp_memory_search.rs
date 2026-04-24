@@ -24,9 +24,11 @@ struct McpSearchFixture {
     state: AppState,
     workspace_id: Uuid,
     primary_library_id: Uuid,
+    primary_library_ref: String,
     secondary_library_id: Uuid,
+    secondary_library_ref: String,
     foreign_workspace_id: Uuid,
-    foreign_library_id: Uuid,
+    foreign_library_ref: String,
 }
 
 impl McpSearchFixture {
@@ -86,9 +88,11 @@ impl McpSearchFixture {
             state,
             workspace_id: workspace.id,
             primary_library_id: primary_library.id,
+            primary_library_ref: format!("{}/{}", workspace.slug, primary_library.slug),
             secondary_library_id: secondary_library.id,
+            secondary_library_ref: format!("{}/{}", workspace.slug, secondary_library.slug),
             foreign_workspace_id: foreign_workspace.id,
-            foreign_library_id: foreign_library.id,
+            foreign_library_ref: format!("{}/{}", foreign_workspace.slug, foreign_library.slug),
         })
     }
 
@@ -282,15 +286,15 @@ async fn authorized_search_spans_multiple_libraries_and_returns_stable_scope_ids
                 "search_documents",
                 json!({
                     "query": "beacon-signal",
-                    "libraryIds": [fixture.primary_library_id, fixture.secondary_library_id],
+                    "libraries": [fixture.primary_library_ref, fixture.secondary_library_ref],
                     "limit": 5
                 }),
             )
             .await?;
         assert_eq!(response["result"]["isError"], json!(false));
         assert_eq!(
-            response["result"]["structuredContent"]["libraryIds"],
-            json!([fixture.primary_library_id, fixture.secondary_library_id])
+            response["result"]["structuredContent"]["libraries"],
+            json!([fixture.primary_library_ref, fixture.secondary_library_ref])
         );
 
         let hits = response["result"]["structuredContent"]["hits"]
@@ -356,8 +360,8 @@ async fn empty_search_results_return_explicit_no_match_payload() -> anyhow::Resu
         );
         assert_eq!(response["result"]["structuredContent"]["hits"], json!([]));
         assert_eq!(
-            response["result"]["structuredContent"]["libraryIds"],
-            json!([fixture.primary_library_id, fixture.secondary_library_id])
+            response["result"]["structuredContent"]["libraries"],
+            json!([fixture.primary_library_ref, fixture.secondary_library_ref])
         );
 
         Ok(())
@@ -404,7 +408,7 @@ async fn processing_and_failed_documents_surface_honest_readability_metadata_in_
                 "search_documents",
                 json!({
                     "query": "status-signal",
-                    "libraryIds": [fixture.primary_library_id],
+                    "libraries": [fixture.primary_library_ref],
                     "limit": 5
                 }),
             )
@@ -471,7 +475,7 @@ async fn processing_documents_with_extracted_text_surface_as_readable_hits() -> 
                 "search_documents",
                 json!({
                     "query": "status-signal",
-                    "libraryIds": [fixture.primary_library_id],
+                    "libraries": [fixture.primary_library_ref.clone()],
                     "limit": 5
                 }),
             )
@@ -536,7 +540,7 @@ async fn extracted_text_matches_are_searchable_without_chunk_rows_and_after_grap
                 "search_documents",
                 json!({
                     "query": "search-direct-anchor",
-                    "libraryIds": [fixture.primary_library_id],
+                    "libraries": [fixture.primary_library_ref.clone()],
                     "limit": 5
                 }),
             )
@@ -597,7 +601,10 @@ async fn inaccessible_library_filters_reject_search_instead_of_returning_partial
                 "search_documents",
                 json!({
                     "query": "beacon-signal",
-                    "libraryIds": [fixture.primary_library_id, fixture.foreign_library_id],
+                    "libraries": [
+                        fixture.primary_library_ref.clone(),
+                        fixture.foreign_library_ref.clone(),
+                    ],
                     "limit": 5
                 }),
             )
@@ -641,7 +648,7 @@ async fn search_documents_degrades_to_lexical_hits_when_vector_path_is_unavailab
                 "search_documents",
                 json!({
                     "query": "fallback-anchor",
-                    "libraryIds": [fixture.primary_library_id],
+                    "libraries": [fixture.primary_library_ref.clone()],
                     "limit": 5
                 }),
             )
@@ -689,7 +696,7 @@ async fn search_documents_returns_structured_content_with_stable_envelope() -> a
                 "search_documents",
                 json!({
                     "query": "envelope-anchor",
-                    "libraryIds": [fixture.primary_library_id],
+                    "libraries": [fixture.primary_library_ref.clone()],
                     "limit": 3
                 }),
             )

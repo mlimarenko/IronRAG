@@ -164,7 +164,7 @@ describe('DashboardPage integration', () => {
     // Summary cards show derived counts, not raw backend values.
     expect(container.textContent).toContain('12'); // total documents
     expect(container.textContent).toContain('58%'); // 7/12 graph ready ≈ 58%
-    expect(container.textContent).toContain('In Flight');
+    expect(container.textContent).toContain('Active Operations');
   });
 
   it('localizes attention entries from their canonical code, not the backend title', async () => {

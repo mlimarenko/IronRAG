@@ -4,6 +4,55 @@ use chrono::{DateTime, Utc};
 use sqlx::{Executor, FromRow, PgPool, Postgres, QueryBuilder, pool::PoolConnection};
 use uuid::Uuid;
 
+/// Canonical CASE expression that derives the five status buckets the
+/// documents surface exposes (`canceled` / `failed` / `processing` /
+/// `queued` / `ready`) from Postgres-only signals. One source of
+/// truth so the list page, the status-count aggregate, and every
+/// ad-hoc caller stay aligned.
+///
+/// Priority (top row wins):
+/// 1. Mutation is terminally failed / conflicted / canceled → `failed`.
+///    The head itself is broken; the operator must see this.
+/// 2. Latest ingest_job is `failed` → `failed`.
+/// 3. Latest ingest_job is `leased` → `processing`. A worker is
+///    actively running this document; surface it regardless of
+///    whether a previous readable revision exists, so the operator
+///    can see the pipeline moving even during bulk re-ingest.
+/// 4. `content_document_head.readable_revision_id` is set → `ready`.
+///    The document has a usable revision the user can consume
+///    right now. `ready` wins over `canceled` / `queued`:
+///    a canceled or queued re-ingest over a still-readable
+///    document should not hide it from the "Готовые" bucket.
+///    That was the regression that produced "Готовые 1" on the
+///    reference library during bulk re-ingest — canceled
+///    fan-out jobs were dominating the pick.
+/// 5. Latest ingest_job is `canceled` → `canceled` (no readable,
+///    work was canceled before finishing).
+/// 6. Latest ingest_job is `queued` → `queued` (new document
+///    waiting for its first ingest; no readable yet).
+/// 7. Mutation state is `accepted` / `running` → `processing`.
+/// 8. Latest ingest_job is `completed` but no readable → `failed`
+///    (post-completion head update did not land; surface the anomaly).
+/// 9. Everything else → `queued`.
+///
+/// Requires the hosting query to expose `ij.queue_state`,
+/// `m.mutation_state`, and `h.readable_revision_id` under exactly
+/// those aliases (both current callers do). `ij.queue_state` must
+/// be picked with a state-priority LATERAL (leased > failed >
+/// canceled > queued > completed), per-document — see
+/// `list_document_page_rows` for the reference implementation.
+pub(crate) const DERIVED_STATUS_CASE_SQL: &str = "case
+    when m.mutation_state in ('failed','conflicted','canceled') then 'failed'
+    when ij.queue_state = 'failed' then 'failed'
+    when ij.queue_state = 'leased' then 'processing'
+    when h.readable_revision_id is not null then 'ready'
+    when ij.queue_state = 'canceled' then 'canceled'
+    when ij.queue_state = 'queued' then 'queued'
+    when m.mutation_state in ('accepted','running') then 'processing'
+    when ij.queue_state = 'completed' then 'failed'
+    else 'queued'
+end";
+
 #[derive(Debug, Clone, FromRow)]
 pub struct ContentDocumentRow {
     pub id: Uuid,
@@ -323,6 +372,58 @@ where
     .bind(document_state)
     .bind(deleted_at)
     .fetch_optional(executor)
+    .await
+}
+
+/// Dedup lookup used by upload and web-ingest paths: is there already a
+/// non-deleted document in this library whose content hashes to
+/// `checksum`? Returns the canonical "winner" — the document with a
+/// healthy `readable_revision_id` if one exists, falling back to the
+/// earliest candidate. Relies on `idx_content_revision_library_checksum`.
+///
+/// Best-effort: not wrapped in an advisory lock. Two concurrent ingests
+/// of the same bytes within a ~100ms window can both see "no
+/// duplicate" and both admit — but that race is dominated by the
+/// normal case (sequential re-uploads, web-crawl worker is
+/// single-threaded per run) and not what operators were hitting. If a
+/// race-proof variant is needed later, wrap this in
+/// `pg_advisory_xact_lock(hash(library_id, checksum))` and move the
+/// subsequent document create into the same transaction.
+pub async fn find_active_document_by_library_checksum(
+    postgres: &PgPool,
+    library_id: Uuid,
+    checksum: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    // Match against each document's LATEST revision only. Matching any
+    // historical revision produced false positives: a document whose
+    // older revision briefly equalled another body (e.g. a site's
+    // login-required placeholder served transiently for many URLs)
+    // would collide forever, even after its own content diverged. The
+    // DISTINCT ON pins us to "is this the same body RIGHT NOW".
+    sqlx::query_scalar::<_, Uuid>(
+        "with latest_revision as (
+             select distinct on (r.document_id)
+                 r.document_id,
+                 r.checksum
+             from content_revision r
+             order by r.document_id, r.created_at desc
+         )
+         select d.id
+         from content_document d
+         join latest_revision lr on lr.document_id = d.id
+         left join content_document_head h on h.document_id = d.id
+         where d.library_id = $1
+           and lr.checksum = $2
+           and d.document_state <> 'deleted'
+           and d.deleted_at is null
+         order by (h.readable_revision_id is not null) desc,
+                  d.created_at asc,
+                  d.id asc
+         limit 1",
+    )
+    .bind(library_id)
+    .bind(checksum)
+    .fetch_optional(postgres)
     .await
 }
 
@@ -1267,6 +1368,14 @@ pub struct ContentDocumentListRow {
     pub attempt_failure_code: Option<String>,
     pub attempt_retryable: Option<bool>,
     pub attempt_heartbeat_at: Option<DateTime<Utc>>,
+
+    // per-document billing rollup — summed across every execution
+    // attributed to this document (ingest_attempt + graph_extraction_attempt).
+    // Surfaced on the canonical list response so the frontend never has
+    // to issue a library-wide `/billing/library-document-costs` fetch to
+    // fill in the cost column.
+    pub cost_total: rust_decimal::Decimal,
+    pub cost_currency_code: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1448,28 +1557,43 @@ pub async fn list_document_page_rows(
                 ij.queue_state::text as job_queue_state,
                 ij.queued_at as job_queued_at,
                 ij.completed_at as job_completed_at,
-                case
-                    when ij.queue_state = 'canceled' then 'canceled'
-                    when ij.queue_state = 'failed'
-                         or m.mutation_state in ('failed','conflicted','canceled')
-                        then 'failed'
-                    when ij.queue_state = 'leased' then 'processing'
-                    when ij.queue_state = 'queued' then 'queued'
-                    when h.readable_revision_id is not null then 'ready'
-                    when m.mutation_state in ('accepted','running') then 'processing'
-                    when ij.queue_state = 'completed' then 'failed'
-                    else 'queued'
-                end as derived_status
+                {DERIVED_STATUS_CASE_SQL} as derived_status
             from content_document d
             left join content_document_head h on h.document_id = d.id
             left join content_revision r
                 on r.id = coalesce(h.readable_revision_id, h.active_revision_id)
             left join content_mutation m on m.id = h.latest_mutation_id
             left join lateral (
+                -- Filter by knowledge_document_id, NOT by mutation_id.
+                -- Legacy bulk-import mutations on production carry
+                -- thousands of ingest_job rows shared across many
+                -- documents, so filtering by mutation_id resolves
+                -- every document to the same state across the whole
+                -- library (observed: 9928 documents all classified
+                -- as processing because a single mutation happened
+                -- to contain one leased job). ingest_job has a
+                -- direct document pointer; using it guarantees the
+                -- lateral pick reflects this document only.
+                --
+                -- Within one document's jobs, state priority first
+                -- then queued_at desc: leased beats failed beats
+                -- canceled beats queued beats completed. This
+                -- surfaces the most informative row — a still-busy
+                -- lease is more useful than the newest of a
+                -- thousand dormant queued fan-out rows — while
+                -- keeping pagination deterministic inside a class.
                 select ij_inner.*
                 from ingest_job ij_inner
-                where ij_inner.mutation_id = m.id
-                order by ij_inner.queued_at desc
+                where ij_inner.knowledge_document_id = d.id
+                order by case ij_inner.queue_state::text
+                        when 'leased' then 1
+                        when 'failed' then 2
+                        when 'canceled' then 3
+                        when 'queued' then 4
+                        when 'completed' then 5
+                        else 6
+                    end,
+                    ij_inner.queued_at desc
                 limit 1
             ) ij on true
             where d.library_id = $1
@@ -1513,7 +1637,9 @@ pub async fn list_document_page_rows(
             a.finished_at as attempt_finished_at,
             a.failure_code as attempt_failure_code,
             a.retryable as attempt_retryable,
-            a.heartbeat_at as attempt_heartbeat_at
+            a.heartbeat_at as attempt_heartbeat_at,
+            coalesce(c.cost_total, 0) as cost_total,
+            coalesce(c.cost_currency_code, 'USD') as cost_currency_code
         from page p
         left join lateral (
             select ia.*
@@ -1522,6 +1648,20 @@ pub async fn list_document_page_rows(
             order by ia.attempt_number desc
             limit 1
         ) a on true
+        left join lateral (
+            -- Per-document cost rollup. `billing_execution_cost` carries
+            -- library_id and knowledge_document_id directly (0006
+            -- migration), so this is a single indexed aggregate via
+            -- `idx_billing_execution_cost_library_document`. Lateral
+            -- keeps the cost column optional — documents with no
+            -- billable execution just get 0.
+            select
+                coalesce(sum(bec.total_cost), 0) as cost_total,
+                coalesce(max(bec.currency_code), 'USD') as cost_currency_code
+            from billing_execution_cost bec
+            where bec.library_id = p.library_id
+              and bec.knowledge_document_id = p.id
+        ) c on true
         order by {page_order_sql}",
         keyset_sql = keyset_sql,
         joined_order_sql = joined_order_sql,
@@ -1595,30 +1735,32 @@ pub async fn aggregate_document_list_status_counts(
     // blows the counts into millions. The lateral subquery returns at
     // most one row per mutation — the newest queued — which is what
     // `derived_status` actually wants.
-    sqlx::query_as::<_, DocumentListStatusCountsRow>(
+    let sql = format!(
         "with joined as (
             select
                 d.id,
-                case
-                    when ij.queue_state = 'canceled' then 'canceled'
-                    when ij.queue_state = 'failed'
-                         or m.mutation_state in ('failed','conflicted','canceled')
-                        then 'failed'
-                    when ij.queue_state = 'leased' then 'processing'
-                    when ij.queue_state = 'queued' then 'queued'
-                    when h.readable_revision_id is not null then 'ready'
-                    when m.mutation_state in ('accepted','running') then 'processing'
-                    when ij.queue_state = 'completed' then 'failed'
-                    else 'queued'
-                end as derived_status
+                {DERIVED_STATUS_CASE_SQL} as derived_status
             from content_document d
             left join content_document_head h on h.document_id = d.id
             left join content_mutation m on m.id = h.latest_mutation_id
             left join lateral (
+                -- Same per-document filter used in
+                -- list_document_page_rows — see the comment there
+                -- for why mutation_id cannot be trusted on
+                -- production stacks with legacy bulk-import
+                -- mutations.
                 select ij_inner.queue_state
                 from ingest_job ij_inner
-                where ij_inner.mutation_id = m.id
-                order by ij_inner.queued_at desc
+                where ij_inner.knowledge_document_id = d.id
+                order by case ij_inner.queue_state::text
+                        when 'leased' then 1
+                        when 'failed' then 2
+                        when 'canceled' then 3
+                        when 'queued' then 4
+                        when 'completed' then 5
+                        else 6
+                    end,
+                    ij_inner.queued_at desc
                 limit 1
             ) ij on true
             where d.library_id = $1
@@ -1632,13 +1774,85 @@ pub async fn aggregate_document_list_status_counts(
             count(*) filter (where derived_status = 'queued')::bigint as queued,
             count(*) filter (where derived_status = 'failed')::bigint as failed,
             count(*) filter (where derived_status = 'canceled')::bigint as canceled
-        from joined",
-    )
-    .bind(library_id)
-    .bind(include_deleted)
-    .bind(search_pattern)
-    .fetch_one(postgres)
-    .await
+        from joined"
+    );
+    sqlx::query_as::<_, DocumentListStatusCountsRow>(&sql)
+        .bind(library_id)
+        .bind(include_deleted)
+        .bind(search_pattern)
+        .fetch_one(postgres)
+        .await
+}
+
+/// Canonical per-library document metrics row. This is the ONE
+/// function every surface (`/ops/libraries/{id}/dashboard`,
+/// `/content/libraries/{id}/documents?includeTotal=true`,
+/// `/knowledge/libraries/{id}/summary`) should route through for
+/// document-count numbers. It runs the status-bucket aggregate and
+/// the graph-ready count concurrently via `tokio::try_join!` and
+/// clamps `graph_ready` to `ready` so the invariant
+/// `graph_ready + graph_sparse == ready` always holds on the wire,
+/// even during a graph rebuild where the two halves are briefly
+/// out-of-sync.
+///
+/// Contract:
+///   * `total == ready + processing + queued + failed + canceled`
+///   * `graph_ready + graph_sparse == ready`
+///
+/// Scoped to `document_state = 'active'` (deleted documents are not
+/// reflected in any of the metrics). Search filtering and
+/// include-deleted live only on the list surface — metrics are a
+/// library-wide summary.
+pub async fn aggregate_library_document_metrics(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<ironrag_contracts::documents::LibraryDocumentMetrics, sqlx::Error> {
+    // Run the status-bucket CASE aggregate and the graph-snapshot
+    // lookup in parallel. The graph count itself is version-scoped,
+    // so we pull the active projection_version from the snapshot row
+    // and only then hit `runtime_graph_node`.
+    let status_future = aggregate_document_list_status_counts(postgres, library_id, false, None);
+    let snapshot_future =
+        crate::infra::repositories::get_runtime_graph_snapshot(postgres, library_id);
+    let (status_row, snapshot_row) = tokio::try_join!(status_future, snapshot_future)?;
+    let graph_ready_raw = if let Some(snapshot) = snapshot_row.as_ref() {
+        if snapshot.graph_status == "empty" || snapshot.node_count <= 0 {
+            0
+        } else {
+            crate::infra::repositories::count_runtime_graph_document_nodes_by_library(
+                postgres,
+                library_id,
+                snapshot.projection_version.max(1),
+            )
+            .await?
+        }
+    } else {
+        0
+    };
+    let total = status_row.total.unwrap_or(0);
+    let ready = status_row.ready.unwrap_or(0);
+    let processing = status_row.processing.unwrap_or(0);
+    let queued = status_row.queued.unwrap_or(0);
+    let failed = status_row.failed.unwrap_or(0);
+    let canceled = status_row.canceled.unwrap_or(0);
+    // Clamp: `runtime_graph_node` may transiently report more document
+    // nodes than the active set (e.g. an old projection still lingers
+    // while a new rebuild is staging). We never report a graph_ready
+    // greater than the ready bucket — that would violate the published
+    // invariant and make the dashboard look nonsensical.
+    let graph_ready = graph_ready_raw.clamp(0, ready);
+    let graph_sparse = ready.saturating_sub(graph_ready);
+    Ok(ironrag_contracts::documents::LibraryDocumentMetrics {
+        total,
+        ready,
+        processing,
+        queued,
+        failed,
+        canceled,
+        graph_ready,
+        graph_sparse,
+        recomputed_at: chrono::Utc::now(),
+    })
 }
 
 pub async fn search_document_metadata_rows(
@@ -1740,97 +1954,15 @@ mod tests {
     }
 }
 
-/// Aggregate readiness summary for a library. Used by
-/// `knowledge::get_library_summary` to replace the previous N+1 scan that
-/// enumerated every document and derived readiness per row.
-///
-/// The readiness bucket is derived from Postgres-only signals:
-///   * `failed` — latest ingest job reached `failed`/`canceled`, OR the latest
-///     mutation landed in `failed`/`conflicted`/`canceled`.
-///   * `processing` — latest mutation is still `accepted`/`running`, OR the
-///     latest job is still `queued`/`leased`.
-///   * `graph_ready` / `readable` — the document has a readable revision
-///     pointer on head (meaning at least one successful ingest has happened)
-///     and no in-flight work. The coarser `graph_ready` vs `readable` split
-///     is not computable from Postgres alone, so this function returns a
-///     single `readable` bucket. `get_library_summary` then breaks out
-///     `graph_ready`/`graph_sparse` from the runtime graph snapshot on the
-///     same library.
-///   * Otherwise — `processing` (default).
-///
-/// This is an approximation of the per-document `classify_document_knowledge_state`
-/// used by the detail handler. For summary counts it is sufficient and, more
-/// importantly, it is O(1) in round-trips instead of O(N) in documents.
-pub async fn aggregate_library_document_readiness(
-    postgres: &PgPool,
-    library_id: Uuid,
-) -> Result<LibraryDocumentReadinessAggregate, sqlx::Error> {
-    // Strictly one row per document_id. Joining ingest_job here would
-    // Cartesian-explode against the multiple job rows a mutation
-    // accumulates over reruns (on a reference ~5 k-document library that
-    // inflates counts ~4000×).
-    // `content_mutation.mutation_state` is already the canonical
-    // final-or-in-flight signal for the document's latest mutation, so
-    // the readiness classification rests on that + the presence of a
-    // readable revision on `content_document_head`.
-    let row: LibraryDocumentReadinessRow = sqlx::query_as(
-        "with base as (
-            select
-                d.id,
-                d.document_state::text as document_state,
-                h.readable_revision_id,
-                m.mutation_state::text as mutation_state
-            from content_document d
-            left join content_document_head h on h.document_id = d.id
-            left join content_mutation m on m.id = h.latest_mutation_id
-            where d.library_id = $1
-        )
-        select
-            count(*) filter (where document_state = 'active')::bigint as active_count,
-            count(*) filter (where document_state = 'deleted')::bigint as deleted_count,
-            count(*) filter (
-                where document_state = 'active'
-                  and mutation_state in ('failed','conflicted','canceled')
-            )::bigint as failed_count,
-            count(*) filter (
-                where document_state = 'active'
-                  and mutation_state in ('accepted','running')
-            )::bigint as processing_count,
-            count(*) filter (
-                where document_state = 'active'
-                  and readable_revision_id is not null
-                  and (mutation_state is null
-                       or mutation_state not in ('accepted','running','failed','conflicted','canceled'))
-            )::bigint as readable_count
-        from base",
-    )
-    .bind(library_id)
-    .fetch_one(postgres)
-    .await?;
-
-    Ok(LibraryDocumentReadinessAggregate {
-        active_count: row.active_count.unwrap_or_default(),
-        deleted_count: row.deleted_count.unwrap_or_default(),
-        failed_count: row.failed_count.unwrap_or_default(),
-        processing_count: row.processing_count.unwrap_or_default(),
-        readable_count: row.readable_count.unwrap_or_default(),
-    })
-}
-
-#[derive(Debug, Clone, FromRow)]
-struct LibraryDocumentReadinessRow {
-    pub active_count: Option<i64>,
-    pub deleted_count: Option<i64>,
-    pub failed_count: Option<i64>,
-    pub processing_count: Option<i64>,
-    pub readable_count: Option<i64>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LibraryDocumentReadinessAggregate {
-    pub active_count: i64,
-    pub deleted_count: i64,
-    pub failed_count: i64,
-    pub processing_count: i64,
-    pub readable_count: i64,
-}
+// Previously here: `aggregate_library_document_readiness`,
+// `LibraryDocumentReadinessRow`, `LibraryDocumentReadinessAggregate`.
+// Retired in the metrics-consolidation release — all readiness
+// numbers now flow through `aggregate_library_document_metrics` /
+// `LibraryDocumentMetrics`, which exposes the same buckets plus the
+// canonical status-CASE bucketing and the graph_ready split. The old
+// readiness aggregator used a different predicate for "readable" that
+// silently hid documents in mutation_state drift, which was the root
+// cause of the dashboard showing `920 ready` while `graph_ready`
+// reported `1212` on production. Consumers migrated to the canonical
+// aggregator; no shim is needed because there are no out-of-tree
+// callers.

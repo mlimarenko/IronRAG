@@ -58,6 +58,7 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
 `tools/list` фильтруется грантами. Если токену что-то нельзя, инструмент просто не будет рекламироваться.
 Каноническая JSON-RPC поверхность намеренно маленькая: `initialize`, `tools/list`, `tools/call` и `notifications/initialized`. Пустой surface `resources/*` IronRAG не рекламирует и не поддерживает.
 Аргументы инструментов принимаются только в каноническом camelCase-виде.
+Цели каталога задаются каноническими ref-ами вместо opaque UUID: `workspace` имеет вид `<workspace>`, а `library` — `<workspace>/<library>`. Discovery-ответы возвращают эти значения в поле `ref`.
 
 ## Инструменты
 
@@ -65,7 +66,7 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `grounded_answer` | Задать вопрос естественным языком и получить grounded ответ с цитатами — **тот же самый pipeline, что использует встроенный UI-ассистент** (QueryCompiler → гибридный поиск → graph-aware context → answer generation → verifier). Предпочитайте этот инструмент `search_documents` + `read_document`, когда пользователю нужен ответ, а не список хитов. | `libraryId`, `query` |
+| `grounded_answer` | Задать вопрос естественным языком и получить grounded ответ с цитатами — **тот же самый pipeline, что использует встроенный UI-ассистент** (QueryCompiler → гибридный поиск → graph-aware context → answer generation → verifier). Предпочитайте этот инструмент `search_documents` + `read_document`, когда пользователю нужен ответ, а не список хитов. | `library`, `query` |
 
 Response структура: `answer` (текст), `citations` (чанки + сущности графа), `verifier` (`level` + `warnings`), `runtimeExecutionId` (ключ для `get_runtime_execution_trace`), `executionId`, `conversationId`. MCP-клиент получает ровно тот ответ, который увидел бы пользователь в UI для того же вопроса и библиотеки — MCP и UI используют один и тот же пайплайн grounded Q&A, без параллельных реализаций.
 
@@ -74,24 +75,24 @@ Response структура: `answer` (текст), `citations` (чанки + с
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
 | `list_workspaces` | Список workspace, видимых текущему токену. | (нет) |
-| `list_libraries` | Список видимых библиотек с фильтрацией по workspace. | `workspaceId` (опц.) |
+| `list_libraries` | Список видимых библиотек с фильтрацией по ref workspace. | `workspace` (опц.) |
 
 ### Администрирование
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `create_workspace` | Создать workspace (только system admin). | `name` |
-| `create_library` | Создать библиотеку внутри workspace. | `workspaceId`, `name` |
+| `create_workspace` | Создать workspace (только system admin). Запрос использует канонический ref workspace; `title` остаётся опциональным display name. | `workspace` |
+| `create_library` | Создать библиотеку внутри workspace. Запрос использует канонический ref библиотеки; `title` остаётся опциональным display name. | `library` |
 
 ### Документы
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `search_documents` | Поиск по библиотеке: гибридный BM25 + вектор. Возвращает хиты на уровне документов. | `query` |
+| `search_documents` | Поиск по библиотеке: гибридный BM25 + вектор. Возвращает хиты на уровне документов. Поиск можно сузить списком канонических ref-ов через `libraries`. | `query` |
 | `read_document` | Прочитать документ полностью или частями (с continuation token). | `documentId` |
-| `list_documents` | Список документов в библиотеке с фильтрацией по статусу. | `libraryId` (опц.) |
-| `upload_documents` | Загрузить один или несколько документов. Поддерживает base64 и inline-текст. | `libraryId`, `documents` |
-| `update_document` | Дописать или заменить содержимое документа. | `libraryId`, `documentId`, `operationKind` |
+| `list_documents` | Список документов в библиотеке с фильтрацией по статусу. | `library` (опц.) |
+| `upload_documents` | Загрузить один или несколько документов. Поддерживает base64 и inline-текст. | `library`, `documents` |
+| `update_document` | Дописать или заменить содержимое документа. | `library`, `documentId`, `operationKind` |
 | `delete_document` | Удалить документ вместе с ревизиями, чанками и вкладом в граф. | `documentId` |
 | `get_mutation_status` | Проверить статус мутации (upload/update/delete). | `receiptId` |
 
@@ -99,16 +100,16 @@ Response структура: `answer` (текст), `citations` (чанки + с
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `search_entities` | Поиск сущностей в графе знаний по имени или описанию. | `libraryId`, `query` |
-| `get_graph_topology` | Получить support-ranked срез топологии графа (сущности, связи, документные привязки) с лимитом. | `libraryId` |
-| `list_relations` | Список связей в графе, упорядоченных по количеству подтверждений. | `libraryId` |
-| `get_communities` | Список graph communities с summary и top entities. | `libraryId` |
+| `search_entities` | Поиск сущностей в графе знаний по имени или описанию. | `library`, `query` |
+| `get_graph_topology` | Получить support-ranked срез топологии графа (сущности, связи, документные привязки) с лимитом. | `library` |
+| `list_relations` | Список связей в графе, упорядоченных по количеству подтверждений. | `library` |
+| `get_communities` | Список graph communities с summary и top entities. | `library` |
 
 ### Веб-краулинг
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `submit_web_ingest_run` | Запустить ingestion с веб-страницы или рекурсивный краул сайта. | `libraryId`, `seedUrl`, `mode` |
+| `submit_web_ingest_run` | Запустить ingestion с веб-страницы или рекурсивный краул сайта. | `library`, `seedUrl`, `mode` |
 | `get_web_ingest_run` | Загрузить текущий статус веб-краулинга. | `runId` |
 | `list_web_ingest_run_pages` | Список обнаруженных страниц и их статусов. | `runId` |
 | `cancel_web_ingest_run` | Отменить активный веб-краулинг. | `runId` |
@@ -137,7 +138,7 @@ Response структура: `answer` (текст), `citations` (чанки + с
 - Read-only токены подходят для ассистентов, которым нужен только поиск, чтение и Q&A.
 - Write-enabled токены могут загружать, обновлять и удалять документы, если агенту нужно самому поддерживать knowledge base.
 - Видимость инструментов следует за грантами: клиент видит только то, что ему разрешено.
-- Если токен ограничен ровно одним workspace или library, MCP tools и query API автоматически подставляют `workspaceId` и `libraryId` из scope токена.
+- Если токен ограничен ровно одним workspace или library, MCP tools могут вывести канонический ref `workspace` или `library` из scope токена и не заставлять агента каждый раз передавать его явно.
 
 ## Что получает клиент
 

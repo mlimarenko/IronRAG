@@ -6,6 +6,9 @@ Cargo.lock
 !/Cargo.lock
 .cargo-*/
 
+# Codex CLI scratch
+.codex
+
 # Env
 .env
 .env.*

@@ -62,7 +62,18 @@ export interface CatalogLibraryResponse {
   id: string;
   workspaceId: string;
   displayName?: string;
+  webIngestPolicy?: WebIngestPolicy;
   createdAt?: string;
+}
+
+export interface WebIngestIgnorePattern {
+  kind: "url_prefix" | "path_prefix" | "glob";
+  value: string;
+  source?: "library" | "run" | null;
+}
+
+export interface WebIngestPolicy {
+  ignorePatterns: WebIngestIgnorePattern[];
 }
 
 export interface BindingValidationResponse {
@@ -80,7 +91,9 @@ export interface MintTokenRequest {
   permissionKinds?: string[];
 }
 
-function buildQuery(params: Record<string, string | number | boolean | undefined>) {
+function buildQuery(
+  params: Record<string, string | number | boolean | undefined>,
+) {
   const searchParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === "") {
@@ -96,7 +109,10 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 export const adminApi = {
   listTokens: () => apiFetch<RawTokenResponse[]>("/iam/tokens"),
   mintToken: (request: MintTokenRequest) =>
-    apiFetch<RawTokenMintResponse>("/iam/tokens", { method: "POST", body: JSON.stringify(request) }),
+    apiFetch<RawTokenMintResponse>("/iam/tokens", {
+      method: "POST",
+      body: JSON.stringify(request),
+    }),
   revokeToken: (principalId: string) =>
     apiFetch<void>(`/iam/tokens/${principalId}/revoke`, { method: "POST" }),
 
@@ -104,7 +120,9 @@ export const adminApi = {
   listModels: (params: ListModelsParams = {}) =>
     apiFetch<RawModelCatalogEntry[]>(`/ai/models${buildQuery(params)}`),
   listCredentials: (params: AiScopeParams = {}) =>
-    apiFetch<RawProviderCredentialResponse[]>(`/ai/credentials${buildQuery(params)}`),
+    apiFetch<RawProviderCredentialResponse[]>(
+      `/ai/credentials${buildQuery(params)}`,
+    ),
   createCredential: (data: CreateCredentialRequest) =>
     apiFetch<RawProviderCredentialResponse>("/ai/credentials", {
       method: "POST",
@@ -115,8 +133,12 @@ export const adminApi = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
-  listBindings: (params: Required<Pick<AiScopeParams, 'scopeKind'>> & AiScopeParams) =>
-    apiFetch<RawBindingAssignmentResponse[]>(`/ai/bindings${buildQuery(params)}`),
+  listBindings: (
+    params: Required<Pick<AiScopeParams, "scopeKind">> & AiScopeParams,
+  ) =>
+    apiFetch<RawBindingAssignmentResponse[]>(
+      `/ai/bindings${buildQuery(params)}`,
+    ),
   createBinding: (data: CreateBindingRequest) =>
     apiFetch<RawBindingAssignmentResponse>("/ai/bindings", {
       method: "POST",
@@ -130,9 +152,13 @@ export const adminApi = {
   deleteBinding: (bindingId: string) =>
     apiFetch<void>(`/ai/bindings/${bindingId}`, { method: "DELETE" }),
   validateBinding: (bindingId: string) =>
-    apiFetch<BindingValidationResponse>(`/ai/bindings/${bindingId}/validate`, { method: "POST" }),
+    apiFetch<BindingValidationResponse>(`/ai/bindings/${bindingId}/validate`, {
+      method: "POST",
+    }),
   listModelPresets: (params: AiScopeParams = {}) =>
-    apiFetch<RawModelPresetResponse[]>(`/ai/model-presets${buildQuery(params)}`),
+    apiFetch<RawModelPresetResponse[]>(
+      `/ai/model-presets${buildQuery(params)}`,
+    ),
   createModelPreset: (data: CreateModelPresetRequest) =>
     apiFetch<RawModelPresetResponse>("/ai/model-presets", {
       method: "POST",
@@ -167,17 +193,33 @@ export const adminApi = {
       })}`,
     ),
 
-  listWorkspaces: () => apiFetch<CatalogWorkspaceResponse[]>("/catalog/workspaces"),
+  listWorkspaces: () =>
+    apiFetch<CatalogWorkspaceResponse[]>("/catalog/workspaces"),
   listLibraries: (workspaceId: string) =>
-    apiFetch<CatalogLibraryResponse[]>(`/catalog/workspaces/${workspaceId}/libraries`),
+    apiFetch<CatalogLibraryResponse[]>(
+      `/catalog/workspaces/${workspaceId}/libraries`,
+    ),
+  getLibrary: (libraryId: string) =>
+    apiFetch<CatalogLibraryResponse>(`/catalog/libraries/${libraryId}`),
+  updateWebIngestPolicy: (libraryId: string, policy: WebIngestPolicy) =>
+    apiFetch<CatalogLibraryResponse>(
+      `/catalog/libraries/${libraryId}/web-ingest-policy`,
+      {
+        method: "PUT",
+        body: JSON.stringify(policy),
+      },
+    ),
   createWorkspace: (name: string) =>
     apiFetch<CatalogWorkspaceResponse>("/catalog/workspaces", {
       method: "POST",
       body: JSON.stringify({ displayName: name }),
     }),
   createLibrary: (workspaceId: string, name: string) =>
-    apiFetch<CatalogLibraryResponse>(`/catalog/workspaces/${workspaceId}/libraries`, {
-      method: "POST",
-      body: JSON.stringify({ displayName: name }),
-    }),
+    apiFetch<CatalogLibraryResponse>(
+      `/catalog/workspaces/${workspaceId}/libraries`,
+      {
+        method: "POST",
+        body: JSON.stringify({ displayName: name }),
+      },
+    ),
 };

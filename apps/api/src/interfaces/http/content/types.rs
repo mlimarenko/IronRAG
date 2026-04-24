@@ -101,6 +101,13 @@ pub(super) struct ContentDocumentListItem {
     pub source_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_access: Option<ContentSourceAccess>,
+    /// Summed cost across every billable execution attributed to this
+    /// document (ingest + graph extraction). Serialized as a decimal
+    /// string to avoid IEEE-754 rounding in the browser. Always present
+    /// (zero when no billable execution landed) so the frontend can
+    /// render the column without a second roundtrip.
+    pub cost: String,
+    pub cost_currency_code: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -13,8 +13,18 @@ type EvidencePanelProps = {
 };
 
 function formatRelevance(value: number): string {
-  if (value > 100) return Math.round(value).toLocaleString();
-  return `${(value * 100).toFixed(0)}%`;
+  // The relevance field is a mixed bag: entity/relation references carry a
+  // normalized probability in [0, 1], chunk/segment search hits carry a
+  // raw BM25 (or boosted BM25) score that can reach double- or
+  // triple-digits. Previously we multiplied everything by 100 unless
+  // value > 100, which produced "6384%" for a BM25 = 63.84 hit. Now we
+  // distinguish: anything within [0, 1] gets a percentage, anything
+  // above is a raw score shown with two decimals.
+  if (!Number.isFinite(value)) return '—';
+  if (value <= 1) {
+    return `${(Math.max(0, value) * 100).toFixed(0)}%`;
+  }
+  return value.toFixed(2);
 }
 
 function EvidencePanelImpl({ t, evidence, onOpenDocuments, onOpenGraph }: EvidencePanelProps) {

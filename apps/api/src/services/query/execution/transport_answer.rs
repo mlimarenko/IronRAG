@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use crate::domains::query_ir::QueryIR;
+
 use super::concise_document_subject_label;
 use super::question_intent::{question_asks_transport_comparison, question_mentions_graphql};
 use super::question_prefers_russian;
@@ -51,12 +53,13 @@ fn graphql_absence_supported(text: &str) -> bool {
 
 pub(super) fn build_transport_contract_comparison_answer(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     if !question_asks_transport_comparison(question) {
         return None;
     }
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
 
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
@@ -170,14 +173,33 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        build_graphql_absence_answer, build_transport_contract_comparison_answer,
+        QueryIR, build_graphql_absence_answer, build_transport_contract_comparison_answer,
         graphql_absence_supported,
     };
+    use crate::domains::query_ir::{QueryAct, QueryLanguage, QueryScope};
     use crate::services::query::execution::types::RuntimeMatchedChunk;
+
+    fn lenient_query_ir() -> QueryIR {
+        QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            confidence: 0.0,
+        }
+    }
 
     fn sample_chunk(document_label: &str, excerpt: &str, source_text: &str) -> RuntimeMatchedChunk {
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: Uuid::now_v7(),
             document_label: document_label.to_string(),
             excerpt: excerpt.to_string(),
@@ -224,6 +246,7 @@ mod tests {
         );
         let answer = build_transport_contract_comparison_answer(
             "Чем REST API rewards accounts отличается от inventory wsdl в транспортном контракте?",
+            &lenient_query_ir(),
             &[rewards, inventory],
         )
         .expect("transport comparison answer");
@@ -252,6 +275,7 @@ mod tests {
         );
         let answer = build_transport_contract_comparison_answer(
             "Чем REST API rewards accounts отличается от inventory wsdl в транспортном контракте?",
+            &lenient_query_ir(),
             &[checkout, rewards, inventory],
         )
         .expect("transport comparison answer");
@@ -275,6 +299,7 @@ mod tests {
         );
         let answer = build_transport_contract_comparison_answer(
             "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?",
+            &lenient_query_ir(),
             &[rewards, inventory],
         )
         .expect("transport comparison answer");

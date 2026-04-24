@@ -28,7 +28,7 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
   IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
   IRONRAG_UI_DEFAULT_LOCALE: ${IRONRAG_UI_DEFAULT_LOCALE:-ru}
-  TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-2}
+  TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-8}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL:-24}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE:-24}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY:-24}
@@ -117,6 +117,21 @@ services:
       - --server.authentication=true
       - --experimental-vector-index=true
       - --database.directory=/var/lib/arangodb3
+      # Memory caps for small (≤ 8 GB) hosts. Without these, the default
+      # per-AQL-query memory limit is auto-sized to roughly half the host
+      # RAM (~4.6 GB on an 8 GB box) and five parallel queries can reserve
+      # 23 GB of virtual memory under concurrent load, enough to
+      # trigger the OOM killer on small hosts. 1 GB / query is
+      # the minimum that survives the retrieval workload on a large
+      # library: the vector-search + graph-traversal + full-scan diagnostic
+      # queries all materialize candidate sets big enough that 256 MB
+      # produced intermittent 500s on bench runs 2026-04-23. RocksDB buffers
+      # and block cache are capped separately so ingest writes don't bloat
+      # resident memory.
+      - --query.memory-limit=1073741824
+      - --query.cache-mode=demand
+      - --rocksdb.block-cache-size=536870912
+      - --rocksdb.total-write-buffer-size=268435456
     healthcheck:
       test:
         [

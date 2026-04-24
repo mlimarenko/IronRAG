@@ -261,6 +261,7 @@ impl WebIngestFixture {
                     boundary_policy,
                     max_depth,
                     max_pages,
+                    extra_ignore_patterns: Vec::new(),
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,

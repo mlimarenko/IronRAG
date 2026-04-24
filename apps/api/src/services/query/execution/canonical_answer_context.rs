@@ -79,6 +79,8 @@ pub(crate) async fn load_direct_targeted_table_answer(
         .map(|(ordinal, block)| RuntimeMatchedChunk {
             chunk_id: block.block_id,
             document_id,
+            revision_id: block.revision_id,
+            chunk_index: block.ordinal,
             document_label: document_label.clone(),
             excerpt: focused_excerpt_for(&block.normalized_text, &plan_keywords, 280),
             score: Some(10_000.0 - ordinal as f32),
@@ -428,7 +430,7 @@ pub(crate) async fn search_community_summaries(
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     scored.truncate(limit);
 
     scored.into_iter().map(|(_, cid, summary, entities)| (cid, summary, entities)).collect()

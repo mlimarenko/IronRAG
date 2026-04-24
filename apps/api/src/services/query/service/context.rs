@@ -54,72 +54,79 @@ pub(crate) async fn assemble_context_bundle(
 ) -> anyhow::Result<()> {
     let started_at = Instant::now();
     let candidate_limit = top_k.saturating_mul(3).max(6);
-    let lexical_search = state
-        .canonical_services
-        .search
-        .search_query_evidence(
+
+    // Phase 1 — lexical search + embedding lookup are fully independent
+    // (neither reads anything the other writes), so run them concurrently
+    // via `tokio::join!`. On reference libraries the lexical search
+    // (four parallel AQL queries inside) lands in ~600 ms and the
+    // embedding resolve (LLM / Arango catalog) lands in ~400–500 ms;
+    // doing both sequentially added ~400 ms to every turn's
+    // AssembleContext stage for no reason.
+    let (lexical_result, embedding_result) = tokio::join!(
+        state.canonical_services.search.search_query_evidence(
             state,
             conversation.library_id,
             query_text,
             query_ir,
             candidate_limit,
-        )
-        .await
-        .context(
-            "failed canonical lexical evidence search while assembling query context bundle",
-        )?;
+        ),
+        resolve_query_embedding_context(state, conversation.library_id, query_text),
+    );
+    let lexical_search = lexical_result.context(
+        "failed canonical lexical evidence search while assembling query context bundle",
+    )?;
     let lexical_chunk_hits = lexical_search.chunk_hits;
     let lexical_entity_hits = lexical_search.entity_hits;
     let lexical_relation_hits = lexical_search.relation_hits;
     let lexical_fact_hits = lexical_search.technical_fact_hits;
     let exact_literal_bias = lexical_search.exact_literal_bias;
 
-    let embedding_context =
-        match resolve_query_embedding_context(state, conversation.library_id, query_text).await {
-            Ok(context) => context,
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    library_id = %conversation.library_id,
-                    execution_id = %execution_id,
-                    "canonical query bundle fell back to lexical retrieval"
-                );
-                None
-            }
-        };
-
-    let vector_limit = candidate_limit.saturating_mul(2).max(8);
-    let vector_chunk_hits = if let Some(context) = embedding_context.as_ref() {
-        state
-            .arango_search_store
-            .search_chunk_vectors_by_similarity(
-                conversation.library_id,
-                &context.model_catalog_id.to_string(),
-                context.freshness_generation,
-                &context.query_vector,
-                vector_limit,
-                Some(16),
-            )
-            .await
-            .context("failed vector chunk search while assembling query context bundle")?
-    } else {
-        Vec::new()
+    let embedding_context = match embedding_result {
+        Ok(context) => context,
+        Err(error) => {
+            warn!(
+                error = %error,
+                library_id = %conversation.library_id,
+                execution_id = %execution_id,
+                "canonical query bundle fell back to lexical retrieval"
+            );
+            None
+        }
     };
-    let vector_entity_hits = if let Some(context) = embedding_context.as_ref() {
-        state
-            .arango_search_store
-            .search_entity_vectors_by_similarity(
-                conversation.library_id,
-                &context.model_catalog_id.to_string(),
-                context.freshness_generation,
-                &context.query_vector,
-                vector_limit,
-                Some(16),
-            )
-            .await
-            .context("failed vector entity search while assembling query context bundle")?
-    } else {
-        Vec::new()
+
+    // Phase 2 — vector chunk and vector entity searches both read the
+    // embedding produced in phase 1 but are independent of each other.
+    // Running them concurrently via `tokio::join!` pins the phase at
+    // max(chunk_vector_ms, entity_vector_ms) ≈ 200–400 ms instead of
+    // their sum ≈ 400–800 ms.
+    let vector_limit = candidate_limit.saturating_mul(2).max(8);
+    let (vector_chunk_hits, vector_entity_hits) = match embedding_context.as_ref() {
+        Some(context) => {
+            let model_id = context.model_catalog_id.to_string();
+            let query_vec = &context.query_vector;
+            let (chunk_result, entity_result) = tokio::join!(
+                state.arango_search_store.search_chunk_vectors_by_similarity(
+                    conversation.library_id,
+                    &model_id,
+                    query_vec,
+                    vector_limit,
+                    Some(16),
+                ),
+                state.arango_search_store.search_entity_vectors_by_similarity(
+                    conversation.library_id,
+                    &model_id,
+                    query_vec,
+                    vector_limit,
+                    Some(16),
+                ),
+            );
+            let chunks = chunk_result
+                .context("failed vector chunk search while assembling query context bundle")?;
+            let entities = entity_result
+                .context("failed vector entity search while assembling query context bundle")?;
+            (chunks, entities)
+        }
+        None => (Vec::new(), Vec::new()),
     };
 
     let mut chunk_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
@@ -185,16 +192,35 @@ pub(crate) async fn assemble_context_bundle(
 
     let entity_seed_ids = top_ranked_ids(&entity_refs, top_k.max(3));
     let mut entity_neighborhood_rows = 0usize;
-    for entity_id in entity_seed_ids {
-        let neighborhood = state
-            .arango_graph_store
-            .list_entity_neighborhood(entity_id, conversation.library_id, 2, candidate_limit * 4)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load entity neighborhood while assembling query context bundle for entity {entity_id}"
+    // Parallel entity-neighborhood fan-out. Each seed entity issues a
+    // single Arango traversal; they're fully independent, so running
+    // them sequentially (the previous pattern) wasted wall-clock on N
+    // × ~80 ms round-trips. `join_all` pins the batch at
+    // max(per-entity latency). The absorb loop below serialises the
+    // HashMap merge; that's intentional to keep rank indices stable.
+    let entity_neighborhood_futures = entity_seed_ids.iter().map(|entity_id| {
+        let entity_id = *entity_id;
+        async move {
+            let neighborhood = state
+                .arango_graph_store
+                .list_entity_neighborhood(
+                    entity_id,
+                    conversation.library_id,
+                    2,
+                    candidate_limit * 4,
                 )
-            })?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load entity neighborhood while assembling query context bundle for entity {entity_id}"
+                    )
+                })?;
+            Ok::<_, anyhow::Error>(neighborhood)
+        }
+    });
+    let entity_neighborhoods: Vec<_> =
+        futures::future::try_join_all(entity_neighborhood_futures).await?;
+    for neighborhood in entity_neighborhoods {
         entity_neighborhood_rows = entity_neighborhood_rows.saturating_add(neighborhood.len());
         for row in neighborhood {
             absorb_traversal_row(
@@ -211,16 +237,42 @@ pub(crate) async fn assemble_context_bundle(
     let relation_seed_ids = top_ranked_ids(&relation_refs, top_k.max(3));
     let mut relation_traversal_rows = 0usize;
     let mut relation_evidence_rows = 0usize;
-    for relation_id in relation_seed_ids {
-        let traversal = state
-            .arango_graph_store
-            .expand_relation_centric(relation_id, conversation.library_id, 2, candidate_limit * 4)
-            .await
-            .with_context(|| {
+    // Parallel relation fan-out. For each seed relation we issue two
+    // independent Arango calls — `expand_relation_centric` and
+    // `list_relation_evidence_lookup` — in parallel, and the outer
+    // `join_all` collapses every seed into one max-latency batch
+    // rather than paying 2 × N round-trips serially.
+    let relation_futures = relation_seed_ids.iter().map(|relation_id| {
+        let relation_id = *relation_id;
+        async move {
+            let expand_future = state.arango_graph_store.expand_relation_centric(
+                relation_id,
+                conversation.library_id,
+                2,
+                candidate_limit * 4,
+            );
+            let evidence_future = state.arango_graph_store.list_relation_evidence_lookup(
+                relation_id,
+                conversation.library_id,
+                candidate_limit,
+            );
+            let (traversal, evidence_lookup) = tokio::join!(expand_future, evidence_future);
+            let traversal = traversal.with_context(|| {
                 format!(
                     "failed to expand relation-centric neighborhood while assembling query context bundle for relation {relation_id}"
                 )
             })?;
+            let evidence_lookup = evidence_lookup.with_context(|| {
+                format!(
+                    "failed to load relation evidence lookup while assembling query context bundle for relation {relation_id}"
+                )
+            })?;
+            Ok::<_, anyhow::Error>((relation_id, traversal, evidence_lookup))
+        }
+    });
+    let relation_batches: Vec<_> = futures::future::try_join_all(relation_futures).await?;
+    for (relation_id, traversal, evidence_lookup) in relation_batches {
+        let _ = relation_id;
         relation_traversal_rows = relation_traversal_rows.saturating_add(traversal.len());
         for row in traversal {
             absorb_traversal_row(
@@ -232,16 +284,6 @@ pub(crate) async fn assemble_context_bundle(
                 "relation_traversal",
             );
         }
-
-        let evidence_lookup = state
-            .arango_graph_store
-            .list_relation_evidence_lookup(relation_id, conversation.library_id, candidate_limit)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load relation evidence lookup while assembling query context bundle for relation {relation_id}"
-                )
-            })?;
         relation_evidence_rows = relation_evidence_rows.saturating_add(evidence_lookup.len());
         for (index, row) in evidence_lookup.into_iter().enumerate() {
             merge_ranked_reference(
@@ -591,9 +633,9 @@ async fn resolve_query_embedding_context(
             ApiError::ProviderFailure(format!("failed to embed query bundle request: {error}"))
         })?;
 
+    let _ = generation;
     Ok(Some(QueryEmbeddingContext {
         model_catalog_id: binding.model_catalog_id,
-        freshness_generation: generation.active_vector_generation,
         query_vector: embedding.embedding,
     }))
 }
@@ -1019,26 +1061,46 @@ pub(crate) async fn load_execution_prepared_reference_context(
         &chunk_supported_fact_rows,
         &mut fact_rank_refs,
     );
+    // Post-answer reference hydration: the generated answer body is
+    // already accepted and streamed before we reach this block, so an
+    // intermittent Arango connection drop (memory-cap throttle, cursor
+    // reset) must not turn a succeeded turn into a 500. Fail-soft to an
+    // empty vec and log, exactly like the legacy best-effort path —
+    // references degrade but the answer still reaches the user.
     let technical_fact_rows =
         if fact_rank_refs.is_empty() && bundle.bundle.selected_fact_ids.is_empty() {
             Vec::new()
         } else {
-            state
-                .arango_document_store
-                .list_technical_facts_by_ids(&selected_fact_ids_for_detail(bundle, &fact_rank_refs))
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            let ids = selected_fact_ids_for_detail(bundle, &fact_rank_refs);
+            match state.arango_document_store.list_technical_facts_by_ids(&ids).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        technical_fact_ids = ids.len(),
+                        "post-answer technical fact lookup failed; returning empty reference list",
+                    );
+                    Vec::new()
+                }
+            }
         };
     let block_rank_refs =
         derive_block_rank_refs(bundle, &evidence_rows, &technical_fact_rows, &chunk_rows);
     let structured_block_rows = if block_rank_refs.is_empty() {
         Vec::new()
     } else {
-        state
-            .arango_document_store
-            .list_structured_blocks_by_ids(&block_rank_refs.keys().copied().collect::<Vec<_>>())
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        let ids: Vec<Uuid> = block_rank_refs.keys().copied().collect();
+        match state.arango_document_store.list_structured_blocks_by_ids(&ids).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    structured_block_ids = ids.len(),
+                    "post-answer structured block lookup failed; returning empty reference list",
+                );
+                Vec::new()
+            }
+        }
     };
     let segment_revision_info =
         load_prepared_segment_revision_info(state, &structured_block_rows).await;

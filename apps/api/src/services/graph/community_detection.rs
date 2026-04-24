@@ -88,7 +88,7 @@ impl CommunityDetectionService {
             comm_entities.entry(comm).or_default().push((node.label.clone(), node.support_count));
         }
         for entities in comm_entities.values_mut() {
-            entities.sort_by(|a, b| b.1.cmp(&a.1));
+            entities.sort_by_key(|entity| std::cmp::Reverse(entity.1));
             entities.truncate(10);
         }
 

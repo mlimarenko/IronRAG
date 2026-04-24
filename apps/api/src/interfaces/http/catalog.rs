@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, get},
+    routing::{delete, get, put},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -16,15 +16,20 @@ use crate::{
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_MCP_DISCOVERY, POLICY_WORKSPACE_ADMIN, authorize_library_discovery,
-            authorize_workspace_discovery, load_workspace_and_authorize,
+            POLICY_LIBRARY_WRITE, POLICY_MCP_DISCOVERY, POLICY_WORKSPACE_ADMIN,
+            authorize_library_discovery, authorize_workspace_discovery, load_library_and_authorize,
+            load_workspace_and_authorize,
         },
         router_support::{ApiError, RequestId},
     },
     services::{
-        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand, UpdateLibraryCommand},
+        catalog_service::{
+            CreateLibraryCommand, CreateWorkspaceCommand, UpdateLibraryCommand,
+            UpdateLibraryWebIngestPolicyCommand,
+        },
         iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     },
+    shared::web::ingest::WebIngestPolicy,
 };
 
 #[derive(Debug, Serialize)]
@@ -52,6 +57,7 @@ pub struct CatalogLibraryResponse {
     pub display_name: String,
     pub description: Option<String>,
     pub extraction_prompt: Option<String>,
+    pub web_ingest_policy: WebIngestPolicy,
     pub lifecycle_state: String,
     pub ingestion_readiness: CatalogLibraryIngestionReadinessResponse,
 }
@@ -81,6 +87,12 @@ pub struct UpdateCatalogLibraryRequest {
     pub lifecycle_state: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLibraryWebIngestPolicyRequest {
+    pub ignore_patterns: Vec<crate::shared::web::ingest::WebIngestIgnorePattern>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/catalog/workspaces", get(list_workspaces).post(create_workspace))
@@ -91,6 +103,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/catalog/workspaces/{workspace_id}/libraries/{library_id}", delete(delete_library))
         .route("/catalog/libraries/{library_id}", get(get_library).put(update_library))
+        .route(
+            "/catalog/libraries/{library_id}/web-ingest-policy",
+            put(update_library_web_ingest_policy),
+        )
 }
 
 #[tracing::instrument(level = "info", name = "http.list_workspaces", skip_all, fields(item_count))]
@@ -433,6 +449,58 @@ async fn update_library(
     Ok(Json(map_library(library)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_library_web_ingest_policy",
+    skip_all,
+    fields(library_id = %library_id)
+)]
+async fn update_library_web_ingest_policy(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(library_id): Path<Uuid>,
+    Json(payload): Json<UpdateLibraryWebIngestPolicyRequest>,
+) -> Result<Json<CatalogLibraryResponse>, ApiError> {
+    let existing =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
+
+    let library = state
+        .canonical_services
+        .catalog
+        .update_library_web_ingest_policy(
+            &state,
+            UpdateLibraryWebIngestPolicyCommand {
+                library_id,
+                web_ingest_policy: WebIngestPolicy { ignore_patterns: payload.ignore_patterns },
+            },
+        )
+        .await?;
+
+    record_catalog_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "catalog.library.web_ingest_policy.update",
+        "succeeded",
+        Some(format!("library {} web ingest policy updated", library.display_name)),
+        Some(format!(
+            "principal {} updated web ingest policy for library {} in workspace {}",
+            auth.principal_id, library.id, library.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "library".to_string(),
+            subject_id: library.id,
+            workspace_id: Some(existing.workspace_id),
+            library_id: Some(library.id),
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(Json(map_library(library)))
+}
+
 fn map_workspace(workspace: CatalogWorkspace) -> CatalogWorkspaceResponse {
     CatalogWorkspaceResponse {
         id: workspace.id,
@@ -450,6 +518,7 @@ fn map_library(library: CatalogLibrary) -> CatalogLibraryResponse {
         display_name: library.display_name,
         description: library.description,
         extraction_prompt: library.extraction_prompt,
+        web_ingest_policy: library.web_ingest_policy,
         lifecycle_state: lifecycle_state_label(&library.lifecycle_state).to_string(),
         ingestion_readiness: CatalogLibraryIngestionReadinessResponse {
             ready: library.ingestion_readiness.ready,

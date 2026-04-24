@@ -10,6 +10,7 @@ use super::{
     fallback_title_from_url, ingest_repository, map_web_run_counts_row, now_if_terminal,
     resolved_web_mime_type, source_file_name_from_url, telemetry,
 };
+use crate::services::content::service::MaterializedWebCapture;
 
 pub(super) async fn execute_single_page_run(
     service: &WebIngestService,
@@ -64,6 +65,7 @@ pub(super) async fn execute_single_page_run(
             host_classification: None,
             candidate_state: WebCandidateState::Processing.as_str(),
             classification_reason: Some(WebClassificationReason::SeedAccepted.as_str()),
+            classification_detail: None,
             content_type: None,
             http_status: None,
             snapshot_storage_key: None,
@@ -135,34 +137,44 @@ pub(super) async fn execute_single_page_run(
         }
     };
 
+    let (candidate_state, classification_reason, telemetry_event) = if materialized.is_duplicate() {
+        (
+            WebCandidateState::Duplicate,
+            WebClassificationReason::DuplicateContent,
+            "candidate_duplicate",
+        )
+    } else {
+        (WebCandidateState::Processed, WebClassificationReason::SeedAccepted, "candidate_processed")
+    };
     let _ = ingest_repository::update_web_discovered_page(
         &state.persistence.postgres,
         seed_candidate.id,
         &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-            final_url: Some(materialized.final_url.as_str()),
-            canonical_url: Some(materialized.final_url.as_str()),
+            final_url: Some(materialized.final_url()),
+            canonical_url: Some(materialized.final_url()),
             host_classification: None,
-            candidate_state: WebCandidateState::Processed.as_str(),
-            classification_reason: Some(WebClassificationReason::SeedAccepted.as_str()),
-            content_type: Some(materialized.content_type.as_str()),
+            candidate_state: candidate_state.as_str(),
+            classification_reason: Some(classification_reason.as_str()),
+            classification_detail: seed_candidate.classification_detail.as_deref(),
+            content_type: Some(materialized.content_type()),
             http_status: Some(resource.http_status),
             snapshot_storage_key: Some(snapshot_storage_key.as_str()),
             updated_at: Some(Utc::now()),
-            document_id: Some(materialized.document_id),
-            result_revision_id: Some(materialized.revision_id),
-            mutation_item_id: Some(materialized.mutation_item_id),
+            document_id: Some(materialized.document_id()),
+            result_revision_id: materialized.revision_id(),
+            mutation_item_id: Some(materialized.mutation_item_id()),
         },
     )
     .await
     .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     telemetry::web_candidate_event(
-        "candidate_processed",
+        telemetry_event,
         processing_row.id,
         seed_candidate.id,
-        WebCandidateState::Processed.as_str(),
-        &materialized.final_url,
+        candidate_state.as_str(),
+        materialized.final_url(),
         0,
-        Some(WebClassificationReason::SeedAccepted.as_str()),
+        Some(classification_reason.as_str()),
         None,
     );
 
@@ -375,6 +387,7 @@ pub(super) async fn materialize_snapshot_resource(
         })?;
 
     let checksum = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&resource.payload_bytes)));
+    let content_type = resolved_web_mime_type(resource.content_type.as_deref(), &extraction_plan);
     let materialized = state
         .canonical_services
         .content
@@ -387,10 +400,7 @@ pub(super) async fn materialize_snapshot_resource(
                 requested_by_principal_id: run.requested_by_principal_id,
                 final_url: resource.final_url.clone(),
                 checksum,
-                mime_type: resolved_web_mime_type(
-                    resource.content_type.as_deref(),
-                    &extraction_plan,
-                ),
+                mime_type: content_type.clone(),
                 byte_size: i64::try_from(resource.payload_bytes.len()).unwrap_or(i64::MAX),
                 title: extraction_title(&extraction_plan.source_map)
                     .or_else(|| fallback_title_from_url(&resource.final_url)),
@@ -408,13 +418,25 @@ pub(super) async fn materialize_snapshot_resource(
             )
         })?;
 
-    Ok(MaterializedWebPage {
-        final_url: resource.final_url.clone(),
-        content_type: resolved_web_mime_type(resource.content_type.as_deref(), &extraction_plan),
-        document_id: materialized.document.id,
-        revision_id: materialized.revision.id,
-        mutation_item_id: materialized.mutation_item.id,
-        _job_id: materialized.job_id,
+    Ok(match materialized {
+        MaterializedWebCapture::Ingested { document, revision, mutation_item, job_id } => {
+            MaterializedWebPage::Ingested {
+                final_url: resource.final_url.clone(),
+                content_type,
+                document_id: document.id,
+                revision_id: revision.id,
+                mutation_item_id: mutation_item.id,
+                _job_id: job_id,
+            }
+        }
+        MaterializedWebCapture::DuplicateContent { existing_document_id, mutation_item } => {
+            MaterializedWebPage::DuplicateContent {
+                final_url: resource.final_url.clone(),
+                content_type,
+                existing_document_id,
+                mutation_item_id: mutation_item.id,
+            }
+        }
     })
 }
 
@@ -434,6 +456,7 @@ pub(super) async fn fail_single_page_run(
             host_classification: None,
             candidate_state: WebCandidateState::Failed.as_str(),
             classification_reason: failure.candidate_reason.as_deref(),
+            classification_detail: None,
             content_type: failure.content_type.as_deref(),
             http_status: failure.http_status,
             snapshot_storage_key: None,

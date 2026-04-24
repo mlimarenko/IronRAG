@@ -15,6 +15,7 @@ use crate::{
         ApiError, map_library_create_error, map_workspace_create_error,
     },
     shared::slugs::slugify,
+    shared::web::ingest::{WebIngestPolicy, validate_web_ingest_policy},
 };
 
 const INGEST_REQUIRED_BINDINGS: &[(AiBindingPurpose, &str)] =
@@ -52,6 +53,12 @@ pub struct UpdateLibraryCommand {
     pub description: Option<String>,
     pub extraction_prompt: Option<String>,
     pub lifecycle_state: CatalogLifecycleState,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateLibraryWebIngestPolicyCommand {
+    pub library_id: Uuid,
+    pub web_ingest_policy: WebIngestPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -358,6 +365,33 @@ impl CatalogService {
         map_library_row(row, readiness)
     }
 
+    /// Updates the reusable web-ingest policy owned by one library.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ApiError`] when validation fails, the repository update fails, readiness
+    /// derivation fails, or the library does not exist.
+    pub async fn update_library_web_ingest_policy(
+        &self,
+        state: &AppState,
+        command: UpdateLibraryWebIngestPolicyCommand,
+    ) -> Result<CatalogLibrary, ApiError> {
+        let web_ingest_policy =
+            validate_web_ingest_policy(command.web_ingest_policy).map_err(ApiError::BadRequest)?;
+        let policy_json =
+            serde_json::to_value(web_ingest_policy).map_err(|_| ApiError::Internal)?;
+        let row = catalog_repository::update_library_web_ingest_policy(
+            &state.persistence.postgres,
+            command.library_id,
+            policy_json,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
+        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        map_library_row(row, readiness)
+    }
+
     /// Deletes a library and its stashed storage snapshot.
     ///
     /// # Errors
@@ -634,6 +668,8 @@ fn map_library_row(
         display_name: row.display_name,
         description: row.description,
         extraction_prompt: row.extraction_prompt,
+        web_ingest_policy: serde_json::from_value(row.web_ingest_policy)
+            .map_err(|_| ApiError::Internal)?,
         lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)
             .map_err(CatalogLifecycleError::into_persisted_error)?,
         ingestion_readiness,

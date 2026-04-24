@@ -677,9 +677,15 @@ impl ContentService {
             self.ensure_delete_async_operation(state, command, mutation.id).await?;
         let mutation_id = mutation.id;
         let completed_at = mutation.completed_at.unwrap_or_else(Utc::now);
+        let refresh_graph_projection = command.parent_async_operation_id.is_none();
 
         let _ = self
-            .delete_document_with_context(state, command.document_id, Some(mutation.id))
+            .delete_document_with_context(
+                state,
+                command.document_id,
+                Some(mutation.id),
+                refresh_graph_projection,
+            )
             .await?;
 
         if let Some(superseded_mutation_id) =
@@ -831,7 +837,7 @@ impl ContentService {
                     status: "accepted".to_string(),
                     subject_kind: "content_mutation".to_string(),
                     subject_id: Some(mutation_id),
-                    parent_async_operation_id: None,
+                    parent_async_operation_id: command.parent_async_operation_id,
                     completed_at: None,
                     failure_code: None,
                 },

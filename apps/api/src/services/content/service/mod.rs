@@ -240,12 +240,29 @@ pub struct ContentMutationAdmission {
     pub async_operation_id: Option<Uuid>,
 }
 
+/// Result of `materialize_web_capture`. Content-dedup means a
+/// successful call does NOT necessarily create a new document — when
+/// the fetched body hashes to content that already lives in the
+/// library, the candidate is recorded as a duplicate and the existing
+/// document id is returned. Caller (web-ingest single_page) branches
+/// on the variant: `Ingested` → candidate_state = processed,
+/// `DuplicateContent` → candidate_state = duplicate with
+/// classification_reason = `duplicate_content`.
 #[derive(Debug, Clone)]
-pub struct MaterializedWebCapture {
-    pub document: ContentDocument,
-    pub revision: ContentRevision,
-    pub mutation_item: ContentMutationItem,
-    pub job_id: Uuid,
+pub enum MaterializedWebCapture {
+    Ingested {
+        document: ContentDocument,
+        revision: ContentRevision,
+        mutation_item: ContentMutationItem,
+        job_id: Uuid,
+    },
+    /// Web-ingest fetched a body whose SHA-256 already matches a
+    /// non-deleted document in the library. No new document, revision,
+    /// or ingest job is created. `mutation_item` records the skip
+    /// linked to the `existing_document_id` so the enclosing
+    /// `web_capture` mutation still settles (otherwise the mutation
+    /// would dangle).
+    DuplicateContent { existing_document_id: Uuid, mutation_item: ContentMutationItem },
 }
 
 #[derive(Debug, Clone)]

@@ -592,18 +592,21 @@ impl KnowledgeService {
         })
     }
 
-    /// Canonical library summary. Was previously enumerating every document
-    /// via `list_documents` (N × 6 prefetch round-trips — catastrophic on
-    /// a reference library with ~5 k documents). Now a single aggregate Postgres query
-    /// plus the graph-snapshot row plus the library generations list.
+    /// Canonical library summary. Reads per-library document counts
+    /// from `aggregate_library_document_metrics` — the same function
+    /// that feeds `/ops/libraries/{id}/dashboard` and `/ops/libraries/{id}`,
+    /// so `documentCountsByReadiness` here can never disagree with
+    /// the dashboard's `document_metrics` / `overview` fields. Graph
+    /// snapshot is still fetched separately to drive the graph-surface
+    /// fields on the response.
     pub async fn get_library_summary(
         &self,
         state: &AppState,
         library_id: Uuid,
     ) -> Result<KnowledgeLibrarySummary, ApiError> {
-        let (readiness, generations, graph_snapshot) = tokio::try_join!(
+        let (metrics, generations, graph_snapshot) = tokio::try_join!(
             async {
-                repositories::content_repository::aggregate_library_document_readiness(
+                repositories::content_repository::aggregate_library_document_metrics(
                     &state.persistence.postgres,
                     library_id,
                 )
@@ -620,37 +623,22 @@ impl KnowledgeService {
 
         let latest_generation = generations.into_iter().next();
 
-        // Canonical definition of "graph-ready": the document has a document
-        // node in the current projection. The old proxy (readable AND any
-        // graph snapshot exists) reported every readable document as
-        // graph-ready the moment the library had a single node, so when
-        // individual ingest jobs failed after LLM extraction but before the
-        // graph merge (timeouts, cancelled stage) the dashboard kept
-        // claiming full graph coverage while the graph viewer showed a
-        // fraction of the documents. Counting document-typed nodes directly
-        // in `runtime_graph_node` at the active projection version keeps
-        // the counter honest.
-        let graph_ready_document_count = if let Some(snapshot) = graph_snapshot.as_ref() {
-            repositories::count_runtime_graph_document_nodes_by_library(
-                &state.persistence.postgres,
-                library_id,
-                snapshot.projection_version,
-            )
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        } else {
-            0
-        };
-        let graph_sparse_document_count =
-            readiness.readable_count.saturating_sub(graph_ready_document_count);
+        // Graph-ready / graph-sparse come straight from the canonical
+        // metrics row. `aggregate_library_document_metrics` already
+        // clamped `graph_ready` to `ready` (so the published invariant
+        // `graph_ready + graph_sparse == ready` holds on the wire even
+        // during a rebuild, where `runtime_graph_node` may transiently
+        // contain more document nodes than the active readable set).
+        let graph_ready_document_count = metrics.graph_ready;
+        let graph_sparse_document_count = metrics.graph_sparse;
 
         let mut document_counts_by_readiness = std::collections::BTreeMap::<String, i64>::new();
-        if readiness.failed_count > 0 {
-            document_counts_by_readiness.insert("failed".to_string(), readiness.failed_count);
+        if metrics.failed > 0 {
+            document_counts_by_readiness.insert("failed".to_string(), metrics.failed);
         }
-        if readiness.processing_count > 0 {
-            document_counts_by_readiness
-                .insert("processing".to_string(), readiness.processing_count);
+        let processing_total = metrics.processing + metrics.queued;
+        if processing_total > 0 {
+            document_counts_by_readiness.insert("processing".to_string(), processing_total);
         }
         if graph_ready_document_count > 0 {
             document_counts_by_readiness
@@ -698,11 +686,7 @@ impl KnowledgeService {
         // aggregate returns the three readable revision numbers and a
         // `latest_created_at` field in a single AQL call.
         let library = state.canonical_services.catalog.get_library(state, library_id).await?;
-        let signals = state
-            .arango_document_store
-            .aggregate_library_generation_signals(library_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let signals = aggregate_library_generation_signals_cached(state, library_id).await?;
 
         if !signals.has_ready_text && !signals.has_ready_vector && !signals.has_ready_graph {
             return Ok(Vec::new());
@@ -912,4 +896,60 @@ fn derive_library_generation_id(
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
+}
+
+const LIBRARY_GENERATION_SIGNALS_CACHE_TTL_SECONDS: u64 = 30;
+
+fn library_generation_signals_cache_key(library_id: Uuid) -> String {
+    format!("lib_generation_signals:v1:{library_id}")
+}
+
+/// Redis-cached wrapper around `ArangoDocumentStore::aggregate_library_generation_signals`.
+///
+/// The AQL aggregate spans every `knowledge_revision` row in the library
+/// and, under concurrent ingest, is the call that surfaces as
+/// `failed to aggregate library generation signals: error sending
+/// request for url ... /_api/cursor` when Arango saturates. The hot
+/// callers — dashboard polling every 2.5 s, knowledge summary, and the
+/// library_summary branch of assistant turns — all tolerate a 30 s
+/// staleness window on the generation fingerprint (it tracks revision
+/// completion, not per-turn state), so a short TTL swaps a 200–2000 ms
+/// Arango cursor for a 1–5 ms Redis GET without changing the contract.
+async fn aggregate_library_generation_signals_cached(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<crate::infra::arangodb::document_store::LibraryGenerationSignals, ApiError> {
+    use redis::AsyncCommands;
+    let cache_key = library_generation_signals_cache_key(library_id);
+
+    if let Ok(mut conn) = state.persistence.redis.get_multiplexed_async_connection().await {
+        if let Ok(Some(bytes)) = conn.get::<_, Option<Vec<u8>>>(&cache_key).await {
+            if let Ok(signals) = serde_json::from_slice::<
+                crate::infra::arangodb::document_store::LibraryGenerationSignals,
+            >(&bytes)
+            {
+                return Ok(signals);
+            }
+        }
+    }
+
+    let signals = state
+        .arango_document_store
+        .aggregate_library_generation_signals(library_id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+
+    if let Ok(mut conn) = state.persistence.redis.get_multiplexed_async_connection().await {
+        if let Ok(encoded) = serde_json::to_vec(&signals) {
+            let _: Result<(), _> = conn
+                .set_ex::<_, _, ()>(
+                    cache_key,
+                    encoded,
+                    LIBRARY_GENERATION_SIGNALS_CACHE_TTL_SECONDS,
+                )
+                .await;
+        }
+    }
+
+    Ok(signals)
 }

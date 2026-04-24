@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -11,18 +11,16 @@ import {
   XCircle,
 } from 'lucide-react';
 
-import { dashboardApi } from '@/api';
 import { Button } from '@/components/ui/button';
 import { useApp } from '@/contexts/AppContext';
-import { errorMessage } from '@/lib/errorMessage';
+import { useLibraryMetrics } from '@/hooks/useLibraryMetrics';
 
 import { SummaryCards, type SummaryCard } from './dashboard/SummaryCards';
 import { LibraryHealthPanel, type HealthRow } from './dashboard/LibraryHealthPanel';
 import { RecentDocumentsList } from './dashboard/RecentDocumentsList';
 import { AttentionPanel } from './dashboard/AttentionPanel';
 import { LatestIngestPanel } from './dashboard/LatestIngestPanel';
-import { metricValue } from './dashboard/format';
-import type { DashboardData, DashboardState, RecentWebRun } from './dashboard/types';
+import type { DashboardState, RecentWebRun } from './dashboard/types';
 import { buildDocumentsPath } from './dashboard/types';
 
 function pickLatestRun(runs: RecentWebRun[]): RecentWebRun | undefined {
@@ -43,44 +41,27 @@ export default function DashboardPage() {
   const { activeLibrary } = useApp();
   const navigate = useNavigate();
 
-  const [state, setState] = useState<DashboardState>('loading');
-  const [refreshing, setRefreshing] = useState(false);
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [loadError, setLoadError] = useState('');
-
-  const fetchDashboard = useCallback(
-    async (libraryId: string, mode: 'initial' | 'refresh') => {
-      try {
-        const result = await dashboardApi.getLibraryDashboard(libraryId);
-        setData(result as DashboardData);
-        setState('loaded');
-        setLoadError('');
-      } catch (err: unknown) {
-        if (mode === 'initial') setState('error');
-        setLoadError(errorMessage(err, 'Failed to load dashboard'));
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (!activeLibrary) {
-      setState('no-library');
-      return;
-    }
-    setState('loading');
-    void fetchDashboard(activeLibrary.id, 'initial');
-  }, [activeLibrary, fetchDashboard]);
+  // Canonical live-metrics path: a shared hook polls the dashboard
+  // endpoint every 2.5 s while the tab is visible, pauses on hide,
+  // and fires an immediate refresh when the tab resumes. That stops
+  // the "number frozen since yesterday" class of bugs — operators
+  // see live-changing counts without any refresh clicks.
+  const { data, error, isInitialLoading, isRefreshing, refresh } =
+    useLibraryMetrics(activeLibrary?.id ?? null);
+  const state: DashboardState = !activeLibrary
+    ? 'no-library'
+    : data
+      ? 'loaded'
+      : error && !isInitialLoading
+        ? 'error'
+        : 'loading';
+  const loadError = error ?? '';
 
   const handleRefresh = useCallback(async () => {
-    if (!activeLibrary || refreshing) return;
-    setRefreshing(true);
-    try {
-      await fetchDashboard(activeLibrary.id, 'refresh');
-    } finally {
-      setRefreshing(false);
-    }
-  }, [activeLibrary, fetchDashboard, refreshing]);
+    if (!activeLibrary || isRefreshing) return;
+    await refresh();
+  }, [activeLibrary, isRefreshing, refresh]);
+  const refreshing = isRefreshing;
 
   // All derived values depend on `data`; useMemo stabilizes them so the
   // extracted widgets (wrapped in React.memo) only re-render when their
@@ -100,7 +81,16 @@ export default function DashboardPage() {
       0,
       readyCount - graphReadyCount - graphSparseCount,
     );
-    const inFlightCount = metricValue(metrics, 'in_flight', processingCount);
+    // `in_flight` is a derived value — `processing + queued`, both
+    // already rolled into `overview.processingDocuments` by the
+    // canonical aggregator on the backend. The old `metricValue(…,
+    // 'in_flight', processingCount)` fallback was a two-source
+    // drift trap: the `metrics[]` value came from a separate
+    // queue_depth + running_attempts calculation and could diverge
+    // from the document-level `processingCount` during rebuilds.
+    // Read straight from the overview so dashboard numbers stay
+    // internally consistent.
+    const inFlightCount = processingCount;
     const graphReadyPct =
       totalDocuments > 0
         ? Math.min(100, Math.round((graphReadyCount / totalDocuments) * 100))

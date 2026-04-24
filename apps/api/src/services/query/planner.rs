@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::domains::query::{QueryPlanningMetadata, RuntimeQueryMode};
+use crate::services::query::latest_versions::latest_version_context_top_k;
 
 const MAX_TOP_K: usize = 48;
 const DEFAULT_TOP_K: usize = 8;
@@ -212,7 +213,7 @@ pub fn build_query_plan(
         entity_keywords,
         concept_keywords,
         expanded_keywords,
-        top_k: top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K),
+        top_k: planned_top_k(question, top_k),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
         hyde_recommended,
     }
@@ -250,7 +251,7 @@ pub fn build_query_plan_from_metadata(
         entity_keywords,
         concept_keywords,
         expanded_keywords,
-        top_k: top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K),
+        top_k: planned_top_k(question, top_k),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
         hyde_recommended,
     }
@@ -265,6 +266,10 @@ fn classify_query_intent_profile(question: &str, keywords: &[String]) -> QueryIn
         multi_document_technical: exact_literal_technical
             && is_multi_document_technical_question(&lowered),
     }
+}
+
+fn planned_top_k(question: &str, top_k: Option<usize>) -> usize {
+    latest_version_context_top_k(question, top_k.unwrap_or(DEFAULT_TOP_K)).clamp(1, MAX_TOP_K)
 }
 
 fn is_exact_literal_technical_question(question: &str, keywords: &[String]) -> bool {
@@ -447,6 +452,18 @@ mod tests {
         assert_eq!(plan.requested_mode, RuntimeQueryMode::Mix);
         assert_eq!(plan.planned_mode, RuntimeQueryMode::Mix);
         assert_eq!(plan.top_k, 48);
+    }
+
+    #[test]
+    fn build_query_plan_expands_top_k_for_latest_version_coverage() {
+        let plan = build_query_plan("Что нового в последних 5 релизах?", None, None, None);
+        assert_eq!(plan.top_k, 20);
+
+        let explicit_low = build_query_plan("latest 5 releases", None, Some(6), None);
+        assert_eq!(explicit_low.top_k, 20);
+
+        let capped = build_query_plan("latest 100 releases", None, None, None);
+        assert_eq!(capped.top_k, 40);
     }
 
     #[test]

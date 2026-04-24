@@ -10,6 +10,8 @@ import {
 } from '@/adapters/assistant';
 import { errorMessage } from '@/lib/errorMessage';
 import { queryApi } from '@/api';
+import type { AssistantTurnExecutionResponse } from '@/api/query';
+import { SseTransportUnavailableError } from '@/api/query';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -35,6 +37,38 @@ const STARTER_PROMPT_KEYS = [
   'assistant.starterPrompts.storage',
 ] as const;
 
+type TranslateFn = ReturnType<typeof useTranslation>['t'];
+
+// Diagnose a failed turn and return a user-facing, localised message.
+// Strings live in `i18n/*.json` under `assistant.errorDiagnosis.*` — do
+// not inline translated text here. Default branch falls back to the raw
+// error string so operators can still read the underlying failure.
+function diagnoseTurnError(err: unknown, raw: string, t: TranslateFn): string {
+  const lower = raw.toLowerCase();
+  const looksLikeNetworkReject =
+    lower.includes('networkerror') ||
+    lower.includes('failed to fetch') ||
+    lower.includes('load failed') ||
+    lower.includes('input stream') ||
+    lower.includes('stream ended');
+  // If we get here after `createTurnWithFallback`, the original SSE
+  // request was blocked AND the non-SSE fallback was also rejected —
+  // both at the network layer, no backend involvement. Canonical cause
+  // in practice is a browser-side block (Strict Tracking Protection,
+  // uBlock / Privacy Badger, corporate TLS-inspection proxy, service
+  // worker) OR a reverse-proxy that is buffering the SSE stream.
+  if (err instanceof SseTransportUnavailableError || looksLikeNetworkReject) {
+    return t('assistant.errorDiagnosis.networkBlocked');
+  }
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return t('assistant.errorDiagnosis.timeout');
+  }
+  if (lower.includes('401') || lower.includes('unauthorized')) {
+    return t('assistant.errorDiagnosis.unauthorized');
+  }
+  return raw;
+}
+
 export default function AssistantPage() {
   const { t } = useTranslation();
   const { activeLibrary, activeWorkspace, locale } = useApp();
@@ -45,6 +79,7 @@ export default function AssistantPage() {
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isExecuting, setIsExecuting] = useState(false);
+  const [retryable, setRetryable] = useState<{ question: string; diagnosis: string } | null>(null);
   const [sessionSearch, setSessionSearch] = useState('');
   const [showEvidence, setShowEvidence] = useState(true);
   const [showSessionRail, setShowSessionRail] = useState(true);
@@ -94,6 +129,30 @@ export default function AssistantPage() {
     }
   }, []);
 
+  const applyTurnResult = useCallback(
+    (streamingId: string, result: AssistantTurnExecutionResponse) => {
+      const answerText =
+        result.responseTurn?.contentText ?? t('assistant.noResponseGenerated');
+      const evidence = mapAssistantTurnToEvidence(result);
+
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === streamingId
+            ? {
+                id: result.responseTurn?.id ?? streamingId,
+                role: 'assistant',
+                content: answerText,
+                timestamp: result.responseTurn?.createdAt ?? message.timestamp,
+                executionId: result.responseTurn?.executionId ?? null,
+                evidence,
+              }
+            : message,
+        ),
+      );
+    },
+    [t],
+  );
+
   const handleSelectSession = useCallback(
     (sessionId: string) => {
       setActiveSession(sessionId);
@@ -142,6 +201,7 @@ export default function AssistantPage() {
     // and re-used correctly, but extracting to a module-level constant makes
     // the contract explicit to readers.
     const streamingId = `m-stream-${now}`;
+    let runtimeExecutionId: string | null = null;
 
     try {
       let sessionId = activeSession;
@@ -161,8 +221,12 @@ export default function AssistantPage() {
         },
       ]);
 
-      const result = await queryApi.createTurnStream(sessionId, questionText, {
-        onRuntime: () => {},
+      const result = await queryApi.createTurnWithFallback(sessionId, questionText, {
+        onRuntime: (runtime) => {
+          if (typeof runtime.runtimeExecutionId === 'string') {
+            runtimeExecutionId = runtime.runtimeExecutionId;
+          }
+        },
         onToolCallStarted: (event) => {
           setMessages((prev) =>
             prev.map((message) =>
@@ -216,41 +280,52 @@ export default function AssistantPage() {
         },
       });
 
-      const answerText =
-        result.responseTurn?.contentText ?? t('assistant.noResponseGenerated');
-      const evidence = mapAssistantTurnToEvidence(result);
-
-      setMessages((prev) =>
-        prev.map((message) =>
-          message.id === streamingId
-            ? {
-                id: result.responseTurn?.id ?? streamingId,
-                role: 'assistant',
-                content: answerText,
-                timestamp: result.responseTurn?.createdAt ?? message.timestamp,
-                executionId: result.responseTurn?.executionId ?? null,
-                evidence,
-              }
-            : message,
-        ),
-      );
+      applyTurnResult(streamingId, result);
 
       loadSessions();
     } catch (err: unknown) {
+      if (!(err instanceof SseTransportUnavailableError) && runtimeExecutionId) {
+        try {
+          const recovered = await queryApi.recoverTurnAfterStreamFailure(
+            runtimeExecutionId,
+          );
+          if (recovered?.responseTurn?.id || recovered?.responseTurn?.contentText) {
+            applyTurnResult(streamingId, recovered);
+            setRetryable(null);
+            loadSessions();
+            return;
+          }
+        } catch (recoveryErr) {
+          console.warn(
+            'Failed to recover assistant turn after stream interruption:',
+            recoveryErr,
+          );
+        }
+      }
+      const rawMessage = errorMessage(err, t('assistant.unknownError'));
+      const diagnosis = diagnoseTurnError(err, rawMessage, t);
       setMessages((prev) => [
         ...prev.filter((message) => !message.id.startsWith('m-stream-')),
         {
           id: `m-err-${Date.now()}`,
           role: 'assistant',
-          content: t('assistant.sendError', {
-            error: errorMessage(err, t('assistant.unknownError')),
-          }),
+          content: t('assistant.sendError', { error: diagnosis }),
           timestamp: new Date().toISOString(),
         },
       ]);
+      setRetryable({ question: questionText, diagnosis });
     } finally {
       setIsExecuting(false);
     }
+  };
+
+  const handleRetry = () => {
+    if (!retryable) return;
+    setInputText(retryable.question);
+    setRetryable(null);
+    // Two-stage UX: refill the input so the user sees what's about to
+    // be sent and can edit before confirming. Intentional — transparent
+    // retry risks duplicating the turn if the backend did receive it.
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -430,6 +505,22 @@ export default function AssistantPage() {
               background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--card)))',
             }}
           >
+            {retryable && (
+              <div className="mb-2 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <div className="flex-1">
+                  <div className="font-medium">{t('assistant.retryTitle')}</div>
+                  <div className="mt-0.5 opacity-80">{retryable.diagnosis}</div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 shrink-0 text-xs"
+                  onClick={handleRetry}
+                >
+                  {t('assistant.retryAction')}
+                </Button>
+              </div>
+            )}
             <div className="flex items-end gap-2">
               <Textarea
                 value={inputText}

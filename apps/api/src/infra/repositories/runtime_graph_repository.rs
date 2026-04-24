@@ -58,8 +58,13 @@ pub struct RuntimeGraphEvidenceRow {
     pub page_ref: Option<String>,
     pub evidence_text: String,
     pub confidence_score: Option<f64>,
-    pub is_active: bool,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RuntimeGraphEvidenceTargetRow {
+    pub target_kind: String,
+    pub target_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -71,13 +76,11 @@ pub struct RuntimeGraphEvidenceLifecycleRow {
     pub document_id: Option<Uuid>,
     pub revision_id: Option<Uuid>,
     pub activated_by_attempt_id: Option<Uuid>,
-    pub deactivated_by_mutation_id: Option<Uuid>,
     pub chunk_id: Option<Uuid>,
     pub source_file_name: Option<String>,
     pub page_ref: Option<String>,
     pub evidence_text: String,
     pub confidence_score: Option<f64>,
-    pub is_active: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -408,6 +411,71 @@ pub async fn list_admitted_runtime_graph_edges_by_library(
         .await
 }
 
+/// Compact edge row — only the columns consumed by the NDJSON topology
+/// (`build_compact_topology` in `services/knowledge/graph_stream.rs`).
+/// Dropping the wide columns (`summary`, `canonical_key`, `metadata_json`,
+/// `weight`, timestamps) cuts the row width ~5× and the heap-fetch cost
+/// accordingly: a reference library with 155 k edges used to spend
+/// ~5.7 s just materialising the wide rows; the slim variant returns
+/// the same 155 k rows in ~1.5 s because Postgres can stream directly
+/// from the `idx_runtime_graph_edge_library_projection_nodes` leaf
+/// pages without a separate heap touch for the JSON payloads.
+#[derive(Debug, Clone, FromRow)]
+pub struct RuntimeGraphEdgeCompactRow {
+    pub from_node_id: Uuid,
+    pub to_node_id: Uuid,
+    pub relation_type: String,
+    pub support_count: i32,
+}
+
+pub async fn list_admitted_runtime_graph_edges_compact_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphEdgeCompactRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEdgeCompactRow>(
+        "select from_node_id, to_node_id, relation_type, support_count
+         from runtime_graph_edge
+         where library_id = $1
+           and projection_version = $2
+           and btrim(relation_type) <> ''
+           and from_node_id <> to_node_id
+         order by relation_type asc, support_count desc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Fetches the full node rows for a pre-computed set of admitted ids
+/// plus every `document`-type node in the library+projection bucket.
+/// Replaces `list_admitted_runtime_graph_nodes_by_library` on the
+/// topology path so the node query no longer duplicates the edge scan
+/// via the `admitted_edges` CTE — the caller derives the admitted ids
+/// once from the compact edge list and passes them through here.
+pub async fn list_runtime_graph_nodes_by_ids_or_document_type(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    admitted_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "select id, library_id, canonical_key, label, node_type, aliases_json,
+            summary, metadata_json, support_count, projection_version, created_at, updated_at
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and (node_type = 'document' or id = any($3::uuid[]))
+         order by node_type asc, label asc, created_at asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(admitted_ids)
+    .fetch_all(pool)
+    .await
+}
+
 /// Counts admitted runtime graph relations whose endpoints are both non-document
 /// nodes for one projection version.
 ///
@@ -618,6 +686,135 @@ pub async fn get_runtime_graph_node_by_key(
     .bind(canonical_key)
     .bind(projection_version)
     .fetch_optional(pool)
+    .await
+}
+
+/// One row worth of input for `bulk_upsert_runtime_graph_nodes`. Kept
+/// separate from `RuntimeGraphNodeRow` because the bulk path carries
+/// only what the caller supplies — `id`, `created_at`, `updated_at`,
+/// and `projection_version` are set by the DB.
+#[derive(Debug, Clone)]
+pub struct RuntimeGraphNodeUpsertInput {
+    pub canonical_key: String,
+    pub label: String,
+    pub node_type: String,
+    pub aliases_json: serde_json::Value,
+    pub summary: Option<String>,
+    pub metadata_json: serde_json::Value,
+    pub support_count: i32,
+}
+
+/// Bulk UPSERT of runtime graph nodes. One round-trip replaces N
+/// sequential `upsert_runtime_graph_node` calls — on a typical chunk
+/// merge (15 entities + 10 relations × 2 endpoints = up to 35 node
+/// upserts) this collapses 35 fan-out INSERT/UPDATE round-trips into
+/// one, which (a) dramatically shortens pool-hold time and (b) lets
+/// Postgres batch the WAL flush instead of fsyncing per row. `inputs`
+/// may contain duplicate canonical keys; the last duplicate wins per
+/// ON CONFLICT semantics, matching what the serial fan-out path did
+/// under race conditions.
+///
+/// RETURNING order is not guaranteed to match input order. Callers
+/// index the result by `canonical_key`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while persisting the graph nodes.
+pub async fn bulk_upsert_runtime_graph_nodes(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    inputs: &[RuntimeGraphNodeUpsertInput],
+) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<Uuid> = (0..inputs.len()).map(|_| Uuid::now_v7()).collect();
+    let canonical_keys: Vec<&str> = inputs.iter().map(|i| i.canonical_key.as_str()).collect();
+    let labels: Vec<&str> = inputs.iter().map(|i| i.label.as_str()).collect();
+    let node_types: Vec<&str> = inputs.iter().map(|i| i.node_type.as_str()).collect();
+    let aliases_jsons: Vec<serde_json::Value> =
+        inputs.iter().map(|i| i.aliases_json.clone()).collect();
+    let summaries: Vec<Option<&str>> = inputs.iter().map(|i| i.summary.as_deref()).collect();
+    let metadatas: Vec<serde_json::Value> =
+        inputs.iter().map(|i| i.metadata_json.clone()).collect();
+    let supports: Vec<i32> = inputs.iter().map(|i| i.support_count).collect();
+
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "insert into runtime_graph_node (
+            id, library_id, canonical_key, label, node_type, aliases_json, summary,
+            metadata_json, support_count, projection_version
+         )
+         select
+            t.id, $1::uuid, t.canonical_key, t.label, t.node_type, t.aliases_json,
+            t.summary, t.metadata_json, t.support_count, $2::bigint
+         from unnest(
+            $3::uuid[], $4::text[], $5::text[], $6::text[], $7::jsonb[],
+            $8::text[], $9::jsonb[], $10::int[]
+         ) as t(id, canonical_key, label, node_type, aliases_json, summary, metadata_json, support_count)
+         on conflict (library_id, canonical_key, projection_version) do update
+         set label = excluded.label,
+             node_type = excluded.node_type,
+             aliases_json = excluded.aliases_json,
+             summary = CASE
+                 WHEN excluded.summary IS NOT NULL AND excluded.summary != ''
+                      AND (runtime_graph_node.summary IS NULL OR runtime_graph_node.summary = ''
+                           OR length(excluded.summary) > length(runtime_graph_node.summary))
+                 THEN excluded.summary
+                 ELSE runtime_graph_node.summary
+             END,
+             metadata_json = excluded.metadata_json,
+             support_count = excluded.support_count,
+             updated_at = now()
+         returning id, library_id, canonical_key, label, node_type, aliases_json, summary,
+            metadata_json, support_count, projection_version, created_at, updated_at",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(&ids)
+    .bind(&canonical_keys)
+    .bind(&labels)
+    .bind(&node_types)
+    .bind(&aliases_jsons)
+    .bind(&summaries)
+    .bind(&metadatas)
+    .bind(&supports)
+    .fetch_all(pool)
+    .await
+}
+
+/// Bulk-loads canonical runtime graph nodes for a projection version by
+/// canonical key set. One round-trip replaces N single-key lookups — on a
+/// chunk merge with 15 entities and 10 relations this collapses ~35
+/// sequential `get_runtime_graph_node_by_key` calls into one indexed
+/// range scan, reducing pool-hold time and lock-wait pressure during
+/// `merge_chunk_graph_candidates`.
+///
+/// Returns the rows in the same order they appear in `canonical_keys`.
+/// Keys with no matching row are simply absent from the result.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the graph nodes.
+pub async fn list_runtime_graph_nodes_by_canonical_keys(
+    pool: &PgPool,
+    library_id: Uuid,
+    canonical_keys: &[String],
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+    if canonical_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "select id, library_id, canonical_key, label, node_type, aliases_json, summary,
+            metadata_json, support_count, projection_version, created_at, updated_at
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and canonical_key = any($3)",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(canonical_keys)
+    .fetch_all(pool)
     .await
 }
 
@@ -855,10 +1052,9 @@ pub async fn create_runtime_graph_evidence(
              source_file_name = excluded.source_file_name,
              page_ref = excluded.page_ref,
              evidence_text = excluded.evidence_text,
-             confidence_score = excluded.confidence_score,
-             is_active = true
+             confidence_score = excluded.confidence_score
          returning id, library_id, target_kind, target_id, document_id, chunk_id, source_file_name,
-            page_ref, evidence_text, confidence_score, is_active, created_at",
+            page_ref, evidence_text, confidence_score, created_at",
     )
     .bind(Uuid::now_v7())
     .bind(library_id)
@@ -973,8 +1169,7 @@ pub async fn bulk_create_runtime_graph_evidence_for_chunk(
              source_file_name = excluded.source_file_name,
              page_ref = excluded.page_ref,
              evidence_text = excluded.evidence_text,
-             confidence_score = excluded.confidence_score,
-             is_active = true",
+             confidence_score = excluded.confidence_score",
     )
     .bind(&ids)
     .bind(library_id)
@@ -1009,7 +1204,6 @@ pub const RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_BY_IDS_SQL: &str = "with
             from runtime_graph_evidence as evidence
             where evidence.library_id = $1
               and evidence.target_kind = 'node'
-              and evidence.is_active = true
               and evidence.target_id = any($3)
             group by evidence.target_id
          ),
@@ -1061,7 +1255,6 @@ pub const RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_BY_IDS_SQL: &str = "with
             from runtime_graph_evidence as evidence
             where evidence.library_id = $1
               and evidence.target_kind = 'edge'
-              and evidence.is_active = true
               and evidence.target_id = any($3)
             group by evidence.target_id
          ),
@@ -1109,9 +1302,9 @@ pub async fn list_runtime_graph_evidence_by_target(
 ) -> Result<Vec<RuntimeGraphEvidenceRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphEvidenceRow>(
         "select id, library_id, target_kind, target_id, document_id, chunk_id, source_file_name,
-            page_ref, evidence_text, confidence_score, is_active, created_at
+            page_ref, evidence_text, confidence_score, created_at
          from runtime_graph_evidence
-         where library_id = $1 and target_kind = $2 and target_id = $3 and is_active = true
+         where library_id = $1 and target_kind = $2 and target_id = $3
          order by created_at desc",
     )
     .bind(library_id)
@@ -1133,13 +1326,12 @@ pub async fn list_active_runtime_graph_evidence_lifecycle_by_target(
 ) -> Result<Vec<RuntimeGraphEvidenceLifecycleRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphEvidenceLifecycleRow>(
         "select id, library_id, target_kind, target_id, document_id, revision_id,
-            activated_by_attempt_id, deactivated_by_mutation_id, chunk_id, source_file_name,
-            page_ref, evidence_text, confidence_score, is_active, created_at
+            activated_by_attempt_id, chunk_id, source_file_name,
+            page_ref, evidence_text, confidence_score, created_at
          from runtime_graph_evidence
          where library_id = $1
            and target_kind = $2
            and target_id = $3
-           and is_active = true
          order by created_at desc",
     )
     .bind(library_id)
@@ -1176,7 +1368,6 @@ pub async fn list_runtime_graph_document_links_by_library(
                and node.projection_version = $2
             where evidence.library_id = $1
               and evidence.target_kind = 'node'
-              and evidence.is_active = true
               and evidence.document_id is not null
             group by evidence.document_id, evidence.target_id
         ),
@@ -1197,7 +1388,6 @@ pub async fn list_runtime_graph_document_links_by_library(
                and edge.projection_version = $2
             where evidence.library_id = $1
               and evidence.target_kind = 'edge'
-              and evidence.is_active = true
               and evidence.document_id is not null
             group by evidence.document_id, evidence.target_id
         )
@@ -1248,7 +1438,6 @@ pub async fn list_runtime_graph_document_links_by_target_ids(
                and node.projection_version = $2
             where evidence.library_id = $1
               and evidence.target_kind = 'node'
-              and evidence.is_active = true
               and evidence.document_id is not null
               and evidence.target_id = any($3)
             group by evidence.document_id, evidence.target_id
@@ -1270,7 +1459,6 @@ pub async fn list_runtime_graph_document_links_by_target_ids(
                and edge.projection_version = $2
             where evidence.library_id = $1
               and evidence.target_kind = 'edge'
-              and evidence.is_active = true
               and evidence.document_id is not null
               and evidence.target_id = any($3)
             group by evidence.document_id, evidence.target_id
@@ -1298,17 +1486,41 @@ pub async fn deactivate_runtime_graph_evidence_by_document(
     pool: &PgPool,
     library_id: Uuid,
     document_id: Uuid,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "update runtime_graph_evidence
-         set is_active = false
-         where library_id = $1 and document_id = $2 and is_active = true",
+) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
+        "delete from runtime_graph_evidence
+         where library_id = $1 and document_id = $2
+         returning target_kind, target_id",
     )
     .bind(library_id)
     .bind(document_id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+    .fetch_all(pool)
+    .await
+}
+
+/// Marks all graph evidence for a set of documents as inactive.
+///
+/// Batch delete runs this after child deletes as a final guard against
+/// evidence admitted by work that was already in flight when deletion began.
+pub async fn deactivate_runtime_graph_evidence_by_documents(
+    pool: &PgPool,
+    library_id: Uuid,
+    document_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
+    if document_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
+        "delete from runtime_graph_evidence
+         where library_id = $1
+           and document_id = any($2)
+         returning target_kind, target_id",
+    )
+    .bind(library_id)
+    .bind(document_ids)
+    .fetch_all(pool)
+    .await
 }
 
 /// Lists active graph evidence rows for one logical content revision.
@@ -1323,12 +1535,11 @@ pub async fn list_active_runtime_graph_evidence_by_content_revision(
 ) -> Result<Vec<RuntimeGraphEvidenceLifecycleRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphEvidenceLifecycleRow>(
         "select id, library_id, target_kind, target_id, document_id, revision_id,
-            activated_by_attempt_id, deactivated_by_mutation_id, chunk_id, source_file_name,
-            page_ref, evidence_text, confidence_score, is_active, created_at
+            activated_by_attempt_id, chunk_id, source_file_name,
+            page_ref, evidence_text, confidence_score, created_at
          from runtime_graph_evidence
          where library_id = $1
            and document_id = $2
-           and is_active = true
            and (revision_id = $3 or revision_id is null)
          order by created_at desc",
     )
@@ -1361,7 +1572,6 @@ pub async fn list_active_runtime_graph_target_ids_excluding_content_revision(
          where library_id = $1
            and target_kind = $4
            and target_id = any($5)
-           and is_active = true
            and not (
                 document_id = $2
                 and (revision_id = $3 or revision_id is null)
@@ -1386,21 +1596,16 @@ pub async fn deactivate_runtime_graph_evidence_by_content_revision(
     library_id: Uuid,
     document_id: Uuid,
     revision_id: Uuid,
-    mutation_id: Option<Uuid>,
 ) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
-        "update runtime_graph_evidence
-         set is_active = false,
-             deactivated_by_mutation_id = coalesce($4, deactivated_by_mutation_id)
+        "delete from runtime_graph_evidence
          where library_id = $1
            and document_id = $2
-           and is_active = true
            and (revision_id = $3 or revision_id is null)",
     )
     .bind(library_id)
     .bind(document_id)
     .bind(revision_id)
-    .bind(mutation_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -1421,7 +1626,6 @@ pub const RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_SQL: &str = "with target
             from runtime_graph_evidence as evidence
             where evidence.library_id = $1
               and evidence.target_kind = 'node'
-              and evidence.is_active = true
             group by evidence.target_id
          ),
          desired_counts as (
@@ -1448,7 +1652,6 @@ pub const RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_SQL: &str = "with target
             from runtime_graph_evidence as evidence
             where evidence.library_id = $1
               and evidence.target_kind = 'edge'
-              and evidence.is_active = true
             group by evidence.target_id
          ),
          desired_counts as (
@@ -1506,6 +1709,35 @@ pub async fn delete_runtime_graph_edges_without_support(
     .await
 }
 
+/// Deletes targeted canonical graph edges with zero surviving active evidence.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while pruning unsupported graph edges.
+pub async fn delete_runtime_graph_edges_without_support_by_ids(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    edge_ids: &[Uuid],
+) -> Result<Vec<String>, sqlx::Error> {
+    if edge_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_scalar::<_, String>(
+        "delete from runtime_graph_edge
+         where library_id = $1
+           and projection_version = $2
+           and id = any($3)
+           and support_count <= 0
+         returning canonical_key",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(edge_ids)
+    .fetch_all(pool)
+    .await
+}
+
 /// Deletes canonical graph nodes with zero surviving active evidence and returns their canonical keys.
 ///
 /// # Errors
@@ -1524,6 +1756,35 @@ pub async fn delete_runtime_graph_nodes_without_support(
     )
     .bind(library_id)
     .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Deletes targeted canonical graph nodes with zero surviving active evidence.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while pruning unsupported graph nodes.
+pub async fn delete_runtime_graph_nodes_without_support_by_ids(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    node_ids: &[Uuid],
+) -> Result<Vec<String>, sqlx::Error> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_scalar::<_, String>(
+        "delete from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and id = any($3)
+           and support_count <= 0
+         returning canonical_key",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(node_ids)
     .fetch_all(pool)
     .await
 }

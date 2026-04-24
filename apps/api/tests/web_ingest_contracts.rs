@@ -7,7 +7,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use ironrag_backend::{
-    interfaces::http::mcp::MCP_CANONICAL_TOOL_NAMES,
+    interfaces::http::mcp::MCP_DIAGNOSTICS_TOOL_NAMES,
     mcp_types::{
         McpCancelWebIngestRunRequest, McpGetWebIngestRunRequest, McpListWebIngestRunPagesRequest,
         McpSubmitWebIngestRunRequest,
@@ -99,13 +99,13 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
         "cancel_web_ingest_run",
     ] {
         assert!(
-            MCP_CANONICAL_TOOL_NAMES.contains(&tool_name),
+            MCP_DIAGNOSTICS_TOOL_NAMES.contains(&tool_name),
             "missing MCP tool `{tool_name}` from canonical tool list"
         );
     }
 
     let submit_request: McpSubmitWebIngestRunRequest = serde_json::from_value(json!({
-        "libraryId": Uuid::nil(),
+        "library": "default/docs",
         "seedUrl": "https://example.com/docs",
         "mode": "recursive_crawl",
         "boundaryPolicy": "allow_external",
@@ -114,7 +114,7 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
         "idempotencyKey": "crawl-1"
     }))
     .expect("submit request should deserialize");
-    assert_eq!(submit_request.library_id, Uuid::nil());
+    assert_eq!(submit_request.library, "default/docs");
     assert_eq!(submit_request.seed_url, "https://example.com/docs");
     assert_eq!(submit_request.mode, "recursive_crawl");
     assert_eq!(submit_request.boundary_policy.as_deref(), Some("allow_external"));
@@ -138,7 +138,7 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
 
     assert!(
         serde_json::from_value::<McpSubmitWebIngestRunRequest>(json!({
-            "library_id": Uuid::nil(),
+            "libraryId": Uuid::nil(),
             "seedUrl": "https://example.com/docs",
             "mode": "recursive_crawl"
         }))

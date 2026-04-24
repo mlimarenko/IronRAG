@@ -79,6 +79,18 @@ spec:
             - --experimental-vector-index=true
             - --database.directory=/var/lib/arangodb3
             - --javascript.app-path=/var/lib/arangodb3-apps
+            # Memory caps — Arango's default per-AQL-query memory limit
+            # auto-sizes to ~½ host RAM (≈4.6 GB on an 8 GB box). Five
+            # parallel retrievals then reserve ≈23 GB virtual memory and
+            # the node's OOM-killer fires on arangod (observed on the
+            # docker-compose profile on 2026-04-22). 256 MB / query is
+            # ample for ArangoSearch + vector-index workloads; block
+            # cache and write buffers are capped separately so ingest
+            # writes don't bloat resident memory.
+            - --query.memory-limit=268435456
+            - --query.cache-mode=demand
+            - --rocksdb.block-cache-size=536870912
+            - --rocksdb.total-write-buffer-size=268435456
           ports:
             - containerPort: 8529
               name: http

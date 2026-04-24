@@ -13,6 +13,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use tokio::{sync::broadcast, time};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -20,12 +21,14 @@ use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::repositories::{catalog_repository, content_repository},
     interfaces::http::router,
+    services::ingest::worker,
 };
 
 struct McpReadFixture {
     state: AppState,
     workspace_id: Uuid,
     library_id: Uuid,
+    library_ref: String,
 }
 
 impl McpReadFixture {
@@ -51,7 +54,12 @@ impl McpReadFixture {
         .await
         .context("failed to create mcp read library")?;
 
-        Ok(Self { state, workspace_id: workspace.id, library_id: library.id })
+        Ok(Self {
+            state,
+            workspace_id: workspace.id,
+            library_id: library.id,
+            library_ref: format!("{}/{}", workspace.slug, library.slug),
+        })
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
@@ -552,18 +560,37 @@ async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow
                 &token,
                 "submit_web_ingest_run",
                 json!({
-                    "libraryId": fixture.library_id,
+                    "library": fixture.library_ref.clone(),
                     "seedUrl": server.url("/seed"),
                     "mode": "single_page",
                 }),
             )
             .await?;
         assert_eq!(submit["result"]["isError"], json!(false));
-        assert_eq!(submit["result"]["structuredContent"]["runState"], json!("completed"));
+        assert_eq!(submit["result"]["structuredContent"]["runState"], json!("processing"));
 
         let run_id: Uuid =
             serde_json::from_value(submit["result"]["structuredContent"]["runId"].clone())
                 .context("run id missing")?;
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
+        let deadline = time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let run = fixture
+                .state
+                .canonical_services
+                .web_ingest
+                .get_run(&fixture.state, run_id)
+                .await
+                .context("failed to poll MCP web ingest run")?;
+            if run.run_state == "completed" {
+                break;
+            }
+            if time::Instant::now() >= deadline {
+                anyhow::bail!("timed out waiting for MCP web ingest run {run_id} to complete");
+            }
+            time::sleep(std::time::Duration::from_millis(250)).await;
+        }
         let pages = fixture
             .mcp_tool_call(&token, "list_web_ingest_run_pages", json!({ "runId": run_id }))
             .await?;
@@ -591,6 +618,9 @@ async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow
             .as_str()
             .context("web-ingest read content missing")?;
         assert!(content.contains("Canonical single-page ingest should keep only this page"));
+
+        let _ = shutdown_tx.send(());
+        let _ = time::timeout(std::time::Duration::from_secs(5), worker_handle).await;
 
         Ok(())
     }

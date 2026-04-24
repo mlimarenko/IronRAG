@@ -523,6 +523,12 @@ impl BillingService {
             )));
         }
 
+        // Resolve canonical execution scope (library + document) so the
+        // rollup row carries its own attribution columns. Both billing
+        // read endpoints (/library-cost-summary and /library-document-costs)
+        // read those columns directly without re-joining provider_call.
+        let scope = self.resolve_execution_scope(state, execution_kind, execution_id).await?;
+
         let rollup = &rollups[0];
         let provider_call_count = i32::try_from(provider_call_count).unwrap_or(i32::MAX);
         let row = billing_repository::upsert_execution_cost(
@@ -530,6 +536,9 @@ impl BillingService {
             &billing_repository::UpsertBillingExecutionCost {
                 owning_execution_kind: execution_owner_kind_key(execution_kind),
                 owning_execution_id: execution_id,
+                workspace_id: scope.workspace_id,
+                library_id: scope.library_id,
+                knowledge_document_id: scope.knowledge_document_id,
                 total_cost: rollup.total_cost,
                 currency_code: &rollup.currency_code,
                 provider_call_count,
@@ -545,6 +554,7 @@ impl BillingService {
 struct BillingExecutionScope {
     workspace_id: Uuid,
     library_id: Uuid,
+    knowledge_document_id: Option<Uuid>,
 }
 
 impl BillingService {
@@ -620,6 +630,7 @@ impl BillingService {
                 Ok(BillingExecutionScope {
                     workspace_id: execution.workspace_id,
                     library_id: execution.library_id,
+                    knowledge_document_id: None,
                 })
             }
             BillingExecutionOwnerKind::GraphExtractionAttempt => {
@@ -642,6 +653,7 @@ impl BillingService {
                 Ok(BillingExecutionScope {
                     workspace_id: library.workspace_id,
                     library_id: extraction.library_id,
+                    knowledge_document_id: Some(extraction.document_id),
                 })
             }
             BillingExecutionOwnerKind::IngestAttempt => {
@@ -662,6 +674,7 @@ impl BillingService {
                 Ok(BillingExecutionScope {
                     workspace_id: job.workspace_id,
                     library_id: job.library_id,
+                    knowledge_document_id: job.knowledge_document_id,
                 })
             }
         }

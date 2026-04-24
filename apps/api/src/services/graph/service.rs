@@ -507,16 +507,34 @@ impl GraphService {
         revision_id: Uuid,
         activated_by_attempt_id: Option<Uuid>,
     ) -> Result<RevisionGraphReconcileOutcome> {
+        let document_lock = repositories::content_repository::acquire_content_document_lock(
+            &state.persistence.postgres,
+            document_id,
+        )
+        .await
+        .context("failed to acquire content document advisory lock for graph reconcile")?;
         let lock = self.library_merge_lock(library_id);
         let _guard = lock.lock().await;
-        crate::services::graph::rebuild::reconcile_revision_graph(
+        let result = crate::services::graph::rebuild::reconcile_revision_graph(
             state,
             library_id,
             document_id,
             revision_id,
             activated_by_attempt_id,
         )
+        .await;
+        let release_result = repositories::content_repository::release_content_document_lock(
+            document_lock,
+            document_id,
+        )
         .await
+        .context("failed to release content document advisory lock after graph reconcile");
+        match (result, release_result) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(release_error)) => Err(release_error),
+            (Err(error), Err(release_error)) => Err(release_error).context(error.to_string()),
+        }
     }
 }
 

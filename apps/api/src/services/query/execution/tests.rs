@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use super::*;
 use serde_json::json;
 
-use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
+use crate::domains::query_ir::{
+    LiteralKind, LiteralSpan, QueryAct, QueryIR, QueryLanguage, QueryScope,
+};
 use crate::infra::arangodb::{
     document_store::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
@@ -41,6 +43,22 @@ fn fallback_query_ir() -> QueryIR {
     }
 }
 
+/// Build a `QueryIR` whose `literal_constraints` carry the supplied phrases.
+/// Mirrors what the real `QueryCompilerService` emits for questions that
+/// name a specific subject or quote a specific token: the compiler keeps
+/// those spans as literals so downstream focus scoring can weigh tokens
+/// from inside them. Tests that depend on IR-driven filtering pass
+/// whatever phrase the real compiler would capture from the question.
+fn query_ir_with_literal_phrases<const N: usize>(phrases: [&str; N]) -> QueryIR {
+    QueryIR {
+        literal_constraints: phrases
+            .into_iter()
+            .map(|phrase| LiteralSpan { text: phrase.to_string(), kind: LiteralKind::Other })
+            .collect(),
+        ..fallback_query_ir()
+    }
+}
+
 #[test]
 fn build_references_keeps_chunk_node_edge_order_and_ranks() {
     let references = build_references(
@@ -61,6 +79,8 @@ fn build_references_keeps_chunk_node_edge_order_and_ranks() {
         }],
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: Uuid::now_v7(),
             document_label: "spec.md".to_string(),
             excerpt: "IronRAG links specs to graph knowledge.".to_string(),
@@ -88,6 +108,8 @@ fn grouped_reference_candidates_prefer_document_deduping() {
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "spec.md".to_string(),
                 excerpt: "First excerpt".to_string(),
@@ -96,6 +118,8 @@ fn grouped_reference_candidates_prefer_document_deduping() {
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "spec.md".to_string(),
                 excerpt: "Second excerpt".to_string(),
@@ -131,6 +155,8 @@ fn assemble_bounded_context_interleaves_graph_and_document_support() {
         }],
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: Uuid::now_v7(),
             document_label: "spec.md".to_string(),
             excerpt: "IronRAG stores graph knowledge.".to_string(),
@@ -180,7 +206,7 @@ fn build_answer_prompt_includes_recent_conversation_history() {
     let prompt = build_answer_prompt(
         "давай",
         "Context\n[dummy] step-by-step instructions",
-        Some("User: как в далионе перемещение сделать\nAssistant: Могу расписать пошагово."),
+        Some("User: как в the product перемещение сделать\nAssistant: Могу расписать пошагово."),
         None,
     );
 
@@ -215,8 +241,11 @@ Trailing details";
 fn build_exact_technical_literals_section_extracts_urls_paths_and_parameters() {
     let section = build_exact_technical_literals_section(
             "Какие параметры пейджинации и какой URL используются?",
+            &fallback_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: Uuid::now_v7(),
                 document_label: "api.pdf".to_string(),
                 excerpt: "Получение списка счетов по страницам.".to_string(),
@@ -245,9 +274,12 @@ fn build_exact_technical_literals_section_extracts_urls_paths_and_parameters() {
 fn build_exact_technical_literals_section_groups_literals_by_document() {
     let section = build_exact_technical_literals_section(
             "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+            &fallback_query_ir(),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: Uuid::now_v7(),
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -258,6 +290,8 @@ fn build_exact_technical_literals_section_groups_literals_by_document() {
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: Uuid::now_v7(),
                     document_label: "rewards_service_reference.pdf".to_string(),
                     excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -288,8 +322,11 @@ fn build_exact_technical_literals_section_groups_literals_by_document() {
 fn build_exact_technical_literals_section_prefers_question_matched_window_per_document() {
     let section = build_exact_technical_literals_section(
             "Какой endpoint возвращает список счетов rewards service?",
+            &fallback_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: Uuid::now_v7(),
                 document_label: "rewards_service_reference.pdf".to_string(),
                 excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -311,9 +348,12 @@ fn build_exact_technical_literals_section_balances_documents_before_second_same_
     let checkout_document_id = Uuid::now_v7();
     let section = build_exact_technical_literals_section(
             "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+            &fallback_query_ir(),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rewards_document_id,
                     document_label: "rewards_service_reference.pdf".to_string(),
                     excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -322,6 +362,8 @@ fn build_exact_technical_literals_section_balances_documents_before_second_same_
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rewards_document_id,
                     document_label: "rewards_service_reference.pdf".to_string(),
                     excerpt: "GET /v1/cards/bypage возвращает список карт rewards service.".to_string(),
@@ -330,6 +372,8 @@ fn build_exact_technical_literals_section_balances_documents_before_second_same_
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rewards_document_id,
                     document_label: "rewards_service_reference.pdf".to_string(),
                     excerpt: "GET /v1/cards возвращает список карт.".to_string(),
@@ -338,6 +382,8 @@ fn build_exact_technical_literals_section_balances_documents_before_second_same_
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: checkout_document_id,
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -359,9 +405,12 @@ fn build_port_answer_returns_insufficient_when_focused_document_has_no_grounded_
 
     let answer = build_port_answer(
             "Какой порт использует Acme Control Center?",
+            &query_ir_with_literal_phrases(["Acme Control Center"]),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: control_document_id,
                     document_label: "Acme Control Center - Example".to_string(),
                     excerpt: "Acme Control Center — программное обеспечение для управления конфигурацией объектов управления.".to_string(),
@@ -372,6 +421,8 @@ fn build_port_answer_returns_insufficient_when_focused_document_has_no_grounded_
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: telegram_document_id,
                     document_label: "Acme Telegram Bot - Example".to_string(),
                     excerpt: "Для интеграции используется localhost:2026.".to_string(),
@@ -402,15 +453,58 @@ fn technical_literal_focus_keyword_segments_splits_english_multi_clause_question
 }
 
 #[test]
+fn technical_literal_focus_keywords_with_ir_literal_keeps_only_literal_tokens() {
+    // When the compiler produced a literal_constraint, every token kept
+    // must appear inside that literal — even tokens that would otherwise
+    // be valid ≥4-char words get dropped because the literal is the
+    // strongest possible focus signal.
+    let ir = query_ir_with_literal_phrases(["Acme Control Center"]);
+    let keywords = technical_literal_focus_keywords(
+        "Какой порт использует Acme Control Center в production?",
+        Some(&ir),
+    );
+
+    assert!(keywords.iter().any(|keyword| keyword == "control"));
+    assert!(keywords.iter().any(|keyword| keyword == "center"));
+    assert!(!keywords.iter().any(|keyword| keyword == "порт"));
+    assert!(!keywords.iter().any(|keyword| keyword == "использует"));
+    assert!(!keywords.iter().any(|keyword| keyword == "production"));
+}
+
+#[test]
+fn technical_literal_focus_keywords_without_literals_keeps_all_question_tokens_above_floor() {
+    // Without literal constraints the helper keeps every ≥4-char token
+    // from the question verbatim. Previously a hard-coded stop list
+    // dropped framing words like "какой" / "endpoint"; that list is
+    // gone and downstream ranking is expected to weigh tokens by how
+    // often they appear in candidate documents instead.
+    let keywords = technical_literal_focus_keywords(
+        "Какой endpoint возвращает список?",
+        Some(&fallback_query_ir()),
+    );
+
+    assert!(keywords.iter().any(|keyword| keyword == "какой"));
+    assert!(keywords.iter().any(|keyword| keyword == "endpoint"));
+    assert!(keywords.iter().any(|keyword| keyword == "возвращает"));
+    assert!(keywords.iter().any(|keyword| keyword == "список"));
+    // Tokens shorter than 4 characters are still filtered out — that
+    // floor is structural, not a legacy stop list.
+    assert!(!keywords.iter().any(|keyword| keyword.chars().count() < 4));
+}
+
+#[test]
 fn build_port_answer_skips_port_plus_protocol_questions() {
     let rewards_document_id = Uuid::now_v7();
     let loyalty_document_id = Uuid::now_v7();
 
     let answer = build_port_answer(
         "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+        &fallback_query_ir(),
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_accounts_rest_reference.md".to_string(),
                 excerpt: "Default port: 8081".to_string(),
@@ -421,6 +515,8 @@ fn build_port_answer_skips_port_plus_protocol_questions() {
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: loyalty_document_id,
                 document_label: "customer_profile_soap_reference.md".to_string(),
                 excerpt: "Protocol: SOAP over HTTP".to_string(),
@@ -442,9 +538,12 @@ fn build_port_and_protocol_answer_handles_english_multi_document_question() {
 
     let answer = build_port_and_protocol_answer(
             "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
+            &fallback_query_ir(),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rewards_document_id,
                     document_label: "rewards_accounts_rest_reference.md".to_string(),
                     excerpt: "Default port: 8081".to_string(),
@@ -455,6 +554,8 @@ fn build_port_and_protocol_answer_handles_english_multi_document_question() {
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: loyalty_document_id,
                     document_label: "customer_profile_soap_reference.md".to_string(),
                     excerpt: "Protocol: SOAP over HTTP".to_string(),
@@ -478,9 +579,12 @@ fn build_multi_document_endpoint_answer_handles_english_checkout_rewards_questio
 
     let answer = build_multi_document_endpoint_answer_from_chunks(
             "If an agent needs the current Checkout Server status and then the Rewards Accounts list, which two endpoints should it call?",
+            &fallback_query_ir(),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rewards_document_id,
                     document_label: "rewards_accounts_rest_reference.md".to_string(),
                     excerpt: "List accounts: GET /v1/accounts".to_string(),
@@ -491,6 +595,8 @@ fn build_multi_document_endpoint_answer_handles_english_checkout_rewards_questio
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: checkout_document_id,
                     document_label: "checkout_server_rest_reference.md".to_string(),
                     excerpt: "Health check: GET /health".to_string(),
@@ -501,6 +607,8 @@ fn build_multi_document_endpoint_answer_handles_english_checkout_rewards_questio
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: checkout_document_id,
                     document_label: "checkout_server_rest_reference.md".to_string(),
                     excerpt: "Current server information: GET /system/info".to_string(),
@@ -524,9 +632,12 @@ fn build_single_endpoint_answer_from_chunks_prefers_system_info_over_adjacent_no
 
     let answer = build_single_endpoint_answer_from_chunks(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        &query_ir_with_literal_phrases(["текущую информацию", "checkout server"]),
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: checkout_document_id,
                 document_label: "checkout_server_reference.pdf".to_string(),
                 excerpt: "GET /checkout-api/rest/dictionaries/cardChanged возвращает историю изменений карт checkout server.".to_string(),
@@ -537,6 +648,8 @@ fn build_single_endpoint_answer_from_chunks_prefers_system_info_over_adjacent_no
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: checkout_document_id,
                 document_label: "checkout_server_reference.pdf".to_string(),
                 excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -560,9 +673,12 @@ fn build_single_endpoint_answer_from_chunks_prefers_question_matched_document_ov
 
     let answer = build_single_endpoint_answer_from_chunks(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        &fallback_query_ir(),
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_accounts_api_contract.md".to_string(),
                 excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -573,6 +689,8 @@ fn build_single_endpoint_answer_from_chunks_prefers_question_matched_document_ov
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: checkout_document_id,
                 document_label: "checkout_runtime_contract.md".to_string(),
                 excerpt: "GET /system/info возвращает текущую информацию checkout server."
@@ -596,6 +714,8 @@ fn build_deterministic_grounded_answer_uses_exact_wsdl_literal_without_agent_loo
     let revision_id = Uuid::now_v7();
     let chunk = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "inventory_soap_api_contract.md".to_string(),
         excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
@@ -606,7 +726,7 @@ fn build_deterministic_grounded_answer_uses_exact_wsdl_literal_without_agent_loo
     };
     let answer = build_deterministic_grounded_answer(
         "Какой WSDL у inventory soap api?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -639,7 +759,7 @@ fn build_deterministic_grounded_answer_uses_endpoint_fact_without_chunk_parsing(
 
     let answer = build_deterministic_grounded_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -670,7 +790,7 @@ fn build_deterministic_grounded_answer_uses_multi_document_endpoint_facts() {
 
     let answer = build_deterministic_grounded_answer(
         "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -707,6 +827,8 @@ fn build_deterministic_grounded_answer_uses_multi_document_endpoint_facts() {
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_service_reference.pdf".to_string(),
                 excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -717,6 +839,8 @@ fn build_deterministic_grounded_answer_uses_multi_document_endpoint_facts() {
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: checkout_document_id,
                 document_label: "checkout_server_reference.pdf".to_string(),
                 excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -740,7 +864,7 @@ fn build_deterministic_grounded_answer_uses_port_fact_without_chunk_parsing() {
 
     let answer = build_deterministic_grounded_answer(
         "Какой порт использует rewards accounts rest api?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -756,6 +880,8 @@ fn build_deterministic_grounded_answer_uses_port_fact_without_chunk_parsing() {
         },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "rewards_accounts_rest_reference.md".to_string(),
             excerpt: "Rewards Accounts REST API Reference".to_string(),
@@ -777,7 +903,7 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
 
     let answer = build_deterministic_grounded_answer(
         "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -824,6 +950,8 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_accounts_rest_reference.md".to_string(),
                 excerpt: "Rewards Accounts REST API Reference".to_string(),
@@ -832,6 +960,8 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: loyalty_document_id,
                 document_label: "customer_profile_soap_reference.md".to_string(),
                 excerpt: "Customer Profile SOAP API Reference".to_string(),
@@ -853,7 +983,7 @@ fn build_deterministic_grounded_answer_reports_unconfirmed_port_without_fact() {
 
     let answer = build_deterministic_grounded_answer(
         "Какой порт использует Acme Control Center?",
-        None,
+        &query_ir_with_literal_phrases(["Acme Control Center"]),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -863,6 +993,8 @@ fn build_deterministic_grounded_answer_reports_unconfirmed_port_without_fact() {
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: control_document_id,
                 document_label: "Acme Control Center - Example".to_string(),
                 excerpt: "Acme Control Center — программное обеспечение для управления конфигурацией объектов управления.".to_string(),
@@ -873,6 +1005,8 @@ fn build_deterministic_grounded_answer_reports_unconfirmed_port_without_fact() {
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: telegram_document_id,
                 document_label: "Acme Telegram Bot - Example".to_string(),
                 excerpt: "Для интеграции используется localhost:2026.".to_string(),
@@ -898,7 +1032,7 @@ fn build_deterministic_grounded_answer_prefers_exact_wsdl_document_over_foreign_
 
     let answer = build_deterministic_grounded_answer(
         "Какой WSDL у inventory soap api?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -920,6 +1054,8 @@ fn build_deterministic_grounded_answer_prefers_exact_wsdl_document_over_foreign_
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_accounts_api_contract.md".to_string(),
                 excerpt: "Compared with inventory SOAP surface, rewards accounts use REST JSON."
@@ -931,6 +1067,8 @@ fn build_deterministic_grounded_answer_prefers_exact_wsdl_document_over_foreign_
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
@@ -954,6 +1092,8 @@ fn build_deterministic_grounded_answer_uses_parameter_meaning_from_structured_bl
     let block_id = Uuid::now_v7();
     let chunk = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "rewards_accounts_api_contract.md".to_string(),
         excerpt: "| `pageNumber` | 1-based page number |".to_string(),
@@ -964,7 +1104,7 @@ fn build_deterministic_grounded_answer_uses_parameter_meaning_from_structured_bl
     };
     let answer = build_deterministic_grounded_answer(
         "Как называется параметр pageNumber в API пагинации?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -999,7 +1139,7 @@ fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despit
 
     let answer = build_deterministic_grounded_answer(
         "Есть ли параметр withCards?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1022,6 +1162,8 @@ fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despit
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: foreign_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "Inventory SOAP uses WSDL.".to_string(),
@@ -1032,6 +1174,8 @@ fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despit
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "rewards_accounts_api_contract.md".to_string(),
                 excerpt: "withCards includes linked card records.".to_string(),
@@ -1056,7 +1200,7 @@ fn build_deterministic_grounded_answer_confirms_parameter_existence() {
     let block_id = Uuid::now_v7();
     let answer = build_deterministic_grounded_answer(
         "Есть ли параметр withCards?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1077,6 +1221,8 @@ fn build_deterministic_grounded_answer_confirms_parameter_existence() {
         },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "rewards_accounts_api_contract.md".to_string(),
             excerpt: "withCards includes linked card records.".to_string(),
@@ -1099,7 +1245,7 @@ fn build_deterministic_grounded_answer_does_not_infer_wsdl_from_chunks_without_f
 
     let answer = build_deterministic_grounded_answer(
         "Какой WSDL у inventory soap api?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1108,6 +1254,8 @@ fn build_deterministic_grounded_answer_does_not_infer_wsdl_from_chunks_without_f
         },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "inventory_soap_api_contract.md".to_string(),
             excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
@@ -1127,7 +1275,7 @@ fn build_deterministic_grounded_answer_does_not_infer_single_endpoint_from_chunk
 
     let answer = build_deterministic_grounded_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1136,6 +1284,8 @@ fn build_deterministic_grounded_answer_does_not_infer_single_endpoint_from_chunk
         },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "checkout_runtime_contract.md".to_string(),
             excerpt: "GET /system/info возвращает текущую информацию checkout server.".to_string(),
@@ -1157,7 +1307,7 @@ fn build_deterministic_grounded_answer_does_not_infer_multi_document_endpoints_f
 
     let answer = build_deterministic_grounded_answer(
         "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1167,6 +1317,8 @@ fn build_deterministic_grounded_answer_does_not_infer_multi_document_endpoints_f
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_service_reference.pdf".to_string(),
                 excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -1177,6 +1329,8 @@ fn build_deterministic_grounded_answer_does_not_infer_multi_document_endpoints_f
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: checkout_document_id,
                 document_label: "checkout_server_reference.pdf".to_string(),
                 excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -1199,7 +1353,7 @@ fn build_deterministic_grounded_answer_does_not_infer_parameter_from_chunks_with
 
     let answer = build_deterministic_grounded_answer(
         "Есть ли параметр withCards?",
-        None,
+        &fallback_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1213,6 +1367,8 @@ fn build_deterministic_grounded_answer_does_not_infer_parameter_from_chunks_with
         },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "rewards_accounts_api_contract.md".to_string(),
             excerpt: "withCards includes linked card records.".to_string(),
@@ -1231,9 +1387,12 @@ fn build_exact_technical_literals_section_picks_best_matching_chunk_within_docum
     let cash_document_id = Uuid::now_v7();
     let section = build_exact_technical_literals_section(
             "Какой endpoint возвращает текущий статус checkout server?",
+            &fallback_query_ir(),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: cash_document_id,
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "GET /cashes возвращает список касс.".to_string(),
@@ -1242,6 +1401,8 @@ fn build_exact_technical_literals_section_picks_best_matching_chunk_within_docum
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: cash_document_id,
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -1262,6 +1423,8 @@ fn build_exact_technical_literals_section_prefers_document_local_clause_in_multi
     let rewards_document_id = Uuid::now_v7();
     let checkout_list = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id: checkout_document_id,
         document_label: "checkout_server_reference.pdf".to_string(),
         excerpt: "GET /cashes возвращает список касс.".to_string(),
@@ -1270,6 +1433,8 @@ fn build_exact_technical_literals_section_prefers_document_local_clause_in_multi
     };
     let checkout_system_info = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: checkout_document_id,
             document_label: "checkout_server_reference.pdf".to_string(),
             excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -1280,6 +1445,8 @@ fn build_exact_technical_literals_section_prefers_document_local_clause_in_multi
         };
     let rewards_bypage = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id: rewards_document_id,
         document_label: "rewards_service_reference.pdf".to_string(),
         excerpt: "GET /v1/accounts/bypage возвращает список счетов с пагинацией.".to_string(),
@@ -1290,6 +1457,8 @@ fn build_exact_technical_literals_section_prefers_document_local_clause_in_multi
     };
     let rewards_accounts = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id: rewards_document_id,
         document_label: "rewards_service_reference.pdf".to_string(),
         excerpt: "GET /v1/accounts возвращает список счетов без параметров пейджинации."
@@ -1302,6 +1471,7 @@ fn build_exact_technical_literals_section_prefers_document_local_clause_in_multi
     let question = "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?";
     let section = build_exact_technical_literals_section(
         question,
+        &fallback_query_ir(),
         &[checkout_list, checkout_system_info, rewards_bypage, rewards_accounts],
     )
     .unwrap_or_default();
@@ -1321,6 +1491,8 @@ fn build_exact_technical_literals_section_prefers_cash_current_info_clause_over_
     let rewards_document_id = Uuid::now_v7();
     let checkout_clients = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: checkout_document_id,
             document_label: "checkout_server_reference.pdf".to_string(),
             excerpt: "GET /checkout-api/rest/dictionaries/clients возвращает список клиентов checkout server.".to_string(),
@@ -1331,6 +1503,8 @@ fn build_exact_technical_literals_section_prefers_cash_current_info_clause_over_
         };
     let checkout_system_info = RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: checkout_document_id,
             document_label: "checkout_server_reference.pdf".to_string(),
             excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -1341,6 +1515,8 @@ fn build_exact_technical_literals_section_prefers_cash_current_info_clause_over_
         };
     let rewards_accounts = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id: rewards_document_id,
         document_label: "rewards_service_reference.pdf".to_string(),
         excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -1351,6 +1527,7 @@ fn build_exact_technical_literals_section_prefers_cash_current_info_clause_over_
     };
     let section = build_exact_technical_literals_section(
             "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+            &fallback_query_ir(),
             &[rewards_accounts, checkout_clients, checkout_system_info],
         )
         .unwrap_or_default();
@@ -1366,9 +1543,12 @@ fn build_multi_document_endpoint_answer_from_chunks_prefers_current_info_for_cas
     let rewards_document_id = Uuid::now_v7();
     let answer = build_multi_document_endpoint_answer_from_chunks(
             "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+            &fallback_query_ir(),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rewards_document_id,
                     document_label: "rewards_service_reference.pdf".to_string(),
                     excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -1379,6 +1559,8 @@ fn build_multi_document_endpoint_answer_from_chunks_prefers_current_info_for_cas
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: checkout_document_id,
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "GET /checkout-api/rest/dictionaries/cardChanged возвращает историю изменений карт checkout server.".to_string(),
@@ -1389,6 +1571,8 @@ fn build_multi_document_endpoint_answer_from_chunks_prefers_current_info_for_cas
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: checkout_document_id,
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "Для получения текущего статуса checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -1413,9 +1597,12 @@ fn build_multi_document_endpoint_answer_from_chunks_handles_live_checkout_server
     let wsdl_document_id = Uuid::now_v7();
     let answer = build_multi_document_endpoint_answer_from_chunks(
             "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?",
+            &fallback_query_ir(),
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rewards_document_id,
                     document_label: "rewards_service_reference.pdf".to_string(),
                     excerpt: "GET /v1/accounts возвращает список счетов rewards service.".to_string(),
@@ -1426,6 +1613,8 @@ fn build_multi_document_endpoint_answer_from_chunks_handles_live_checkout_server
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: checkout_document_id,
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "Получить историю изменений карт checkout server.".to_string(),
@@ -1436,6 +1625,8 @@ fn build_multi_document_endpoint_answer_from_chunks_handles_live_checkout_server
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: checkout_document_id,
                     document_label: "checkout_server_reference.pdf".to_string(),
                     excerpt: "Публичное API checkout server. Checkout server предоставляет REST-интерфейс для внешних сервисов и приложений.".to_string(),
@@ -1446,6 +1637,8 @@ fn build_multi_document_endpoint_answer_from_chunks_handles_live_checkout_server
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: wsdl_document_id,
                     document_label: "customer_profile_service_reference.pdf".to_string(),
                     excerpt: "WSDL customer profile service доступен по префиксу /customer-profile/ws/.".to_string(),
@@ -1485,6 +1678,7 @@ fn assemble_answer_context_prefixes_library_summary_and_recent_documents() {
     let retrieved_documents = vec![RuntimeRetrievedDocumentBrief {
         title: "spec.md".to_string(),
         preview_excerpt: "IronRAG stores graph knowledge.".to_string(),
+        source_uri: None,
     }];
     let context = assemble_answer_context(
         &summary,
@@ -1541,6 +1735,8 @@ fn build_structured_query_diagnostics_emits_typed_response_shape() {
         }],
         chunks: vec![RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: Uuid::now_v7(),
             document_label: "spec.md".to_string(),
             excerpt: "IronRAG query runtime returns structured references.".to_string(),
@@ -1548,7 +1744,7 @@ fn build_structured_query_diagnostics_emits_typed_response_shape() {
             source_text: "IronRAG query runtime returns structured references.".to_string(),
         }],
     };
-    let graph_index = QueryGraphIndex { nodes: HashMap::new(), edges: HashMap::new() };
+    let graph_index = QueryGraphIndex::empty();
     let enrichment = QueryExecutionEnrichment {
         planning: crate::domains::query::QueryPlanningMetadata {
             requested_mode: RuntimeQueryMode::Hybrid,
@@ -1767,6 +1963,8 @@ fn focused_answer_document_id_prefers_dominant_single_document() {
     let chunks = vec![
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: primary_document_id,
             document_label: "vector_database_wikipedia.md".to_string(),
             excerpt:
@@ -1779,6 +1977,8 @@ fn focused_answer_document_id_prefers_dominant_single_document() {
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: primary_document_id,
             document_label: "vector_database_wikipedia.md".to_string(),
             excerpt: "Use-cases include multi-modal search and recommendation engines.".to_string(),
@@ -1788,6 +1988,8 @@ fn focused_answer_document_id_prefers_dominant_single_document() {
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: secondary_document_id,
             document_label: "large_language_model_wikipedia.md".to_string(),
             excerpt: "LLMs generate, summarize, translate, and reason over text.".to_string(),
@@ -1838,6 +2040,8 @@ fn build_focused_document_answer_extracts_report_name_from_focused_document() {
         "What report name appears in the runtime PDF upload check?",
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "runtime_upload_check.pdf".to_string(),
             excerpt: "Runtime PDF upload check".to_string(),
@@ -1855,6 +2059,8 @@ fn build_focused_document_answer_extracts_formats_under_test() {
             "Which formats are explicitly listed under test in the PDF smoke fixture?",
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "upload_smoke_fixture.pdf".to_string(),
                 excerpt: "IronRAG PDF smoke fixture".to_string(),
@@ -1872,6 +2078,8 @@ fn build_focused_document_answer_does_not_answer_semantic_vectorized_modalities_
             "According to the vector database article, what kinds of data can all be vectorized?",
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "vector_database_wikipedia.md".to_string(),
                 excerpt:
@@ -1955,6 +2163,8 @@ fn build_canonical_answer_context_limits_sections_to_focused_document() {
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: focused_document_id,
                 document_label: "knowledge_graph_wikipedia.md".to_string(),
                 excerpt: "Google, Bing, Yahoo, WolframAlpha, Siri, and Alexa are named."
@@ -1965,6 +2175,8 @@ fn build_canonical_answer_context_limits_sections_to_focused_document() {
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: other_document_id,
                 document_label: "large_language_model_wikipedia.md".to_string(),
                 excerpt: "LLMs generate, summarize, translate, and reason over text.".to_string(),
@@ -1991,6 +2203,8 @@ fn render_canonical_chunk_section_uses_longer_question_focused_source_excerpt() 
             &fallback_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "knowledge_graph_wikipedia.md".to_string(),
                 excerpt: "Google, Bing, and Yahoo are named as examples.".to_string(),
@@ -2016,6 +2230,8 @@ fn build_multi_document_role_answer_selects_distinct_corpus_technologies() {
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: vector_document_id,
                     document_label: "vector_database_wikipedia.md".to_string(),
                     excerpt: "Vector databases typically implement approximate nearest neighbor algorithms."
@@ -2026,6 +2242,8 @@ fn build_multi_document_role_answer_selects_distinct_corpus_technologies() {
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: llm_document_id,
                     document_label: "large_language_model_wikipedia.md".to_string(),
                     excerpt:
@@ -2053,6 +2271,8 @@ fn build_multi_document_role_answer_handles_retrieval_and_embeddings_roles() {
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rag_document_id,
                     document_label: "retrieval_augmented_generation_wikipedia.md".to_string(),
                     excerpt: "Retrieval-augmented generation fetches external documents before the model answers."
@@ -2063,6 +2283,8 @@ fn build_multi_document_role_answer_handles_retrieval_and_embeddings_roles() {
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: vector_document_id,
                     document_label: "vector_database_wikipedia.md".to_string(),
                     excerpt: "Vector databases support semantic similarity over embeddings."
@@ -2088,6 +2310,8 @@ fn build_multi_document_role_answer_distinguishes_rust_and_llm_roles() {
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: llm_document_id,
                     document_label: "large_language_model_wikipedia.md".to_string(),
                     excerpt: "A large language model is designed for natural language processing tasks."
@@ -2098,6 +2322,8 @@ fn build_multi_document_role_answer_distinguishes_rust_and_llm_roles() {
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: rust_document_id,
                     document_label: "rust_programming_language_wikipedia.md".to_string(),
                     excerpt: "Rust is a general-purpose programming language with an emphasis on memory safety."
@@ -2124,6 +2350,8 @@ fn build_multi_document_role_answer_distinguishes_semantic_web_and_knowledge_gra
             &[
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: semantic_web_document_id,
                     document_label: "semantic_web_wikipedia.md".to_string(),
                     excerpt: "The Semantic Web is an extension of the World Wide Web that enables data to be shared and reused across applications."
@@ -2134,6 +2362,8 @@ fn build_multi_document_role_answer_distinguishes_semantic_web_and_knowledge_gra
                 },
                 RuntimeMatchedChunk {
                     chunk_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    chunk_index: 0,
                     document_id: knowledge_graph_document_id,
                     document_label: "knowledge_graph_wikipedia.md".to_string(),
                     excerpt: "A knowledge graph stores interlinked descriptions of entities and concepts."
@@ -2172,7 +2402,7 @@ fn canonical_preflight_answer_prefers_missing_explicit_document_before_other_pat
 
     let answer = build_canonical_preflight_answer(
         "Что сказано в missing-contract.md?",
-        None,
+        &fallback_query_ir(),
         &QueryIntentProfile::default(),
         &document_index,
         Some("table answer".to_string()),
@@ -2184,6 +2414,8 @@ fn canonical_preflight_answer_prefers_missing_explicit_document_before_other_pat
         },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: missing_document_id,
             document_label: "available.md".to_string(),
             excerpt: "No GraphQL API is published here.".to_string(),
@@ -2205,6 +2437,8 @@ fn canonical_preflight_answer_reuses_graphql_absence_override_for_live_path() {
     )]);
     let chunks = vec![RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "api-contract.md".to_string(),
         excerpt: "GraphQL is not published.".to_string(),
@@ -2215,7 +2449,7 @@ fn canonical_preflight_answer_reuses_graphql_absence_override_for_live_path() {
 
     let answer = build_canonical_preflight_answer(
         "Есть ли в этой библиотеке GraphQL API?",
-        None,
+        &fallback_query_ir(),
         &QueryIntentProfile {
             exact_literal_technical: true,
             unsupported_capability: Some(UnsupportedCapabilityIntent::GraphQlApi),
@@ -2245,6 +2479,8 @@ fn canonical_preflight_answer_reuses_single_endpoint_override_for_live_path() {
     )]);
     let chunks = vec![RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "checkout_runtime_contract.md".to_string(),
         excerpt: "Для получения текущей информации checkout server надо выполнить запрос GET на URL /system/info.".to_string(),
@@ -2257,7 +2493,7 @@ fn canonical_preflight_answer_reuses_single_endpoint_override_for_live_path() {
     let revision_id = Uuid::now_v7();
     let answer = build_canonical_preflight_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
-        None,
+        &fallback_query_ir(),
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         &document_index,
         None,
@@ -2287,6 +2523,8 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
     let document_id = Uuid::now_v7();
     let noisy_chunk = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "checkout_runtime_contract.md".to_string(),
         excerpt: "The checkout server exposes runtime metadata.".to_string(),
@@ -2296,6 +2534,8 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
     };
     let endpoint_chunk = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "checkout_runtime_contract.md".to_string(),
         excerpt: "GET /system/info returns checkout server information.".to_string(),
@@ -2307,6 +2547,7 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
 
     let merged = build_preflight_answer_chunks(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        &fallback_query_ir(),
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         std::slice::from_ref(&noisy_chunk),
         std::slice::from_ref(&endpoint_chunk),
@@ -2318,7 +2559,7 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
     let revision_id = Uuid::now_v7();
     let answer = build_canonical_preflight_answer(
         "Какой endpoint возвращает текущую информацию checkout server?",
-        None,
+        &fallback_query_ir(),
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         &document_index,
         None,
@@ -2348,8 +2589,11 @@ fn build_single_endpoint_answer_falls_back_to_full_source_when_focus_excerpt_ski
     let document_id = Uuid::now_v7();
     let answer = build_single_endpoint_answer_from_chunks(
         "Какой endpoint возвращает текущую информацию checkout server?",
+        &fallback_query_ir(),
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "checkout_runtime_contract.md".to_string(),
             excerpt: "# Checkout Runtime Contract".to_string(),
@@ -2698,9 +2942,12 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
     let inventory_document_id = Uuid::now_v7();
     let selected = select_technical_literal_chunks(
         question,
+        &fallback_query_ir(),
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_accounts_api_contract.md".to_string(),
                 excerpt: "| `pageNumber` | 1-based page number |".to_string(),
@@ -2711,6 +2958,8 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "Inventory SOAP canonical WSDL.".to_string(),
@@ -2721,6 +2970,8 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "SOAP over HTTP.".to_string(),
@@ -2729,6 +2980,8 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "Agents use XML.".to_string(),
@@ -2737,6 +2990,8 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "Port 8080.".to_string(),
@@ -2745,6 +3000,8 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "Contract note.".to_string(),
@@ -2754,7 +3011,7 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
         ],
         detect_technical_literal_intent(question),
         8,
-        &technical_literal_focus_keywords(question, None),
+        &technical_literal_focus_keywords(question, Some(&fallback_query_ir())),
         question_mentions_pagination(question),
     );
 
@@ -2771,9 +3028,12 @@ fn select_technical_literal_chunks_prefers_matching_wsdl_document_for_single_sou
     let inventory_document_id = Uuid::now_v7();
     let selected = select_technical_literal_chunks(
         question,
+        &fallback_query_ir(),
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: checkout_document_id,
                 document_label: "checkout_runtime_contract.md".to_string(),
                 excerpt: "Checkout GraphQL is unsupported.".to_string(),
@@ -2784,6 +3044,8 @@ fn select_technical_literal_chunks_prefers_matching_wsdl_document_for_single_sou
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
@@ -2796,7 +3058,7 @@ fn select_technical_literal_chunks_prefers_matching_wsdl_document_for_single_sou
         ],
         detect_technical_literal_intent(question),
         8,
-        &technical_literal_focus_keywords(question, None),
+        &technical_literal_focus_keywords(question, Some(&fallback_query_ir())),
         question_mentions_pagination(question),
     );
 
@@ -2812,6 +3074,7 @@ fn build_preflight_canonical_evidence_scopes_exact_literal_questions_to_literal_
     let inventory_revision_id = Uuid::now_v7();
     let filtered = build_preflight_canonical_evidence(
         "Как называется параметр pageNumber в API пагинации?",
+        &fallback_query_ir(),
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         &CanonicalAnswerEvidence {
             bundle: None,
@@ -2842,6 +3105,8 @@ fn build_preflight_canonical_evidence_scopes_exact_literal_questions_to_literal_
         },
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: rewards_document_id,
             document_label: "rewards_accounts_api_contract.md".to_string(),
             excerpt: "| `pageNumber` | 1-based page number |".to_string(),
@@ -2946,6 +3211,8 @@ fn canonical_preflight_answer_uses_literal_scoped_evidence_for_parameter_questio
     };
     let technical_literal_chunks = vec![RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id: rewards_document_id,
         document_label: "rewards_accounts_api_contract.md".to_string(),
         excerpt: "| `pageNumber` | 1-based page number |".to_string(),
@@ -2956,10 +3223,13 @@ fn canonical_preflight_answer_uses_literal_scoped_evidence_for_parameter_questio
     }];
     let preflight_chunks = build_preflight_answer_chunks(
         "Как называется параметр pageNumber в API пагинации?",
+        &fallback_query_ir(),
         &profile,
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl"
@@ -2975,6 +3245,7 @@ fn canonical_preflight_answer_uses_literal_scoped_evidence_for_parameter_questio
     );
     let preflight_evidence = build_preflight_canonical_evidence(
         "Как называется параметр pageNumber в API пагинации?",
+        &fallback_query_ir(),
         &profile,
         &canonical_evidence,
         &technical_literal_chunks,
@@ -2982,7 +3253,7 @@ fn canonical_preflight_answer_uses_literal_scoped_evidence_for_parameter_questio
 
     let answer = build_canonical_preflight_answer(
         "Как называется параметр pageNumber в API пагинации?",
-        None,
+        &fallback_query_ir(),
         &profile,
         &document_index,
         None,
@@ -3005,6 +3276,8 @@ fn preflight_exact_literal_scope_prefers_focused_document_for_single_source_ques
     let technical_literal_chunks = vec![
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: rewards_document_id,
             document_label: "rewards_accounts_api_contract.md".to_string(),
             excerpt: "GET /v1/accounts returns rewards accounts.".to_string(),
@@ -3015,6 +3288,8 @@ fn preflight_exact_literal_scope_prefers_focused_document_for_single_source_ques
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: inventory_document_id,
             document_label: "inventory_soap_api_contract.md".to_string(),
             excerpt: "WSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl".to_string(),
@@ -3027,12 +3302,14 @@ fn preflight_exact_literal_scope_prefers_focused_document_for_single_source_ques
 
     let preflight_chunks = build_preflight_answer_chunks(
         question,
+        &fallback_query_ir(),
         &profile,
         &technical_literal_chunks,
         &technical_literal_chunks,
     );
     let preflight_evidence = build_preflight_canonical_evidence(
         question,
+        &fallback_query_ir(),
         &profile,
         &CanonicalAnswerEvidence {
             bundle: None,
@@ -3088,10 +3365,13 @@ fn preflight_exact_literal_scope_keeps_multi_document_comparison_questions_broad
 
     let scoped_documents = preflight_exact_literal_document_scope(
         "Чем rewards REST отличается от inventory WSDL?",
+        &fallback_query_ir(),
         &profile,
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: checkout_document_id,
                 document_label: "rewards_accounts_api_contract.md".to_string(),
                 excerpt: "REST API over JSON.".to_string(),
@@ -3100,6 +3380,8 @@ fn preflight_exact_literal_scope_keeps_multi_document_comparison_questions_broad
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "SOAP API with WSDL.".to_string(),
@@ -3136,7 +3418,7 @@ fn canonical_preflight_answer_handles_english_transport_comparison_without_graph
     let question = "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?";
     let answer = build_canonical_preflight_answer(
         question,
-        None,
+        &fallback_query_ir(),
         &QueryIntentProfile::default(),
         &document_index,
         None,
@@ -3149,6 +3431,8 @@ fn canonical_preflight_answer_handles_english_transport_comparison_without_graph
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: rewards_document_id,
                 document_label: "rewards_accounts_api_contract.md".to_string(),
                 excerpt: "REST JSON over HTTP".to_string(),
@@ -3159,6 +3443,8 @@ fn canonical_preflight_answer_handles_english_transport_comparison_without_graph
             },
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: inventory_document_id,
                 document_label: "inventory_soap_api_contract.md".to_string(),
                 excerpt: "SOAP WSDL over HTTP".to_string(),
@@ -3200,6 +3486,8 @@ fn should_skip_crag_retry_only_for_grounded_exact_literal_queries() {
     };
     let grounded_chunks = vec![RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id: Uuid::now_v7(),
         document_label: "checkout_runtime_contract.md".to_string(),
         excerpt: "GET /system/info returns checkout server information.".to_string(),
@@ -3245,14 +3533,34 @@ fn build_lexical_queries_keeps_broader_unique_query_set() {
     let question = "Если агенту нужно получить текущий статус checkout server и отдельно список счетов rewards service, какие два endpoint'а ему нужны?";
     let queries = build_lexical_queries(question, &plan);
 
-    assert_eq!(queries[0], "program profile discount tier");
-    assert!(queries.contains(&question.to_string()));
-    assert!(queries.contains(&"текущий статус checkout server".to_string()));
-    assert!(queries.contains(&"список счетов rewards service".to_string()));
+    // Raw question goes first — Arango's full-text analyser already
+    // splits it into relevant tokens and the broader phrasing is the
+    // highest-signal single query we can dispatch. The combined
+    // keyword phrase ("program profile discount tier") is still
+    // emitted, but one slot later.
+    assert_eq!(queries[0], question);
+    assert!(queries.contains(&"program profile discount tier".to_string()));
+    // Retrieval-time segmentation cannot see `QueryIR` (the compiler
+    // runs in parallel with retrieval), so each "и отдельно"-delimited
+    // clause is joined verbatim. The segments still carry the
+    // identifying terms ("текущий статус checkout server" and
+    // "список счетов rewards service") and Arango's analyser strips
+    // the framing tokens downstream.
+    assert!(
+        queries.iter().any(|query| query.contains("текущий статус checkout server")),
+        "segments should include the checkout clause: {queries:?}"
+    );
+    assert!(
+        queries.iter().any(|query| query.contains("список счетов rewards service")),
+        "segments should include the rewards clause: {queries:?}"
+    );
     assert!(queries.contains(&"program profile".to_string()));
     assert!(queries.contains(&"discount tier".to_string()));
     assert!(queries.contains(&"program".to_string()));
-    assert!(queries.contains(&"profile".to_string()));
+    // Budget-capped: with all three question clauses emitted as
+    // separate lexical queries (retrieval-stage segmentation is
+    // IR-blind), the final single-keyword slot goes to the first
+    // plan keyword rather than further ones.
 }
 
 #[test]
@@ -3330,6 +3638,8 @@ fn build_focused_document_answer_does_not_answer_semantic_ocr_sources_question()
             "Which kinds of source material are explicitly listed as OCR inputs in the OCR article?",
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "optical_character_recognition_wikipedia.md".to_string(),
                 excerpt: "machine-encoded text, whether from a scanned document, a photo of a document, a scene photo or from subtitle text.".to_string(),
@@ -3348,6 +3658,8 @@ fn build_focused_document_answer_does_not_answer_semantic_ocr_conversion_questio
             "What does OCR convert images of text into, and what kinds of source material are explicitly named?",
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id,
                 document_label: "optical_character_recognition_wikipedia.md".to_string(),
                 excerpt: "machine-encoded text from a scanned document and subtitle text.".to_string(),
@@ -3389,6 +3701,8 @@ fn apply_rerank_outcome_reorders_bundle_before_final_truncation() {
         chunks: vec![
             RuntimeMatchedChunk {
                 chunk_id: chunk_a,
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: Uuid::now_v7(),
                 document_label: "alpha.md".to_string(),
                 excerpt: "Alpha excerpt".to_string(),
@@ -3397,6 +3711,8 @@ fn apply_rerank_outcome_reorders_bundle_before_final_truncation() {
             },
             RuntimeMatchedChunk {
                 chunk_id: chunk_b,
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
                 document_id: Uuid::now_v7(),
                 document_label: "budget.md".to_string(),
                 excerpt: "Budget approval memo".to_string(),

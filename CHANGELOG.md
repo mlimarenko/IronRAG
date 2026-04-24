@@ -1,5 +1,132 @@
 # Changelog
 
+## 0.3.2 — unreleased
+
+> ⚠️ **Breaking changes.**
+>
+> 1. **Clean-slate migration.** Migrations 0003–0009 were collapsed
+>    into a single `0003_schema_rollup.sql`. Upgrading an existing
+>    v0.3.1 deployment requires dropping Postgres and ArangoDB
+>    volumes; data cannot be preserved. New deployments are unaffected.
+> 2. **`WebClassificationReason` enum rename.** The `system_page`
+>    variant is now `ignore_pattern`. External clients that parse the
+>    web-ingest classification field must update their enum handling.
+
+### Web ingest
+
+- **Library-owned web ingest ignore policy.** A new `web_ingest_policy`
+  JSONB column on `catalog_library` stores per-library ignore patterns
+  (`url_prefix`, `path_prefix`, `glob`). The hardcoded
+  `classify_confluence_system_page` helper is replaced by a dynamic
+  matcher in `shared/web/ingest.rs`. New endpoint:
+  `PUT /v1/catalog/libraries/{libraryId}/web-ingest-policy`.
+- **Per-run extra ignore patterns.** Each ingest run can carry
+  additional patterns on top of the library default, stored in
+  `content_web_ingest_run.ignore_patterns` and merged at match time.
+- **`WebIngestRunSummary.ignorePatterns`** is a required field in the
+  OpenAPI contract; UI surfaces the active ignore policy in the
+  web-runs panel.
+
+### Reliability & operability
+
+- **Null-head recovery** (`ironrag-promote-null-heads`): idempotent CLI
+  that promotes `document_head` for any document whose head is NULL but
+  whose latest revision has persisted chunks.
+- **Fail-loud Postgres ↔ Arango head sync.** `promote_knowledge_document`
+  now returns `Result<(), ApiError>`; silent warn-on-fail is gone.
+  Regression test asserts the error path when Arango is unreachable.
+- **Fail-soft post-answer reference hydration.** Transient Arango errors
+  during reference-panel lookups no longer flip a 200-answered turn
+  into a 500 after the answer body has streamed.
+- **Reverse-proxy POST fix.** Dropped `proxy_request_buffering off`
+  from `nginx.conf.template`; POSTs on `/v1/query/sessions` and
+  `/v1/mcp` no longer hang for 15 s behind the proxy.
+- **ArangoDB memory caps** pinned in compose and Helm
+  (`--query.memory-limit`, RocksDB caps separate) — eliminates the
+  5-parallel-turn OOM on small hosts.
+- **Pool / threading tuning.** `TOKIO_WORKER_THREADS` default 2 → 8;
+  heartbeat pool 6 → 24 with 15 s acquire_timeout, removing the reaper
+  false-positive that was releasing healthy leases under merge load.
+
+### Retrieval quality
+
+- **QueryIR routing.** `QueryCompilerService` compiles the
+  natural-language question into a typed `QueryIR` (act / scope /
+  target_types / literal_constraints / confidence); downstream stages
+  read routing signals from the IR instead of re-classifying the raw
+  string. Replaces scattered keyword classifiers.
+- **Entity-bio fan-out for biographical queries.** When the IR carries a
+  named target entity (proper noun), retrieval fans out over graph
+  evidence plus a lexical pass by entity label, and post-filters to
+  keep only chunks that literally contain the label. Single-word
+  surname queries now surface every corpus mention rather than the
+  top BM25 hit. Capitalized mentions take precedence over common
+  concept nouns when both are present.
+- **Title-aware BM25 boost + ngram fuzzy title match.** Typos in
+  product or proper-noun titles no longer shred recall; the ngram
+  analyzer on `title` / `file_name` plus a separate title-token
+  BM25 boost keeps the canonical document in top-K.
+- **Real chunk embedding in ingest** with library-wide vector filter.
+  Vector search no longer silently matches stale embeddings from
+  other libraries.
+- **Lexical fallback scan only on view-lag**, bounded bind vars.
+  Full-scan triggers only when the ArangoSearch view is behind the
+  freshness budget.
+- **Parallel tool dispatch + atomic topology prewarm.** The grounded-
+  answer tool loop dispatches independent calls in parallel; graph
+  topology cache is prewarmed atomically at boot.
+- **Revision-coherence gate hardened.** `map_chunk_hit` is strict on
+  canonical revision equality, backed by the null-head recovery above.
+
+### Ingest performance
+
+- **Bulk-upsert in merge.** One-shot `list_runtime_graph_nodes_by_canonical_keys`
+  preload plus `bulk_upsert_runtime_graph_nodes` replace ~35 sequential
+  round-trips per chunk; +112 % throughput and −71 % slow statements
+  on an internal stress stack.
+- **Stuck-document terminal marker** with extended backoff: the
+  stale-lease reaper stops reactivating revisions that have
+  deterministically failed extraction.
+- **`sub_type_hints` cache** (60 s TTL, per `(library_id, projection_version)`)
+  drops a per-batch Postgres aggregate from the slow-statement log.
+- **Bulk chunk-vector UPSERT** per embedding batch replaces the
+  previous per-row round-trip.
+
+### Assistant UX
+
+- **SSE transport fallback.** When the browser or proxy blocks SSE,
+  the UI falls back to non-streaming POST and shows an inline retry
+  alert instead of a NetworkError dead-end.
+- **Evidence panel relevance formatter** distinguishes normalized
+  probabilities (0..1 → percent) from raw BM25 scores (> 1 → decimal);
+  fixes the `6384 %` overflow for high-BM25 hits.
+- **SSE keep-alive 15 s → 3 s.** The longer interval was racing with
+  Firefox Enhanced Tracking Protection's idle close on large-corpus
+  retrievals, producing `stream ended without a completed frame`.
+- **Assistant i18n.** Diagnosis and error strings moved into the
+  translation layer; no hardcoded locale text remains in the UI.
+- **Operations admin panel simplified.** Noisy status badges, pill
+  banners, and verbose audit rows removed in favour of a compact
+  one-line-per-event view.
+
+### Miscellaneous
+
+- Optional `query_compile` and `vision` bindings.
+- Graph extraction parser accepts alternative field names from
+  smaller models.
+- Billing, `/v1/content/web-runs`, and graph-cache perf fixes that
+  were causing concurrent-request timeouts.
+- Tuning knobs centralised in `services/query/execution/tuning.rs`.
+- Clippy-clean.
+
+### Measured
+
+- Grounded-answer parity benchmark passes on both UI and MCP lanes
+  for clarify + provider follow-ups + release-history scenarios on
+  the internal stress corpus.
+- Concurrency stress (5 parallel turns): 5 / 5 × 200, p95 21 s;
+  previously 0 / 5 × 500 with ArangoDB OOM.
+
 ## 0.3.1 — 2026-04-17
 
 ### QueryCompiler: NL → typed QueryIR replaces hardcoded keyword classifiers
@@ -33,7 +160,7 @@ Three hardcoded lists remain pending a column-semantic ontology in Arango: `tabl
 
 The IronRAG UI assistant is the reference implementation of grounded Q&A. Every MCP agent plugged into the same library now receives the same answer quality, citations, and guard-rails — MCP is no longer a degraded lane, it is the same pipeline exposed as a canonical tool.
 
-- New MCP tool **`grounded_answer`** (`apps/api/src/interfaces/http/mcp/tools/grounded.rs`). Input: `libraryId`, `query`, optional `topK`, `includeDebug`. Handler is a thin translator — it creates an ephemeral conversation and delegates to `state.canonical_services.query.execute_turn`, i.e. the same entry point the UI handler `POST /v1/query/sessions/{id}/turns` uses. No parallel retrieval, ranking, or answer-generation logic is introduced.
+- New MCP tool `**grounded_answer`** (`apps/api/src/interfaces/http/mcp/tools/grounded.rs`). Input: `libraryId`, `query`, optional `topK`, `includeDebug`. Handler is a thin translator — it creates an ephemeral conversation and delegates to `state.canonical_services.query.execute_turn`, i.e. the same entry point the UI handler `POST /v1/query/sessions/{id}/turns` uses. No parallel retrieval, ranking, or answer-generation logic is introduced.
 - Output surfaces the same handles the UI consumes: `answer` (text), `citations` (chunk refs + graph-entity refs with label/type/summary), `verifier` (`level` + structured warnings), `runtimeExecutionId` (feed to `get_runtime_execution_trace` for full per-stage evidence), `executionId`, `conversationId`. Agents receive exactly the data the UI debug panel shows for the equivalent turn.
 - Tool is gated by the `query_run` grant — identical to the UI path. An MCP token that can ask questions in UI can ask them over MCP; a scope denied in UI is denied in MCP. Parity is observable at the grant level, not just at the code level.
 - `MCP_CANONICAL_TOOL_NAMES` extended in `apps/api/src/interfaces/http/mcp.rs`; `visible_tool_names` advertises `grounded_answer` when the token has `query_run` somewhere.
@@ -101,18 +228,18 @@ Large-library performance release. On a 4900-document reference library the docu
 
 - **Format redesign: NDJSON → tar.zst.** The old NDJSON stream truncated in browsers because the frontend buffered the entire response via `fetch().blob()`. The new format is a streaming tar archive compressed with zstd level 3 (~13× on NDJSON text). Archive layout: `manifest.json` → chunked NDJSON per table/collection (64 MiB soft cap per part) → raw blob entries → `summary.json`. `tokio-tar` + `async-compression` write into a `tokio::io::duplex` pair piped into `Body::from_stream` with natural back-pressure.
 - **Streaming Arango cursor.** New `ArangoClient::query_json_batches` yields cursor batches via an async callback instead of merging the entire result into memory. The old path OOM-killed the backend on `knowledge_structured_block` (545 k rows / ~1 GB JSON). Export now streams through a bounded `mpsc` channel (depth 2) between the cursor producer task and the tar writer.
-- **Edge `library_id` propagation.** Every Arango edge insert now carries `library_id` (10 wrapper methods, 12 call sites, 8 files). Persistent indexes on `library_id` for all 15 edge collections. Snapshot export edge query uses `FILTER edge.library_id == @lid` instead of the old per-edge `DOCUMENT()` lookup — edge export stage dropped from **11.3 s → <2 ms** on the Artix fixture.
-- **Batched import.** `PgBatcher` flushes every 1 000 rows via `jsonb_populate_recordset`; `ArangoBatcher` flushes via `FOR doc IN @docs INSERT`. Artix full restore (107 k pg + 466 k arango rows) dropped from **>5 min (nginx 504)** to **~78 s**.
+- **Edge `library_id` propagation.** Every Arango edge insert now carries `library_id` (10 wrapper methods, 12 call sites, 8 files). Persistent indexes on `library_id` for all 15 edge collections. Snapshot export edge query uses `FILTER edge.library_id == @lid` instead of the old per-edge `DOCUMENT()` lookup — edge export stage dropped from **11.3 s → <2 ms** on the large-library reference fixture.
+- **Batched import.** `PgBatcher` flushes every 1 000 rows via `jsonb_populate_recordset`; `ArangoBatcher` flushes via `FOR doc IN @docs INSERT`. Large-library full restore (107 k pg + 466 k arango rows) dropped from **>5 min (nginx 504)** to **~78 s**.
 - **Bulk Arango timeout.** `query_json_bulk` and `query_json_batches` carry a 10-minute per-request timeout override. The canonical 15 s client timeout was truncating edge cleanup and large-batch inserts.
 - **Replace mode.** `POST /snapshot?overwrite=replace` clears the library footprint (reverse-FK Postgres delete, Arango edge/doc purge, blob stash) before restoring. Import trusts the archive manifest for include kinds — no duplicate selector on the request.
-- **Simplified include scope.** `IncludeKind` collapsed from `content / runtime_graph / knowledge / blobs` to `**library_data` + `blobs**`. A library is one atomic domain unit; the old split leaked storage tiers into the UI. Back-compat shim maps old tokens to `library_data`. UI dialog: one always-on "Library data" card + one "Include source files" checkbox.
-- Export throughput on Artix (24 k nodes, 82 k edges, 445 k structured blocks): **6.1 s / 42 MiB** (was 17.4 s before edge indexes, truncated before tar.zst).
+- **Simplified include scope.** `IncludeKind` collapsed from `content / runtime_graph / knowledge / blobs` to `**library_data` + `blobs`**. A library is one atomic domain unit; the old split leaked storage tiers into the UI. Back-compat shim maps old tokens to `library_data`. UI dialog: one always-on "Library data" card + one "Include source files" checkbox.
+- Export throughput on the large-library reference fixture (24 k nodes, 82 k edges, 445 k structured blocks): **6.1 s / 42 MiB** (was 17.4 s before edge indexes, truncated before tar.zst).
 
 ### Graph rendering performance
 
-- **Web Worker layout offload.** `applyGraphLayout` runs in a dedicated module worker (`graphLayout.worker.ts`, ~~70 KB chunk) for graphs ≥ 3 000 nodes. The main thread builds Graphology + inits Sigma while the worker computes coordinates off-thread; positions are returned via a `Float32Array` transferable buffer (zero-copy). Artix first canvas paint: **~~1.6 s** (was browser "page is slowing down" warning).
+- **Web Worker layout offload.** `applyGraphLayout` runs in a dedicated module worker (`graphLayout.worker.ts`, ~~70 KB chunk) for graphs ≥ 3 000 nodes. The main thread builds Graphology + inits Sigma while the worker computes coordinates off-thread; positions are returned via a `Float32Array` transferable buffer (zero-copy). Large-library first canvas paint: **~~1.6 s** (was browser "page is slowing down" warning).
 - **Hidden-edge precompute.** The `hiddenIds → hiddenEdgeIds` derivation moved from the per-hover reducer effect (O(M) on every hover commit) to a dedicated effect keyed only on `hiddenIds` change. Hover branches read a pre-built `Set<edgeId>` ref — O(1) per edge per frame.
-- **O(degree) selection.** Click-mode connected-edge lookup uses `graph.edges(selectedId)` (O(degree)) instead of `graph.forEachEdge` (O(M)). On Artix: ~8 edges vs 82 k scan per click.
+- **O(degree) selection.** Click-mode connected-edge lookup uses `graph.edges(selectedId)` (O(degree)) instead of `graph.forEachEdge` (O(M)). On the large-library reference fixture: ~8 edges vs 82 k scan per click.
 - **Instant layout at density.** Layout transitions skip the 280 ms per-frame interpolation at ≥ 5 000 nodes — the animation burned 1.5 M `setNodeAttribute` calls/sec with no visual value at that density.
 - **Labels disabled at extreme density.** `renderLabels: false` at > 15 000 nodes eliminates Sigma's label collision pass (the dominant per-frame cost). `selectProminentGraphLabelIds` O(N log N) sort also skipped in that regime.
 - **Byte-buffered NDJSON parser.** `getGraphTopologyStream` uses a `Uint8Array` ring buffer with direct 0x0A scan instead of the old `pending += chunk; pending.slice()` pattern, preventing O(N²) string churn at 100 k+ node topologies.
@@ -123,7 +250,7 @@ Large-library performance release. On a 4900-document reference library the docu
 
 ### Release-readiness tooling
 
-- `**scripts/ops/release-check.py**` — consolidated pre-release smoke + perf suite. 24 checks covering auth, catalog, content, knowledge, snapshot export, and MCP tools. Per-check latency budgets with pass/warn/fail verdicts, top-10 latency table, machine-readable JSON output. Replaces ad-hoc curl scripts.
+- `**scripts/ops/release-check.py`** — consolidated pre-release smoke + perf suite. 24 checks covering auth, catalog, content, knowledge, snapshot export, and MCP tools. Per-check latency budgets with pass/warn/fail verdicts, top-10 latency table, machine-readable JSON output. Replaces ad-hoc curl scripts.
 
 ### Extraction pipeline refactor
 
@@ -145,7 +272,7 @@ Large-library performance release. On a 4900-document reference library the docu
 
 ### Query execution performance
 
-- **O(1) edge lookup.** `QueryGraphIndex.edges` switched from `Vec` with linear `.find()` to `HashMap<Uuid, GraphViewEdgeWrite>`. On the Artix fixture (82 k edges), `map_edge_hit` dropped from ~41 M comparisons to ~500 hash lookups per query.
+- **O(1) edge lookup.** `QueryGraphIndex.edges` switched from `Vec` with linear `.find()` to `HashMap<Uuid, GraphViewEdgeWrite>`. On the large-library reference fixture (82 k edges), `map_edge_hit` dropped from ~41 M comparisons to ~500 hash lookups per query.
 - **Batched extract candidate inserts.** `replace_extract_node_candidates` and `replace_extract_edge_candidates` switched from per-row INSERT to `QueryBuilder::push_values()` bulk INSERT … RETURNING. On a 5 k-doc library with ~50 candidates per chunk, this eliminates millions of sequential round-trips during ingest.
 - **Batched audit subject inserts.** `append_audit_event` subject loop switched to single-statement `push_values` INSERT.
 - **Extract candidate indexes.** New migration `0003_extract_candidate_indexes.sql` adds `CREATE INDEX CONCURRENTLY` on `extract_node_candidate(chunk_result_id)` and `extract_edge_candidate(chunk_result_id)` — the tables lacked FK indexes and every per-chunk DELETE/SELECT was a full table scan.
@@ -161,7 +288,7 @@ Large-library performance release. On a 4900-document reference library the docu
 - `**execution_id_of()` helper.** Deduplicates 5-site `.expect(...)` pattern.
 - **ServiceRole enum dispatch.** Config string matching replaced with existing `ServiceRole::Api/Worker/Startup` enum.
 - **N+1 query eliminated in document lifecycle.** Batch `list_ingest_attempts_by_jobs` / `list_ingest_stage_events_by_jobs` via `WHERE job_id = ANY($1)` — 2 queries regardless of job count.
-- **Sequential awaits → `tokio::try_join!**` in AI catalog service.
+- **Sequential awaits → `tokio::try_join!`** in AI catalog service.
 - **Dead code removal.** Query execution scaffolding, branded identifier heuristics, unused types.
 - **In-place dedup.** BTreeSet roundtrip pattern (4 sites) → `sort_unstable() + dedup()`.
 - **MCP library_ids capped** at 50 per request.
@@ -209,7 +336,7 @@ Large-library performance release. On a 4900-document reference library the docu
 - **DOM tooltip card anchored to node viewport**. Hover shows a floating card with the full node label, neighbor count, and the first 12 neighbor names. The card is positioned via `sigma.graphToViewport(node.x, node.y)` and re-anchored on every camera `updated` event, so it stays glued to the node during pan/zoom instead of trailing the cursor.
 - **Density-aware label rendering**. `labelRenderedSizeThreshold` scales 8 → 10 → 14 → 20 with `nodes.length` and `labelGridCellSize` jumps 100 → 240 on dense graphs. `hideLabelsOnMove` is now true for every graph above 5 k nodes (was 140). Hover no longer `forceLabel`-s neighbors on dense graphs.
 - **Pre-computed neighbor index + label lookup**. `useMemo<Map<string, Set<string>>>` rebuilt only when `nodes` / `edges` change; hover and click both read it as O(1) instead of walking the graphology adjacency list each time.
-- **Layout spacing tuned for `autoRescale**`. `layoutBands`, `layoutSectors`, `layoutRings` now spread cells aggressively (`orderRoot * 1.4` for bands, `× 4` inner radius for sectors, `× 1.6` ring gaps) so even after Sigma compresses 25 k nodes into the viewport the cells stay visually distinct.
+- **Layout spacing tuned for `autoRescale`**. `layoutBands`, `layoutSectors`, `layoutRings` now spread cells aggressively (`orderRoot * 1.4` for bands, `× 4` inner radius for sectors, `× 1.6` ring gaps) so even after Sigma compresses 25 k nodes into the viewport the cells stay visually distinct.
 - **Density-aware node radius**. Per-node `size` shrinks with the visible node count (3..13 → 2..7 → 1.4..4 → 1..2.6 across density tiers) so dense graphs do not paint as a solid color block.
 
 ### Local profiling environment
@@ -276,7 +403,7 @@ Large-library performance release. On a 4900-document reference library the docu
 
 - **Schema reset**: the database baseline was consolidated to one canonical `0001_init.sql`; legacy execution and accounting paths were removed.
 - **Assistant/MCP cutover**: the standalone `ask` shortcut and parallel special-case assistant flow were removed; assistant Q&A now runs only through the canonical MCP tool loop.
-- **IRONRAG rename**: release-facing configuration now uses `IRONRAG`_* naming instead of `RUSTRAG_`*.
+- **IRONRAG rename**: release-facing configuration now uses `IRONRAG`_* naming instead of `RUSTRAG`_*.
 
 ### Platform
 

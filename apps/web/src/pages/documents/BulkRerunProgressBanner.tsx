@@ -1,15 +1,19 @@
-import { memo } from 'react';
-import { CheckSquare, Loader2, XCircle } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { ASYNC_OPERATION_TERMINAL_STATES, type AsyncOperationDetail } from '@/api';
+import { memo } from "react";
+import { CheckSquare, Loader2, XCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  ASYNC_OPERATION_TERMINAL_STATES,
+  type AsyncOperationDetail,
+} from "@/api";
 
 export interface BulkRerunProgressState {
+  kind: "delete" | "reprocess";
   operationId: string;
   total: number;
   completed: number;
   failed: number;
   inFlight: number;
-  status: AsyncOperationDetail['status'];
+  status: AsyncOperationDetail["status"];
 }
 
 type BulkRerunProgressBannerProps = {
@@ -19,7 +23,7 @@ type BulkRerunProgressBannerProps = {
 };
 
 /**
- * Canonical inline progress strip for the async batch-rerun flow. Occupies
+ * Canonical inline progress strip for async batch document operations. Occupies
  * one row above the documents table, never a modal. Surfaces three numbers
  * (completed / total / failed) plus a slim progress bar, and becomes
  * dismissible the moment the parent async-op enters a terminal state.
@@ -37,24 +41,32 @@ function BulkRerunProgressBannerImpl({
   const settled = bulkRerun.completed + bulkRerun.failed;
   const pct = Math.min(100, Math.round((settled / denominator) * 100));
   const isTerminal = ASYNC_OPERATION_TERMINAL_STATES.has(bulkRerun.status);
+  const isFinalizing =
+    !isTerminal && bulkRerun.total > 0 && settled >= bulkRerun.total;
   const hasFailures = bulkRerun.failed > 0;
   const tone = isTerminal
     ? hasFailures
-      ? 'border-amber-500/30 bg-amber-50/40 dark:bg-amber-500/5'
-      : 'border-emerald-500/30 bg-emerald-50/40 dark:bg-emerald-500/5'
-    : 'border-primary/30 bg-primary/5';
+      ? "border-amber-500/30 bg-amber-50/40 dark:bg-amber-500/5"
+      : "border-emerald-500/30 bg-emerald-50/40 dark:bg-emerald-500/5"
+    : "border-primary/30 bg-primary/5";
+  const labelPrefix =
+    bulkRerun.kind === "delete"
+      ? "documents.bulkDelete"
+      : "documents.bulkRerun";
   const label = isTerminal
     ? hasFailures
-      ? t('documents.bulkRerunDoneWithFailures', {
+      ? t(`${labelPrefix}DoneWithFailures`, {
           completed: bulkRerun.completed,
           failed: bulkRerun.failed,
           total: bulkRerun.total,
         })
-      : t('documents.bulkRerunDone', { total: bulkRerun.total })
-    : t('documents.bulkRerunInFlight', {
-        settled,
-        total: bulkRerun.total,
-      });
+      : t(`${labelPrefix}Done`, { total: bulkRerun.total })
+    : isFinalizing
+      ? t(`${labelPrefix}Finalizing`, { total: bulkRerun.total })
+      : t(`${labelPrefix}InFlight`, {
+          settled,
+          total: bulkRerun.total,
+        });
 
   return (
     <div
@@ -75,10 +87,10 @@ function BulkRerunProgressBannerImpl({
           <div
             className={
               hasFailures && isTerminal
-                ? 'h-full bg-amber-500 transition-all duration-300'
+                ? "h-full bg-amber-500 transition-all duration-300"
                 : isTerminal
-                  ? 'h-full bg-emerald-500 transition-all duration-300'
-                  : 'h-full bg-primary transition-all duration-300'
+                  ? "h-full bg-emerald-500 transition-all duration-300"
+                  : "h-full bg-primary transition-all duration-300"
             }
             style={{ width: `${pct}%` }}
           />
@@ -91,7 +103,7 @@ function BulkRerunProgressBannerImpl({
           className="h-7 px-2 text-xs"
           onClick={onDismiss}
         >
-          {t('documents.bulkRerunDismiss')}
+          {t("documents.bulkRerunDismiss")}
         </Button>
       )}
     </div>

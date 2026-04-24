@@ -15,6 +15,7 @@ pub struct WebDiscoveredPageRow {
     pub host_classification: String,
     pub candidate_state: String,
     pub classification_reason: Option<String>,
+    pub classification_detail: Option<String>,
     pub content_type: Option<String>,
     pub http_status: Option<i32>,
     pub snapshot_storage_key: Option<String>,
@@ -38,6 +39,7 @@ pub struct NewWebDiscoveredPage<'a> {
     pub host_classification: &'a str,
     pub candidate_state: &'a str,
     pub classification_reason: Option<&'a str>,
+    pub classification_detail: Option<&'a str>,
     pub content_type: Option<&'a str>,
     pub http_status: Option<i32>,
     pub snapshot_storage_key: Option<&'a str>,
@@ -55,6 +57,7 @@ pub struct UpdateWebDiscoveredPage<'a> {
     pub host_classification: Option<&'a str>,
     pub candidate_state: &'a str,
     pub classification_reason: Option<&'a str>,
+    pub classification_detail: Option<&'a str>,
     pub content_type: Option<&'a str>,
     pub http_status: Option<i32>,
     pub snapshot_storage_key: Option<&'a str>,
@@ -81,6 +84,7 @@ pub async fn create_web_discovered_page(
             host_classification,
             candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -105,11 +109,12 @@ pub async fn create_web_discovered_page(
             $12,
             $13,
             $14,
-            coalesce($15, now()),
+            $15,
             coalesce($16, now()),
-            $17,
+            coalesce($17, now()),
             $18,
-            $19
+            $19,
+            $20
         )
         returning
             id,
@@ -123,6 +128,7 @@ pub async fn create_web_discovered_page(
             host_classification::text as host_classification,
             candidate_state::text as candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -143,6 +149,7 @@ pub async fn create_web_discovered_page(
     .bind(input.host_classification)
     .bind(input.candidate_state)
     .bind(input.classification_reason)
+    .bind(input.classification_detail)
     .bind(input.content_type)
     .bind(input.http_status)
     .bind(input.snapshot_storage_key)
@@ -172,6 +179,7 @@ pub async fn list_web_discovered_pages(
             host_classification::text as host_classification,
             candidate_state::text as candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -206,6 +214,7 @@ pub async fn get_web_discovered_page_by_result_revision_id(
             host_classification::text as host_classification,
             candidate_state::text as candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -245,6 +254,7 @@ pub async fn list_web_discovered_pages_by_result_revision_ids(
             host_classification::text as host_classification,
             candidate_state::text as candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -279,6 +289,7 @@ pub async fn get_web_discovered_page_by_id(
             host_classification::text as host_classification,
             candidate_state::text as candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -313,6 +324,7 @@ pub async fn get_web_discovered_page_by_run_and_normalized_url(
             host_classification::text as host_classification,
             candidate_state::text as candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -344,13 +356,14 @@ pub async fn update_web_discovered_page(
              host_classification = coalesce($4::web_candidate_host_classification, host_classification),
              candidate_state = $5::web_candidate_state,
              classification_reason = $6,
-             content_type = $7,
-             http_status = $8,
-             snapshot_storage_key = $9,
-             updated_at = coalesce($10, now()),
-             document_id = $11,
-             result_revision_id = $12,
-             mutation_item_id = $13
+             classification_detail = $7,
+             content_type = $8,
+             http_status = $9,
+             snapshot_storage_key = $10,
+             updated_at = coalesce($11, now()),
+             document_id = $12,
+             result_revision_id = $13,
+             mutation_item_id = $14
          where id = $1
          returning
             id,
@@ -364,6 +377,7 @@ pub async fn update_web_discovered_page(
             host_classification::text as host_classification,
             candidate_state::text as candidate_state,
             classification_reason,
+            classification_detail,
             content_type,
             http_status,
             snapshot_storage_key,
@@ -379,6 +393,7 @@ pub async fn update_web_discovered_page(
     .bind(input.host_classification)
     .bind(input.candidate_state)
     .bind(input.classification_reason)
+    .bind(input.classification_detail)
     .bind(input.content_type)
     .bind(input.http_status)
     .bind(input.snapshot_storage_key)

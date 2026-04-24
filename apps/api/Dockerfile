@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.94.0-trixie AS builder
+FROM rust:1.95.0-trixie AS builder
 WORKDIR /workspace
 ARG APP_VERSION
 
@@ -21,7 +21,13 @@ ENV APP_VERSION=${APP_VERSION}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg \
     --mount=type=cache,target=/usr/local/cargo/git,id=ironrag-cargo-git \
-    cargo build --locked --release -p ironrag-backend --bin ironrag-backend --bin rebuild_runtime_graph --bin ironrag-cli
+    cargo build --locked --release -p ironrag-backend \
+      --bin ironrag-backend \
+      --bin rebuild_runtime_graph \
+      --bin ironrag-cli \
+      --bin ironrag-embed-chunks-backfill \
+      --bin ironrag-promote-null-heads \
+      --bin ironrag-gc-stale-chunks
 
 FROM debian:trixie-slim AS runtime
 WORKDIR /app
@@ -33,6 +39,9 @@ RUN apt-get update \
 COPY --from=builder /workspace/target/release/ironrag-backend /usr/local/bin/ironrag-backend
 COPY --from=builder /workspace/target/release/rebuild_runtime_graph /usr/local/bin/rebuild_runtime_graph
 COPY --from=builder /workspace/target/release/ironrag-cli /usr/local/bin/ironrag-cli
+COPY --from=builder /workspace/target/release/ironrag-embed-chunks-backfill /usr/local/bin/ironrag-embed-chunks-backfill
+COPY --from=builder /workspace/target/release/ironrag-promote-null-heads /usr/local/bin/ironrag-promote-null-heads
+COPY --from=builder /workspace/target/release/ironrag-gc-stale-chunks /usr/local/bin/ironrag-gc-stale-chunks
 COPY apps/api/docker/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint.sh
 
 RUN adduser --disabled-password --gecos "" appuser \

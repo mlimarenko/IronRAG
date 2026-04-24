@@ -8,8 +8,8 @@ use crate::{
         auth::AuthContext,
         authorization::{
             POLICY_LIBRARY_WRITE, POLICY_MCP_MEMORY_READ, POLICY_WORKSPACE_ADMIN,
-            authorize_library_discovery, authorize_workspace_discovery,
-            authorize_workspace_permission,
+            authorize_library_discovery, authorize_library_permission,
+            authorize_workspace_discovery, authorize_workspace_permission,
         },
         router_support::{ApiError, map_library_create_error, map_workspace_create_error},
     },
@@ -17,17 +17,105 @@ use crate::{
         McpCreateLibraryRequest, McpCreateWorkspaceRequest, McpLibraryDescriptor,
         McpLibraryIngestionReadiness, McpWorkspaceDescriptor,
     },
-    shared::slugs::slugify,
 };
 
 use super::types::VisibleLibraryContext;
 
-fn resolve_mcp_slug(requested_slug: Option<&str>, name: &str) -> String {
-    requested_slug
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(slugify)
-        .unwrap_or_else(|| slugify(name))
+const LIBRARY_REF_SEPARATOR: char = '/';
+
+#[must_use]
+pub(crate) fn workspace_catalog_ref(workspace_slug: &str) -> String {
+    workspace_slug.to_string()
+}
+
+#[must_use]
+pub(crate) fn library_catalog_ref(workspace_slug: &str, library_slug: &str) -> String {
+    format!("{workspace_slug}{LIBRARY_REF_SEPARATOR}{library_slug}")
+}
+
+fn parse_workspace_catalog_ref(value: &str) -> Result<String, ApiError> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return Err(ApiError::invalid_mcp_tool_call("workspace must not be empty"));
+    }
+    if normalized.contains(LIBRARY_REF_SEPARATOR) {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "workspace ref '{normalized}' must not contain '{LIBRARY_REF_SEPARATOR}'"
+        )));
+    }
+    Ok(normalized.to_string())
+}
+
+fn parse_library_catalog_ref(value: &str) -> Result<(String, String), ApiError> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return Err(ApiError::invalid_mcp_tool_call("library must not be empty"));
+    }
+    let Some((workspace_slug, library_slug)) = normalized.split_once(LIBRARY_REF_SEPARATOR) else {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "library ref '{normalized}' must use '<workspace>/<library>'"
+        )));
+    };
+    let workspace_slug = parse_workspace_catalog_ref(workspace_slug)?;
+    let library_slug = library_slug.trim();
+    if library_slug.is_empty() || library_slug.contains(LIBRARY_REF_SEPARATOR) {
+        return Err(ApiError::invalid_mcp_tool_call(format!(
+            "library ref '{normalized}' must use exactly one '{LIBRARY_REF_SEPARATOR}' separator"
+        )));
+    }
+    Ok((workspace_slug, library_slug.to_string()))
+}
+
+async fn load_workspace_row_by_catalog_ref(
+    state: &AppState,
+    workspace_ref: &str,
+) -> Result<CatalogWorkspaceRow, ApiError> {
+    let workspace_ref = parse_workspace_catalog_ref(workspace_ref)?;
+    catalog_repository::get_workspace_by_slug(&state.persistence.postgres, &workspace_ref)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("workspace", workspace_ref))
+}
+
+pub(crate) async fn load_workspace_by_catalog_ref(
+    auth: &AuthContext,
+    state: &AppState,
+    workspace_ref: &str,
+    accepted_permissions: &[&str],
+) -> Result<CatalogWorkspaceRow, ApiError> {
+    let workspace = load_workspace_row_by_catalog_ref(state, workspace_ref).await?;
+    authorize_workspace_permission(auth, workspace.id, accepted_permissions)?;
+    Ok(workspace)
+}
+
+pub(crate) async fn load_workspace_by_catalog_ref_for_discovery(
+    auth: &AuthContext,
+    state: &AppState,
+    workspace_ref: &str,
+) -> Result<CatalogWorkspaceRow, ApiError> {
+    let workspace = load_workspace_row_by_catalog_ref(state, workspace_ref).await?;
+    authorize_workspace_discovery(auth, workspace.id)?;
+    Ok(workspace)
+}
+
+pub(crate) async fn load_library_by_catalog_ref(
+    auth: &AuthContext,
+    state: &AppState,
+    library_ref: &str,
+    accepted_permissions: &[&str],
+) -> Result<CatalogLibraryRow, ApiError> {
+    let (workspace_ref, library_slug) = parse_library_catalog_ref(library_ref)?;
+    let workspace = load_workspace_row_by_catalog_ref(state, &workspace_ref).await?;
+    let library = catalog_repository::get_library_by_workspace_and_slug(
+        &state.persistence.postgres,
+        workspace.id,
+        &library_slug,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+    .ok_or_else(|| ApiError::resource_not_found("library", library_ref))?;
+    authorize_library_permission(auth, library.workspace_id, library.id, accepted_permissions)?;
+    Ok(library)
 }
 
 pub async fn visible_workspaces(
@@ -63,7 +151,7 @@ pub async fn visible_workspaces(
         let can_write_any_library = workspace_libraries.iter().any(|item| item.supports_write);
         items.push(McpWorkspaceDescriptor {
             workspace_id: workspace.id,
-            slug: workspace.slug,
+            catalog_ref: workspace_catalog_ref(&workspace.slug),
             name: workspace.display_name,
             status: workspace.lifecycle_state,
             visible_library_count: workspace_libraries.len(),
@@ -76,7 +164,7 @@ pub async fn visible_workspaces(
 pub async fn visible_libraries(
     auth: &AuthContext,
     state: &AppState,
-    workspace_filter: Option<Uuid>,
+    workspace_filter: Option<&str>,
 ) -> Result<Vec<McpLibraryDescriptor>, ApiError> {
     let libraries = load_visible_library_contexts(auth, state, workspace_filter).await?;
     Ok(libraries.into_iter().map(|item| item.descriptor).collect())
@@ -115,7 +203,7 @@ pub async fn visible_catalog(
         let can_write_any_library = workspace_libs.iter().any(|item| item.supports_write);
         workspaces.push(McpWorkspaceDescriptor {
             workspace_id: workspace.id,
-            slug: workspace.slug,
+            catalog_ref: workspace_catalog_ref(&workspace.slug),
             name: workspace.display_name,
             status: workspace.lifecycle_state,
             visible_library_count: workspace_libs.len(),
@@ -136,11 +224,14 @@ pub async fn create_workspace(
     if !auth.is_system_admin {
         return Err(ApiError::Unauthorized);
     }
-    let name = request.name.trim();
-    if name.is_empty() {
-        return Err(ApiError::BadRequest("workspace name must not be empty".into()));
-    }
-    let slug = resolve_mcp_slug(request.slug.as_deref(), name);
+    let workspace_ref = parse_workspace_catalog_ref(&request.workspace)?;
+    let display_name = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&workspace_ref)
+        .to_string();
 
     let workspace = state
         .canonical_services
@@ -148,20 +239,22 @@ pub async fn create_workspace(
         .create_workspace(
             state,
             crate::services::catalog_service::CreateWorkspaceCommand {
-                slug: Some(slug.clone()),
-                display_name: name.to_string(),
+                slug: Some(workspace_ref.clone()),
+                display_name,
                 created_by_principal_id: Some(auth.principal_id),
             },
         )
         .await
         .map_err(|error| match error {
             ApiError::Conflict(_) => error,
-            _ => map_workspace_create_error(sqlx::Error::Protocol(error.to_string()), &slug),
+            _ => {
+                map_workspace_create_error(sqlx::Error::Protocol(error.to_string()), &workspace_ref)
+            }
         })?;
 
     Ok(McpWorkspaceDescriptor {
         workspace_id: workspace.id,
-        slug: workspace.slug,
+        catalog_ref: workspace_catalog_ref(&workspace.slug),
         name: workspace.display_name,
         status: "active".to_string(),
         visible_library_count: 0,
@@ -174,13 +267,16 @@ pub async fn create_library(
     state: &AppState,
     request: McpCreateLibraryRequest,
 ) -> Result<McpLibraryDescriptor, ApiError> {
-    authorize_workspace_permission(auth, request.workspace_id, POLICY_WORKSPACE_ADMIN)?;
-
-    let name = request.name.trim();
-    if name.is_empty() {
-        return Err(ApiError::BadRequest("library name must not be empty".into()));
-    }
-    let slug = resolve_mcp_slug(request.slug.as_deref(), name);
+    let (workspace_ref, library_slug) = parse_library_catalog_ref(&request.library)?;
+    let workspace =
+        load_workspace_by_catalog_ref(auth, state, &workspace_ref, POLICY_WORKSPACE_ADMIN).await?;
+    let display_name = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&library_slug)
+        .to_string();
 
     let library = state
         .canonical_services
@@ -188,9 +284,9 @@ pub async fn create_library(
         .create_library(
             state,
             crate::services::catalog_service::CreateLibraryCommand {
-                workspace_id: request.workspace_id,
-                slug: Some(slug.clone()),
-                display_name: name.to_string(),
+                workspace_id: workspace.id,
+                slug: Some(library_slug.clone()),
+                display_name,
                 description: request.description,
                 created_by_principal_id: Some(auth.principal_id),
             },
@@ -200,8 +296,8 @@ pub async fn create_library(
             ApiError::Conflict(_) => error,
             _ => map_library_create_error(
                 sqlx::Error::Protocol(error.to_string()),
-                request.workspace_id,
-                &slug,
+                workspace.id,
+                &library_slug,
             ),
         })?;
 
@@ -211,7 +307,7 @@ pub async fn create_library(
         .ok_or_else(|| ApiError::resource_not_found("library", library.id))?;
     let readiness =
         state.canonical_services.catalog.get_library_ingestion_readiness(state, row.id).await?;
-    let context = describe_library(auth, state, row, readiness).await?;
+    let context = describe_library(auth, state, row, &workspace.slug, readiness).await?;
     Ok(context.descriptor)
 }
 
@@ -229,11 +325,10 @@ pub(crate) async fn load_visible_workspace_rows(
 pub(crate) async fn load_visible_library_contexts(
     auth: &AuthContext,
     state: &AppState,
-    workspace_filter: Option<Uuid>,
+    workspace_filter: Option<&str>,
 ) -> Result<Vec<VisibleLibraryContext>, ApiError> {
     let workspace_ids = if let Some(workspace_id) = workspace_filter {
-        authorize_workspace_discovery(auth, workspace_id)?;
-        vec![workspace_id]
+        vec![load_workspace_by_catalog_ref_for_discovery(auth, state, workspace_id).await?.id]
     } else {
         load_visible_workspace_rows(auth, state)
             .await?
@@ -262,6 +357,12 @@ pub(crate) async fn describe_libraries(
     state: &AppState,
     libraries: Vec<CatalogLibraryRow>,
 ) -> Result<Vec<VisibleLibraryContext>, ApiError> {
+    let workspace_slug_by_id = catalog_repository::list_workspaces(&state.persistence.postgres)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .into_iter()
+        .map(|workspace| (workspace.id, workspace.slug))
+        .collect::<std::collections::HashMap<_, _>>();
     let readiness_by_library = state
         .canonical_services
         .catalog
@@ -279,7 +380,11 @@ pub(crate) async fn describe_libraries(
                 missing_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
             },
         );
-        items.push(describe_library(auth, state, library, readiness).await?);
+        let workspace_slug = workspace_slug_by_id
+            .get(&library.workspace_id)
+            .cloned()
+            .ok_or_else(|| ApiError::resource_not_found("workspace", library.workspace_id))?;
+        items.push(describe_library(auth, state, library, &workspace_slug, readiness).await?);
     }
     Ok(items)
 }
@@ -288,6 +393,7 @@ pub(crate) async fn describe_library(
     auth: &AuthContext,
     state: &AppState,
     library: CatalogLibraryRow,
+    workspace_slug: &str,
     ingestion_readiness: CatalogLibraryIngestionReadiness,
 ) -> Result<VisibleLibraryContext, ApiError> {
     let supports_search =
@@ -309,9 +415,11 @@ pub(crate) async fn describe_library(
     let descriptor = McpLibraryDescriptor {
         library_id: library.id,
         workspace_id: library.workspace_id,
-        slug: library.slug.clone(),
+        catalog_ref: library_catalog_ref(workspace_slug, &library.slug),
         name: library.display_name.trim().to_string(),
         description: library.description.clone(),
+        web_ingest_policy: serde_json::from_value(library.web_ingest_policy.clone())
+            .map_err(|_| ApiError::Internal)?,
         ingestion_readiness: map_ingestion_readiness(ingestion_readiness),
         document_count,
         readable_document_count,

@@ -75,7 +75,7 @@ const INSTANT_LAYOUT_NODE_THRESHOLD = 5000;
 /// `hideLabelsOnMove` and `labelRenderedSizeThreshold` tuned up; at
 /// 15k+ nodes the labels are visually useless anyway (unreadable at
 /// that density) and turning them off shaves 30-50% off the per-frame
-/// budget on the Artix fixture.
+/// budget on the large-library reference fixture.
 const LABELS_DISABLED_NODE_THRESHOLD = 15000;
 /// Above this node count, the initial layout is computed in a Web
 /// Worker so it never blocks the main thread. Below it, the sync
@@ -229,7 +229,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     // At ultra-dense node counts labels are disabled entirely below, so
     // `selectProminentGraphLabelIds` — which does an O(N log N) full
     // sort on the node array — is pointless work. Skipping it shaves
-    // ~15 ms off the initial build on the Artix fixture.
+    // ~15 ms off the initial build on the large-library reference fixture.
     const prominentLabelIds =
       visibleNodes.length > LABELS_DISABLED_NODE_THRESHOLD
         ? EMPTY_LABEL_SET
@@ -689,7 +689,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
     if (selectedId && graph.hasNode(selectedId)) {
       // `graph.edges(node)` returns only the edges incident to
       // `selectedId` — O(degree) instead of O(M). The previous code
-      // walked ALL 82k edges on the Artix fixture every time the user
+      // walked ALL 82k edges on the large-library reference fixture every time the user
       // clicked a node, which was visibly janky.
       const connectedEdges = new Set<string>(graph.edges(selectedId));
       const neighbors = neighborIndex.get(selectedId) ?? new Set<string>();

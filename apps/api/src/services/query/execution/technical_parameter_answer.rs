@@ -1,5 +1,6 @@
 use uuid::Uuid;
 
+use crate::domains::query_ir::QueryIR;
 use crate::shared::extraction::technical_facts::TechnicalFactKind;
 use crate::shared::extraction::text_render::repair_technical_layout_noise;
 
@@ -15,6 +16,7 @@ use super::{
 
 pub(super) fn build_exact_parameter_answer(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
@@ -34,7 +36,7 @@ pub(super) fn build_exact_parameter_answer(
     }
 
     let target_parameter =
-        select_exact_parameter_literal(question, evidence, chunks, &explicit_parameters)?;
+        select_exact_parameter_literal(question, query_ir, evidence, chunks, &explicit_parameters)?;
     let parameter_meaning =
         extract_parameter_meaning(question, &target_parameter, evidence, chunks);
 
@@ -76,12 +78,13 @@ pub(super) fn build_exact_parameter_answer(
 
 fn select_exact_parameter_literal(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     explicit_parameters: &[String],
 ) -> Option<String> {
     let focused_document_id = focused_answer_document_id(question, chunks);
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let document_labels = build_document_labels(chunks);
 
     best_matching_fact(

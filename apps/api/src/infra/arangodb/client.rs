@@ -235,6 +235,56 @@ impl ArangoClient {
         Err(anyhow!("failed to ensure collection {name}: status {}", response.status()))
     }
 
+    /// Creates (or leaves in place) a custom ArangoSearch analyzer with the
+    /// given type + properties + features. Idempotent: if an analyzer with
+    /// `name` already exists the call is a no-op.
+    ///
+    /// Used for analyzers that are not part of the Arango default set —
+    /// e.g. an application-level trigram analyzer that makes a title
+    /// subquery tolerant to small spelling variants and single-character
+    /// typos that the default stemming analyzers collapse into different
+    /// stems.
+    pub async fn ensure_analyzer(
+        &self,
+        name: &str,
+        analyzer_type: &str,
+        properties: serde_json::Value,
+        features: &[&str],
+    ) -> anyhow::Result<()> {
+        let existing = self
+            .request(Method::GET, &format!("_api/analyzer/{name}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to query analyzer {name}"))?;
+        if existing.status().is_success() {
+            return Ok(());
+        }
+        if existing.status().as_u16() != 404 {
+            return Err(anyhow!(
+                "unexpected status probing analyzer {name}: {}",
+                existing.status()
+            ));
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "type": analyzer_type,
+            "properties": properties,
+            "features": features,
+        });
+        let response = self
+            .request(Method::POST, "_api/analyzer")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("failed to create analyzer {name}"))?;
+        if response.status().is_success() || response.status().as_u16() == 409 {
+            return Ok(());
+        }
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        Err(anyhow!("failed to create analyzer {name}: status {status}, body {text}"))
+    }
+
     pub async fn ensure_view(&self, name: &str, links: serde_json::Value) -> anyhow::Result<()> {
         self.ensure_view_exists(name).await?;
 

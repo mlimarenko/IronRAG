@@ -95,5 +95,6 @@ export function mapAssistantMessage(m: RawAssistantMessage): AssistantMessage {
     content: m.content ?? '',
     timestamp: m.timestamp,
     executionId: m.executionId ?? null,
+    evidence: m.evidence ? mapAssistantTurnToEvidence(m.evidence) : undefined,
   };
 }

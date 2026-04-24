@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domains::ai::AiBindingPurpose;
+use crate::shared::web::ingest::WebIngestPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CatalogLifecycleState {
@@ -36,6 +37,7 @@ pub struct CatalogLibrary {
     pub display_name: String,
     pub description: Option<String>,
     pub extraction_prompt: Option<String>,
+    pub web_ingest_policy: WebIngestPolicy,
     pub lifecycle_state: CatalogLifecycleState,
     pub ingestion_readiness: CatalogLibraryIngestionReadiness,
     pub created_at: DateTime<Utc>,

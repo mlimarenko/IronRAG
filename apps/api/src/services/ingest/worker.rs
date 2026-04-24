@@ -829,7 +829,15 @@ async fn run_canonical_ingest_pipeline(
         .await
         .context("failed to record extract_technical_facts stage event")?;
 
-    // --- Stage: embed_chunk (deferred) ----------------------------------------
+    // --- Stage: embed_chunk ---------------------------------------------------
+    // Inline chunk embedding. The previous "deferred non-blocking" no-op
+    // left `knowledge_chunk_vector` empty, so every vector-lane retrieval
+    // returned zero hits and queries fell back to lexical-only results.
+    // Canonical fix: embed all chunks for the just-readable revision
+    // synchronously using the library's EmbedChunk binding. Failure here
+    // leaves `vector_state` unpromoted — the revision is still text-
+    // readable, but graph extraction still runs so the rest of the
+    // pipeline doesn't stall on embedding provider hiccups.
     cancellation.check(job.id)?;
     state
         .canonical_services
@@ -840,8 +848,10 @@ async fn run_canonical_ingest_pipeline(
                 attempt_id,
                 stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
                 stage_state: "started".to_string(),
-                message: None,
-                details_json: serde_json::json!({}),
+                message: Some("embedding chunks".to_string()),
+                details_json: serde_json::json!({
+                    "revisionId": revision_id,
+                }),
                 provider_kind: None,
                 model_name: None,
                 prompt_tokens: None,
@@ -855,32 +865,110 @@ async fn run_canonical_ingest_pipeline(
         )
         .await
         .context("failed to record embed_chunk started stage event")?;
-    state
+
+    let embed_chunk_start = Instant::now();
+    let embed_chunk_outcome = state
         .canonical_services
-        .ingest
-        .record_stage_event(
-            state,
-            RecordStageEventCommand {
-                attempt_id,
-                stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
-                stage_state: "completed".to_string(),
-                message: Some(
-                    "vector stage deferred to keep background ingestion non-blocking".to_string(),
-                ),
-                details_json: serde_json::json!({ "strategy": "deferred_non_blocking" }),
-                provider_kind: None,
-                model_name: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                total_tokens: None,
-                cached_tokens: None,
-                estimated_cost: None,
-                currency_code: None,
-                elapsed_ms: Some(0i64),
-            },
-        )
-        .await
-        .context("failed to record embed_chunk stage event")?;
+        .search
+        .embed_chunks_for_revision(state, revision.library_id, revision_id)
+        .await;
+    let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
+    let embed_chunk_success = match &embed_chunk_outcome {
+        Ok(outcome) => {
+            if let (Some(provider), Some(model), Some(usage_json)) = (
+                outcome.provider_kind.clone(),
+                outcome.model_name.clone(),
+                outcome.usage_json.clone(),
+            ) {
+                if let Err(e) = state
+                    .canonical_services
+                    .billing
+                    .capture_ingest_attempt(
+                        state,
+                        crate::services::ops::billing::CaptureIngestAttemptBillingCommand {
+                            workspace_id: job.workspace_id,
+                            library_id: job.library_id,
+                            attempt_id,
+                            binding_id: None,
+                            provider_kind: provider,
+                            model_name: model,
+                            call_kind: "embed_chunk".to_string(),
+                            usage_json,
+                        },
+                    )
+                    .await
+                {
+                    warn!(%worker_id, job_id = %job.id, ?e, "embed_chunk billing capture failed");
+                }
+            }
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id,
+                        stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                        stage_state: "completed".to_string(),
+                        message: Some("chunk embeddings persisted".to_string()),
+                        details_json: serde_json::json!({
+                            "chunksEmbedded": outcome.chunks_embedded,
+                            "providerKind": outcome.provider_kind,
+                            "modelName": outcome.model_name,
+                        }),
+                        provider_kind: outcome.provider_kind.clone(),
+                        model_name: outcome.model_name.clone(),
+                        prompt_tokens: outcome.prompt_tokens,
+                        completion_tokens: outcome.completion_tokens,
+                        total_tokens: outcome.total_tokens,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: embed_chunk_elapsed_ms,
+                    },
+                )
+                .await
+                .context("failed to record embed_chunk stage event")?;
+            true
+        }
+        Err(error) => {
+            warn!(
+                %worker_id,
+                job_id = %job.id,
+                revision_id = %revision_id,
+                ?error,
+                "chunk embedding failed; vector lane will remain empty for this revision",
+            );
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id,
+                        stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                        stage_state: "failed".to_string(),
+                        message: Some("chunk embedding failed".to_string()),
+                        details_json: serde_json::json!({
+                            "error": format!("{error:#}"),
+                        }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: embed_chunk_elapsed_ms,
+                    },
+                )
+                .await
+                .context("failed to record embed_chunk failed stage event")?;
+            false
+        }
+    };
+    drop(embed_chunk_outcome);
 
     // --- Stage: extract_graph -------------------------------------------------
     cancellation.check(job.id)?;
@@ -1010,15 +1098,16 @@ async fn run_canonical_ingest_pipeline(
                         .await
                         .context("failed to record extract_graph stage event")?;
 
-                    // Record embed_chunk with actual embedding usage + billing
+                    // Capture graph-embedding billing under its own
+                    // `embed_graph` call_kind. Previous versions filed
+                    // this usage under the `embed_chunk` stage event,
+                    // which made every dashboard conflate chunk-embed
+                    // activity (which was actually a no-op until this
+                    // release) with graph-node/edge embedding activity.
                     if let Some(embedding_usage) = outcome.embedding_usage {
                         let embed_provider = embedding_usage.provider_kind.clone();
                         let embed_model = embedding_usage.model_name.clone();
-                        let embed_prompt = embedding_usage.prompt_tokens;
-                        let embed_completion = embedding_usage.completion_tokens;
-                        let embed_total = embedding_usage.total_tokens;
 
-                        // Capture embedding billing
                         if let Err(e) = state
                             .canonical_services
                             .billing
@@ -1037,37 +1126,8 @@ async fn run_canonical_ingest_pipeline(
                             )
                             .await
                         {
-                            warn!(%worker_id, job_id = %job.id, ?e, "embedding billing capture failed");
+                            warn!(%worker_id, job_id = %job.id, ?e, "embed_graph billing capture failed");
                         }
-
-                        let _ = state
-                            .canonical_services
-                            .ingest
-                            .record_stage_event(
-                                state,
-                                RecordStageEventCommand {
-                                    attempt_id,
-                                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
-                                    stage_state: "completed".to_string(),
-                                    message: Some(
-                                        "graph node/edge embeddings computed".to_string(),
-                                    ),
-                                    details_json: serde_json::json!({
-                                        "providerKind": embed_provider,
-                                        "modelName": embed_model,
-                                    }),
-                                    provider_kind: embed_provider,
-                                    model_name: embed_model,
-                                    prompt_tokens: embed_prompt,
-                                    completion_tokens: embed_completion,
-                                    total_tokens: embed_total,
-                                    cached_tokens: None,
-                                    estimated_cost: None,
-                                    currency_code: None,
-                                    elapsed_ms: None,
-                                },
-                            )
-                            .await;
                     }
                 }
                 Err(graph_error) => {
@@ -1294,29 +1354,53 @@ async fn run_canonical_ingest_pipeline(
     let finalizing_start = Instant::now();
 
     let now = Utc::now();
+    let vector_state_label = if embed_chunk_success { "ready" } else { "failed" };
+    let vector_ready_at = embed_chunk_success.then_some(now);
     let _ = state
         .arango_document_store
         .update_revision_readiness(
             revision_id,
             "ready",
-            "ready",
+            vector_state_label,
             if graph_ready { "ready" } else { "processing" },
             Some(now),
-            Some(now),
+            vector_ready_at,
             graph_ready.then_some(now),
             revision.superseded_by_revision_id,
         )
         .await
         .context("failed to update revision readiness")?;
 
-    // Update mutation state if a mutation is linked.
+    // Fail-loud finalize contract. The previous `if let Err(e) { warn!; }`
+    // path silently swallowed mutation-state update failures while
+    // `promote_document_head` ran regardless — the result was documents
+    // with `readable_revision_id IS NOT NULL` on head but
+    // `mutation_state` stuck in `accepted`/`running`, which then
+    // diverged across the multiple dashboard aggregates and produced
+    // the "920 ready" frozen-counter report.
+    //
+    // Now every finalize sub-step returns its error up the stack. If
+    // any step fails, `?` bubbles out before `promote_document_head`
+    // so the document head NEVER gains a readable revision out of sync
+    // with its mutation. The attempt transitions to `failed` and the
+    // job will be retried by the scheduler — a second pass either
+    // completes atomically or stays in the failed bucket where
+    // operators can see it.
+    //
+    // Not a Postgres `Transaction` yet because `promote_document_head`
+    // writes to both Postgres and Arango and crossing databases inside
+    // one `BEGIN` is a larger refactor (see
+    // `services/content/service/revision.rs::promote_document_head`).
+    // The fail-loud ordering gives us the same drift-prevention
+    // guarantee for all future ingests without changing the executor
+    // plumbing.
     if let Some(mutation_id) = job.mutation_id {
         let items =
             content_repository::list_mutation_items(&state.persistence.postgres, mutation_id)
                 .await
-                .unwrap_or_default();
+                .context("failed to list mutation items during finalize")?;
         if let Some(item) = items.first() {
-            if let Err(e) = content_repository::update_mutation_item(
+            content_repository::update_mutation_item(
                 &state.persistence.postgres,
                 item.id,
                 Some(document_id),
@@ -1326,11 +1410,14 @@ async fn run_canonical_ingest_pipeline(
                 Some("mutation applied by canonical worker"),
             )
             .await
-            {
-                tracing::warn!(%mutation_id, ?e, "failed to update mutation item to applied");
-            }
+            .with_context(|| {
+                format!(
+                    "failed to update mutation item to applied (mutation_id={mutation_id}, item_id={})",
+                    item.id
+                )
+            })?;
         }
-        if let Err(e) = content_repository::update_mutation_status(
+        content_repository::update_mutation_status(
             &state.persistence.postgres,
             mutation_id,
             "applied",
@@ -1339,13 +1426,16 @@ async fn run_canonical_ingest_pipeline(
             None,
         )
         .await
-        {
-            tracing::warn!(%mutation_id, ?e, "failed to update mutation status to applied");
-        }
+        .with_context(|| {
+            format!("failed to update mutation status to applied (mutation_id={mutation_id})")
+        })?;
     }
 
-    // Promote the document head through the canonical service so Postgres and Arango stay aligned.
-    if let Err(error) = state
+    // Promote the document head through the canonical service so
+    // Postgres and Arango stay aligned. Runs AFTER mutation updates
+    // succeed — any earlier error above has already bubbled out and
+    // prevented the head from reaching the readable-revision state.
+    state
         .canonical_services
         .content
         .promote_document_head(
@@ -1359,9 +1449,11 @@ async fn run_canonical_ingest_pipeline(
             },
         )
         .await
-    {
-        tracing::error!(document_id = %document_id, ?error, "failed to promote document head — Postgres/Arango may diverge");
-    }
+        .with_context(|| {
+            format!(
+                "failed to promote document head (document_id={document_id}, revision_id={revision_id})"
+            )
+        })?;
     state
         .canonical_services
         .content

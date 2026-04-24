@@ -118,16 +118,18 @@ async fn get_async_operation(
     let progress =
         state.canonical_services.ops.get_async_operation_progress(&state, operation_id).await?;
 
-    // For any parent batch op (children present), the effective status is
-    // DERIVED from child progress, not from the stored row. The spawned
-    // batch worker only writes to the parent on admit-phase catastrophic
-    // failure; happy-path transitions through `processing → ready/failed`
-    // are all computed on read from the aggregate counts. This gives
-    // callers a single source of truth — `progress` — regardless of what
-    // the stored parent row happens to say.
-    if progress.total > 0 {
+    // For parent batch ops (children present), the effective status is
+    // usually derived from child progress. Batch delete is the exception:
+    // after every child delete settles, the parent still runs one library
+    // graph projection refresh. Until that parent-owned finalization writes
+    // completed_at, reporting `ready` would be a false terminal state.
+    if progress.total > 0
+        && !matches!(operation.status.as_str(), "failed" | "canceled" | "superseded")
+    {
         let pending = progress.total.saturating_sub(progress.completed + progress.failed);
-        let derived = if pending > 0 {
+        let parent_finalizing = operation.operation_kind == "batch_delete_documents"
+            && operation.completed_at.is_none();
+        let derived = if pending > 0 || parent_finalizing {
             "processing"
         } else if progress.failed > 0 {
             "failed"
@@ -137,7 +139,7 @@ async fn get_async_operation(
         if operation.status != derived {
             operation.status = derived.to_string();
         }
-        if pending == 0 && operation.completed_at.is_none() {
+        if pending == 0 && !parent_finalizing && operation.completed_at.is_none() {
             operation.completed_at = Some(chrono::Utc::now());
         }
     }
@@ -204,7 +206,7 @@ async fn get_library_dashboard(
     };
     let (
         recent_page,
-        status_counts_row,
+        document_metrics,
         recent_web_runs,
         knowledge_summary,
         ops_snapshot,
@@ -212,16 +214,14 @@ async fn get_library_dashboard(
     ) = tokio::try_join!(
         state.canonical_services.content.list_documents_page(&state, recent_page_command),
         async {
-            crate::infra::repositories::content_repository::aggregate_document_list_status_counts(
+            crate::infra::repositories::content_repository::aggregate_library_document_metrics(
                 &state.persistence.postgres,
                 library_id,
-                false,
-                None,
             )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))
         },
-        state.canonical_services.web_ingest.list_runs(&state, library_id),
+        state.canonical_services.web_ingest.list_runs(&state, library_id, 6),
         state.canonical_services.knowledge.get_library_summary(&state, library_id),
         state.canonical_services.ops.get_library_state_snapshot(&state, library_id),
         state.canonical_services.ops.list_library_warnings(&state, library_id),
@@ -229,7 +229,11 @@ async fn get_library_dashboard(
 
     let recent_documents: Vec<DocumentSummary> =
         recent_page.items.into_iter().map(map_list_entry_to_dashboard_summary).collect();
-    let overview = build_documents_overview_from_counts(&status_counts_row);
+    // `overview` is derived from the canonical `document_metrics` row
+    // to keep the two fields on `DashboardSurface` consistent by
+    // construction. Legacy UI consumers that read `overview.*` see
+    // the same numbers as new consumers that read `documentMetrics`.
+    let overview = build_documents_overview_from_metrics(&document_metrics);
     let warnings = map_operator_warnings(&ops_warnings, &ops_snapshot.state);
     let graph = map_graph_surface(&knowledge_summary, &ops_snapshot.state, warnings.first());
     let attention = build_attention_items_bounded(
@@ -243,6 +247,7 @@ async fn get_library_dashboard(
 
     Ok(Json(DashboardSurface {
         overview,
+        document_metrics,
         metrics,
         recent_documents,
         recent_web_runs: recent_web_runs.into_iter().map(map_web_run_summary).collect(),
@@ -283,16 +288,19 @@ fn map_list_entry_to_dashboard_summary(
 }
 
 fn parse_list_entry_status(value: &str) -> DocumentStatus {
-    // The dashboard contract enum has 5 variants and does not model
-    // `canceled` separately — cancelled runs surface as `Failed` on
-    // this surface. Anything else we don't understand degrades to
-    // `Queued` so the dashboard never crashes on a future backend
-    // enum value it wasn't aware of.
+    // The dashboard contract enum now models `canceled` separately
+    // (prior versions folded it into `Failed`, which hid the
+    // difference between a pipeline rejection and an operator
+    // withdrawal and made batch-cancel rollouts indistinguishable
+    // from real failures on the dashboard). Unknown values still
+    // degrade to `Queued` so the dashboard can't crash on a future
+    // backend enum addition.
     match value {
         "ready" => DocumentStatus::Ready,
         "processing" => DocumentStatus::Processing,
         "queued" => DocumentStatus::Queued,
-        "failed" | "canceled" => DocumentStatus::Failed,
+        "failed" => DocumentStatus::Failed,
+        "canceled" => DocumentStatus::Canceled,
         _ => DocumentStatus::Queued,
     }
 }
@@ -307,21 +315,20 @@ fn parse_list_entry_readiness(value: &str) -> DocumentReadiness {
     }
 }
 
-fn build_documents_overview_from_counts(
-    counts: &crate::infra::repositories::content_repository::DocumentListStatusCountsRow,
+/// Canonical path: derive the legacy `DocumentsOverview` shape from
+/// a freshly-computed `LibraryDocumentMetrics`. Used by the dashboard
+/// handler so both fields on `DashboardSurface` are built from the
+/// same numbers. The previous `_from_counts` sibling was removed —
+/// everything now consolidates on `LibraryDocumentMetrics`.
+fn build_documents_overview_from_metrics(
+    metrics: &ironrag_contracts::documents::LibraryDocumentMetrics,
 ) -> DocumentsOverview {
     DocumentsOverview {
-        total_documents: saturating_i32(counts.total.unwrap_or(0) as usize),
-        ready_documents: saturating_i32(counts.ready.unwrap_or(0) as usize),
-        processing_documents: saturating_i32(
-            (counts.processing.unwrap_or(0) + counts.queued.unwrap_or(0)) as usize,
-        ),
-        failed_documents: saturating_i32(
-            (counts.failed.unwrap_or(0) + counts.canceled.unwrap_or(0)) as usize,
-        ),
-        // graph_sparse split is not in the aggregate — the graph surface
-        // already reports that count from the runtime_graph_snapshot.
-        graph_sparse_documents: 0,
+        total_documents: saturating_i32(metrics.total.max(0) as usize),
+        ready_documents: saturating_i32(metrics.ready.max(0) as usize),
+        processing_documents: saturating_i32((metrics.processing + metrics.queued).max(0) as usize),
+        failed_documents: saturating_i32((metrics.failed + metrics.canceled).max(0) as usize),
+        graph_sparse_documents: saturating_i32(metrics.graph_sparse.max(0) as usize),
     }
 }
 
@@ -424,11 +431,26 @@ fn map_ops_warning(warning: &OpsLibraryWarning) -> OpsLibraryWarningResponse {
 
 fn build_dashboard_metrics(
     overview: &DocumentsOverview,
-    ops_state: &OpsLibraryState,
+    _ops_state: &OpsLibraryState,
     graph: &GraphSurface,
     attention_count: usize,
 ) -> Vec<DashboardMetric> {
-    let in_flight = ops_state.queue_depth.saturating_add(ops_state.running_attempts);
+    // Canonical `in_flight`: `processing + queued` at the document
+    // level — exactly what `overview.processingDocuments` is, because
+    // that field is built from `LibraryDocumentMetrics` via
+    // `build_documents_overview_from_metrics`. Do NOT re-derive from
+    // `ops_state.queue_depth + running_attempts` here: those come
+    // from `ingest_job` / `ingest_attempt` rows and can legitimately
+    // disagree with the document-level bucketing (one document can
+    // have multiple jobs/attempts during retries; one queued job can
+    // represent a document that still counts as `processing` because
+    // a mutation is `running`). The two numbers used to appear on
+    // the same response as `metrics[in_flight] = 8756` and
+    // `overview.processingDocuments = 8484` for the same moment —
+    // that divergence is the drift bug the dashboard release killed
+    // for the overview but forgot here. The UI reads either field
+    // now without contradiction.
+    let in_flight = i64::from(overview.processing_documents);
     let attention = i64::try_from(attention_count).unwrap_or(i64::MAX);
 
     vec![
@@ -633,6 +655,15 @@ fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSumm
         boundary_policy: summary.boundary_policy,
         max_depth: summary.max_depth,
         max_pages: summary.max_pages,
+        ignore_patterns: summary
+            .ignore_patterns
+            .into_iter()
+            .map(|pattern| ironrag_contracts::documents::WebIngestIgnorePattern {
+                kind: pattern.kind,
+                value: pattern.value,
+                source: pattern.source,
+            })
+            .collect(),
         run_state: map_web_run_state(&summary.run_state),
         seed_url: summary.seed_url,
         counts: WebRunCounts {

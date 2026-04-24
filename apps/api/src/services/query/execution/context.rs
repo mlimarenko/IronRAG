@@ -198,8 +198,8 @@ pub(crate) fn build_structured_query_diagnostics(
             entity_count: bundle.entities.len(),
             relationship_count: bundle.relationships.len(),
             chunk_count: bundle.chunks.len(),
-            graph_node_count: graph_index.nodes.len(),
-            graph_edge_count: graph_index.edges.len(),
+            graph_node_count: graph_index.node_count(),
+            graph_edge_count: graph_index.edge_count(),
         },
         planning: enrichment.planning.clone(),
         rerank: enrichment.rerank.clone(),
@@ -260,14 +260,14 @@ pub(crate) async fn load_query_execution_library_context(
     // The previous implementation enumerated every document + 6 Arango
     // prefetches per call, which on a 5k-doc library burned ~180 s per
     // query turn before the outer timeout cut it off.
-    let readiness =
-        crate::infra::repositories::content_repository::aggregate_library_document_readiness(
+    let metrics =
+        crate::infra::repositories::content_repository::aggregate_library_document_metrics(
             &state.persistence.postgres,
             library_id,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .context("failed to aggregate library readiness for query context")?;
+        .context("failed to aggregate library metrics for query context")?;
     let recent_page = crate::infra::repositories::content_repository::list_document_page_rows(
         &state.persistence.postgres,
         library_id,
@@ -283,18 +283,22 @@ pub(crate) async fn load_query_execution_library_context(
     .map_err(|error| anyhow::anyhow!(error.to_string()))
     .context("failed to load recent document rows for query context")?;
 
-    let backlog_count = readiness.processing_count;
-    let convergence_status = query_execution_convergence_status(graph_status, backlog_count);
+    let in_flight = metrics.processing + metrics.queued;
+    // Backlog surfaced to the convergence-warning classifier covers
+    // everything that is not yet readable — jobs still in flight
+    // plus any queued / canceled retries the runtime will sweep
+    // before the library reaches a fully-ready state. Derived from
+    // the canonical metrics row so this number and the dashboard
+    // `in-flight` card always agree.
+    let backlog_count = in_flight;
+    let convergence_status = query_execution_convergence_status(graph_status, in_flight);
     let summary = RuntimeQueryLibrarySummary {
-        document_count: usize::try_from(readiness.active_count).unwrap_or(0),
-        // Approximation: without a per-document Arango scan we can't
-        // split `graph_ready` from `readable`, so we surface the
-        // whole readable bucket as the graph-ready prompt hint. This
-        // over-counts docs that are readable-but-graph-sparse, which
-        // is a benign prompt signal.
-        graph_ready_count: usize::try_from(readiness.readable_count).unwrap_or(0),
-        processing_count: usize::try_from(readiness.processing_count).unwrap_or(0),
-        failed_count: usize::try_from(readiness.failed_count).unwrap_or(0),
+        document_count: usize::try_from(metrics.total).unwrap_or(0),
+        // Canonical `graph_ready` comes from the metrics row (already
+        // clamped to `ready` so the published invariant holds).
+        graph_ready_count: usize::try_from(metrics.graph_ready).unwrap_or(0),
+        processing_count: usize::try_from(in_flight).unwrap_or(0),
+        failed_count: usize::try_from(metrics.failed + metrics.canceled).unwrap_or(0),
         graph_status,
     };
     let recent_documents =
@@ -427,7 +431,23 @@ pub(crate) fn assemble_answer_context(
     if !retrieved_documents.is_empty() {
         let retrieved_lines = retrieved_documents
             .iter()
-            .map(|document| format!("- {}: {}", document.title, document.preview_excerpt))
+            .map(|document| {
+                // Render source URL when the runtime has one (web
+                // ingest, external link). The model is instructed
+                // in the single-shot prompt to quote this URL when
+                // citing the document so the end user can click
+                // through. For uploads without a URL we just show
+                // the document title.
+                let mut line = format!("- {}", document.title);
+                if let Some(source) = document.source_uri.as_deref() {
+                    let trimmed = source.trim();
+                    if !trimmed.is_empty() {
+                        line.push_str(&format!(" (source: {trimmed})"));
+                    }
+                }
+                line.push_str(&format!(": {}", document.preview_excerpt));
+                line
+            })
             .collect::<Vec<_>>();
         sections.push(format!("Retrieved document briefs\n{}", retrieved_lines.join("\n")));
     }
@@ -457,12 +477,22 @@ pub(crate) async fn load_retrieved_document_briefs(
     chunks: &[RuntimeMatchedChunk],
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     top_k: usize,
+    focused_document_id: Option<Uuid>,
 ) -> Vec<RuntimeRetrievedDocumentBrief> {
     let brief_limit = top_k.clamp(16, 48);
     let mut best_by_document = HashMap::<Uuid, RuntimeMatchedChunk>::new();
     let mut ordered_document_ids = Vec::<Uuid>::new();
+    // Collect the focused-document chunks once — consolidation has
+    // already sorted them by chunk_index and biased their scores so
+    // they sit at the top of the bundle; the brief preview joins the
+    // first N of them in reading order. Non-focused documents keep
+    // the legacy "best-scored chunk excerpt" fallback.
+    let mut focused_chunks: Vec<&RuntimeMatchedChunk> = Vec::new();
 
     for chunk in chunks {
+        if Some(chunk.document_id) == focused_document_id {
+            focused_chunks.push(chunk);
+        }
         let entry = best_by_document.entry(chunk.document_id).or_insert_with(|| {
             ordered_document_ids.push(chunk.document_id);
             chunk.clone()
@@ -472,6 +502,9 @@ pub(crate) async fn load_retrieved_document_briefs(
         }
     }
 
+    focused_chunks.sort_by_key(|chunk| chunk.chunk_index);
+    let focused_preview = focused_preview_from_bundle_chunks(&focused_chunks);
+
     let ranked_documents = ordered_document_ids
         .into_iter()
         .take(brief_limit)
@@ -479,16 +512,31 @@ pub(crate) async fn load_retrieved_document_briefs(
             let document = document_index.get(&document_id)?.clone();
             let fallback_excerpt =
                 best_by_document.get(&document_id).map(|chunk| chunk.excerpt.clone());
-            Some((document, fallback_excerpt))
+            let is_focused = Some(document_id) == focused_document_id;
+            Some((document, fallback_excerpt, is_focused))
         })
         .collect::<Vec<_>>();
 
-    let previews =
-        join_all(ranked_documents.into_iter().map(|(document, fallback_excerpt)| async move {
-            let preview_excerpt = load_retrieved_document_preview(state, &document)
-                .await
-                .or(fallback_excerpt)
-                .unwrap_or_default();
+    let focused_preview_ref = focused_preview.as_ref();
+    let previews = join_all(ranked_documents.into_iter().map(
+        |(document, fallback_excerpt, is_focused)| async move {
+            let (preview_excerpt, source_uri) = if is_focused {
+                // For the winner we already have the anchor-window
+                // chunks in the bundle; synthesize the preview from
+                // them and skip the `list_chunks_by_revision` fetch
+                // entirely. The separate `get_revision` call is kept
+                // so the source_uri still reaches the prompt.
+                let source_uri = load_retrieved_document_source_uri(state, &document).await;
+                let preview = focused_preview_ref.cloned().or(fallback_excerpt).unwrap_or_default();
+                (preview, source_uri)
+            } else {
+                let (preview, source_uri) =
+                    load_retrieved_document_preview_and_source(state, &document)
+                        .await
+                        .unwrap_or((None, None));
+                let preview = preview.or(fallback_excerpt).unwrap_or_default();
+                (preview, source_uri)
+            };
             if preview_excerpt.trim().is_empty() {
                 return None;
             }
@@ -497,19 +545,71 @@ pub(crate) async fn load_retrieved_document_briefs(
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| document.external_key.clone());
-            Some(RuntimeRetrievedDocumentBrief { title, preview_excerpt })
-        }))
-        .await;
+            Some(RuntimeRetrievedDocumentBrief { title, preview_excerpt, source_uri })
+        },
+    ))
+    .await;
 
     previews.into_iter().flatten().collect()
 }
 
-async fn load_retrieved_document_preview(
+/// Build the "Retrieved document briefs" preview for the winning
+/// document out of the chunks consolidation has already packed into
+/// the bundle. Joining the anchor-window `source_text` segments in
+/// reading order produces a preview that actually reflects where the
+/// answer will quote from, rather than the intro-chunk of the
+/// revision (which is what `list_chunks_by_revision` surfaces).
+///
+/// `source_text` is already normalised in `apply_winner_chunks` via
+/// `repair_technical_layout_noise`, so we just trim and join here.
+fn focused_preview_from_bundle_chunks(chunks: &[&RuntimeMatchedChunk]) -> Option<String> {
+    let joined = chunks
+        .iter()
+        .filter_map(|chunk| {
+            let trimmed = chunk.source_text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!joined.is_empty()).then(|| excerpt_for(&joined, 240))
+}
+
+async fn load_retrieved_document_source_uri(
     state: &AppState,
     document: &KnowledgeDocumentRow,
 ) -> Option<String> {
     let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
-    let chunks = state.arango_document_store.list_chunks_by_revision(revision_id).await.ok()?;
+    let revision = state.arango_document_store.get_revision(revision_id).await.ok()??;
+    revision.source_uri.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
+async fn load_retrieved_document_preview_and_source(
+    state: &AppState,
+    document: &KnowledgeDocumentRow,
+) -> Option<(Option<String>, Option<String>)> {
+    // `source_uri` is stored on the revision row, not on the
+    // document root — a document can have many revisions over its
+    // lifetime and each carries the provenance of *that* upload
+    // (URL for web-ingested pages, storage reference for files).
+    // We read the readable revision first (what the user would see
+    // today); the active revision is the fallback while a newer
+    // ingest run is still processing but has not landed yet.
+    let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
+
+    let revision_future = state.arango_document_store.get_revision(revision_id);
+    let chunks_future = state.arango_document_store.list_chunks_by_revision(revision_id);
+    let (revision_result, chunks_result) =
+        futures::future::join(revision_future, chunks_future).await;
+
+    let source_uri = revision_result
+        .ok()
+        .flatten()
+        .and_then(|revision| revision.source_uri)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let chunks = chunks_result.ok().unwrap_or_default();
     let combined = chunks
         .into_iter()
         .filter_map(|chunk| {
@@ -523,10 +623,10 @@ async fn load_retrieved_document_preview(
         .take(3)
         .collect::<Vec<_>>()
         .join(" ");
-    if combined.is_empty() {
-        return None;
-    }
-    Some(excerpt_for(&combined, 240))
+
+    let preview = (!combined.is_empty()).then(|| excerpt_for(&combined, 240));
+
+    Some((preview, source_uri))
 }
 
 pub(crate) fn assemble_context_metadata_for_query(

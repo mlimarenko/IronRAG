@@ -1,3 +1,10 @@
+// CRAG rewrite path + RetrievalConfidence live here but their call sites
+// in `structured_query_pipeline.rs` are not wired into the v0.3.2
+// retrieval pipeline. Marking the module-level allow so the file stays
+// as the canonical home when the structured-query pipeline gets
+// re-enabled in a later release.
+#![allow(dead_code)]
+
 use uuid::Uuid;
 
 use crate::{

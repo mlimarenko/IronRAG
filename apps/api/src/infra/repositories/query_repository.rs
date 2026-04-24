@@ -110,6 +110,12 @@ pub struct NewQueryConversation<'a> {
     pub created_by_principal_id: Option<Uuid>,
     pub title: Option<&'a str>,
     pub conversation_state: &'a str,
+    /// Canonical `surface_kind` enum value — `'ui'` for the web
+    /// assistant session-create path, `'mcp'` for the grounded_answer
+    /// tool. Set once at creation time and drives the UI session
+    /// listing filter so MCP-born conversations do not leak into the
+    /// web surface.
+    pub request_surface: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +154,9 @@ pub async fn list_conversations_by_library(
     postgres: &PgPool,
     library_id: Uuid,
 ) -> Result<Vec<QueryConversationRow>, sqlx::Error> {
+    // UI-only listing: MCP-born conversations are audit-visible but
+    // must not surface in the web assistant session list. The surface
+    // is set at creation time on `request_surface` (migration 0007).
     sqlx::query_as::<_, QueryConversationRowRecord>(
         "select
             id,
@@ -160,6 +169,7 @@ pub async fn list_conversations_by_library(
             updated_at
          from query_conversation
          where library_id = $1
+           and request_surface = 'ui'
          order by updated_at desc, created_at desc
          limit 5",
     )
@@ -230,10 +240,11 @@ pub async fn create_conversation(
             created_by_principal_id,
             title,
             conversation_state,
+            request_surface,
             created_at,
             updated_at
         )
-        values ($1, $2, $3, $4, $5, $6::query_conversation_state, now(), now())
+        values ($1, $2, $3, $4, $5, $6::query_conversation_state, $7::surface_kind, now(), now())
         returning
             id,
             workspace_id,
@@ -250,6 +261,7 @@ pub async fn create_conversation(
     .bind(input.created_by_principal_id)
     .bind(input.title)
     .bind(input.conversation_state)
+    .bind(input.request_surface)
     .fetch_one(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -637,6 +649,56 @@ pub async fn create_execution(
     .fetch_one(postgres)
     .await?;
     map_query_execution_row(row)
+}
+
+/// One row that will land in `query_chunk_reference`. The turn layer
+/// captures these in `RuntimeStructuredQueryResult.chunk_references`
+/// and forwards them to `append_chunk_references` once it has an
+/// `execution_id`. Keeping the repo-layer type small and insert-only
+/// avoids leaking the internal `RuntimeMatchedChunk` into the query
+/// repository surface.
+#[derive(Debug, Clone, Copy)]
+pub struct NewQueryChunkReference {
+    pub chunk_id: Uuid,
+    pub rank: i32,
+    pub score: f64,
+}
+
+/// Persist the final ranked chunks that shaped a query execution's
+/// answer context into `query_chunk_reference`. The write is an UNNEST
+/// batch insert — one Postgres round-trip regardless of how many
+/// chunks landed in the bundle. `ON CONFLICT DO NOTHING` makes the
+/// call idempotent if the turn layer ever retries after a transient
+/// failure on a later step (the caller holds the execution_id so a
+/// replay cannot produce mismatched rows).
+///
+/// No-op when `references` is empty — avoids a redundant round-trip
+/// on turns that produced no retrieved chunks.
+pub async fn append_chunk_references(
+    postgres: &PgPool,
+    execution_id: Uuid,
+    references: &[NewQueryChunkReference],
+) -> Result<u64, sqlx::Error> {
+    if references.is_empty() {
+        return Ok(0);
+    }
+    let chunk_ids: Vec<Uuid> = references.iter().map(|reference| reference.chunk_id).collect();
+    let ranks: Vec<i32> = references.iter().map(|reference| reference.rank).collect();
+    let scores: Vec<f64> = references.iter().map(|reference| reference.score).collect();
+    let result = sqlx::query(
+        "insert into query_chunk_reference (execution_id, chunk_id, rank, score)
+         select $1, chunk_id, rank, score
+         from unnest($2::uuid[], $3::int[], $4::double precision[])
+              as input(chunk_id, rank, score)
+         on conflict (execution_id, chunk_id) do nothing",
+    )
+    .bind(execution_id)
+    .bind(&chunk_ids)
+    .bind(&ranks)
+    .bind(&scores)
+    .execute(postgres)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn update_execution(

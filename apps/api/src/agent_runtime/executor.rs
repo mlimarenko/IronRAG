@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::{future::Future, sync::Arc};
 use tokio::sync::Semaphore;
@@ -66,11 +66,20 @@ impl RuntimeExecutionSession {
         Ok(())
     }
 
+    /// Record a trace row for a completed stage. `started_at` is
+    /// captured by the caller when the stage *begins* (returned by
+    /// [`RuntimeExecutor::begin_stage`]) and threaded through to
+    /// this call; `completed_at` is stamped here, at the moment the
+    /// trace row is actually written. The previous behaviour stamped
+    /// both timestamps with the same `Utc::now()` — the runtime
+    /// trace viewer consequently showed every stage as taking ~0 ms,
+    /// which made per-stage perf investigation impossible.
     pub fn record_stage(
         &mut self,
         stage_kind: RuntimeStageKind,
         stage_state: RuntimeStageState,
         deterministic: bool,
+        started_at: DateTime<Utc>,
     ) -> Uuid {
         let record_id = Uuid::now_v7();
         self.trace.stages.push(RuntimeStageRecord {
@@ -81,7 +90,7 @@ impl RuntimeExecutionSession {
             attempt_no: 1,
             stage_state,
             deterministic,
-            started_at: Utc::now(),
+            started_at,
             completed_at: Some(Utc::now()),
             input_summary_json: json!({}),
             output_summary_json: json!({}),
@@ -247,13 +256,25 @@ impl RuntimeExecutor {
         decision
     }
 
+    /// Mark a stage as entered and return the wall-clock moment the
+    /// stage actually started. The caller holds on to this timestamp
+    /// and passes it back to [`complete_stage`] so the trace row
+    /// records real elapsed time instead of the old `started_at == completed_at`
+    /// zero.
+    ///
     /// # Errors
     /// Returns [`RuntimeExecutionError::PolicyBlocked`] when runtime policy rejects the stage.
     pub async fn begin_stage(
         &self,
         session: &mut RuntimeExecutionSession,
         stage_kind: RuntimeStageKind,
-    ) -> Result<(), RuntimeExecutionError> {
+    ) -> Result<DateTime<Utc>, RuntimeExecutionError> {
+        // Capture the real stage-entry timestamp BEFORE the policy
+        // round-trip — evaluate_target can take several ms on some
+        // policies, and attributing that setup cost to the stage
+        // itself is exactly the kind of fudge the old "zero-diff"
+        // trace row was hiding.
+        let started_at = Utc::now();
         let decision = self
             .evaluate_target(
                 session.execution.id,
@@ -276,7 +297,7 @@ impl RuntimeExecutor {
             RuntimeDecisionKind::Allow => {
                 session.execution.lifecycle_state = RuntimeLifecycleState::Running;
                 session.execution.active_stage = Some(stage_kind);
-                Ok(())
+                Ok(started_at)
             }
             RuntimeDecisionKind::Reject | RuntimeDecisionKind::Terminate => {
                 let reason_code = decision.resolved_reason_code();
@@ -304,8 +325,9 @@ impl RuntimeExecutor {
         deterministic: bool,
         failure_code: Option<String>,
         failure_summary_redacted: Option<String>,
+        started_at: DateTime<Utc>,
     ) -> Uuid {
-        let stage_id = session.record_stage(stage_kind, stage_state, deterministic);
+        let stage_id = session.record_stage(stage_kind, stage_state, deterministic, started_at);
         if let Some(record) = session.trace.stages.iter_mut().find(|record| record.id == stage_id) {
             record.failure_code = failure_code;
             record.failure_summary_redacted = failure_summary_redacted;

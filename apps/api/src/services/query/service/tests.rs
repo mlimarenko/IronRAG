@@ -17,14 +17,17 @@ use crate::{
 };
 
 use super::{
-    MAX_DETAIL_PREPARED_SEGMENT_REFERENCES, MAX_DETAIL_TECHNICAL_FACT_REFERENCES,
-    RankedBundleReference,
+    ExternalConversationTurn, MAX_DETAIL_PREPARED_SEGMENT_REFERENCES,
+    MAX_DETAIL_TECHNICAL_FACT_REFERENCES, RankedBundleReference,
     context::{derive_fact_rank_refs, selected_fact_ids_for_detail},
     formatting::{
         build_prepared_segment_references, parse_query_verification_state,
         render_answer_source_links,
     },
-    session::build_conversation_runtime_context,
+    session::{
+        build_conversation_runtime_context,
+        build_conversation_runtime_context_with_external_history,
+    },
 };
 
 #[test]
@@ -370,7 +373,7 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
         turn_index: 1,
         turn_kind: QueryTurnKind::User,
         author_principal_id: None,
-        content_text: "как в далионе перемещение сделать скажи".to_string(),
+        content_text: "как в the product перемещение сделать скажи".to_string(),
         execution_id: None,
         created_at: Utc::now(),
     };
@@ -380,7 +383,7 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
         turn_index: 2,
         turn_kind: QueryTurnKind::Assistant,
         author_principal_id: None,
-        content_text: "Могу сразу расписать это пошагово для Далиона.".to_string(),
+        content_text: "Могу сразу расписать это пошагово для the product.".to_string(),
         execution_id: Some(Uuid::now_v7()),
         created_at: Utc::now(),
     };
@@ -400,17 +403,70 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
         follow_up_turn.id,
     );
 
-    assert!(context.effective_query_text.contains("как в далионе перемещение сделать скажи"));
+    assert!(context.effective_query_text.contains("как в the product перемещение сделать скажи"));
     assert!(
-        context.effective_query_text.contains("Могу сразу расписать это пошагово для Далиона.")
+        !context
+            .effective_query_text
+            .contains("Могу сразу расписать это пошагово для the product.")
     );
     assert!(context.effective_query_text.ends_with("давай"));
     assert_eq!(
         context.prompt_history_text.as_deref(),
         Some(
-            "User: как в далионе перемещение сделать скажи\nAssistant: Могу сразу расписать это пошагово для Далиона."
+            "User: как в the product перемещение сделать скажи\nAssistant: Могу сразу расписать это пошагово для the product."
         )
     );
+}
+
+#[test]
+fn build_conversation_runtime_context_prefers_matching_history_snippet_for_short_follow_up() {
+    let conversation_id = Uuid::now_v7();
+    let first_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "which connector variants exist".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "\
+Connector Alpha uses the [Alpha] section with `alphaSecret`.
+Connector TargetName uses the [TargetName] section with `targetSecret` and merchantId."
+            .to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "TargetNme how".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[first_user_turn, assistant_turn, follow_up_turn.clone()],
+        follow_up_turn.id,
+    );
+
+    assert!(context.effective_query_text.contains("which connector variants exist"));
+    assert!(context.effective_query_text.contains("Connector TargetName"));
+    assert!(context.effective_query_text.contains("targetSecret"));
+    assert!(!context.effective_query_text.contains("Connector Alpha"));
+    assert!(context.coreference_entities.contains(&"targetSecret".to_string()));
+    assert!(!context.coreference_entities.contains(&"alphaSecret".to_string()));
+    assert!(context.effective_query_text.ends_with("TargetNme how"));
 }
 
 #[test]
@@ -432,7 +488,7 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
         turn_index: 2,
         turn_kind: QueryTurnKind::User,
         author_principal_id: None,
-        content_text: "как в далионе перемещение сделать скажи".to_string(),
+        content_text: "как в the product перемещение сделать скажи".to_string(),
         execution_id: None,
         created_at: Utc::now(),
     };
@@ -440,6 +496,7 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
     let context =
         build_conversation_runtime_context(&[first_turn, second_turn.clone()], second_turn.id);
 
-    assert_eq!(context.effective_query_text, "как в далионе перемещение сделать скажи");
-    assert_eq!(context.prompt_history_text.as_deref(), Some("User: как перемещение оформить"));
+    assert_eq!(context.effective_query_text, "как в the product перемещение сделать скажи");
+    assert_eq!(context.prompt_history_text, None);
 }
+

@@ -72,8 +72,8 @@ impl AiCatalogService {
                 credential.id == target_credential_id && credential.credential_state == "active"
             }) {
                 if let Some(provider) = provider_by_id.get(&credential.provider_catalog_id) {
-                    let should_refresh = !provider_catalog_id
-                        .is_some_and(|value| value != provider.id)
+                    let should_refresh = provider_catalog_id
+                        .is_none_or(|value| value == provider.id)
                         && provider_credential_policy(&provider.provider_kind).validation_mode
                             == ProviderCredentialValidationMode::ModelList;
                     if should_refresh {

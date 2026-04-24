@@ -1,5 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 
+use std::time::Duration;
+
 use redis::Client as RedisClient;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
@@ -48,22 +50,54 @@ impl Persistence {
     /// # Errors
     /// Returns any database, Redis client, or Redis ping initialization error.
     pub async fn connect(settings: &Settings) -> anyhow::Result<Self> {
+        // Main working pool. `acquire_timeout` caps how long a request
+        // may block waiting for a free slot before returning
+        // `PoolTimedOut` — without it, a spike of concurrent
+        // grounded_answer calls (each holding a connection for a
+        // retrieval + audit write) could stack up behind a cold
+        // runtime_graph_edge load and surface as 30-60 s timeouts at
+        // the MCP transport. 8 s is long enough to absorb the typical
+        // slow-query tail, short enough that clients see a real
+        // error before the MCP tool-call budget is exhausted.
+        // `min_connections` keeps a handful of sockets warm so the
+        // first query after an idle window doesn't pay the TLS/auth
+        // handshake tax. `idle_timeout` reclaims slots that have
+        // been unused long enough to have been closed by Postgres
+        // (`idle_session_timeout`) or a pgbouncer in between.
         let postgres = PgPoolOptions::new()
             .max_connections(settings.database_max_connections)
+            .min_connections(4)
+            .acquire_timeout(Duration::from_secs(8))
+            .idle_timeout(Some(Duration::from_secs(300)))
             .connect(&settings.database_url)
             .await?;
 
         // Independent control-plane pool. Sized to cover concurrent
         // heartbeat tasks (one per in-flight ingest attempt, up to the
         // worker's slot count) plus the dedicated stale-lease reaper that
-        // shares this pool. The previous size of 2 occasionally starved
-        // when 3+ heartbeats raced the reaper, surfacing as
-        // `PoolTimedOut` and a missed reaper cycle. The pool stays small
-        // enough that it cannot meaningfully compete with the main pool
-        // for PG slots.
+        // shares this pool.
+        //
+        // Sizing history:
+        //   * 2 — starved at 3+ heartbeats vs reaper.
+        //   * 6 — worked at single-digit concurrency; starved on
+        //     2026-04-21 under 24-slot merge load. Live `PoolTimedOut`
+        //     storm on the reaper surfaced 23 "stale" leases that were
+        //     actually healthy jobs whose heartbeats couldn't claim a
+        //     slot in time. Canonical root cause is row-lock
+        //     contention on `ingest_attempt` (state-transition UPDATEs
+        //     from the main pool hold row locks that block heartbeat
+        //     UPDATEs from this pool), not pool count alone — the
+        //     schema-level split of heartbeat into its own row is
+        //     tracked as a follow-up. Meanwhile, raising the pool to
+        //     24 gives every worker slot a dedicated connection so
+        //     heartbeats + the reaper don't compete for the same 6
+        //     sockets. The pool is still an order of magnitude smaller
+        //     than `database_max_connections` so it cannot meaningfully
+        //     starve the main pool.
         let heartbeat_postgres = PgPoolOptions::new()
             .min_connections(1)
-            .max_connections(6)
+            .max_connections(24)
+            .acquire_timeout(Duration::from_secs(15))
             .connect(&settings.database_url)
             .await?;
 
@@ -87,6 +121,12 @@ impl Persistence {
 }
 
 pub async fn run_postgres_migrations(postgres: &PgPool) -> anyhow::Result<()> {
+    // `sqlx::migrate!` expands at compile time. When a new `.sql` file is
+    // added without any Rust change, cargo may skip re-expanding the macro
+    // and bake a stale migration list into the binary. If you ever see
+    // `migration N was previously applied but is missing in the resolved
+    // migrations` at startup, nudge this function (e.g. touch a comment)
+    // before rebuilding so the proc macro re-scans `./migrations`.
     sqlx::migrate!("./migrations").run(postgres).await?;
     Ok(())
 }

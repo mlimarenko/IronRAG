@@ -257,6 +257,11 @@ export interface RawAssistantTurnResponse {
   runtimeStageSummaries?: RawRuntimeStageSummary[];
 }
 
+export interface RawAssistantEvidenceBundle extends RawAssistantTurnResponse {
+  chunkReferences?: unknown[];
+  runtimeSummary?: unknown;
+}
+
 /** Raw assistant session */
 export interface RawAssistantSession {
   id: string;
@@ -273,6 +278,7 @@ export interface RawAssistantMessage {
   content?: string;
   timestamp: string;
   executionId?: string | null;
+  evidence?: RawAssistantEvidenceBundle | null;
 }
 
 /** Raw API token mint response (POST /v1/iam/tokens) */

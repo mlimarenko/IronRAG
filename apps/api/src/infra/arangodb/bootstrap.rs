@@ -20,10 +20,10 @@ use crate::infra::arangodb::{
         KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_EVIDENCE_COLLECTION,
         KNOWLEDGE_EVIDENCE_SOURCE_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
         KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE, KNOWLEDGE_FACT_EVIDENCE_EDGE,
-        KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_PERSISTENT_INDEXES, KNOWLEDGE_RELATION_COLLECTION,
-        KNOWLEDGE_RELATION_OBJECT_EDGE, KNOWLEDGE_RELATION_SUBJECT_EDGE,
-        KNOWLEDGE_REVISION_BLOCK_EDGE, KNOWLEDGE_REVISION_CHUNK_EDGE,
-        KNOWLEDGE_REVISION_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
+        KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_NGRAM_ANALYZER, KNOWLEDGE_PERSISTENT_INDEXES,
+        KNOWLEDGE_RELATION_COLLECTION, KNOWLEDGE_RELATION_OBJECT_EDGE,
+        KNOWLEDGE_RELATION_SUBJECT_EDGE, KNOWLEDGE_REVISION_BLOCK_EDGE,
+        KNOWLEDGE_REVISION_CHUNK_EDGE, KNOWLEDGE_REVISION_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
         KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION, KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
     },
 };
@@ -83,6 +83,27 @@ pub async fn bootstrap_knowledge_plane(
     }
 
     if options.views {
+        // Custom trigram analyzer used by the title-match subquery to
+        // stay tolerant to small spelling variants and single-character
+        // typos in document titles. The default text stemmers produce
+        // different stems for variant forms so a plain TOKENS()-based
+        // SEARCH misses; NGRAM_MATCH against a 3-gram index of the same
+        // field catches them. Must exist before `ensure_view` so the
+        // view link can reference it.
+        client
+            .ensure_analyzer(
+                KNOWLEDGE_NGRAM_ANALYZER,
+                "ngram",
+                serde_json::json!({
+                    "min": 3,
+                    "max": 3,
+                    "preserveOriginal": false,
+                    "streamType": "utf8"
+                }),
+                &["frequency", "norm", "position"],
+            )
+            .await
+            .context("failed to ensure ironrag_ngram analyzer")?;
         let links = knowledge_search_view_links();
         client
             .ensure_view(KNOWLEDGE_SEARCH_VIEW, links)
@@ -208,13 +229,27 @@ fn knowledge_text_analyzers() -> serde_json::Value {
     serde_json::json!(["text_en", "text_ru"])
 }
 
+/// Analyzers applied to document title / file_name — the same text_en /
+/// text_ru pair as chunk content (for exact stemmed hits) plus a
+/// trigram analyzer so the title subquery also fires on close spelling
+/// variants of a term.
+fn knowledge_title_analyzers() -> serde_json::Value {
+    serde_json::json!(["text_en", "text_ru", KNOWLEDGE_NGRAM_ANALYZER])
+}
+
 fn knowledge_search_view_links() -> serde_json::Value {
     let text_analyzers = knowledge_text_analyzers();
+    let title_analyzers = knowledge_title_analyzers();
     serde_json::json!({
         KNOWLEDGE_DOCUMENT_COLLECTION: {
             "includeAllFields": false,
             "fields": {
-                "external_key": { "analyzers": ["identity"] }
+                "external_key": { "analyzers": ["identity"] },
+                "library_id": { "analyzers": ["identity"] },
+                "workspace_id": { "analyzers": ["identity"] },
+                "document_state": { "analyzers": ["identity"] },
+                "title": { "analyzers": title_analyzers.clone() },
+                "file_name": { "analyzers": title_analyzers.clone() }
             }
         },
         KNOWLEDGE_CHUNK_COLLECTION: {

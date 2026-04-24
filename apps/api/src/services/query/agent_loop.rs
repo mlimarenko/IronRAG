@@ -17,26 +17,37 @@ use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
     domains::provider_profiles::ProviderModelSelection,
+    infra::repositories::catalog_repository,
     integrations::llm::{ChatMessage, ToolUseRequest},
     interfaces::http::auth::AuthContext,
     interfaces::http::mcp::agent_bridge::{dispatch_assistant_tool, list_assistant_tools},
+    services::mcp::access::library_catalog_ref,
     services::query::assistant_grounding::AssistantGroundingEvidence,
 };
 
-/// Maximum number of LLM <-> tool round trips per turn. Each iteration is
-/// one LLM call. Real assistants almost never need more than 4–5; the cap
-/// exists purely as a runaway guard.
 /// Upper bound on tool-call rounds for the assistant agent loop.
 ///
-/// A round is one LLM response + tool dispatch pair; the cap is a
+/// A round is one LLM response + tool dispatch pair. The cap is a
 /// circuit-breaker against runaway planning, NOT a product budget.
-/// Empirically the old cap of 10 was not enough for grounded answers
-/// on large libraries that span many documents: the agent routinely
-/// needs 1 list + 2-3 search refinements + 4-6 read_document calls
-/// (with continuation tokens on long docs) before it has enough
-/// evidence. The per-result truncation below keeps the provider
-/// payload bounded regardless of how many iterations the agent runs.
-const MAX_AGENT_ITERATIONS: usize = 20;
+///
+/// Hitting the cap is a signal that the answer-generation pipeline
+/// mis-routed this question: the single-shot fast path
+/// (`run_single_shot_turn`) should have answered it from the
+/// pre-computed retrieval bundle, and any question that truly needs
+/// iterative tool use is almost always decided by round 5–7. The
+/// pre-0.3.2 cap of 20 masked that mis-routing and dragged every
+/// escalation out to ~60–90 s on production traffic.
+///
+/// When the cap is reached we no longer `bail!` with an error —
+/// instead `run_assistant_turn` asks the model one more time for a
+/// final answer without tools (see the cap-exceeded branch below)
+/// and returns what it produces. Partial evidence is a better user
+/// experience than "internal server error" on hard questions.
+///
+/// Per-result truncation (see `MAX_TOOL_RESULT_CHARS`) keeps the
+/// provider payload bounded regardless of how many iterations the
+/// agent runs within this cap.
+const MAX_AGENT_ITERATIONS: usize = 10;
 
 /// Per-tool-result character budget appended to the conversation.
 ///
@@ -113,7 +124,7 @@ pub async fn run_assistant_turn(
     request_id: &str,
     user_question: &str,
     conversation_history: Option<&str>,
-    mut on_progress: Option<&mut (dyn FnMut(AgentProgressEvent) + Send)>,
+    on_progress: Option<tokio::sync::mpsc::UnboundedSender<AgentProgressEvent>>,
 ) -> anyhow::Result<AgentTurnResult> {
     // 1. Resolve the configured provider/model for this library's QueryAnswer
     //    binding so the assistant uses whichever model the operator picked.
@@ -139,20 +150,46 @@ pub async fn run_assistant_turn(
     // 3. Build the conversation messages for the LLM. The system
     //    prompt is the canonical one — exact same text external MCP
     //    clients get from `/v1/query/assistant/system-prompt`, with
-    //    the active library id substituted in. Keep this path
+    //    the active library ref substituted in. Keep this path
     //    trivially thin so the in-app assistant and external agents
     //    see the same guidance.
+    let library = catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
+        .await
+        .context("failed to load assistant library for canonical prompt")?
+        .ok_or_else(|| anyhow::anyhow!("assistant library {library_id} does not exist"))?;
+    let workspace =
+        catalog_repository::get_workspace_by_id(&state.persistence.postgres, library.workspace_id)
+            .await
+            .context("failed to load assistant workspace for canonical prompt")?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "assistant workspace {} for library {} does not exist",
+                    library.workspace_id,
+                    library_id
+                )
+            })?;
+    let library_ref = library_catalog_ref(&workspace.slug, &library.slug);
     let mut messages = Vec::new();
-    let system_prompt = super::assistant_prompt::render(library_id, conversation_history);
+    let system_prompt = super::assistant_prompt::render(&library_ref, conversation_history);
     messages.push(ChatMessage::system(system_prompt));
     messages.push(ChatMessage::user(user_question.to_string()));
 
     let mut total_tool_calls = 0usize;
-    let mut last_usage = serde_json::json!({});
+    // Cumulative usage across every LLM round-trip in this turn. The
+    // tool loop can make up to `MAX_AGENT_ITERATIONS` separate
+    // `generate_with_tools_stream` calls, each returning its own
+    // `usage_json`. Returning only the last one would hide every
+    // intermediate prompt/completion from the billing pipeline — the
+    // real cost of a 4-iteration turn is the sum of all 4 rounds, not
+    // the last round alone. `merge_usage_into` normalises the shape
+    // across providers (OpenAI `prompt_tokens` / Anthropic
+    // `input_tokens`) before the billing layer sees it.
+    let mut accumulated_usage = serde_json::json!({});
     let mut debug_iterations: Vec<super::llm_context_debug::LlmIterationDebug> = Vec::new();
     let mut assistant_grounding = AssistantGroundingEvidence::default();
 
     for iteration in 1..=MAX_AGENT_ITERATIONS {
+        let iteration_started_at = std::time::Instant::now();
         let request_messages_snapshot = messages.clone();
         let tool_use_request = ToolUseRequest {
             provider_kind: binding.provider_kind.clone(),
@@ -179,15 +216,15 @@ pub async fn run_assistant_turn(
         // mutable borrow of `on_progress`, keeps it alive for the
         // duration of the provider call, and drops it before we
         // touch `on_progress` again for tool-call events below.
+        let llm_started_at = std::time::Instant::now();
         let response = {
-            let progress_slot: &mut Option<&mut (dyn FnMut(AgentProgressEvent) + Send)> =
-                &mut on_progress;
+            let progress = on_progress.clone();
             let mut stream_delta_forwarder = |delta: String| {
                 if delta.is_empty() {
                     return;
                 }
-                if let Some(emit) = progress_slot.as_deref_mut() {
-                    emit(AgentProgressEvent::AnswerDelta(delta));
+                if let Some(sender) = progress.as_ref() {
+                    let _ = sender.send(AgentProgressEvent::AnswerDelta(delta));
                 }
             };
             state
@@ -196,8 +233,24 @@ pub async fn run_assistant_turn(
                 .await
                 .with_context(|| format!("LLM tool-use call failed (iteration {iteration})"))?
         };
+        let llm_elapsed_ms = llm_started_at.elapsed().as_millis() as u64;
 
-        last_usage = response.usage_json.clone();
+        let iteration_usage = response.usage_json.clone();
+        merge_usage_into(&mut accumulated_usage, &iteration_usage);
+        tracing::info!(
+            iteration,
+            llm_elapsed_ms,
+            tool_call_count = response.tool_calls.len(),
+            has_output_text = !response.output_text.is_empty(),
+            provider_kind = %binding.provider_kind,
+            model_name = %binding.model_name,
+            request_id,
+            %library_id,
+            "assistant agent iteration: llm round-trip"
+        );
+        // iteration_started_at is measured here — the final "iteration completed"
+        // line below reports llm + tool-dispatch in one delta.
+        let _iteration_outer = iteration_started_at;
 
         // No tool calls? The model produced its final answer.
         if response.tool_calls.is_empty() {
@@ -209,7 +262,7 @@ pub async fn run_assistant_turn(
                 request_messages: request_messages_snapshot,
                 response_text: (!answer.is_empty()).then(|| answer.clone()),
                 response_tool_calls: Vec::new(),
-                usage: last_usage.clone(),
+                usage: iteration_usage,
             });
             // Text has already been forwarded live through
             // `stream_delta_forwarder` as the provider produced it,
@@ -220,7 +273,7 @@ pub async fn run_assistant_turn(
             return Ok(AgentTurnResult {
                 answer,
                 provider,
-                usage_json: last_usage,
+                usage_json: accumulated_usage,
                 iterations: iteration,
                 tool_calls_total: total_tool_calls,
                 assistant_grounding,
@@ -232,48 +285,76 @@ pub async fn run_assistant_turn(
         // history on the next iteration.
         messages.push(ChatMessage::assistant_with_tool_calls(response.tool_calls.clone()));
 
-        // Execute each tool call and append the result as a `tool` message.
-        // (Sequential for now — parallelizing with buffered streams hits
-        // an HRTB-lifetime Send overflow in the surrounding async
-        // body that needs a larger refactor to fix cleanly.)
+        // Execute every tool call in this iteration concurrently and
+        // append each result as a `tool` message in the original order.
+        //
+        // Model-dictated order matters: when multiple tool_call blocks
+        // are emitted, they must be echoed back to the model paired
+        // with the same ids in the same position on the next
+        // iteration. We preserve that by awaiting the futures in
+        // lockstep (collecting results into a `Vec` indexed by the
+        // original position) rather than using `join_all`'s arbitrary
+        // completion order.
+        //
+        // Parallelism gain: a typical 5-tool iteration on a reference-sized library used
+        // to cost ~sum(per-tool dispatch latency) ~1.5–3 s; concurrent
+        // dispatch pins that at max(per-tool latency) ~300–700 ms,
+        // trimming ~1.0–2.3 s per iteration on 6–10 iteration turns.
+        total_tool_calls = total_tool_calls.saturating_add(response.tool_calls.len());
+        let tool_dispatches: Vec<_> = response
+            .tool_calls
+            .iter()
+            .map(|call| {
+                let arguments_value: serde_json::Value = serde_json::from_str(&call.arguments_json)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                let progress = on_progress.clone();
+                let call_id = call.id.clone();
+                let name = call.name.clone();
+                let arguments_preview = preview_text(&call.arguments_json, 240);
+                async move {
+                    if let Some(sender) = progress.as_ref() {
+                        let _ = sender.send(AgentProgressEvent::ToolCallStarted {
+                            iteration,
+                            call_id: call_id.clone(),
+                            name: name.clone(),
+                            arguments_preview,
+                        });
+                    }
+                    let dispatch =
+                        dispatch_assistant_tool(state, auth, request_id, &name, &arguments_value)
+                            .await;
+                    let tool_text = truncate_tool_result(&dispatch.tool_message_text);
+                    if let Some(sender) = progress.as_ref() {
+                        let _ = sender.send(AgentProgressEvent::ToolCallCompleted {
+                            iteration,
+                            call_id: call_id.clone(),
+                            name: name.clone(),
+                            is_error: dispatch.is_error,
+                            result_preview: preview_text(&tool_text, 240),
+                        });
+                    }
+                    (dispatch, tool_text)
+                }
+            })
+            .collect();
+        let dispatch_outcomes = futures::future::join_all(tool_dispatches).await;
+
         let mut iteration_tool_debugs: Vec<super::llm_context_debug::ResponseToolCallDebug> =
             Vec::with_capacity(response.tool_calls.len());
-        for call in &response.tool_calls {
-            total_tool_calls = total_tool_calls.saturating_add(1);
-            let arguments_value: serde_json::Value = serde_json::from_str(&call.arguments_json)
-                .unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(emit) = on_progress.as_deref_mut() {
-                emit(AgentProgressEvent::ToolCallStarted {
-                    iteration,
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments_preview: preview_text(&call.arguments_json, 240),
-                });
-            }
-            let dispatch =
-                dispatch_assistant_tool(state, auth, request_id, &call.name, &arguments_value)
-                    .await;
+        for (call, (dispatch, tool_text)) in
+            response.tool_calls.iter().zip(dispatch_outcomes)
+        {
             tracing::debug!(
                 tool = %call.name,
                 arguments = %call.arguments_json,
                 is_error = dispatch.is_error,
                 "assistant agent tool call"
             );
-            let tool_text = truncate_tool_result(&dispatch.tool_message_text);
             assistant_grounding.record_tool_result(
                 &call.name,
                 &dispatch.tool_message_text,
                 dispatch.is_error,
             );
-            if let Some(emit) = on_progress.as_deref_mut() {
-                emit(AgentProgressEvent::ToolCallCompleted {
-                    iteration,
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    is_error: dispatch.is_error,
-                    result_preview: preview_text(&tool_text, 240),
-                });
-            }
             iteration_tool_debugs.push(super::llm_context_debug::ResponseToolCallDebug {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -290,8 +371,18 @@ pub async fn run_assistant_turn(
             request_messages: request_messages_snapshot,
             response_text: (!response.output_text.is_empty()).then(|| response.output_text.clone()),
             response_tool_calls: iteration_tool_debugs,
-            usage: last_usage.clone(),
+            usage: iteration_usage,
         });
+        let iteration_total_ms = _iteration_outer.elapsed().as_millis() as u64;
+        tracing::info!(
+            iteration,
+            iteration_total_ms,
+            llm_ms = llm_elapsed_ms,
+            tool_dispatch_ms = iteration_total_ms.saturating_sub(llm_elapsed_ms),
+            request_id,
+            %library_id,
+            "assistant agent iteration: completed"
+        );
 
         // Trim runaway tool messages so we never blow past context limits.
         if messages.len() > 80 {
@@ -302,9 +393,316 @@ pub async fn run_assistant_turn(
         }
     }
 
-    anyhow::bail!(
-        "assistant agent loop exceeded {MAX_AGENT_ITERATIONS} iterations without producing a final answer"
-    )
+    // Iteration cap reached. Instead of bailing with an error — which
+    // surfaces to the MCP client as `internal server error` and wastes
+    // every tool call the agent already made — ask the model once more
+    // for a final answer without tools, using the evidence it has
+    // already accumulated. Any grounded partial answer is a strictly
+    // better user experience than a hard fail on hard questions, and
+    // the model still honours the grounding-discipline rules from the
+    // system prompt (no hallucinated facts; say "library does not
+    // contain this" when the evidence really isn't there).
+    tracing::warn!(
+        iterations = MAX_AGENT_ITERATIONS,
+        tool_calls_total = total_tool_calls,
+        "assistant agent loop cap reached — requesting finalize-from-evidence answer"
+    );
+    messages.push(ChatMessage::user(
+        "You have reached the tool-call budget for this turn. Produce the final answer now in the \
+         user's language, grounded strictly in the evidence you have already gathered from the \
+         previous tool calls. No further tool calls are available. If that evidence is not enough \
+         to answer the question, say so honestly — do not invent facts."
+            .to_string(),
+    ));
+    let finalize_request = ToolUseRequest {
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        api_key_override: binding.api_key.clone(),
+        base_url_override: binding.provider_base_url.clone(),
+        temperature: binding.temperature,
+        top_p: binding.top_p,
+        max_output_tokens_override: binding.max_output_tokens_override,
+        messages: messages.clone(),
+        tools: Vec::new(),
+        extra_parameters_json: binding.extra_parameters_json.clone(),
+    };
+    let finalize_response = state
+        .llm_gateway
+        .generate_with_tools(finalize_request)
+        .await
+        .with_context(|| "assistant agent loop finalize LLM call failed")?;
+    let answer = finalize_response.output_text.trim().to_string();
+    debug_iterations.push(super::llm_context_debug::LlmIterationDebug {
+        iteration: MAX_AGENT_ITERATIONS + 1,
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        request_messages: messages,
+        response_text: (!answer.is_empty()).then(|| answer.clone()),
+        response_tool_calls: Vec::new(),
+        usage: finalize_response.usage_json.clone(),
+    });
+    if let Some(sender) = on_progress.as_ref() {
+        let _ = sender.send(AgentProgressEvent::AnswerDelta(answer.clone()));
+    }
+    Ok(AgentTurnResult {
+        answer,
+        provider,
+        usage_json: finalize_response.usage_json,
+        iterations: MAX_AGENT_ITERATIONS + 1,
+        tool_calls_total: total_tool_calls,
+        assistant_grounding,
+        debug_iterations,
+    })
+}
+
+/// Run one assistant turn as a single grounded-answer LLM call,
+/// without exposing tools to the model.
+///
+/// This is the fast path for the common case where the retrieval
+/// stage already assembled enough evidence to answer the question —
+/// `prepare_answer_query` builds `answer_context` out of the top
+/// retrieved chunks, graph-aware neighbours, recent documents, and
+/// the library summary. Handing that context to the model in one
+/// round-trip typically lands an answer in 3–8 s, versus the 45–90 s
+/// the tool-using loop costs when it re-retrieves the same evidence
+/// via 8–11 MCP tool calls.
+///
+/// Escalation is the caller's responsibility: if the single-shot
+/// output is empty, admits it could not answer, or trips the
+/// verifier, the caller should rerun the question through
+/// [`run_assistant_turn`] with the full tool catalogue.
+pub async fn run_single_shot_turn(
+    state: &AppState,
+    library_id: Uuid,
+    user_question: &str,
+    conversation_history: Option<&str>,
+    grounded_context: &str,
+) -> anyhow::Result<AgentTurnResult> {
+    let binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to resolve query_answer binding: {e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no active query_answer binding configured for library {library_id}")
+        })?;
+
+    let provider = ProviderModelSelection {
+        provider_kind: binding.provider_kind.parse().unwrap_or_default(),
+        model_name: binding.model_name.clone(),
+    };
+
+    // Same system + user message shape the tool loop uses on its
+    // first iteration, but with the grounded context already baked
+    // into the system prompt and no tool catalogue — the model can
+    // only reply with text. Progress streaming is intentionally
+    // skipped here: if the verifier later forces an escalation to
+    // the tool loop we don't want UI/SSE clients to have already
+    // received a partial single-shot answer that will be overwritten
+    // by the tool-loop output. The caller is responsible for
+    // emitting `AnswerDelta` once the single-shot answer is accepted.
+    let system_prompt =
+        super::assistant_prompt::render_single_shot(grounded_context, conversation_history);
+    let messages =
+        vec![ChatMessage::system(system_prompt), ChatMessage::user(user_question.to_string())];
+
+    let tool_use_request = ToolUseRequest {
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        api_key_override: binding.api_key.clone(),
+        base_url_override: binding.provider_base_url.clone(),
+        temperature: binding.temperature,
+        top_p: binding.top_p,
+        max_output_tokens_override: binding.max_output_tokens_override,
+        messages: messages.clone(),
+        tools: Vec::new(),
+        extra_parameters_json: binding.extra_parameters_json.clone(),
+    };
+
+    let response = state
+        .llm_gateway
+        .generate_with_tools(tool_use_request)
+        .await
+        .with_context(|| "single-shot grounded-answer LLM call failed")?;
+
+    let answer = response.output_text.trim().to_string();
+    let debug_iteration = super::llm_context_debug::LlmIterationDebug {
+        iteration: 1,
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        request_messages: messages,
+        response_text: (!answer.is_empty()).then(|| answer.clone()),
+        response_tool_calls: Vec::new(),
+        usage: response.usage_json.clone(),
+    };
+
+    Ok(AgentTurnResult {
+        answer,
+        provider,
+        usage_json: response.usage_json,
+        iterations: 1,
+        tool_calls_total: 0,
+        // Single-shot did not observe any tool results — the grounding
+        // evidence the runtime collected is already baked into the
+        // verifier's `prompt_context`, so there is nothing to record
+        // here. The verifier still sees the same chunks / structured
+        // evidence it would have seen for a deterministic-preflight
+        // answer.
+        assistant_grounding: AssistantGroundingEvidence::default(),
+        debug_iterations: vec![debug_iteration],
+    })
+}
+
+/// Run one grounded-answer turn as a short clarification call.
+///
+/// The post-retrieval router decided (see
+/// `answer_pipeline::classify_answer_disposition`) that the topic
+/// the user asked about spans several distinct variants in the
+/// library and no single-shot answer will usefully cover them all.
+/// The caller passes those variant labels — pulled from retrieved
+/// document titles, graph node labels, or grouped-reference titles
+/// on the current `answer_context` — and this function asks the
+/// answer model to write one short clarifying question enumerating
+/// them.
+///
+/// Uses the same `QueryAnswer` binding as `run_single_shot_turn`
+/// so the clarify reply shares model identity, temperature caps
+/// and per-turn billing plumbing.
+pub async fn run_clarify_turn(
+    state: &AppState,
+    library_id: Uuid,
+    user_question: &str,
+    conversation_history: Option<&str>,
+    variants: &[String],
+) -> anyhow::Result<AgentTurnResult> {
+    let binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to resolve query_answer binding: {e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no active query_answer binding configured for library {library_id}")
+        })?;
+
+    let provider = ProviderModelSelection {
+        provider_kind: binding.provider_kind.parse().unwrap_or_default(),
+        model_name: binding.model_name.clone(),
+    };
+
+    let system_prompt = super::assistant_prompt::render_clarify(variants, conversation_history);
+    let messages =
+        vec![ChatMessage::system(system_prompt), ChatMessage::user(user_question.to_string())];
+
+    let tool_use_request = ToolUseRequest {
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        api_key_override: binding.api_key.clone(),
+        base_url_override: binding.provider_base_url.clone(),
+        temperature: binding.temperature,
+        top_p: binding.top_p,
+        max_output_tokens_override: binding.max_output_tokens_override,
+        messages: messages.clone(),
+        tools: Vec::new(),
+        extra_parameters_json: binding.extra_parameters_json.clone(),
+    };
+
+    let response = state
+        .llm_gateway
+        .generate_with_tools(tool_use_request)
+        .await
+        .with_context(|| "clarify-path LLM call failed")?;
+
+    let answer = response.output_text.trim().to_string();
+    let debug_iteration = super::llm_context_debug::LlmIterationDebug {
+        iteration: 1,
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        request_messages: messages,
+        response_text: (!answer.is_empty()).then(|| answer.clone()),
+        response_tool_calls: Vec::new(),
+        usage: response.usage_json.clone(),
+    };
+
+    Ok(AgentTurnResult {
+        answer,
+        provider,
+        usage_json: response.usage_json,
+        iterations: 1,
+        tool_calls_total: 0,
+        assistant_grounding: AssistantGroundingEvidence::default(),
+        debug_iterations: vec![debug_iteration],
+    })
+}
+
+/// Accumulate one iteration's `usage_json` into the running total for
+/// a turn. The billing pipeline (`services::ops::billing`) reads token
+/// counts from any of the provider-specific key aliases (`prompt_tokens`
+/// / `input_tokens`, `completion_tokens` / `output_tokens`, plus cached
+/// input variants); we canonicalise to the OpenAI shape on write so a
+/// mixed-provider trace still produces one correct billing row.
+///
+/// Numbers are summed, and per-iteration counters (`iteration_count`,
+/// `provider_call_count`) expose the round-trip volume separately from
+/// raw tokens so an operator reading the debug snapshot or the billing
+/// `usage_json` can tell a single-shot call apart from a 6-iteration
+/// escalation without cross-referencing `debug_iterations`.
+fn merge_usage_into(accumulator: &mut serde_json::Value, iteration: &serde_json::Value) {
+    fn sum_key(
+        accumulator: &mut serde_json::Map<String, serde_json::Value>,
+        canonical_key: &str,
+        source: &serde_json::Value,
+        aliases: &[&str],
+    ) {
+        let value =
+            aliases.iter().find_map(|alias| source.get(*alias)).and_then(serde_json::Value::as_i64);
+        let Some(delta) = value else {
+            return;
+        };
+        let existing =
+            accumulator.get(canonical_key).and_then(serde_json::Value::as_i64).unwrap_or(0);
+        accumulator.insert(canonical_key.to_string(), serde_json::json!(existing + delta));
+    }
+
+    if !accumulator.is_object() {
+        *accumulator = serde_json::json!({});
+    }
+    // The branch above guarantees `accumulator` is a JSON object, so
+    // `as_object_mut()` returns `Some`; the fallback path is unreachable
+    // but keeps the type checker happy without introducing a panic.
+    let Some(obj) = accumulator.as_object_mut() else {
+        return;
+    };
+
+    sum_key(obj, "prompt_tokens", iteration, &["prompt_tokens", "input_tokens"]);
+    sum_key(obj, "completion_tokens", iteration, &["completion_tokens", "output_tokens"]);
+    sum_key(obj, "total_tokens", iteration, &["total_tokens"]);
+    sum_key(
+        obj,
+        "cached_input_tokens",
+        iteration,
+        &["cached_input_tokens", "cache_read_input_tokens", "input_cached_tokens"],
+    );
+    // Nested `{"prompt_tokens_details": {"cached_tokens": N}}` shape
+    // some providers emit — merge it into the flat canonical key too
+    // so billing sees it regardless of which path upstream used.
+    let nested_cached = iteration
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .or_else(|| {
+            iteration.get("input_tokens_details").and_then(|details| details.get("cached_tokens"))
+        })
+        .and_then(serde_json::Value::as_i64);
+    if let Some(delta) = nested_cached {
+        let existing =
+            obj.get("cached_input_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        obj.insert("cached_input_tokens".to_string(), serde_json::json!(existing + delta));
+    }
+
+    let existing_iterations =
+        obj.get("iteration_count").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    obj.insert("iteration_count".to_string(), serde_json::json!(existing_iterations + 1));
 }
 
 /// Shorten a string to `max_chars` characters on a UTF-8 char

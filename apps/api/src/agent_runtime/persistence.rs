@@ -67,6 +67,8 @@ pub async fn persist_runtime_result(
                 attempt_no: stage.attempt_no,
                 stage_state: stage.stage_state.as_str(),
                 deterministic: stage.deterministic,
+                started_at: stage.started_at,
+                completed_at: stage.completed_at,
                 input_summary_json: stage.input_summary_json.clone(),
                 output_summary_json: stage.output_summary_json.clone(),
                 failure_code: stage.failure_code.as_deref(),

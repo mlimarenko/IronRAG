@@ -17,7 +17,7 @@ use crate::{
     app::state::AppState,
     domains::agent_runtime::{
         RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeExecutionSummary, RuntimeStageKind,
-        RuntimeStageState, RuntimeSurfaceKind,
+        RuntimeStageState, RuntimeSurfaceKind, RuntimeTaskKind,
     },
     domains::catalog::CatalogLifecycleState,
     domains::query::{QueryConversationState, QueryExecutionDetail, QueryVerificationState},
@@ -25,7 +25,7 @@ use crate::{
     interfaces::http::router_support::ApiError,
     services::{
         ingest::runtime::bounded_runtime_overrides,
-        ops::billing::CaptureQueryExecutionBillingCommand,
+        ops::billing::{CaptureExecutionBillingCommand, CaptureQueryExecutionBillingCommand},
         ops::service::CreateAsyncOperationCommand,
         query::execution::{RuntimeAnswerQueryResult, generate_answer_query, prepare_answer_query},
     },
@@ -44,7 +44,8 @@ use super::{
         parse_query_verification_warnings, search_pg_entity_references,
     },
     session::{
-        build_conversation_runtime_context, derive_conversation_title,
+        build_conversation_runtime_context,
+        build_conversation_runtime_context_with_external_history, derive_conversation_title,
         enrich_query_with_coreference_entities, map_conversation_row, map_execution_row,
         map_turn_row, normalize_required_text, should_refresh_conversation_title,
     },
@@ -74,6 +75,14 @@ impl QueryService {
         command: ExecuteConversationTurnCommand,
         progress: Option<UnboundedSender<QueryTurnProgressEvent>>,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
+        // Wall-clock clock for the whole turn. Captured at entry so the
+        // `query.turn.completed` structured log at the bottom of this
+        // function can report `total_ms` alongside the per-stage numbers
+        // already persisted on `runtime_stage_record`. Turn latency on
+        // a reference library is ~40 s end-to-end; this single log line
+        // lets operators see which phase dominated without cross-joining
+        // the stage table manually.
+        let turn_started_at = std::time::Instant::now();
         let mut conversation = query_repository::get_conversation_by_id(
             &state.persistence.postgres,
             command.conversation_id,
@@ -130,8 +139,15 @@ impl QueryService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let conversation_context =
-            build_conversation_runtime_context(&conversation_turns, request_turn.id);
+        let conversation_context = if command.external_prior_turns.is_empty() {
+            build_conversation_runtime_context(&conversation_turns, request_turn.id)
+        } else {
+            build_conversation_runtime_context_with_external_history(
+                &conversation_turns,
+                request_turn.id,
+                &command.external_prior_turns,
+            )
+        };
 
         let binding_id = ai_repository::get_effective_binding_assignment_by_purpose(
             &state.persistence.postgres,
@@ -208,14 +224,30 @@ impl QueryService {
 
         let top_k = command.top_k.clamp(1, 32);
         let mut query_embedding_usage = None;
+        // Compile + embed both bill separately from answer generation:
+        // different bindings, different models, different rates. We
+        // hold the snapshots here so the capture rows on
+        // `billing_provider_call` at the end of the turn attribute
+        // each LLM call to the right `call_kind`.
+        let mut query_compile_usage = None;
         // Bridge the assistant agent's structured progress events into
-        // the turn-level SSE stream. One central place so the handler
-        // and the frontend both see one canonical set of frames.
-        let mut stream_agent_progress =
-            |event: crate::services::query::agent_loop::AgentProgressEvent| {
-                use crate::services::query::agent_loop::AgentProgressEvent;
-                let Some(progress) = progress.as_ref() else {
-                    return;
+        // the turn-level SSE stream. The agent loop needs a `Send`-
+        // cloneable sender so every parallel tool dispatch can emit
+        // `ToolCallStarted` / `ToolCallCompleted` without serialising
+        // through an `&mut FnMut`; we run a small adapter task that
+        // reads `AgentProgressEvent`s off an internal mpsc and forwards
+        // them as `QueryTurnProgressEvent` frames to the SSE channel.
+        let (agent_progress_tx, mut agent_progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::services::query::agent_loop::AgentProgressEvent,
+        >();
+        let agent_progress_sender = progress.as_ref().map(|_| agent_progress_tx.clone());
+        drop(agent_progress_tx);
+        let sse_progress_clone = progress.clone();
+        let _agent_progress_task = tokio::spawn(async move {
+            use crate::services::query::agent_loop::AgentProgressEvent;
+            while let Some(event) = agent_progress_rx.recv().await {
+                let Some(ref sse) = sse_progress_clone else {
+                    continue;
                 };
                 let frame = match event {
                     AgentProgressEvent::AnswerDelta(delta) => {
@@ -246,8 +278,9 @@ impl QueryService {
                         result_preview,
                     },
                 };
-                let _ = progress.send(frame);
-            };
+                let _ = sse.send(frame);
+            }
+        });
         let outcome: RuntimeTerminalOutcome<QueryAnswerTaskSuccess, QueryAnswerTaskFailure> = {
             if let Err(failure) = begin_query_runtime_stage(
                 state.agent_runtime.executor(),
@@ -260,6 +293,7 @@ impl QueryService {
                     progress.as_ref(),
                     RuntimeExecutionSummary::from(&runtime_session.execution),
                 );
+                // policy-deny before stage work started, zero-duration record is canonical
                 record_query_runtime_stage(
                     state.agent_runtime.executor(),
                     &mut runtime_session,
@@ -267,6 +301,7 @@ impl QueryService {
                     RuntimeStageState::Failed,
                     true,
                     Some(&failure),
+                    None,
                 );
                 emit_query_runtime_summary(
                     progress.as_ref(),
@@ -278,6 +313,7 @@ impl QueryService {
                     &conversation_context.effective_query_text,
                     &conversation_context.coreference_entities,
                 );
+                let retrieve_started = Utc::now();
                 let prepared = match prepare_answer_query(
                     state,
                     library.id,
@@ -297,12 +333,45 @@ impl QueryService {
                             RuntimeStageState::Completed,
                             true,
                             None,
+                            Some(retrieve_started),
                         );
                         emit_query_runtime_summary(
                             progress.as_ref(),
                             RuntimeExecutionSummary::from(&runtime_session.execution),
                         );
+                        // Persist the final ranked chunks that shaped
+                        // this execution's answer context so operators
+                        // can trace which chunks grounded which answer
+                        // long after the turn completed. One UNNEST
+                        // insert regardless of bundle size; failures
+                        // are logged (not fatal) — a missing audit
+                        // row must never block the user's answer.
+                        let chunk_refs: Vec<query_repository::NewQueryChunkReference> = result
+                            .structured
+                            .chunk_references
+                            .iter()
+                            .map(|reference| query_repository::NewQueryChunkReference {
+                                chunk_id: reference.chunk_id,
+                                rank: reference.rank,
+                                score: reference.score,
+                            })
+                            .collect();
+                        if let Err(error) = query_repository::append_chunk_references(
+                            &state.persistence.postgres,
+                            execution.id,
+                            &chunk_refs,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                execution_id = %execution.id,
+                                chunk_count = chunk_refs.len(),
+                                "failed to persist query_chunk_reference rows"
+                            );
+                        }
                         query_embedding_usage = result.embedding_usage.clone();
+                        query_compile_usage = result.query_compile_usage.clone();
                         result
                     }
                     Err(error) => {
@@ -315,6 +384,7 @@ impl QueryService {
                             RuntimeStageState::Failed,
                             true,
                             Some(&failure),
+                            Some(retrieve_started),
                         );
                         emit_query_runtime_summary(
                             progress.as_ref(),
@@ -409,6 +479,7 @@ impl QueryService {
                         progress.as_ref(),
                         RuntimeExecutionSummary::from(&runtime_session.execution),
                     );
+                    // policy-deny before stage work started, zero-duration record is canonical
                     record_query_runtime_stage(
                         state.agent_runtime.executor(),
                         &mut runtime_session,
@@ -416,6 +487,7 @@ impl QueryService {
                         RuntimeStageState::Failed,
                         true,
                         Some(&failure),
+                        None,
                     );
                     emit_query_runtime_summary(
                         progress.as_ref(),
@@ -423,6 +495,7 @@ impl QueryService {
                     );
                     make_query_terminal_failure_outcome(failure.clone())
                 } else {
+                    let assemble_context_started = Utc::now();
                     match assemble_context_bundle(
                         state,
                         &conversation,
@@ -445,6 +518,7 @@ impl QueryService {
                                 RuntimeStageState::Completed,
                                 true,
                                 None,
+                                Some(assemble_context_started),
                             );
                             emit_query_runtime_summary(
                                 progress.as_ref(),
@@ -462,6 +536,7 @@ impl QueryService {
                                     progress.as_ref(),
                                     RuntimeExecutionSummary::from(&runtime_session.execution),
                                 );
+                                // policy-deny before stage work started, zero-duration record is canonical
                                 record_query_runtime_stage(
                                     state.agent_runtime.executor(),
                                     &mut runtime_session,
@@ -469,6 +544,7 @@ impl QueryService {
                                     RuntimeStageState::Failed,
                                     false,
                                     Some(&failure),
+                                    None,
                                 );
                                 emit_query_runtime_summary(
                                     progress.as_ref(),
@@ -476,6 +552,7 @@ impl QueryService {
                                 );
                                 make_query_terminal_failure_outcome(failure.clone())
                             } else {
+                                let answer_started = Utc::now();
                                 match generate_answer_query(
                                     state,
                                     library.id,
@@ -485,12 +562,7 @@ impl QueryService {
                                     conversation_context.prompt_history_text.as_deref(),
                                     None,
                                     prepared,
-                                    progress.as_ref().map(|_| {
-                                        &mut stream_agent_progress
-                                            as &mut (dyn FnMut(
-                                                crate::services::query::agent_loop::AgentProgressEvent,
-                                            ) + Send)
-                                    }),
+                                    agent_progress_sender.clone(),
                                     &command.auth,
                                 )
                                 .await
@@ -508,6 +580,7 @@ impl QueryService {
                                             RuntimeStageState::Completed,
                                             false,
                                             None,
+                                            Some(answer_started),
                                         );
                                         emit_query_runtime_summary(
                                             progress.as_ref(),
@@ -537,6 +610,7 @@ impl QueryService {
                                                     &runtime_session.execution,
                                                 ),
                                             );
+                                            // policy-deny before stage work started, zero-duration record is canonical
                                             record_query_runtime_stage(
                                                 state.agent_runtime.executor(),
                                                 &mut runtime_session,
@@ -544,6 +618,7 @@ impl QueryService {
                                                 RuntimeStageState::Failed,
                                                 true,
                                                 Some(&failure),
+                                                None,
                                             );
                                             emit_query_runtime_summary(
                                                 progress.as_ref(),
@@ -553,6 +628,7 @@ impl QueryService {
                                             );
                                             make_query_terminal_failure_outcome(failure.clone())
                                         } else {
+                                            let persist_started = Utc::now();
                                             match query_repository::create_turn(
                                                 &state.persistence.postgres,
                                                 &query_repository::NewQueryTurn {
@@ -588,6 +664,7 @@ impl QueryService {
                                                                 RuntimeStageState::Completed,
                                                                 true,
                                                                 None,
+                                                                Some(persist_started),
                                                             );
                                                             emit_query_runtime_summary(
                                                                 progress.as_ref(),
@@ -618,6 +695,7 @@ impl QueryService {
                                                                 RuntimeStageState::Failed,
                                                                 true,
                                                                 Some(&failure),
+                                                                Some(persist_started),
                                                             );
                                                             emit_query_runtime_summary(
                                                                 progress.as_ref(),
@@ -643,6 +721,7 @@ impl QueryService {
                                                                 RuntimeStageState::Failed,
                                                                 true,
                                                                 Some(&failure),
+                                                                Some(persist_started),
                                                             );
                                                             emit_query_runtime_summary(
                                                                 progress.as_ref(),
@@ -670,6 +749,7 @@ impl QueryService {
                                                         RuntimeStageState::Failed,
                                                         true,
                                                         Some(&failure),
+                                                        Some(persist_started),
                                                     );
                                                     emit_query_runtime_summary(
                                                         progress.as_ref(),
@@ -696,6 +776,7 @@ impl QueryService {
                                             RuntimeStageState::Failed,
                                             false,
                                             Some(&failure),
+                                            Some(answer_started),
                                         );
                                         emit_query_runtime_summary(
                                             progress.as_ref(),
@@ -727,6 +808,7 @@ impl QueryService {
                                 RuntimeStageState::Failed,
                                 true,
                                 Some(&failure),
+                                Some(assemble_context_started),
                             );
                             emit_query_runtime_summary(
                                 progress.as_ref(),
@@ -841,6 +923,14 @@ impl QueryService {
                         warn!(error = %error, execution_id = %terminal_execution.id, "query embedding billing capture failed");
                     }
                 }
+                capture_query_compile_usage_if_any(
+                    state,
+                    &conversation,
+                    &terminal_execution,
+                    &runtime_result.execution,
+                    query_compile_usage.as_ref(),
+                )
+                .await;
             }
             RuntimeTerminalOutcome::Recovered { success, .. } => {
                 if let Err(error) = state
@@ -902,6 +992,14 @@ impl QueryService {
                         warn!(error = %error, execution_id = %terminal_execution.id, "query embedding billing capture failed");
                     }
                 }
+                capture_query_compile_usage_if_any(
+                    state,
+                    &conversation,
+                    &terminal_execution,
+                    &runtime_result.execution,
+                    query_compile_usage.as_ref(),
+                )
+                .await;
             }
             RuntimeTerminalOutcome::Failed { summary, .. }
             | RuntimeTerminalOutcome::Canceled { summary, .. } => {
@@ -941,6 +1039,24 @@ impl QueryService {
 
         let detail = self.get_execution(state, terminal_execution.id).await?;
         let request_turn = detail.request_turn.ok_or(ApiError::Internal)?;
+
+        // One structured log line at turn completion with total
+        // wall-clock. Per-stage timings live on `runtime_stage_record`
+        // in Postgres (written via `record_query_runtime_stage` during
+        // each phase); this line lets operators filter
+        // `query.turn.completed` to get one latency number per turn
+        // without joining the stage table, then drill down if needed.
+        let total_ms = turn_started_at.elapsed().as_millis() as u64;
+        tracing::info!(
+            total_ms,
+            execution_id = %terminal_execution.id,
+            library_id = %terminal_execution.library_id,
+            conversation_id = %terminal_execution.conversation_id,
+            turn_count = terminal_execution.turn_count,
+            stage_summary_count = detail.runtime_stage_summaries.len(),
+            "query.turn.completed"
+        );
+
         Ok(QueryTurnExecutionResult {
             conversation: map_conversation_row(conversation),
             request_turn,
@@ -1257,7 +1373,7 @@ async fn begin_query_runtime_stage(
     executor: &crate::agent_runtime::executor::RuntimeExecutor,
     session: &mut RuntimeExecutionSession,
     stage_kind: RuntimeStageKind,
-) -> Result<(), QueryAnswerTaskFailure> {
+) -> Result<chrono::DateTime<chrono::Utc>, QueryAnswerTaskFailure> {
     executor.begin_stage(session, stage_kind).await.map_err(|error| match error {
         RuntimeExecutionError::TurnBudgetExhausted => make_query_answer_failure(
             "runtime_budget_exhausted",
@@ -1292,7 +1408,17 @@ fn record_query_runtime_stage(
     stage_state: RuntimeStageState,
     deterministic: bool,
     failure: Option<&QueryAnswerTaskFailure>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
 ) {
+    // `started_at` is the real wall-clock moment the stage began,
+    // threaded through from the matching `begin_query_runtime_stage`
+    // call. When a stage errors out before we have a `begin` result
+    // (e.g. policy rejection at stage entry), callers pass `None` and
+    // we stamp `Utc::now()` so the record still has a monotonically
+    // correct pair — `started_at == completed_at` in that case, which
+    // mirrors the trace viewer's "zero-duration" entry for genuinely
+    // atomic policy denials.
+    let resolved_started_at = started_at.unwrap_or_else(chrono::Utc::now);
     executor.complete_stage(
         session,
         stage_kind,
@@ -1300,6 +1426,7 @@ fn record_query_runtime_stage(
         deterministic,
         failure.map(|value| value.code.clone()),
         failure.map(|value| truncate_failure_code(&value.summary).to_string()),
+        resolved_started_at,
     );
 }
 
@@ -1370,4 +1497,51 @@ fn map_query_execution_error_message(
     }
 
     ApiError::Internal
+}
+
+/// Record a billing row for the QueryCompiler LLM call that produced
+/// the `QueryIR` used by this turn. `None` means the compiler served
+/// the IR from cache or from a fallback (binding missing / provider
+/// outage), in which case no token usage was spent and no billing
+/// row is required. The helper is called from both the `Completed`
+/// and `Recovered` terminal branches — both go through the same
+/// answer pipeline and both need the compile-stage cost attributed
+/// to the same `query_execution` row.
+async fn capture_query_compile_usage_if_any(
+    state: &AppState,
+    conversation: &query_repository::QueryConversationRow,
+    terminal_execution: &query_repository::QueryExecutionRow,
+    runtime_execution: &crate::domains::agent_runtime::RuntimeExecution,
+    compile_usage: Option<&crate::services::query::execution::QueryCompileUsage>,
+) {
+    let Some(compile_usage) = compile_usage else {
+        return;
+    };
+    if let Err(error) = state
+        .canonical_services
+        .billing
+        .capture_execution_provider_call(
+            state,
+            CaptureExecutionBillingCommand {
+                workspace_id: conversation.workspace_id,
+                library_id: conversation.library_id,
+                owning_execution_kind: "query_execution".to_string(),
+                owning_execution_id: terminal_execution.id,
+                runtime_execution_id: Some(runtime_execution.id),
+                runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer),
+                binding_id: None,
+                provider_kind: compile_usage.provider_kind.clone(),
+                model_name: compile_usage.model_name.clone(),
+                call_kind: "query_compile".to_string(),
+                usage_json: compile_usage.usage_json.clone(),
+            },
+        )
+        .await
+    {
+        warn!(
+            error = %error,
+            execution_id = %terminal_execution.id,
+            "query compiler billing capture failed",
+        );
+    }
 }

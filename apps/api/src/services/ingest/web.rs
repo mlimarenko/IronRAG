@@ -14,7 +14,8 @@ mod single_page;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use reqwest::{Client, Url};
+use reqwest::Client;
+use sha2::{Digest, Sha256};
 use tracing::error;
 use uuid::Uuid;
 
@@ -23,9 +24,12 @@ use crate::{
     domains::ingest::{
         WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt, WebIngestRunSummary, WebRunCounts,
     },
-    infra::repositories::ingest_repository::{
-        self, NewWebDiscoveredPage, NewWebIngestRun, UpdateWebIngestRun, WebDiscoveredPageRow,
-        WebIngestRunRow, WebRunCountsRow,
+    infra::repositories::{
+        catalog_repository,
+        ingest_repository::{
+            self, NewWebDiscoveredPage, NewWebIngestRun, UpdateWebIngestRun, WebDiscoveredPageRow,
+            WebIngestRunRow, WebRunCountsRow,
+        },
     },
     interfaces::http::router_support::ApiError,
     services::{
@@ -42,8 +46,10 @@ use crate::{
         telemetry,
         web::{
             ingest::{
-                WebCandidateState, WebClassificationReason, WebIngestMode, WebRunFailureCode,
-                WebRunState, derive_terminal_run_state, now_if_terminal, validate_web_run_settings,
+                WebCandidateState, WebClassificationReason, WebIngestIgnorePattern, WebIngestMode,
+                WebIngestPolicy, WebRunFailureCode, WebRunState,
+                build_web_ingest_run_ignore_patterns, derive_terminal_run_state,
+                match_web_ingest_ignore_pattern, now_if_terminal, validate_web_run_settings,
             },
             url_identity::{HostClassification, normalize_seed_url},
         },
@@ -73,6 +79,7 @@ pub struct CreateWebIngestRunCommand {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
+    pub extra_ignore_patterns: Vec<WebIngestIgnorePattern>,
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub idempotency_key: Option<String>,
@@ -101,14 +108,71 @@ pub struct WebIngestService {
     http: Client,
 }
 
+/// Result of `materialize_snapshot_resource`. Mirrors
+/// `MaterializedWebCapture` — a fetched page can either be `Ingested`
+/// (fresh content, normal pipeline) or collapsed under
+/// `DuplicateContent` (body already present in the library under some
+/// other URL variant, no new content_document created). Callers choose
+/// candidate_state based on the variant.
 #[derive(Debug, Clone)]
-struct MaterializedWebPage {
-    final_url: String,
-    content_type: String,
-    document_id: Uuid,
-    revision_id: Uuid,
-    mutation_item_id: Uuid,
-    _job_id: Uuid,
+enum MaterializedWebPage {
+    Ingested {
+        final_url: String,
+        content_type: String,
+        document_id: Uuid,
+        revision_id: Uuid,
+        mutation_item_id: Uuid,
+        _job_id: Uuid,
+    },
+    DuplicateContent {
+        final_url: String,
+        content_type: String,
+        existing_document_id: Uuid,
+        mutation_item_id: Uuid,
+    },
+}
+
+impl MaterializedWebPage {
+    fn final_url(&self) -> &str {
+        match self {
+            Self::Ingested { final_url, .. } | Self::DuplicateContent { final_url, .. } => {
+                final_url
+            }
+        }
+    }
+
+    fn content_type(&self) -> &str {
+        match self {
+            Self::Ingested { content_type, .. } | Self::DuplicateContent { content_type, .. } => {
+                content_type
+            }
+        }
+    }
+
+    fn document_id(&self) -> Uuid {
+        match self {
+            Self::Ingested { document_id, .. } => *document_id,
+            Self::DuplicateContent { existing_document_id, .. } => *existing_document_id,
+        }
+    }
+
+    fn revision_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Ingested { revision_id, .. } => Some(*revision_id),
+            Self::DuplicateContent { .. } => None,
+        }
+    }
+
+    fn mutation_item_id(&self) -> Uuid {
+        match self {
+            Self::Ingested { mutation_item_id, .. }
+            | Self::DuplicateContent { mutation_item_id, .. } => *mutation_item_id,
+        }
+    }
+
+    fn is_duplicate(&self) -> bool {
+        matches!(self, Self::DuplicateContent { .. })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +306,26 @@ impl WebIngestService {
             command.max_pages,
         )
         .map_err(ApiError::BadRequest)?;
+        let library_row =
+            catalog_repository::get_library_by_id(&state.persistence.postgres, command.library_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
+        let library_policy: WebIngestPolicy = serde_json::from_value(library_row.web_ingest_policy)
+            .map_err(|_| ApiError::Internal)?;
+        let ignore_patterns =
+            build_web_ingest_run_ignore_patterns(&library_policy, command.extra_ignore_patterns)
+                .map_err(ApiError::BadRequest)?;
+        let ignore_patterns_json =
+            serde_json::to_value(&ignore_patterns).map_err(|_| ApiError::Internal)?;
+        let source_identity = web_run_source_identity(
+            &normalized_seed_url,
+            &validated.mode,
+            &validated.boundary_policy,
+            validated.max_depth,
+            validated.max_pages,
+            &ignore_patterns_json,
+        );
 
         let mutation = state
             .canonical_services
@@ -255,7 +339,7 @@ impl WebIngestService {
                     requested_by_principal_id: command.requested_by_principal_id,
                     request_surface: command.request_surface.clone(),
                     idempotency_key: command.idempotency_key.clone(),
-                    source_identity: Some(normalized_seed_url.clone()),
+                    source_identity: Some(source_identity),
                 },
             )
             .await?;
@@ -306,6 +390,7 @@ impl WebIngestService {
                 boundary_policy: &validated.boundary_policy,
                 max_depth: validated.max_depth,
                 max_pages: validated.max_pages,
+                ignore_patterns: ignore_patterns_json,
                 run_state: WebRunState::Accepted.as_str(),
                 requested_by_principal_id: command.requested_by_principal_id,
                 requested_at: None,
@@ -343,6 +428,7 @@ impl WebIngestService {
                 host_classification: HostClassification::SameHost.as_str(),
                 candidate_state: WebCandidateState::Eligible.as_str(),
                 classification_reason: Some(WebClassificationReason::SeedAccepted.as_str()),
+                classification_detail: None,
                 content_type: None,
                 http_status: None,
                 snapshot_storage_key: None,
@@ -378,14 +464,53 @@ impl WebIngestService {
         &self,
         state: &AppState,
         library_id: Uuid,
+        limit: i64,
     ) -> Result<Vec<WebIngestRunSummary>, ApiError> {
-        let rows = ingest_repository::list_web_ingest_runs(&state.persistence.postgres, library_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let mut summaries = Vec::with_capacity(rows.len());
-        for row in rows {
-            summaries.push(self.build_run_summary(state, row).await?);
+        let rows =
+            ingest_repository::list_web_ingest_runs(&state.persistence.postgres, library_id, limit)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
         }
+
+        // One GROUP BY aggregation over all run ids instead of one
+        // aggregate per run. Before this change, a library with N runs
+        // issued N+1 queries on every /content/web-runs request, which
+        // on reference-sized libraries pushed the endpoint past browser
+        // timeout.
+        let run_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        let counts_rows = ingest_repository::list_web_run_counts_by_run_ids(
+            &state.persistence.postgres,
+            &run_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let mut counts_by_run: std::collections::HashMap<Uuid, MappedCounts> =
+            std::collections::HashMap::with_capacity(counts_rows.len());
+        for row in counts_rows {
+            counts_by_run.insert(row.run_id, map_web_run_counts_by_run_row(&row));
+        }
+
+        let summaries = rows
+            .into_iter()
+            .map(|row| {
+                let counts = counts_by_run.remove(&row.id).unwrap_or_default();
+                Ok(WebIngestRunSummary {
+                    run_id: row.id,
+                    library_id: row.library_id,
+                    mode: row.mode,
+                    boundary_policy: row.boundary_policy,
+                    max_depth: row.max_depth,
+                    max_pages: row.max_pages,
+                    ignore_patterns: parse_run_ignore_patterns(row.ignore_patterns)?,
+                    run_state: row.run_state,
+                    seed_url: row.seed_url,
+                    counts: counts.counts,
+                    last_activity_at: counts.last_activity_at,
+                })
+            })
+            .collect::<Result<Vec<_>, ApiError>>()?;
         Ok(summaries)
     }
 
@@ -598,6 +723,7 @@ impl WebIngestService {
                 host_classification: Some(candidate.host_classification.as_str()),
                 candidate_state: WebCandidateState::Processing.as_str(),
                 classification_reason: candidate.classification_reason.as_deref(),
+                classification_detail: candidate.classification_detail.as_deref(),
                 content_type: candidate.content_type.as_deref(),
                 http_status: candidate.http_status,
                 snapshot_storage_key: candidate.snapshot_storage_key.as_deref(),
@@ -629,22 +755,41 @@ impl WebIngestService {
             .await
         {
             Ok(materialized) => {
+                // Content-dedup outcome: a fetched page whose body already
+                // lives in the library is recorded under candidate_state =
+                // `duplicate` + classification_reason = `duplicate_content`,
+                // otherwise the usual `processed` + inherited classification
+                // reason. `result_revision_id` is None on dedup — there is
+                // no new revision to link.
+                let (candidate_state, classification_reason): (WebCandidateState, Option<&str>) =
+                    if materialized.is_duplicate() {
+                        (
+                            WebCandidateState::Duplicate,
+                            Some(WebClassificationReason::DuplicateContent.as_str()),
+                        )
+                    } else {
+                        (
+                            WebCandidateState::Processed,
+                            processing_page.classification_reason.as_deref(),
+                        )
+                    };
                 let _ = ingest_repository::update_web_discovered_page(
                     &state.persistence.postgres,
                     processing_page.id,
                     &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                        final_url: Some(materialized.final_url.as_str()),
-                        canonical_url: Some(materialized.final_url.as_str()),
+                        final_url: Some(materialized.final_url()),
+                        canonical_url: Some(materialized.final_url()),
                         host_classification: Some(processing_page.host_classification.as_str()),
-                        candidate_state: WebCandidateState::Processed.as_str(),
-                        classification_reason: processing_page.classification_reason.as_deref(),
-                        content_type: Some(materialized.content_type.as_str()),
+                        candidate_state: candidate_state.as_str(),
+                        classification_reason,
+                        classification_detail: processing_page.classification_detail.as_deref(),
+                        content_type: Some(materialized.content_type()),
                         http_status: Some(resource.http_status),
                         snapshot_storage_key: processing_page.snapshot_storage_key.as_deref(),
                         updated_at: Some(Utc::now()),
-                        document_id: Some(materialized.document_id),
-                        result_revision_id: Some(materialized.revision_id),
-                        mutation_item_id: Some(materialized.mutation_item_id),
+                        document_id: Some(materialized.document_id()),
+                        result_revision_id: materialized.revision_id(),
+                        mutation_item_id: Some(materialized.mutation_item_id()),
                     },
                 )
                 .await
@@ -770,35 +915,13 @@ impl WebIngestService {
             boundary_policy: row.boundary_policy,
             max_depth: row.max_depth,
             max_pages: row.max_pages,
+            ignore_patterns: parse_run_ignore_patterns(row.ignore_patterns)?,
             run_state: row.run_state,
             requested_by_principal_id: row.requested_by_principal_id,
             requested_at: row.requested_at,
             completed_at: row.completed_at,
             failure_code: row.failure_code,
             cancel_requested_at: row.cancel_requested_at,
-            counts: counts.counts,
-            last_activity_at: counts.last_activity_at,
-        })
-    }
-
-    async fn build_run_summary(
-        &self,
-        state: &AppState,
-        row: WebIngestRunRow,
-    ) -> Result<WebIngestRunSummary, ApiError> {
-        let counts_row = ingest_repository::get_web_run_counts(&state.persistence.postgres, row.id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let counts = map_web_run_counts_row(counts_row);
-        Ok(WebIngestRunSummary {
-            run_id: row.id,
-            library_id: row.library_id,
-            mode: row.mode,
-            boundary_policy: row.boundary_policy,
-            max_depth: row.max_depth,
-            max_pages: row.max_pages,
-            run_state: row.run_state,
-            seed_url: row.seed_url,
             counts: counts.counts,
             last_activity_at: counts.last_activity_at,
         })
@@ -954,44 +1077,28 @@ impl WebIngestService {
     }
 }
 
-fn classify_confluence_system_page(url: &str) -> Option<&'static str> {
-    let parsed = Url::parse(url).ok()?;
-    let path = parsed.path().to_ascii_lowercase();
-    let query = parsed.query().unwrap_or_default().to_ascii_lowercase();
-
-    let is_system_path = matches!(
-        path.as_str(),
-        "/aboutconfluencepage.action"
-            | "/collector/pages.action"
-            | "/dashboard/configurerssfeed.action"
-            | "/exportword"
-            | "/forgotuserpassword.action"
-            | "/login.action"
-            | "/pages/diffpages.action"
-            | "/pages/diffpagesbyversion.action"
-            | "/pages/listundefinedpages.action"
-            | "/pages/reorderpages.action"
-            | "/pages/viewinfo.action"
-            | "/pages/viewpageattachments.action"
-            | "/pages/viewpreviousversions.action"
-            | "/plugins/viewsource/viewpagesrc.action"
-            | "/spacedirectory/view.action"
-            | "/spaces/flyingpdf/pdfpageexport.action"
-            | "/spaces/listattachmentsforspace.action"
-            | "/spaces/listrssfeeds.action"
-            | "/spaces/viewspacesummary.action"
-    );
-    let is_profile_page = path.starts_with("/display/~");
-    let is_system_query =
-        query.contains("os_destination=") || query.contains("permissionviolation=");
-
-    (is_system_path || is_profile_page || is_system_query)
-        .then_some(WebClassificationReason::SystemPage.as_str())
-}
-
+#[derive(Default)]
 struct MappedCounts {
     counts: WebRunCounts,
     last_activity_at: Option<DateTime<Utc>>,
+}
+
+fn map_web_run_counts_by_run_row(row: &ingest_repository::WebRunCountsByRunRow) -> MappedCounts {
+    MappedCounts {
+        counts: WebRunCounts {
+            discovered: row.discovered,
+            eligible: row.eligible,
+            processed: row.processed,
+            queued: row.queued,
+            processing: row.processing,
+            duplicates: row.duplicates,
+            excluded: row.excluded,
+            blocked: row.blocked,
+            failed: row.failed,
+            canceled: row.canceled,
+        },
+        last_activity_at: row.last_activity_at,
+    }
 }
 
 fn map_web_run_counts_row(row: WebRunCountsRow) -> MappedCounts {
@@ -1025,6 +1132,32 @@ fn map_web_run_receipt(run: WebIngestRun) -> WebIngestRunReceipt {
     }
 }
 
+fn web_run_source_identity(
+    normalized_seed_url: &str,
+    mode: &str,
+    boundary_policy: &str,
+    max_depth: i32,
+    max_pages: i32,
+    ignore_patterns_json: &serde_json::Value,
+) -> String {
+    let payload = serde_json::json!({
+        "normalizedSeedUrl": normalized_seed_url,
+        "mode": mode,
+        "boundaryPolicy": boundary_policy,
+        "maxDepth": max_depth,
+        "maxPages": max_pages,
+        "ignorePatterns": ignore_patterns_json,
+    });
+    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+    format!("web_capture:sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn parse_run_ignore_patterns(
+    value: serde_json::Value,
+) -> Result<Vec<WebIngestIgnorePattern>, ApiError> {
+    serde_json::from_value(value).map_err(|_| ApiError::Internal)
+}
+
 fn map_web_page_row(row: WebDiscoveredPageRow) -> WebDiscoveredPage {
     WebDiscoveredPage {
         candidate_id: row.id,
@@ -1038,6 +1171,7 @@ fn map_web_page_row(row: WebDiscoveredPageRow) -> WebDiscoveredPage {
         host_classification: row.host_classification,
         candidate_state: row.candidate_state,
         classification_reason: row.classification_reason,
+        classification_detail: row.classification_detail,
         content_type: row.content_type,
         http_status: row.http_status,
         discovered_at: row.discovered_at,
@@ -1217,31 +1351,4 @@ fn fallback_title_from_url(final_url: &str) -> Option<String> {
             .map(ToString::to_string);
         path_title.or_else(|| url.host_str().map(ToString::to_string))
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::classify_confluence_system_page;
-
-    #[test]
-    fn classifies_confluence_system_pages() {
-        assert_eq!(
-            classify_confluence_system_page(
-                "https://docs.example.test/pages/diffpagesbyversion.action?pageId=1&selectedPageVersions=1&selectedPageVersions=2",
-            ),
-            Some("system_page")
-        );
-        assert_eq!(
-            classify_confluence_system_page(
-                "https://docs.example.test/login.action?os_destination=%2Fdisplay%2FACA%2FAcme%2BConsultant%2BApp",
-            ),
-            Some("system_page")
-        );
-        assert_eq!(
-            classify_confluence_system_page(
-                "https://docs.example.test/display/ACA/Acme+Consultant+App"
-            ),
-            None
-        );
-    }
 }

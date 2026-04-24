@@ -5,6 +5,7 @@ mod answer;
 mod answer_pipeline;
 mod canonical_answer_context;
 mod canonical_target;
+mod consolidation;
 mod context;
 mod document_target;
 mod embed;
@@ -35,6 +36,7 @@ mod technical_url_answer;
 #[cfg(test)]
 mod tests;
 mod transport_answer;
+mod tuning;
 mod types;
 mod verification;
 
@@ -76,6 +78,7 @@ pub(crate) use answer::*;
 pub(crate) use answer_pipeline::*;
 pub(crate) use canonical_answer_context::*;
 pub(crate) use canonical_target::*;
+pub(crate) use consolidation::*;
 pub(crate) use context::*;
 pub(crate) use document_target::*;
 #[cfg(test)]
@@ -92,13 +95,18 @@ pub(crate) use verification::*;
 
 /// HyDE passage generation timeout. Increase for slow LLM providers.
 const HYDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// CRAG query rewrite timeout.
-const CRAG_REWRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// HyDE generation temperature. Lower = more factual, higher = more creative.
 const HYDE_TEMPERATURE: f64 = 0.3;
-/// CRAG rewrite temperature.
+/// CRAG retrieval-confidence + rewrite-retry knobs. Currently wired into
+/// `hyde_crag.rs` and `structured_query_pipeline.rs` as the rewrite path
+/// behind feature-flag-style dead-code; the callers are out of the hot
+/// retrieval path for v0.3.2. Kept in-tree as the next lever once the
+/// structured-query pipeline gets re-enabled.
+#[allow(dead_code)]
+const CRAG_REWRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+#[allow(dead_code)]
 const CRAG_REWRITE_TEMPERATURE: f64 = 0.5;
-/// Minimum retrieval quality score (0.0-1.0) to skip CRAG retry.
+#[allow(dead_code)]
 const CRAG_CONFIDENCE_THRESHOLD: f32 = 0.25;
 /// Maximum structured blocks included per answer assembly pass.
 const MAX_ANSWER_BLOCKS: usize = 16;

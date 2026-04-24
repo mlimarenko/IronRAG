@@ -110,6 +110,10 @@ impl TempArangoDatabase {
     }
 
     async fn drop(self) -> Result<()> {
+        self.drop_runtime_database().await
+    }
+
+    async fn drop_runtime_database(&self) -> Result<()> {
         let response = self
             .http
             .delete(format!("{}/_api/database/{}", self.base_url, self.name))
@@ -221,6 +225,10 @@ impl ContentLifecycleFixture {
         self.state.persistence.postgres.close().await;
         self.temp_arango.drop().await?;
         self.temp_database.drop().await
+    }
+
+    pub async fn drop_arango_database(&self) -> Result<()> {
+        self.temp_arango.drop_runtime_database().await
     }
 }
 

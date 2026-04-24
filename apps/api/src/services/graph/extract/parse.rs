@@ -23,13 +23,21 @@ pub fn parse_graph_extraction_output(output_text: &str) -> Result<GraphExtractio
     let parsed = extract_json_payload(output_text).map_err(|error| {
         anyhow!("{}: {}", GraphExtractionTaskFailureCode::MalformedOutput.as_str(), error)
     })?;
+    // Some models (small-weight Ollama checkpoints, older instruction-
+    // tuned SLMs) emit `"nodes"` / `"relationships"` instead of the
+    // canonical `"entities"` / `"relations"`. Accept both spellings at
+    // the top level so the output from a locally-hosted model is not
+    // thrown away over a naming disagreement.
     let entities = parsed
         .get("entities")
+        .or_else(|| parsed.get("nodes"))
         .and_then(serde_json::Value::as_array)
         .map(|items| items.iter().filter_map(parse_entity_candidate).collect::<Vec<_>>())
         .unwrap_or_default();
     let relations = parsed
         .get("relations")
+        .or_else(|| parsed.get("relationships"))
+        .or_else(|| parsed.get("edges"))
         .and_then(serde_json::Value::as_array)
         .map(|items| items.iter().filter_map(parse_relation_candidate).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -169,11 +177,18 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
         });
     }
 
-    let label = value.get("label").and_then(serde_json::Value::as_str)?.trim();
+    // Accept `label` (canonical) or `name` (emitted by smaller instruct
+    // models). Same for `node_type` vs `type`.
+    let label = value
+        .get("label")
+        .or_else(|| value.get("name"))
+        .and_then(serde_json::Value::as_str)?
+        .trim();
     if label.is_empty() {
         return None;
     }
-    let node_type = match value.get("node_type").and_then(serde_json::Value::as_str) {
+    let raw_node_type = value.get("node_type").or_else(|| value.get("type"));
+    let node_type = match raw_node_type.and_then(serde_json::Value::as_str) {
         None => RuntimeNodeType::Entity,
         Some(raw) => {
             let trimmed = raw.trim();
@@ -242,18 +257,26 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
 }
 
 fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCandidate> {
+    // Accept the canonical `source_label` / `target_label` /
+    // `relation_type` trio plus the common aliases emitted by smaller
+    // Ollama-hosted models (`source`/`from`, `target`/`to`,
+    // `relation`/`type`). Graph extraction used to discard the entire
+    // relation list when the model picked a near-canonical alternative.
     let source_label = value
         .get("source_label")
         .or_else(|| value.get("source"))
+        .or_else(|| value.get("from"))
         .and_then(serde_json::Value::as_str)?
         .trim();
     let target_label = value
         .get("target_label")
         .or_else(|| value.get("target"))
+        .or_else(|| value.get("to"))
         .and_then(serde_json::Value::as_str)?
         .trim();
     let relation_type = value
         .get("relation_type")
+        .or_else(|| value.get("relation"))
         .or_else(|| value.get("type"))
         .and_then(serde_json::Value::as_str)?
         .trim();

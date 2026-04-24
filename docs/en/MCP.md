@@ -58,6 +58,7 @@ If your IronRAG instance is behind another domain or TLS terminator, replace the
 `tools/list` is grant-filtered. If a token cannot do something, the tool is not advertised.
 The canonical JSON-RPC surface is intentionally small: `initialize`, `tools/list`, `tools/call`, and `notifications/initialized`. IronRAG does not expose an empty `resources/*` surface.
 Tool arguments use canonical camelCase fields only.
+Catalog targets use canonical refs instead of opaque UUIDs: `workspace` is `<workspace>`, and `library` is `<workspace>/<library>`. Discovery responses expose these values as `ref`.
 
 ## Tools
 
@@ -65,7 +66,7 @@ Tool arguments use canonical camelCase fields only.
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `grounded_answer` | Ask a natural-language question and get a grounded answer with citations — **the same pipeline the built-in UI assistant uses** (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `libraryId`, `query` |
+| `grounded_answer` | Ask a natural-language question and get a grounded answer with citations — **the same pipeline the built-in UI assistant uses** (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `library`, `query` |
 
 Response shape: `answer` (text), `citations` (chunks + graph entities), `verifier` (`level` + `warnings`), `runtimeExecutionId` (feed it to `get_runtime_execution_trace` for the full execution graph), `executionId`, `conversationId`. An MCP client receives exactly the answer a user would see in the UI for the same library and question — MCP and UI share the same grounded-answer pipeline, no parallel implementation.
 
@@ -74,24 +75,24 @@ Response shape: `answer` (text), `citations` (chunks + graph entities), `verifie
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
 | `list_workspaces` | List workspaces visible to the current token. | (none) |
-| `list_libraries` | List visible libraries, optionally filtered to one workspace. | `workspaceId` (optional) |
+| `list_libraries` | List visible libraries, optionally filtered to one workspace ref. | `workspace` (optional) |
 
 ### Admin
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `create_workspace` | Create a workspace (system-admin only). | `name` |
-| `create_library` | Create a library inside one workspace. | `workspaceId`, `name` |
+| `create_workspace` | Create a workspace (system-admin only). The request uses the canonical workspace ref; `title` is optional display text. | `workspace` |
+| `create_library` | Create a library inside one workspace. The request uses the canonical library ref; `title` is optional display text. | `library` |
 
 ### Documents
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `search_documents` | Search library memory and return document-level candidates. | `query` |
+| `search_documents` | Search library memory and return document-level candidates. Optionally scope the search to one or more canonical library refs via `libraries`. | `query` |
 | `read_document` | Read one document in full or as an excerpt. | `documentId` |
-| `list_documents` | List documents in a library, optionally filtered by processing status. | `libraryId` (optional) |
-| `upload_documents` | Create one or more new documents in a library. | `libraryId`, `documents` |
-| `update_document` | Append to or replace an existing document. | `libraryId`, `documentId`, `operationKind` |
+| `list_documents` | List documents in a library, optionally filtered by processing status. | `library` (optional) |
+| `upload_documents` | Create one or more new documents in a library. | `library`, `documents` |
+| `update_document` | Append to or replace an existing document. | `library`, `documentId`, `operationKind` |
 | `delete_document` | Delete a document and its revisions, chunks, and graph contributions. | `documentId` |
 | `get_mutation_status` | Check the lifecycle of a mutation receipt from upload/update/delete. | `receiptId` |
 
@@ -99,16 +100,16 @@ Response shape: `answer` (text), `citations` (chunks + graph entities), `verifie
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `search_entities` | Search knowledge graph entities by name or label. | `libraryId`, `query` |
-| `get_graph_topology` | Get a support-ranked graph topology slice (entities, relations, document links) with truncation. | `libraryId` |
-| `list_relations` | List knowledge graph relations ordered by support count. | `libraryId` |
-| `get_communities` | List detected graph communities with summaries and top entities. | `libraryId` |
+| `search_entities` | Search knowledge graph entities by name or label. | `library`, `query` |
+| `get_graph_topology` | Get a support-ranked graph topology slice (entities, relations, document links) with truncation. | `library` |
+| `list_relations` | List knowledge graph relations ordered by support count. | `library` |
+| `get_communities` | List detected graph communities with summaries and top entities. | `library` |
 
 ### Web Crawl
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `submit_web_ingest_run` | Submit a web ingest run for a seed URL. | `libraryId`, `seedUrl`, `mode` |
+| `submit_web_ingest_run` | Submit a web ingest run for a seed URL. | `library`, `seedUrl`, `mode` |
 | `get_web_ingest_run` | Load one web ingest run and its current state. | `runId` |
 | `list_web_ingest_run_pages` | List candidate pages and outcomes for a web ingest run. | `runId` |
 | `cancel_web_ingest_run` | Request cancellation for an active web ingest run. | `runId` |
@@ -137,7 +138,7 @@ Under the hood, MCP calls the same canonical services as the web app: Postgres f
 - Read-only tokens are useful for assistants that should only search and read.
 - Write-enabled tokens can upload documents or update existing content when you want an agent to maintain the knowledge base.
 - Tool visibility follows grants, so clients only see the operations they are allowed to use.
-- When a token is scoped to exactly one workspace or library, MCP tools and the query API auto-fill `workspaceId` and `libraryId` from the token scope.
+- When a token is scoped to exactly one workspace or library, MCP tools can infer the canonical `workspace` or `library` ref from the token scope instead of forcing the agent to pass it every time.
 
 ## What the client gets
 

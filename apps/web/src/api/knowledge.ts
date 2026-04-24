@@ -80,11 +80,11 @@ export async function getGraphTopologyStream(
   // Byte-level buffer. The previous implementation held a growing
   // UTF-8 *string* (`let pending = "";`) and repeatedly did
   // `pending += chunk; pending = pending.slice(newlineIndex + 1)` —
-  // on a 7.87 MB Artix payload that is O(N²) in engine heap churn
+  // on a 7.87 MB large-library reference payload that is O(N²) in engine heap churn
   // because each `+=` and each `slice` allocates a fresh String.
   // A Uint8Array ring keeps the live bytes contiguous, lets us scan
   // for 0x0A directly, and only decodes the slice that spans a full
-  // NDJSON line. Measured ~150 ms saved on the Artix fixture.
+  // NDJSON line. Measured ~150 ms saved on the large-library reference fixture.
   let buffer = new Uint8Array(256 * 1024);
   let bufferLength = 0;
   const LF = 0x0a;

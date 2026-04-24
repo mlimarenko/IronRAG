@@ -56,8 +56,6 @@ pub struct OpsLibraryFactsRow {
     pub library_id: Uuid,
     pub queue_depth: i64,
     pub running_attempts: i64,
-    pub readable_document_count: i64,
-    pub failed_document_count: i64,
     pub degraded_state: String,
     pub last_recomputed_at: DateTime<Utc>,
 }
@@ -224,7 +222,7 @@ pub async fn get_async_operation_progress(
         "select
             count(*)::bigint as total,
             count(*) filter (where status = 'ready')::bigint as completed,
-            count(*) filter (where status = 'failed')::bigint as failed,
+            count(*) filter (where status in ('failed', 'canceled', 'superseded'))::bigint as failed,
             count(*) filter (where status in ('accepted', 'processing'))::bigint as in_flight
          from ops_async_operation
          where parent_async_operation_id = $1",
@@ -271,6 +269,10 @@ pub async fn get_library_facts(
     postgres: &PgPool,
     library_id: Uuid,
 ) -> Result<Option<OpsLibraryFactsRow>, sqlx::Error> {
+    // Queue-health-only aggregate. Document-level counts are NOT part
+    // of this row — they live in `aggregate_library_document_metrics`
+    // as the single source of truth, and `map_library_facts_from_aggregate`
+    // combines both aggregates into the service-layer `OpsLibraryState`.
     sqlx::query_as::<_, OpsLibraryFactsRow>(
         "select
             $1 as library_id,
@@ -287,8 +289,6 @@ pub async fn get_library_facts(
                 where job.library_id = $1
                   and attempt.attempt_state in ('leased', 'running')
             ) as running_attempts,
-            0::bigint as readable_document_count,
-            0::bigint as failed_document_count,
             'healthy'::text as degraded_state,
             now() as last_recomputed_at",
     )

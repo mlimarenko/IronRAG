@@ -25,6 +25,7 @@ struct McpPermissionsFixture {
     workspace_id: Uuid,
     foreign_workspace_id: Uuid,
     foreign_library_id: Uuid,
+    foreign_library_ref: String,
 }
 
 impl McpPermissionsFixture {
@@ -74,6 +75,7 @@ impl McpPermissionsFixture {
             workspace_id: workspace.id,
             foreign_workspace_id: foreign_workspace.id,
             foreign_library_id: foreign_library.id,
+            foreign_library_ref: format!("{}/{}", foreign_workspace.slug, foreign_library.slug),
         })
     }
 
@@ -435,7 +437,7 @@ async fn foreign_scope_rejections_do_not_leak_library_or_document_metadata() -> 
                 "search_documents",
                 json!({
                     "query": "secret",
-                    "libraryIds": [fixture.foreign_library_id]
+                    "libraries": [fixture.foreign_library_ref.clone()]
                 }),
             )
             .await?;

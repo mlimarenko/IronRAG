@@ -460,7 +460,6 @@ async fn search_documents_impl(
             .search_chunk_vectors_by_similarity(
                 library_id,
                 &context.model_catalog_id.to_string(),
-                context.freshness_generation,
                 &context.query_vector,
                 vector_candidate_limit,
                 Some(16),
@@ -472,7 +471,6 @@ async fn search_documents_impl(
                 warn!(
                     library_id = %library_id,
                     model_catalog_id = %context.model_catalog_id,
-                    freshness_generation = context.freshness_generation,
                     error = ?error,
                     "hybrid knowledge chunk vector search failed; falling back to lexical-only hits",
                 );
@@ -488,7 +486,6 @@ async fn search_documents_impl(
             .search_entity_vectors_by_similarity(
                 library_id,
                 &context.model_catalog_id.to_string(),
-                context.freshness_generation,
                 &context.query_vector,
                 vector_candidate_limit,
                 Some(16),
@@ -500,7 +497,6 @@ async fn search_documents_impl(
                 warn!(
                     library_id = %library_id,
                     model_catalog_id = %context.model_catalog_id,
-                    freshness_generation = context.freshness_generation,
                     error = ?error,
                     "hybrid knowledge entity vector search failed; returning lexical entity hits only",
                 );

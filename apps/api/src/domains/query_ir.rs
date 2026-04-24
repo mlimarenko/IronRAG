@@ -57,7 +57,7 @@ pub enum QueryAct {
     RetrieveValue,
     /// "explain X", "расскажи про Y" — conceptual / narrative answer.
     Describe,
-    /// "how do I configure Z", "как настроить сбп" — procedural answer.
+    /// "how do I configure Z", "как настроить модуль оплаты" — procedural answer.
     ConfigureHow,
     /// "compare X and Y", "чем отличается A от B".
     Compare,
@@ -140,7 +140,7 @@ impl QueryLanguage {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityRole {
-    /// Primary thing the question is about ("СБП Сбербанк" in "как настроить СБП Сбербанк").
+    /// Primary thing the question is about ("платежный модуль" in "как настроить платежный модуль").
     Subject,
     /// Secondary named thing, usually in comparisons or "for X" clauses.
     Object,
@@ -179,7 +179,7 @@ pub enum ConversationRefKind {
     Pronoun,
     /// "там", "тут", "here", "that one" — deictic reference.
     Deictic,
-    /// Missing noun phrase ("и ещё?", "а для Sberbank?") — elliptic continuation.
+    /// Missing noun phrase ("и ещё?", "а для другого провайдера?") — elliptic continuation.
     Elliptic,
     /// Single interrogative word that cannot stand on its own
     /// ("Что?", "Как?", "Where?").
@@ -460,10 +460,15 @@ impl QueryIR {
         }
     }
 
-    /// True if the confidence is below the clarification threshold.
+    /// True only when the compiler explicitly asked for clarification.
+    ///
+    /// `confidence` remains an uncertainty signal for downstream
+    /// ranking and verification, but low confidence alone is not a
+    /// canonical reason to interrupt a grounded answer path once
+    /// retrieval has enough evidence to proceed.
     #[must_use]
     pub fn should_request_clarification(&self) -> bool {
-        self.needs_clarification.is_some() || self.confidence < 0.6
+        self.needs_clarification.is_some()
     }
 }
 
@@ -644,7 +649,7 @@ mod tests {
             language: QueryLanguage::Ru,
             target_types: vec!["procedure".to_string()],
             target_entities: vec![EntityMention {
-                label: "сбп".to_string(),
+                label: "платежный модуль".to_string(),
                 role: EntityRole::Subject,
             }],
             literal_constraints: vec![],
@@ -705,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn low_confidence_triggers_clarification() {
+    fn low_confidence_alone_does_not_trigger_clarification() {
         let ir = QueryIR {
             act: QueryAct::Describe,
             scope: QueryScope::SingleDocument,
@@ -718,6 +723,27 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             confidence: 0.4,
+        };
+        assert!(!ir.should_request_clarification());
+    }
+
+    #[test]
+    fn explicit_clarification_reason_triggers_clarification() {
+        let ir = QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: Some(ClarificationSpec {
+                reason: ClarificationReason::AmbiguousTooShort,
+                suggestion: String::new(),
+            }),
+            confidence: 0.9,
         };
         assert!(ir.should_request_clarification());
     }
@@ -746,7 +772,27 @@ mod tests {
 
 /// Bump when the IR schema changes incompatibly — callers key cached IR
 /// on this so stale rows are automatically ignored after a schema upgrade.
-pub const QUERY_IR_SCHEMA_VERSION: u16 = 1;
+///
+/// v3 is a cache-invalidation bump: the IR JSON shape is unchanged, but
+/// the compiler now repairs stateless `follow_up` outputs that carry an
+/// explicit target. Rows compiled under v2 may incorrectly route a
+/// standalone short question into the tool-loop path.
+///
+/// v2 was a cache-invalidation bump: the IR JSON shape is unchanged, but
+/// 0.3.1 changes how downstream consolidation consumes `document_focus`
+/// and widens the winner pack budget (`FOCUSED_WINNER_MAX_CHUNKS = 16`).
+/// Rows compiled under v1 semantics are treated as stale so retrieval
+/// always sees IR the current pipeline is calibrated against. The bump
+/// is zero-downtime — `get_query_ir_cache` filters by this version, so
+/// stale rows simply miss the cache and recompile on demand.
+pub const QUERY_IR_SCHEMA_VERSION: u16 = 3;
+
+/// Maximum age of a Postgres-tier `query_ir_cache` row before it is
+/// treated as a miss. Redis already holds its own 24h hot tier; the
+/// persistent tier keeps compilations for 30 days so operators can
+/// audit yesterday's "what IR did we derive for this question" decision
+/// while protecting against unbounded row growth on a busy library.
+pub const QUERY_IR_CACHE_MAX_AGE_DAYS: i64 = 30;
 
 /// Self-consistency issue picked up by [`validate_ir`]. Caught in debug
 /// builds as an assertion so it shouts early in tests; production paths

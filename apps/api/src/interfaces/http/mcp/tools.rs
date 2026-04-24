@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    McpJsonRpcResponse, McpToolCallParams, McpToolDescriptor, audit::record_canonical_mcp_audit,
-    success_response, tool_error_result,
+    McpJsonRpcResponse, McpToolCallParams, McpToolDescriptor, McpToolSurface,
+    audit::record_canonical_mcp_audit, success_response, tool_error_result,
 };
 
 pub(crate) mod catalog;
@@ -31,8 +31,29 @@ pub(crate) struct ToolCallContext<'a> {
     pub request_id: &'a str,
 }
 
-pub(crate) fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
+pub(crate) fn visible_tool_names(auth: &AuthContext, surface: McpToolSurface) -> Vec<String> {
+    match surface {
+        McpToolSurface::Answer => visible_answer_tool_names(auth),
+        McpToolSurface::Diagnostics => visible_diagnostics_tool_names(auth),
+    }
+}
+
+fn visible_answer_tool_names(auth: &AuthContext) -> Vec<String> {
     let mut tools = vec!["list_workspaces".to_string(), "list_libraries".to_string()];
+    if auth.can_read_any_library_memory(POLICY_QUERY_RUN) {
+        tools.push("grounded_answer".to_string());
+    }
+    if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
+        tools.push("list_documents".to_string());
+    }
+    tools
+}
+
+fn visible_diagnostics_tool_names(auth: &AuthContext) -> Vec<String> {
+    let mut tools = vec!["list_workspaces".to_string(), "list_libraries".to_string()];
+    if auth.can_read_any_library_memory(POLICY_QUERY_RUN) {
+        tools.push("grounded_answer".to_string());
+    }
     if auth.is_system_admin {
         tools.push("create_workspace".to_string());
     }
@@ -72,13 +93,6 @@ pub(crate) fn visible_tool_names(auth: &AuthContext) -> Vec<String> {
         tools.push("list_relations".to_string());
         tools.push("get_communities".to_string());
     }
-    if auth.can_read_any_library_memory(POLICY_QUERY_RUN) {
-        // Canonical grounded-answer tool. Pinned to the same
-        // `query_run` scope the UI assistant uses, so UI parity is
-        // observable at the grant level: a token that can ask
-        // questions in UI can ask them over MCP.
-        tools.push("grounded_answer".to_string());
-    }
     tools
 }
 
@@ -87,8 +101,9 @@ pub(super) async fn handle_tools_list(
     state: &AppState,
     request_id: &str,
     id: Option<Value>,
+    surface: McpToolSurface,
 ) -> McpJsonRpcResponse {
-    let tools = visible_tool_names(auth)
+    let tools = visible_tool_names(auth, surface)
         .into_iter()
         .filter_map(|name| descriptor_for(&name))
         .collect::<Vec<_>>();
@@ -114,6 +129,7 @@ pub(super) async fn handle_tools_call(
     request_id: &str,
     id: Option<Value>,
     params: Option<Value>,
+    surface: McpToolSurface,
 ) -> McpJsonRpcResponse {
     let params_value = params.unwrap_or_else(|| json!({}));
     let parsed: McpToolCallParams = match serde_json::from_value(params_value) {
@@ -127,6 +143,16 @@ pub(super) async fn handle_tools_call(
             );
         }
     };
+    if !visible_tool_names(auth, surface).iter().any(|tool_name| tool_name == &parsed.name) {
+        return success_response(
+            id,
+            json!(tool_error_result(ApiError::invalid_mcp_tool_call(format!(
+                "tool '{}' is not available on the {} MCP surface",
+                parsed.name,
+                surface.label()
+            )))),
+        );
+    }
 
     let context = ToolCallContext { auth, state, request_id };
     let result = if let Some(result) =
@@ -170,4 +196,80 @@ fn descriptor_for(name: &str) -> Option<McpToolDescriptor> {
         .or_else(|| runtime::descriptor(name))
         .or_else(|| web_ingest::descriptor(name))
         .or_else(|| graph::descriptor(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use uuid::Uuid;
+
+    use crate::{
+        domains::iam::PrincipalKind,
+        interfaces::http::{
+            auth::{AuthContext, AuthGrant, AuthTokenKind},
+            authorization::{POLICY_MCP_MEMORY_READ, POLICY_QUERY_RUN},
+            mcp::{McpToolSurface, tools::visible_tool_names},
+        },
+    };
+
+    fn auth_with_query_and_memory_access() -> AuthContext {
+        AuthContext {
+            token_id: Uuid::nil(),
+            principal_id: Uuid::nil(),
+            parent_principal_id: None,
+            workspace_id: None,
+            token_kind: AuthTokenKind::Principal(PrincipalKind::ApiToken),
+            scopes: Vec::new(),
+            grants: vec![
+                AuthGrant {
+                    id: Uuid::from_u128(1),
+                    resource_kind: "library".to_string(),
+                    resource_id: Uuid::from_u128(11),
+                    permission_kind: POLICY_QUERY_RUN[0].to_string(),
+                    workspace_id: Some(Uuid::from_u128(101)),
+                    library_id: Some(Uuid::from_u128(11)),
+                    document_id: None,
+                },
+                AuthGrant {
+                    id: Uuid::from_u128(2),
+                    resource_kind: "library".to_string(),
+                    resource_id: Uuid::from_u128(11),
+                    permission_kind: POLICY_MCP_MEMORY_READ[0].to_string(),
+                    workspace_id: Some(Uuid::from_u128(101)),
+                    library_id: Some(Uuid::from_u128(11)),
+                    document_id: None,
+                },
+            ],
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: false,
+        }
+    }
+
+    #[test]
+    fn visible_tools_prioritize_grounded_answer_before_raw_search_tools() {
+        let tools =
+            visible_tool_names(&auth_with_query_and_memory_access(), McpToolSurface::Diagnostics);
+        let grounded_index =
+            tools.iter().position(|name| name == "grounded_answer").expect("grounded_answer");
+        let search_index =
+            tools.iter().position(|name| name == "search_documents").expect("search_documents");
+        let read_index =
+            tools.iter().position(|name| name == "read_document").expect("read_document");
+
+        assert!(grounded_index < search_index);
+        assert!(grounded_index < read_index);
+    }
+
+    #[test]
+    fn answer_surface_hides_raw_search_and_read_tools() {
+        let tools =
+            visible_tool_names(&auth_with_query_and_memory_access(), McpToolSurface::Answer);
+
+        assert!(tools.iter().any(|name| name == "grounded_answer"));
+        assert!(tools.iter().any(|name| name == "list_documents"));
+        assert!(!tools.iter().any(|name| name == "search_documents"));
+        assert!(!tools.iter().any(|name| name == "read_document"));
+    }
 }

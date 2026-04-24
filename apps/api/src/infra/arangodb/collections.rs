@@ -33,6 +33,13 @@ pub const KNOWLEDGE_BUNDLE_RELATION_EDGE: &str = "knowledge_bundle_relation_edge
 pub const KNOWLEDGE_BUNDLE_EVIDENCE_EDGE: &str = "knowledge_bundle_evidence_edge";
 
 pub const KNOWLEDGE_SEARCH_VIEW: &str = "knowledge_search_view";
+
+/// Custom trigram analyzer registered on startup and attached to the
+/// `knowledge_document.title` / `file_name` fields. Powers typo-tolerant
+/// matches in the `search_chunks` title subquery via NGRAM_MATCH.
+/// Keeping the name in one place keeps bootstrap + search_store in sync.
+pub const KNOWLEDGE_NGRAM_ANALYZER: &str = "ironrag_ngram";
+
 pub const KNOWLEDGE_GRAPH_NAME: &str = "knowledge_graph";
 pub const KNOWLEDGE_CHUNK_VECTOR_INDEX: &str = "knowledge_chunk_vector_index";
 pub const KNOWLEDGE_ENTITY_VECTOR_INDEX: &str = "knowledge_entity_vector_index";
@@ -42,6 +49,7 @@ pub const KNOWLEDGE_STRUCTURED_BLOCK_REVISION_ORDINAL_INDEX: &str =
     "knowledge_structured_block_revision_ordinal_index";
 pub const KNOWLEDGE_TECHNICAL_FACT_REVISION_INDEX: &str = "knowledge_technical_fact_revision_index";
 pub const KNOWLEDGE_TECHNICAL_FACT_LITERAL_INDEX: &str = "knowledge_technical_fact_literal_index";
+pub const KNOWLEDGE_CHUNK_LIBRARY_DOCUMENT_INDEX: &str = "knowledge_chunk_library_document_index";
 pub const KNOWLEDGE_DOCUMENT_LIBRARY_UPDATED_INDEX: &str =
     "knowledge_document_library_updated_index";
 pub const KNOWLEDGE_REVISION_REVISION_ID_INDEX: &str = "knowledge_revision_revision_id_index";
@@ -95,6 +103,13 @@ pub const KNOWLEDGE_PERSISTENT_INDEXES: &[ArangoPersistentIndexSpec] = &[
         collection: KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
         name: KNOWLEDGE_STRUCTURED_BLOCK_REVISION_ORDINAL_INDEX,
         fields: &["revision_id", "ordinal"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_CHUNK_COLLECTION,
+        name: KNOWLEDGE_CHUNK_LIBRARY_DOCUMENT_INDEX,
+        fields: &["library_id", "document_id", "chunk_state", "chunk_index"],
         unique: false,
         sparse: false,
     },

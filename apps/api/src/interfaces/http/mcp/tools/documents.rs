@@ -12,7 +12,7 @@ use super::super::{
     audit::{
         build_mcp_mutation_subjects, build_mcp_search_subjects, mutation_scope_from_receipts,
         record_canonical_mcp_audit, record_error_audit, record_success_audit,
-        search_scope_from_request, search_scope_from_response,
+        search_scope_from_response,
     },
     ok_tool_result, parse_tool_args, tool_error_result,
 };
@@ -22,7 +22,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     match name {
         "search_documents" => Some(McpToolDescriptor {
             name: "search_documents",
-            description: "Search authorized library memory and return document-level candidates. Usually follow relevant hits with `read_document` before answering a content question — the search response alone is NOT enough to ground an answer, it only tells you where to look. Each hit carries `suggestedStartOffset` — the character offset of the best-matching chunk inside the full document; ALWAYS pass this value as `startOffset` to `read_document` on the first call for that document so your very first read window lands on the relevant paragraph instead of the PDF's table of contents. Rules: (1) NEVER rerun this tool with the same `query`+`libraryIds`+`limit` payload in one turn; if the first call returned nothing useful, narrow or broaden the query, do not try a synonym on the same scope. (2) If the top hit is clearly the right document, prefer one `read_document` call (with `startOffset=suggestedStartOffset`) on it over issuing more searches. (3) Keep `limit` small (3-10) — larger limits just bloat the context without finding new answers.",
+            description: "Search authorized library memory and return document-level candidates. Usually follow relevant hits with `read_document` before answering a content question — the search response alone is NOT enough to ground an answer, it only tells you where to look. By default this tool returns only documents whose content is readable enough to inspect; unreadable/failed documents are hidden unless you explicitly opt in for diagnostics. Each hit carries `suggestedStartOffset` — the character offset of the best-matching chunk inside the full document; ALWAYS pass this value as `startOffset` to `read_document` on the first call for that document so your very first read window lands on the relevant paragraph instead of the PDF's table of contents. Rules: (1) NEVER rerun this tool with the same `query`+`libraries`+`limit` payload in one turn; if the first call returned nothing useful, narrow or broaden the query, do not try a synonym on the same scope. (2) If the top hit is clearly the right document, prefer one `read_document` call (with `startOffset=suggestedStartOffset`) on it over issuing more searches. (3) Keep `limit` small (3-10) — larger limits just bloat the context without finding new answers. (4) Use `includeUnreadable=true` only for diagnostics or ops investigation, not for normal user-facing answers.",
             input_schema: json!({
                 "type": "object",
                 "required": ["query"],
@@ -31,10 +31,10 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                         "type": "string",
                         "description": "Natural-language question or keyword query to match against IronRAG memory."
                     },
-                    "libraryIds": {
+                    "libraries": {
                         "type": "array",
-                        "items": { "type": "string", "format": "uuid" },
-                        "description": "Optional library UUID filter. Narrowing to the most likely library reduces noise."
+                        "items": { "type": "string" },
+                        "description": "Optional fully-qualified library refs like '<workspace>/<library>'. Narrowing to the most likely library reduces noise."
                     },
                     "limit": {
                         "type": "integer",
@@ -44,6 +44,10 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     "includeReferences": {
                         "type": "boolean",
                         "description": "Include chunk/entity/relation/evidence reference arrays (default: false to reduce response size)."
+                    },
+                    "includeUnreadable": {
+                        "type": "boolean",
+                        "description": "Include failed/processing/unavailable documents in the candidate set. Default false; keep it false for normal user-facing answers."
                     }
                 }
             }),
@@ -87,14 +91,13 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "list_documents" => Some(McpToolDescriptor {
             name: "list_documents",
-            description: "List documents in a knowledge library. Use this for meta questions (\"what documents do you have\", \"what is this library about\") before answering. For specific content questions prefer `search_documents` — listing does not return document bodies, only titles and status, so it cannot ground a factual answer on its own.",
+            description: "List documents in a knowledge library. Use this ONLY for library inventory and meta questions (\"what documents do you have\", \"what is this library about\"). Never use it as the first step for ordinary content questions, setup questions, or factual questions — it returns only titles and status, not grounded body evidence. For those questions call `grounded_answer` first; use `search_documents` + `read_document` only when you need raw inspection after the grounded answer.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Target library UUID. Omit if your token is scoped to a single library — it will be inferred automatically."
+                        "description": "Target fully-qualified library ref. Omit if your token is scoped to a single library — it will be inferred automatically."
                     },
                     "limit": {
                         "type": "integer",
@@ -104,23 +107,22 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     },
                     "statusFilter": {
                         "type": "string",
-                        "enum": ["processing", "readable", "failed", "graph_ready"],
-                        "description": "Optional readiness status filter."
+                        "enum": ["processing", "readable", "failed"],
+                        "description": "Optional readability-state filter. `readable` includes documents whose raw readiness kinds are `readable`, `graph_sparse`, or `graph_ready`."
                     }
                 }
             }),
         }),
         "upload_documents" => Some(McpToolDescriptor {
             name: "upload_documents",
-            description: "Create one or more new logical documents in an authorized library. Use body for short agent-authored text and contentBase64 for files; always poll get_mutation_status before treating ingestion as complete.",
+            description: "Create one or more new logical documents in an authorized library. PREFER `fetchUrl` for any file larger than a couple of kilobytes — the LLM tool-call output is capped at a few thousand tokens, so a 20 kB file's base64 payload gets silently truncated inside your `tool_calls.arguments_json` and the upload fails. `fetchUrl` makes the backend download the file directly, which bypasses that limit entirely. Use `body` for short agent-authored text notes, `contentBase64` only for files smaller than ~4 kB. Always poll `get_mutation_status` before treating ingestion as complete.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId", "documents"],
+                "required": ["library", "documents"],
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Target library UUID from list_libraries or create_library."
+                        "description": "Target fully-qualified library ref from list_libraries or create_library."
                     },
                     "idempotencyKey": {
                         "type": "string",
@@ -132,17 +134,22 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                         "items": {
                             "type": "object",
                             "anyOf": [
+                                { "required": ["fetchUrl"] },
                                 { "required": ["contentBase64"] },
                                 { "required": ["body"] }
                             ],
                             "properties": {
                                 "fileName": {
                                     "type": "string",
-                                    "description": "Original file name. Optional for inline body uploads; autogenerated if omitted."
+                                    "description": "Original file name. Optional for inline body uploads and fetchUrl uploads (derived from URL path); required for contentBase64 uploads when a meaningful name is not otherwise available."
+                                },
+                                "fetchUrl": {
+                                    "type": "string",
+                                    "description": "Public http(s) URL for the backend to download the file from. Preferred over contentBase64 for anything larger than ~4 kB. The backend resolves the host, blocks loopback/private/link-local addresses, follows up to 5 redirects, enforces the library's upload-size cap, and reads the body directly — no LLM token budget is spent on file contents. Use this whenever the user pointed you at a URL, or whenever your host runtime can hand you a direct download link for an attachment."
                                 },
                                 "contentBase64": {
                                     "type": "string",
-                                    "description": "Base64-encoded file payload for binary/file uploads."
+                                    "description": "Base64-encoded file payload. Only use for tiny files (~4 kB or less); larger payloads exceed the model's tool-call output budget and will be truncated. Prefer fetchUrl."
                                 },
                                 "body": {
                                     "type": "string",
@@ -150,11 +157,11 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                                 },
                                 "sourceType": {
                                     "type": "string",
-                                    "description": "Optional hint: use inline for text body uploads or file for base64 payload uploads."
+                                    "description": "Optional hint: use inline for text body uploads, file for binary base64 or fetchUrl uploads."
                                 },
                                 "sourceUri": {
                                     "type": "string",
-                                    "description": "Optional logical source URI used to derive a default file name for inline uploads."
+                                    "description": "Optional logical source URI used to derive a default file name for inline uploads (informational; not fetched)."
                                 },
                                 "mimeType": {
                                     "type": "string",
@@ -172,25 +179,14 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "update_document" => Some(McpToolDescriptor {
             name: "update_document",
-            description: "Append to or replace one logical document while preserving document identity. The call returns mutation receipts; poll get_mutation_status until a terminal state before depending on the new revision.",
+            description: "Append to or replace one logical document while preserving document identity. The call returns mutation receipts; poll get_mutation_status until a terminal state before depending on the new revision. For operationKind=append pass appendedText; for operationKind=replace pass replacementFileName together with replacementContentBase64. The handler validates these pairings server-side and rejects malformed combinations — the schema itself must stay a flat object because OpenAI-compatible structured-output tool schemas forbid top-level `allOf`/`oneOf`/`anyOf`/`if`/`then`.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId", "documentId", "operationKind"],
-                "allOf": [
-                    {
-                        "if": { "properties": { "operationKind": { "const": "append" } } },
-                        "then": { "required": ["appendedText"] }
-                    },
-                    {
-                        "if": { "properties": { "operationKind": { "const": "replace" } } },
-                        "then": { "required": ["replacementFileName", "replacementContentBase64"] }
-                    }
-                ],
+                "required": ["library", "documentId", "operationKind"],
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Library UUID that owns the target document."
+                        "description": "Fully-qualified library ref that owns the target document."
                     },
                     "documentId": {
                         "type": "string",
@@ -208,19 +204,19 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     },
                     "appendedText": {
                         "type": "string",
-                        "description": "Required for append operations. Good for small incremental notes."
+                        "description": "Required when operationKind=append. Good for small incremental notes."
                     },
                     "replacementFileName": {
                         "type": "string",
-                        "description": "Required for replace operations."
+                        "description": "Required when operationKind=replace."
                     },
                     "replacementContentBase64": {
                         "type": "string",
-                        "description": "Required for replace operations."
+                        "description": "Required when operationKind=replace."
                     },
                     "replacementMimeType": {
                         "type": "string",
-                        "description": "Optional for replace."
+                        "description": "Optional when operationKind=replace."
                     }
                 }
             }),
@@ -300,7 +296,7 @@ async fn search_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     Some(format!(
                         "principal {} completed MCP document search across {} library scope(s)",
                         context.auth.principal_id,
-                        payload.library_ids.len()
+                        payload.libraries.len()
                     )),
                     build_mcp_search_subjects(context.state, &payload),
                 )
@@ -326,7 +322,11 @@ async fn search_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     context.state,
                     context.request_id,
                     McpAuditActionKind::SearchDocuments,
-                    search_scope_from_request(context.auth, args.library_ids.as_deref()),
+                    McpAuditScope {
+                        workspace_id: context.auth.workspace_id,
+                        library_id: None,
+                        document_id: None,
+                    },
                     &error,
                     json!({
                         "tool": "search_documents",
@@ -446,15 +446,30 @@ async fn read_document(context: ToolCallContext<'_>, arguments: &Value) -> McpTo
 async fn list_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpListDocumentsRequest>(arguments.clone()) {
         Ok(args) => {
-            let library_id = match args.library_id.or_else(|| context.auth.sole_library_id()) {
-                Some(id) => id,
-                None => {
-                    return tool_error_result(ApiError::BadRequest(
-                        "libraryId is required — your token has access to multiple libraries, \
-                         so the target must be specified explicitly"
-                            .into(),
-                    ));
+            let library_id = match args.library.as_deref() {
+                Some(library_ref) => {
+                    match crate::services::mcp::access::load_library_by_catalog_ref(
+                        context.auth,
+                        context.state,
+                        library_ref,
+                        crate::interfaces::http::authorization::POLICY_MCP_MEMORY_READ,
+                    )
+                    .await
+                    {
+                        Ok(library) => library.id,
+                        Err(error) => return tool_error_result(error),
+                    }
                 }
+                None => match context.auth.sole_library_id() {
+                    Some(id) => id,
+                    None => {
+                        return tool_error_result(ApiError::BadRequest(
+                            "library is required — your token has access to multiple libraries, \
+                             so the target must be specified explicitly"
+                                .into(),
+                        ));
+                    }
+                },
             };
             let limit = args.limit.unwrap_or(50).clamp(1, 200);
             match crate::services::mcp::access::list_documents(
@@ -557,7 +572,7 @@ async fn upload_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                         "principal {} accepted {} MCP upload mutation(s) in library {}",
                         context.auth.principal_id,
                         payload.len(),
-                        args.library_id
+                        args.library
                     )),
                     canonical_subjects,
                 )
@@ -569,7 +584,7 @@ async fn upload_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     McpAuditActionKind::UploadDocuments,
                     mutation_scope_from_receipts(&payload).unwrap_or(McpAuditScope {
                         workspace_id: context.auth.workspace_id,
-                        library_id: Some(args.library_id),
+                        library_id: None,
                         document_id: None,
                     }),
                     json!({
@@ -588,7 +603,7 @@ async fn upload_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     McpAuditActionKind::UploadDocuments,
                     McpAuditScope {
                         workspace_id: context.auth.workspace_id,
-                        library_id: Some(args.library_id),
+                        library_id: None,
                         document_id: None,
                     },
                     &error,
@@ -671,7 +686,7 @@ async fn update_document(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                     McpAuditActionKind::UpdateDocument,
                     McpAuditScope {
                         workspace_id: context.auth.workspace_id,
-                        library_id: Some(args.library_id),
+                        library_id: None,
                         document_id: Some(args.document_id),
                     },
                     &error,

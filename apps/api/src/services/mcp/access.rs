@@ -15,4 +15,10 @@ pub use self::{
     runtime::{get_runtime_execution, get_runtime_execution_trace},
 };
 
-pub(crate) use self::documents::resolve_document_state;
+pub(crate) use self::{
+    catalog::{
+        library_catalog_ref, load_library_by_catalog_ref,
+        load_workspace_by_catalog_ref_for_discovery,
+    },
+    documents::resolve_document_state,
+};

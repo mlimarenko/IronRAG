@@ -1,13 +1,12 @@
+use std::{collections::HashMap, sync::Arc};
+
 use anyhow::Context;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::{
-        arangodb::graph_store::{GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite},
-        repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
-    },
-    shared::json_coercion::from_value_or_default,
+    infra::repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
 };
 
 #[derive(Debug, Clone)]
@@ -16,75 +15,115 @@ pub struct ActiveRuntimeGraphProjection {
     pub edges: Vec<RuntimeGraphEdgeRow>,
 }
 
+/// In-memory cache of admitted graph projections. Key is
+/// `(library_id, projection_version)`; values are `Arc`-shared so
+/// multiple concurrent queries can read the same projection without
+/// cloning 100k+ rows. Cache is populated lazily by
+/// `load_active_runtime_graph_projection` and evicts older versions
+/// for the same library on every miss, which keeps the working set
+/// bounded by `active libraries × 1 current version`.
+type RuntimeGraphProjectionEntries = HashMap<(Uuid, i64), Arc<ActiveRuntimeGraphProjection>>;
+
+#[derive(Debug, Default, Clone)]
+pub struct RuntimeGraphProjectionCache {
+    entries: Arc<RwLock<RuntimeGraphProjectionEntries>>,
+}
+
+impl RuntimeGraphProjectionCache {
+    async fn get(
+        &self,
+        library_id: Uuid,
+        projection_version: i64,
+    ) -> Option<Arc<ActiveRuntimeGraphProjection>> {
+        self.entries.read().await.get(&(library_id, projection_version)).cloned()
+    }
+
+    async fn insert(
+        &self,
+        library_id: Uuid,
+        projection_version: i64,
+        projection: Arc<ActiveRuntimeGraphProjection>,
+    ) {
+        let mut guard = self.entries.write().await;
+        // Evict any older versions for the same library — the
+        // projection version increments monotonically on every
+        // rebuild, so we can drop entries with a lower version
+        // safely (no concurrent caller should be reading them).
+        guard.retain(|(lib, version), _| *lib != library_id || *version == projection_version);
+        guard.insert((library_id, projection_version), projection);
+    }
+}
+
 pub async fn load_active_runtime_graph_projection(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<ActiveRuntimeGraphProjection> {
+) -> anyhow::Result<Arc<ActiveRuntimeGraphProjection>> {
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
             .context("failed to load runtime graph snapshot")?;
     let Some(snapshot_row) = snapshot else {
-        return Ok(ActiveRuntimeGraphProjection { nodes: Vec::new(), edges: Vec::new() });
+        return Ok(Arc::new(ActiveRuntimeGraphProjection { nodes: Vec::new(), edges: Vec::new() }));
     };
 
     let projection_version = snapshot_row.projection_version.max(1);
     if snapshot_row.graph_status == "empty"
         || (snapshot_row.node_count <= 0 && snapshot_row.edge_count <= 0)
     {
-        return Ok(ActiveRuntimeGraphProjection { nodes: Vec::new(), edges: Vec::new() });
+        return Ok(Arc::new(ActiveRuntimeGraphProjection { nodes: Vec::new(), edges: Vec::new() }));
     }
 
-    let nodes = repositories::list_admitted_runtime_graph_nodes_by_library(
-        &state.persistence.postgres,
-        library_id,
-        projection_version,
-    )
-    .await
-    .context("failed to load admitted runtime graph nodes")?;
-    let edges = repositories::list_admitted_runtime_graph_edges_by_library(
-        &state.persistence.postgres,
-        library_id,
-        projection_version,
-    )
-    .await
-    .context("failed to load admitted runtime graph edges")?;
+    if let Some(cached) =
+        state.runtime_graph_projection_cache.get(library_id, projection_version).await
+    {
+        tracing::debug!(
+            stage = "graph_projection_cache",
+            %library_id,
+            projection_version,
+            node_count = cached.nodes.len(),
+            edge_count = cached.edges.len(),
+            "runtime graph projection cache hit"
+        );
+        return Ok(cached);
+    }
 
-    Ok(ActiveRuntimeGraphProjection { nodes, edges })
-}
+    let load_started = std::time::Instant::now();
+    // Nodes + edges are fully independent Postgres reads; running them
+    // sequentially (the original pattern) cost about sum(per-query ms)
+    // ≈ 11 s on the reference library cache miss. `try_join!` pins the
+    // load at max(nodes_ms, edges_ms) ≈ 6–7 s. Caller caches the
+    // `Arc<ActiveRuntimeGraphProjection>` keyed by projection_version,
+    // so the savings compound across every turn that hits the same
+    // version (~every turn between projection publishes on prod).
+    let (nodes_result, edges_result) = tokio::join!(
+        repositories::list_admitted_runtime_graph_nodes_by_library(
+            &state.persistence.postgres,
+            library_id,
+            projection_version,
+        ),
+        repositories::list_admitted_runtime_graph_edges_by_library(
+            &state.persistence.postgres,
+            library_id,
+            projection_version,
+        ),
+    );
+    let nodes = nodes_result.context("failed to load admitted runtime graph nodes")?;
+    let edges = edges_result.context("failed to load admitted runtime graph edges")?;
+    let elapsed_ms = load_started.elapsed().as_millis();
 
-#[must_use]
-pub fn graph_view_data_from_runtime_projection(
-    projection: &ActiveRuntimeGraphProjection,
-) -> GraphViewData {
-    let nodes = projection
-        .nodes
-        .iter()
-        .map(|node| GraphViewNodeWrite {
-            node_id: node.id,
-            canonical_key: node.canonical_key.clone(),
-            label: node.label.clone(),
-            node_type: node.node_type.clone(),
-            support_count: node.support_count,
-            summary: node.summary.clone(),
-            aliases: from_value_or_default("runtime_graph_node.aliases_json", &node.aliases_json),
-            metadata_json: node.metadata_json.clone(),
-        })
-        .collect();
-    let edges = projection
-        .edges
-        .iter()
-        .map(|edge| GraphViewEdgeWrite {
-            edge_id: edge.id,
-            from_node_id: edge.from_node_id,
-            to_node_id: edge.to_node_id,
-            relation_type: edge.relation_type.clone(),
-            canonical_key: edge.canonical_key.clone(),
-            support_count: edge.support_count,
-            summary: edge.summary.clone(),
-            weight: edge.weight,
-            metadata_json: edge.metadata_json.clone(),
-        })
-        .collect();
-    GraphViewData { nodes, edges }
+    let projection = Arc::new(ActiveRuntimeGraphProjection { nodes, edges });
+    tracing::info!(
+        stage = "graph_projection_cache",
+        %library_id,
+        projection_version,
+        node_count = projection.nodes.len(),
+        edge_count = projection.edges.len(),
+        elapsed_ms,
+        "runtime graph projection loaded from Postgres (cache miss)"
+    );
+    state
+        .runtime_graph_projection_cache
+        .insert(library_id, projection_version, Arc::clone(&projection))
+        .await;
+    Ok(projection)
 }

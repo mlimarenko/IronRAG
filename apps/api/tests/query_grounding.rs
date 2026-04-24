@@ -359,6 +359,7 @@ impl QueryGroundingAppFixture {
                 created_by_principal_id: None,
                 title: Some("Grounding Regression"),
                 conversation_state: "active",
+                request_surface: "ui",
             },
             8,
         )

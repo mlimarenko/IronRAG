@@ -20,6 +20,7 @@ use crate::{
     },
     interfaces::http::router_support::ApiError,
     services::content::source_access::{derive_content_source_file_name, describe_content_source},
+    services::knowledge::graph_stream::invalidate_graph_topology_cache,
     services::knowledge::service::PromoteKnowledgeDocumentCommand,
 };
 
@@ -30,6 +31,37 @@ use super::{
     map_mutation_row, map_revision_row, map_structured_revision_row, map_web_page_provenance_row,
     segment_excerpt,
 };
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeletedDocumentGraphCleanup {
+    pub node_ids: Vec<Uuid>,
+    pub edge_ids: Vec<Uuid>,
+}
+
+impl DeletedDocumentGraphCleanup {
+    #[must_use]
+    pub fn from_targets(targets: Vec<repositories::RuntimeGraphEvidenceTargetRow>) -> Self {
+        let mut node_ids = HashSet::new();
+        let mut edge_ids = HashSet::new();
+        for target in targets {
+            match target.target_kind.as_str() {
+                "node" => {
+                    node_ids.insert(target.target_id);
+                }
+                "edge" => {
+                    edge_ids.insert(target.target_id);
+                }
+                _ => {}
+            }
+        }
+        Self { node_ids: node_ids.into_iter().collect(), edge_ids: edge_ids.into_iter().collect() }
+    }
+
+    #[must_use]
+    pub fn requires_graph_convergence(&self) -> bool {
+        !self.node_ids.is_empty() || !self.edge_ids.is_empty()
+    }
+}
 
 fn prefers_relative_external_key_display_name(
     external_key: &str,
@@ -846,7 +878,7 @@ impl ContentService {
         state: &AppState,
         document_id: Uuid,
     ) -> Result<ContentDocument, ApiError> {
-        self.delete_document_with_context(state, document_id, None).await
+        self.delete_document_with_context(state, document_id, None, true).await
     }
 
     pub(crate) async fn delete_document_with_context(
@@ -854,6 +886,7 @@ impl ContentService {
         state: &AppState,
         document_id: Uuid,
         latest_mutation_id: Option<Uuid>,
+        refresh_graph_projection: bool,
     ) -> Result<ContentDocument, ApiError> {
         let current_document =
             content_repository::get_document_by_id(&state.persistence.postgres, document_id)
@@ -903,7 +936,7 @@ impl ContentService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         transaction.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        self.promote_knowledge_document_best_effort(
+        self.promote_knowledge_document(
             state,
             PromoteKnowledgeDocumentCommand {
                 document_id,
@@ -913,9 +946,9 @@ impl ContentService {
                 latest_revision_no,
                 deleted_at: document.deleted_at,
             },
-            "post-delete knowledge promotion failed after document delete committed",
+            "knowledge document sync failed after document delete committed; Postgres delete is committed and the Arango mirror may be stale until retry",
         )
-        .await;
+        .await?;
         if let Err(error) = self.converge_document_technical_facts(state, document_id, None).await {
             tracing::warn!(
                 %document_id,
@@ -924,9 +957,17 @@ impl ContentService {
                 "post-delete technical fact convergence failed after document delete committed"
             );
         }
-        if let Err(error) =
+        let graph_refresh = if refresh_graph_projection {
             self.refresh_deleted_document_graph_state(state, document.library_id, document_id).await
-        {
+        } else {
+            self.cleanup_deleted_document_local_graph_artifacts(
+                state,
+                document.library_id,
+                document_id,
+            )
+            .await
+        };
+        if let Err(error) = graph_refresh {
             tracing::warn!(
                 %document_id,
                 library_id = %document.library_id,
@@ -1244,14 +1285,19 @@ impl ContentService {
         library_id: Uuid,
         document_id: Uuid,
     ) -> Result<(), ApiError> {
+        self.cleanup_deleted_document_local_graph_artifacts(state, library_id, document_id).await?;
+        let cleanup =
+            self.cleanup_deleted_document_graph_evidence(state, library_id, document_id).await?;
+        self.refresh_deleted_library_graph_projection_for_cleanup(state, library_id, cleanup).await
+    }
+
+    pub(crate) async fn cleanup_deleted_document_local_graph_artifacts(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        document_id: Uuid,
+    ) -> Result<(), ApiError> {
         repositories::delete_query_execution_references_by_document(
-            &state.persistence.postgres,
-            library_id,
-            document_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        repositories::deactivate_runtime_graph_evidence_by_document(
             &state.persistence.postgres,
             library_id,
             document_id,
@@ -1314,6 +1360,51 @@ impl ContentService {
             }
         }
 
+        Ok(())
+    }
+
+    pub(crate) async fn cleanup_deleted_document_graph_evidence(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        document_id: Uuid,
+    ) -> Result<DeletedDocumentGraphCleanup, ApiError> {
+        let targets = repositories::deactivate_runtime_graph_evidence_by_document(
+            &state.persistence.postgres,
+            library_id,
+            document_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(DeletedDocumentGraphCleanup::from_targets(targets))
+    }
+
+    pub(crate) async fn cleanup_deleted_documents_graph_evidence(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        document_ids: &[Uuid],
+    ) -> Result<DeletedDocumentGraphCleanup, ApiError> {
+        let targets = repositories::deactivate_runtime_graph_evidence_by_documents(
+            &state.persistence.postgres,
+            library_id,
+            document_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(DeletedDocumentGraphCleanup::from_targets(targets))
+    }
+
+    pub(crate) async fn refresh_deleted_library_graph_projection_for_cleanup(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        cleanup: DeletedDocumentGraphCleanup,
+    ) -> Result<(), ApiError> {
+        if !cleanup.requires_graph_convergence() {
+            return Ok(());
+        }
+
         let projection_scope = crate::services::graph::projection::resolve_projection_scope(
             state, library_id,
         )
@@ -1323,6 +1414,54 @@ impl ContentService {
                 "settlement refresh failed: document delete graph projection scope failed: {error}"
             ))
         })?;
+        repositories::recalculate_runtime_graph_node_support_counts_by_ids(
+            &state.persistence.postgres,
+            library_id,
+            projection_scope.projection_version,
+            &cleanup.node_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        repositories::recalculate_runtime_graph_edge_support_counts_by_ids(
+            &state.persistence.postgres,
+            library_id,
+            projection_scope.projection_version,
+            &cleanup.edge_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let deleted_edge_keys = repositories::delete_runtime_graph_edges_without_support_by_ids(
+            &state.persistence.postgres,
+            library_id,
+            projection_scope.projection_version,
+            &cleanup.edge_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let deleted_node_keys = repositories::delete_runtime_graph_nodes_without_support_by_ids(
+            &state.persistence.postgres,
+            library_id,
+            projection_scope.projection_version,
+            &cleanup.node_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if !deleted_edge_keys.is_empty() {
+            let _ = state
+                .arango_graph_store
+                .delete_relations_by_canonical_keys(library_id, &deleted_edge_keys)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        }
+        if !deleted_node_keys.is_empty() {
+            let _ = state
+                .arango_graph_store
+                .delete_entities_by_canonical_keys(library_id, &deleted_node_keys)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        }
+        let projection_scope =
+            projection_scope.with_targeted_refresh(cleanup.node_ids, cleanup.edge_ids);
         state
             .canonical_services
             .graph
@@ -1333,6 +1472,20 @@ impl ContentService {
                     "settlement refresh failed: document delete graph projection refresh failed: {error}"
                 ))
             })?;
+        if let Err(error) = invalidate_graph_topology_cache(
+            &state.persistence.redis,
+            library_id,
+            projection_scope.projection_version,
+        )
+        .await
+        {
+            tracing::warn!(
+                %library_id,
+                projection_version = projection_scope.projection_version,
+                error = format!("{error:#}"),
+                "graph topology cache invalidation failed after deleted-document graph convergence"
+            );
+        }
         Ok(())
     }
 }
@@ -1376,6 +1529,12 @@ pub struct ContentDocumentListEntry {
     pub source_kind: Option<String>,
     pub source_uri: Option<String>,
     pub source_access: Option<crate::domains::content::ContentSourceAccess>,
+    /// Summed cost across every billable execution attributed to this
+    /// document — computed server-side via the per-document LATERAL on
+    /// `billing_execution_cost` in the list query, so the frontend never
+    /// issues a library-wide `/billing/library-document-costs` fetch.
+    pub cost_total: rust_decimal::Decimal,
+    pub cost_currency_code: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1445,26 +1604,32 @@ fn build_document_list_entry(
         "processing"
     };
 
-    // Status derivation — mirrors apps/web/src/pages/documents/mappers.ts
-    // (mapApiDocument status chain). Priority chain:
-    //   canceled > failed > leased/queued > ready > zombie completion.
-    let status = if row.job_queue_state.as_deref() == Some("canceled") {
-        "canceled"
-    } else if row.job_queue_state.as_deref() == Some("failed") || readiness == "failed" {
+    // Status derivation MUST mirror `DERIVED_STATUS_CASE_SQL` in
+    // content_repository.rs — that CASE drives the status filter on the
+    // list SQL. If the orderings diverge the server filters on one
+    // classification and the row renders with another (observed as
+    // "filter=ready shows queued rows" when a re-ingest job queues
+    // against a still-readable head). Chain, SQL-aligned:
+    //   failed (mutation/revision/job) > leased → processing > readable
+    //   revision wins → ready > canceled > queued > inflight → processing
+    //   > zombie completed → failed > else queued.
+    let status = if readiness == "failed" || row.job_queue_state.as_deref() == Some("failed") {
         "failed"
     } else if row.job_queue_state.as_deref() == Some("leased") {
         // list path does not carry activity_status; surface as `processing`
         // and let the inspector refine the blocked/retrying/stalled split.
         "processing"
-    } else if row.job_queue_state.as_deref() == Some("queued") {
-        "queued"
     } else if matches!(readiness, "graph_ready" | "readable") {
         "ready"
+    } else if row.job_queue_state.as_deref() == Some("canceled") {
+        "canceled"
+    } else if row.job_queue_state.as_deref() == Some("queued") {
+        "queued"
+    } else if mutation_inflight || job_inflight {
+        "processing"
     } else if row.job_queue_state.as_deref() == Some("completed") {
         // zombie completion — job terminal but readiness never went green
         "failed"
-    } else if mutation_inflight || job_inflight {
-        "processing"
     } else {
         "queued"
     };
@@ -1552,6 +1717,8 @@ fn build_document_list_entry(
             .clone()
             .or_else(|| effective_revision.and_then(|revision| revision.source_uri.clone())),
         source_access: source_descriptor.and_then(|d| d.access),
+        cost_total: row.cost_total,
+        cost_currency_code: row.cost_currency_code.clone(),
     }
 }
 

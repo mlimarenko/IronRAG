@@ -22,12 +22,11 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Submit a web ingest run for one seed URL. Default to mode single_page so only the submitted page is processed unless recursive_crawl is explicitly requested.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId", "seedUrl", "mode"],
+                "required": ["library", "seedUrl", "mode"],
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Target library UUID from list_libraries."
+                        "description": "Target fully-qualified library ref from list_libraries."
                     },
                     "seedUrl": {
                         "type": "string",
@@ -53,6 +52,23 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                         "type": "integer",
                         "minimum": 1,
                         "description": "Optional crawl budget."
+                    },
+                    "extraIgnorePatterns": {
+                        "type": "array",
+                        "description": "Optional URL ignore patterns added to this run on top of the target library web ingest policy.",
+                        "items": {
+                            "type": "object",
+                            "required": ["kind", "value"],
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["url_prefix", "path_prefix", "glob"]
+                                },
+                                "value": {
+                                    "type": "string"
+                                }
+                            }
+                        }
                     },
                     "idempotencyKey": {
                         "type": "string",
@@ -159,7 +175,7 @@ async fn submit_web_ingest_run(context: ToolCallContext<'_>, arguments: &Value) 
                     McpAuditActionKind::SubmitWebIngestRun,
                     McpAuditScope {
                         workspace_id: context.auth.workspace_id,
-                        library_id: Some(args.library_id),
+                        library_id: None,
                         document_id: None,
                     },
                     json!({
@@ -180,7 +196,7 @@ async fn submit_web_ingest_run(context: ToolCallContext<'_>, arguments: &Value) 
                     McpAuditActionKind::SubmitWebIngestRun,
                     McpAuditScope {
                         workspace_id: context.auth.workspace_id,
-                        library_id: Some(args.library_id),
+                        library_id: None,
                         document_id: None,
                     },
                     &error,

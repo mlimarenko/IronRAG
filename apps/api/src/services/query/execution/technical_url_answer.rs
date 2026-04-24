@@ -1,3 +1,4 @@
+use crate::domains::query_ir::QueryIR;
 use crate::shared::extraction::technical_facts::TechnicalFactKind;
 
 use super::{
@@ -18,6 +19,7 @@ struct ExactUrlLiteralMatch {
 
 pub(super) fn build_exact_url_answer(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
@@ -28,7 +30,7 @@ pub(super) fn build_exact_url_answer(
     }
     let asks_wsdl = matches!(url_lookup_kind, ExactUrlLookupKind::Wsdl);
 
-    let url_match = select_exact_url_literal(question, evidence, chunks, asks_wsdl)?;
+    let url_match = select_exact_url_literal(question, query_ir, evidence, chunks, asks_wsdl)?;
     let subject = url_match
         .document_label
         .as_deref()
@@ -62,12 +64,13 @@ pub(super) fn build_exact_url_answer(
 
 fn select_exact_url_literal(
     question: &str,
+    query_ir: &QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     wants_wsdl: bool,
 ) -> Option<ExactUrlLiteralMatch> {
     let focused_document_id = focused_answer_document_id(question, chunks);
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let document_labels = build_document_labels(chunks);
 
     best_matching_fact(

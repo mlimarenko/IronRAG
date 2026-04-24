@@ -96,6 +96,11 @@ pub struct CompileQueryOutcome {
     /// outage, invalid model output). Callers should surface this as a
     /// non-fatal diagnostic in the query execution record.
     pub fallback_reason: Option<String>,
+    /// `true` when this outcome was served from the two-tier cache
+    /// (Redis or Postgres) instead of a live LLM call. Billing must
+    /// skip cache hits so repeat questions do not double-charge the
+    /// same token usage.
+    pub served_from_cache: bool,
 }
 
 impl CompileQueryOutcome {
@@ -529,6 +534,7 @@ impl QueryCompilerService {
                 return Ok(fallback_outcome("invalid_ir_output"));
             }
         };
+        let ir = normalize_compiled_ir(question, history, ir);
 
         tracing::info!(
             target: "ironrag::query_compile",
@@ -557,6 +563,7 @@ impl QueryCompilerService {
             model_name: response.model_name,
             usage_json: response.usage_json,
             fallback_reason: None,
+            served_from_cache: false,
         })
     }
 }
@@ -572,6 +579,7 @@ fn cached_outcome(entry: CachedIrEntry) -> CompileQueryOutcome {
         model_name: entry.model_name,
         usage_json: entry.usage_json,
         fallback_reason: None,
+        served_from_cache: true,
     }
 }
 
@@ -585,7 +593,41 @@ fn fallback_outcome(reason: &str) -> CompileQueryOutcome {
             "call_count": 0,
         }),
         fallback_reason: Some(reason.to_string()),
+        served_from_cache: false,
     }
+}
+
+fn normalize_compiled_ir(
+    question: &str,
+    history: &[CompileHistoryTurn],
+    mut ir: QueryIR,
+) -> QueryIR {
+    if history.is_empty()
+        && matches!(ir.act, QueryAct::FollowUp)
+        && stateless_ir_has_explicit_target(&ir)
+    {
+        tracing::info!(
+            target: "ironrag::query_compile",
+            question_len = question.len(),
+            target_entities_count = ir.target_entities.len(),
+            has_document_focus = ir.document_focus.is_some(),
+            literal_constraints_count = ir.literal_constraints.len(),
+            "query compile repaired stateless follow_up IR"
+        );
+        // A stateless call has no prior turn to resolve. If the IR still
+        // carries an explicit target, it is a standalone question and must
+        // stay on the grounded single-shot path; the raw question text still
+        // tells the answer model whether the user asked for a procedure.
+        ir.act = QueryAct::Describe;
+        ir.conversation_refs.clear();
+    }
+    ir
+}
+
+fn stateless_ir_has_explicit_target(ir: &QueryIR) -> bool {
+    !ir.target_entities.is_empty()
+        || ir.document_focus.as_ref().is_some_and(|hint| !hint.hint.trim().is_empty())
+        || !ir.literal_constraints.is_empty()
 }
 
 /// Safe default when the compiler cannot run. Chosen so no downstream stage
@@ -755,7 +797,7 @@ mod tests {
             "scope": "single_document",
             "language": "ru",
             "target_types": ["procedure"],
-            "target_entities": [{"label": "сбп", "role": "subject"}],
+            "target_entities": [{"label": "платежный модуль", "role": "subject"}],
             "literal_constraints": [],
             "comparison": null,
             "document_focus": null,
@@ -769,7 +811,7 @@ mod tests {
         let binding = sample_binding();
 
         let outcome = service
-            .compile_with_gateway(&gateway, &binding, "как настроить сбп?", &[])
+            .compile_with_gateway(&gateway, &binding, "как настроить платежный модуль?", &[])
             .await
             .expect("compile ok");
 
@@ -782,7 +824,70 @@ mod tests {
         assert_eq!(request.provider_kind, "openai");
         assert_eq!(request.model_name, "gpt-5.4-nano");
         assert!(request.response_format.is_some(), "structured response format must be attached");
-        assert!(request.prompt.contains("как настроить сбп?"));
+        assert!(request.prompt.contains("как настроить платежный модуль?"));
+    }
+
+    #[tokio::test]
+    async fn repairs_stateless_follow_up_with_explicit_target() {
+        let ir_json = json!({
+            "act": "follow_up",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["service"],
+            "target_entities": [{"label": "TargetName", "role": "subject"}],
+            "literal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [{"surface": "how", "kind": "bare_interrogative"}],
+            "needs_clarification": "ambiguous_too_short",
+            "confidence": 0.35
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "TargetName how", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.act, QueryAct::Describe);
+        assert!(outcome.ir.conversation_refs.is_empty());
+        assert_eq!(outcome.ir.target_entities.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn preserves_follow_up_when_history_exists() {
+        let ir_json = json!({
+            "act": "follow_up",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["service"],
+            "target_entities": [{"label": "TargetName", "role": "subject"}],
+            "literal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [{"surface": "how", "kind": "bare_interrogative"}],
+            "needs_clarification": null,
+            "confidence": 0.75
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+        let history = vec![CompileHistoryTurn {
+            role: "assistant".to_string(),
+            content: "TargetName was mentioned previously.".to_string(),
+        }];
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "how", &history)
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.act, QueryAct::FollowUp);
+        assert_eq!(outcome.ir.conversation_refs.len(), 1);
     }
 
     #[tokio::test]
@@ -825,11 +930,11 @@ mod tests {
         let history = vec![
             CompileHistoryTurn {
                 role: "user".to_string(),
-                content: "у нас есть СБП Сбербанк?".to_string(),
+                content: "у нас есть модуль платежей?".to_string(),
             },
             CompileHistoryTurn {
                 role: "assistant".to_string(),
-                content: "Да, модуль Sbersbp.".to_string(),
+                content: "Да, модуль платежей описан.".to_string(),
             },
         ];
 
@@ -840,8 +945,7 @@ mod tests {
 
         let prompt = gateway.last_request.lock().unwrap().clone().unwrap().prompt;
         assert!(prompt.contains("Prior conversation"));
-        assert!(prompt.contains("СБП Сбербанк"));
-        assert!(prompt.contains("Sbersbp"));
+        assert!(prompt.contains("модуль платежей"));
         assert!(prompt.contains("а как настроить?"));
     }
 
@@ -911,7 +1015,7 @@ mod tests {
     #[tokio::test]
     async fn cache_hit_short_circuits_llm() {
         let library_id = Uuid::now_v7();
-        let question = "как настроить сбп?";
+        let question = "как настроить платежный модуль?";
         let history: Vec<CompileHistoryTurn> = Vec::new();
         let hash = hash_question(question, &history, QUERY_IR_SCHEMA_VERSION);
         let cached = CachedIrEntry {

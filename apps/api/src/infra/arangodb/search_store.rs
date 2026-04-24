@@ -18,9 +18,13 @@ use crate::infra::arangodb::{
     client::ArangoClient,
     collections::{
         KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-        KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
+        KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_NGRAM_ANALYZER, KNOWLEDGE_SEARCH_VIEW,
     },
 };
+
+const TITLE_NGRAM_MIN_TERM_CHARS: usize = 8;
+const TITLE_NGRAM_MAX_TERMS: usize = 4;
+const TITLE_IDENTITY_MAX_TERMS: usize = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeChunkVectorRow {
@@ -227,6 +231,70 @@ impl ArangoSearchStore {
         decode_single_result(cursor)
     }
 
+    /// Bulk UPSERT of chunk vector rows. One AQL round-trip replaces N
+    /// sequential `upsert_chunk_vector` calls — on a typical embed
+    /// batch (16 vectors) this collapses 16 serial `UPSERT .. IN ..
+    /// RETURN NEW` round-trips into one, cutting the Arango I/O tail
+    /// on the chunk embed stage from O(chunks × RTT) to O(chunks /
+    /// batch_size × RTT). Payload per request is roughly
+    /// `len × dimensions × 4 bytes` plus metadata — 16 × 3072 × 4 =
+    /// ~192 KB, comfortably inside the default Arango request size.
+    pub async fn upsert_chunk_vectors_bulk(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+    ) -> anyhow::Result<Vec<KnowledgeChunkVectorRow>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Note on field names: `KnowledgeChunkVectorRow` serialises its
+        // key column as `_key` (serde rename) to match Arango's
+        // canonical document-key field. That means inside the AQL body
+        // we read `row._key`, NOT `row.key` — the latter is
+        // `null`, which Arango rejects at runtime with "illegal
+        // document key". A first deploy of this function used
+        // `row.key` and collapsed every bulk embed batch on prod.
+        let cursor = self
+            .client
+            .query_json(
+                "FOR row IN @rows
+                 UPSERT { _key: row._key }
+                 INSERT {
+                    _key: row._key,
+                    vector_id: row.vector_id,
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    chunk_id: row.chunk_id,
+                    revision_id: row.revision_id,
+                    embedding_model_key: row.embedding_model_key,
+                    vector_kind: row.vector_kind,
+                    dimensions: row.dimensions,
+                    vector: row.vector,
+                    freshness_generation: row.freshness_generation,
+                    created_at: row.created_at
+                 }
+                 UPDATE {
+                    workspace_id: row.workspace_id,
+                    library_id: row.library_id,
+                    chunk_id: row.chunk_id,
+                    revision_id: row.revision_id,
+                    embedding_model_key: row.embedding_model_key,
+                    vector_kind: row.vector_kind,
+                    dimensions: row.dimensions,
+                    vector: row.vector,
+                    freshness_generation: row.freshness_generation
+                 }
+                 IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "rows": rows,
+                }),
+            )
+            .await
+            .context("failed to bulk-upsert knowledge chunk vectors")?;
+        decode_many_results(cursor)
+    }
+
     pub async fn delete_chunk_vector(
         &self,
         chunk_id: Uuid,
@@ -407,72 +475,303 @@ impl ArangoSearchStore {
         let normalized_limit = limit.max(1);
         let query_lower = query.trim().to_lowercase();
         let query_terms = lexical_query_terms(query);
+        let title_ngram_terms = title_ngram_terms(&query_terms);
+        let title_identity_terms = title_identity_terms(query, &query_terms);
+        let title_soft_raw_enabled = title_soft_raw_enabled(&query_terms);
+        // Over-fetch by 4× so the per-document dedup below has a
+        // realistic candidate pool. On short Russian "how to
+        // configure X" queries the bare BM25 ranking can fill the
+        // first 16 slots with chunks from one stem-collision document
+        // (every `настроен/настроено/настроить` stems to `настро`),
+        // drowning out the actual answer. With a 4× over-fetch
+        // followed by `LIMIT max_per_document_chunks=2` per doc, the
+        // final `@limit` slots go to chunks from up to `@limit`
+        // different documents ranked by their top chunk's BM25.
+        let over_fetch = normalized_limit.saturating_mul(4).max(48);
+        let title_ngram_0 = title_ngram_terms.first().map_or("", String::as_str);
+        let title_ngram_1 = title_ngram_terms.get(1).map_or("", String::as_str);
+        let title_ngram_2 = title_ngram_terms.get(2).map_or("", String::as_str);
+        let title_ngram_3 = title_ngram_terms.get(3).map_or("", String::as_str);
         let cursor = self
             .client
             .query_json(
-                "FOR doc IN @@view
-                 SEARCH doc.library_id == @library_id
-                   AND doc.chunk_id != null
-                   AND doc.chunk_state == 'ready'
-                   AND (
-                        ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_en'), 'text_en')
-                        OR ANALYZER(doc.content_text IN TOKENS(@query, 'text_en'), 'text_en')
-                        OR ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_ru'), 'text_ru')
-                        OR ANALYZER(doc.content_text IN TOKENS(@query, 'text_ru'), 'text_ru')
-                        OR
-                        ANALYZER(PHRASE(doc.normalized_text, @query, 'text_en'), 'text_en')
-                        OR ANALYZER(PHRASE(doc.content_text, @query, 'text_en'), 'text_en')
-                        OR ANALYZER(PHRASE(doc.normalized_text, @query, 'text_ru'), 'text_ru')
-                        OR ANALYZER(PHRASE(doc.content_text, @query, 'text_ru'), 'text_ru')
-                   )
-                 LET base_score = BM25(doc)
-                 LET heading_boost = (
-                   LENGTH(doc.heading_trail) > 0
-                   AND TOKENS(@query, 'text_en') ANY IN doc.heading_trail
-                 ) ? 1.5 : 1.0
-                 LET section_boost = (
-                   LENGTH(doc.section_path) > 0
-                   AND TOKENS(@query, 'text_en') ANY IN doc.section_path
-                 ) ? 1.3 : 1.0
-                 LET quality_boost = doc.quality_score != null ? doc.quality_score : 1.0
-                 LET score = base_score * heading_boost * section_boost * quality_boost
-                 SORT score DESC, doc.chunk_id ASC
-                 LIMIT @limit
-                 RETURN {
-                    chunk_id: doc.chunk_id,
-                    workspace_id: doc.workspace_id,
-                    library_id: doc.library_id,
-                    revision_id: doc.revision_id,
-                    content_text: doc.content_text,
-                    normalized_text: doc.normalized_text,
-                    section_path: doc.section_path,
-                    heading_trail: doc.heading_trail,
-                    score: score,
-                    quality_score: doc.quality_score
-                 }",
+                "/* Title-match subquery. Docs whose `title` or
+                    `file_name` contains query tokens get a title lane.
+                    Only `title_identity_docs` receives identity-scale
+                    scores. Broad token/fuzzy matches stay as ordinary
+                    relevance boosts so generic multi-document questions
+                    cannot collapse into arbitrary title collisions. */
+                 LET token_title_match_docs = (
+                   FOR d IN @@view
+                     SEARCH d.library_id == @library_id
+                       AND d.document_state == 'active'
+                       AND (d.title != null OR d.file_name != null)
+                       AND (
+                            ANALYZER(d.title IN TOKENS(@query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(d.title IN TOKENS(@query, 'text_en'), 'text_en')
+                            OR ANALYZER(d.file_name IN TOKENS(@query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(d.file_name IN TOKENS(@query, 'text_en'), 'text_en')
+                            OR ANALYZER(PHRASE(d.title, @query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(PHRASE(d.title, @query, 'text_en'), 'text_en')
+                       )
+                     LIMIT 50
+                     RETURN d.document_id
+                 )
+                 LET title_identity_docs = (
+                   FOR d IN @@view
+                     SEARCH d.library_id == @library_id
+                       AND d.document_state == 'active'
+                       AND (d.title != null OR d.file_name != null)
+                       AND (
+                            ANALYZER(d.title IN TOKENS(@query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(d.title IN TOKENS(@query, 'text_en'), 'text_en')
+                            OR ANALYZER(d.file_name IN TOKENS(@query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(d.file_name IN TOKENS(@query, 'text_en'), 'text_en')
+                            OR ANALYZER(PHRASE(d.title, @query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(PHRASE(d.title, @query, 'text_en'), 'text_en')
+                       )
+                     LET title_blob = LOWER(CONCAT_SEPARATOR(
+                       ' ',
+                       d.title != null ? d.title : '',
+                       d.file_name != null ? d.file_name : ''
+                     ))
+                     LET padded_title_blob = CONCAT(' ', title_blob, ' ')
+                     LET identity_term_hits = LENGTH(
+                       FOR term IN @title_identity_terms
+                         FILTER (REGEX_TEST(term, '\\\\d')
+                           ? CONTAINS(padded_title_blob, CONCAT(' ', term, ' '))
+                           : CONTAINS(title_blob, term))
+                         LIMIT @title_identity_term_count
+                         RETURN 1
+                     )
+                     FILTER @title_identity_term_count > 0
+                       AND identity_term_hits == @title_identity_term_count
+                     LIMIT 50
+                     RETURN d.document_id
+                 )
+                 LET fuzzy_title_match_docs = (
+                   FOR d IN @@view
+                     SEARCH d.library_id == @library_id
+                       AND d.document_state == 'active'
+                       AND (d.title != null OR d.file_name != null)
+                       AND (
+                            /* Trigram-level fuzzy match covers small
+                               spelling variants the stemmers miss. It
+                               only receives long query terms, so
+                               low-signal suffix words do not enter the
+                               document-identity lane and outrank exact
+                               release/version documents. */
+                            (@title_ngram_0 != '' AND (
+                                ANALYZER(NGRAM_MATCH(d.title, @title_ngram_0, 0.55, @ngram_analyzer), @ngram_analyzer)
+                                OR ANALYZER(NGRAM_MATCH(d.file_name, @title_ngram_0, 0.55, @ngram_analyzer), @ngram_analyzer)
+                            ))
+                            OR (@title_ngram_1 != '' AND (
+                                ANALYZER(NGRAM_MATCH(d.title, @title_ngram_1, 0.55, @ngram_analyzer), @ngram_analyzer)
+                                OR ANALYZER(NGRAM_MATCH(d.file_name, @title_ngram_1, 0.55, @ngram_analyzer), @ngram_analyzer)
+                            ))
+                            OR (@title_ngram_2 != '' AND (
+                                ANALYZER(NGRAM_MATCH(d.title, @title_ngram_2, 0.55, @ngram_analyzer), @ngram_analyzer)
+                                OR ANALYZER(NGRAM_MATCH(d.file_name, @title_ngram_2, 0.55, @ngram_analyzer), @ngram_analyzer)
+                            ))
+                            OR (@title_ngram_3 != '' AND (
+                                ANALYZER(NGRAM_MATCH(d.title, @title_ngram_3, 0.55, @ngram_analyzer), @ngram_analyzer)
+                                OR ANALYZER(NGRAM_MATCH(d.file_name, @title_ngram_3, 0.55, @ngram_analyzer), @ngram_analyzer)
+                            ))
+                       )
+                     LIMIT 50
+                     RETURN d.document_id
+                 )
+                 LET title_match_docs = UNION_DISTINCT(token_title_match_docs, fuzzy_title_match_docs)
+                 LET soft_title_match_docs = MINUS(title_match_docs, title_identity_docs)
+                 LET text_raw = (
+                   FOR doc IN @@view
+                     SEARCH doc.library_id == @library_id
+                       AND doc.chunk_id != null
+                       AND doc.chunk_state == 'ready'
+                       AND (
+                            ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_en'), 'text_en')
+                            OR ANALYZER(doc.content_text IN TOKENS(@query, 'text_en'), 'text_en')
+                            OR ANALYZER(doc.normalized_text IN TOKENS(@query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(doc.content_text IN TOKENS(@query, 'text_ru'), 'text_ru')
+                            OR
+                            ANALYZER(PHRASE(doc.normalized_text, @query, 'text_en'), 'text_en')
+                            OR ANALYZER(PHRASE(doc.content_text, @query, 'text_en'), 'text_en')
+                            OR ANALYZER(PHRASE(doc.normalized_text, @query, 'text_ru'), 'text_ru')
+                            OR ANALYZER(PHRASE(doc.content_text, @query, 'text_ru'), 'text_ru')
+                       )
+                     LET base_score = BM25(doc)
+                     /* Title boost (doc-level) dominates heading boost
+                        (chunk-local). When both fire they do NOT
+                        compose multiplicatively — we take the max so a
+                        title hit stays at 8× and a title-miss with
+                        heading hit stays at 3×. Substring-on-blob
+                        heading match is a pragmatic fallback for
+                        queries whose winning signal lives inside a
+                        chunk's local heading/section path rather than
+                        the document title — same caveat about stem-
+                        token noise, kept conservative at 3×. */
+                     LET q_tokens = (
+                       FOR t IN TOKENS(LOWER(@query), 'text_ru')
+                         FILTER LENGTH(t) >= 3
+                         RETURN t
+                     )
+                     LET heading_blob = LENGTH(doc.heading_trail) > 0
+                       ? LOWER(CONCAT_SEPARATOR(' ', doc.heading_trail))
+                       : ''
+                     LET section_blob = LENGTH(doc.section_path) > 0
+                       ? LOWER(CONCAT_SEPARATOR(' ', doc.section_path))
+                       : ''
+                     LET heading_token_match = heading_blob != '' AND LENGTH(
+                       FOR t IN q_tokens FILTER CONTAINS(heading_blob, t) LIMIT 1 RETURN 1
+                     ) > 0
+                     LET section_token_match = section_blob != '' AND LENGTH(
+                       FOR t IN q_tokens FILTER CONTAINS(section_blob, t) LIMIT 1 RETURN 1
+                     ) > 0
+                     LET title_identity_match = doc.document_id IN title_identity_docs
+                     LET title_soft_match = doc.document_id IN soft_title_match_docs
+                     LET identity_boost = title_identity_match
+                       ? 8.0
+                       : (title_soft_match ? 2.0 : (heading_token_match ? 3.0 : 1.0))
+                     LET section_boost = section_token_match ? 1.5 : 1.0
+                     LET quality_boost = doc.quality_score != null ? doc.quality_score : 1.0
+                     LET score = base_score * identity_boost * section_boost * quality_boost
+                     SORT score DESC, doc.chunk_id ASC
+                     LIMIT @over_fetch
+                     RETURN {
+                        chunk_id: doc.chunk_id,
+                        workspace_id: doc.workspace_id,
+                        library_id: doc.library_id,
+                        document_id: doc.document_id,
+                        revision_id: doc.revision_id,
+                        content_text: doc.content_text,
+                        normalized_text: doc.normalized_text,
+                        section_path: doc.section_path,
+                        heading_trail: doc.heading_trail,
+                        score: score,
+                        quality_score: doc.quality_score
+                     }
+                 )
+                 LET title_identity_raw = (
+                     FOR chunk IN @@chunk_collection
+                       FILTER chunk.library_id == @library_id
+                         AND chunk.chunk_state == 'ready'
+                         AND chunk.document_id IN title_identity_docs
+                       LET quality_boost = chunk.quality_score != null ? chunk.quality_score : 1.0
+                       LET score = (1000000 - chunk.chunk_index) * quality_boost
+                       SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
+                       LIMIT @over_fetch
+                       RETURN {
+                          chunk_id: chunk.chunk_id,
+                          workspace_id: chunk.workspace_id,
+                          library_id: chunk.library_id,
+                          document_id: chunk.document_id,
+                          revision_id: chunk.revision_id,
+                          content_text: chunk.content_text,
+                          normalized_text: chunk.normalized_text,
+                          section_path: chunk.section_path,
+                          heading_trail: chunk.heading_trail,
+                          score: score,
+                          quality_score: chunk.quality_score
+                       }
+                 )
+                 LET title_soft_raw = (
+                     FOR chunk IN @@chunk_collection
+                       FILTER chunk.library_id == @library_id
+                         AND chunk.chunk_state == 'ready'
+                         AND @title_soft_raw_enabled
+                         AND chunk.document_id IN soft_title_match_docs
+                       LET quality_boost = chunk.quality_score != null ? chunk.quality_score : 1.0
+                       LET score = (50 - (chunk.chunk_index * 0.001)) * quality_boost
+                       SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
+                       LIMIT @over_fetch
+                       RETURN {
+                          chunk_id: chunk.chunk_id,
+                          workspace_id: chunk.workspace_id,
+                          library_id: chunk.library_id,
+                          document_id: chunk.document_id,
+                          revision_id: chunk.revision_id,
+                          content_text: chunk.content_text,
+                          normalized_text: chunk.normalized_text,
+                          section_path: chunk.section_path,
+                          heading_trail: chunk.heading_trail,
+                          score: score,
+                          quality_score: chunk.quality_score
+                       }
+                 )
+                 LET raw = APPEND(text_raw, APPEND(title_identity_raw, title_soft_raw))
+                 /* Per-document dedup: keep at most 2 chunks per
+                   document_id out of `raw`, then return @limit. Runs
+                    inside Arango so we never ship 48 rows over the
+                    wire when the client only needs 12 diverse ones. */
+                 LET diversified = (
+                   FOR r IN raw
+                     COLLECT doc = r.document_id INTO per_doc = r
+                     FOR c IN (
+                       FOR x IN per_doc
+                         SORT x.score DESC, x.chunk_id ASC
+                         LIMIT 2
+                         RETURN x
+                     )
+                     RETURN c
+                 )
+                 FOR r IN diversified
+                   SORT r.score DESC, r.chunk_id ASC
+                   LIMIT @limit
+                   RETURN {
+                      chunk_id: r.chunk_id,
+                      workspace_id: r.workspace_id,
+                      library_id: r.library_id,
+                      revision_id: r.revision_id,
+                      content_text: r.content_text,
+                      normalized_text: r.normalized_text,
+                      section_path: r.section_path,
+                      heading_trail: r.heading_trail,
+                      score: r.score,
+                      quality_score: r.quality_score
+                   }",
                 serde_json::json!({
                     "@view": KNOWLEDGE_SEARCH_VIEW,
+                    "@chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,
                     "library_id": library_id,
                     "query": query,
                     "limit": normalized_limit,
+                    "over_fetch": over_fetch,
+                    "ngram_analyzer": KNOWLEDGE_NGRAM_ANALYZER,
+                    "title_ngram_0": title_ngram_0,
+                    "title_ngram_1": title_ngram_1,
+                    "title_ngram_2": title_ngram_2,
+                    "title_ngram_3": title_ngram_3,
+                    "title_identity_terms": title_identity_terms,
+                    "title_identity_term_count": title_identity_terms.len(),
+                    "title_soft_raw_enabled": title_soft_raw_enabled,
                 }),
             )
             .await
             .context("failed to search knowledge chunks")?;
         let rows = decode_many_results(cursor)?;
-        if query_lower.is_empty() {
+        if query_lower.is_empty() || !rows.is_empty() {
+            // View is the canonical lexical lane. If it returned anything at all
+            // we trust it — BM25 + title_match_docs already prioritise fresh
+            // exact hits over stale stem matches, and falling back to a full
+            // CONTAINS scan over `knowledge_chunk` is an O(chunks × terms)
+            // operation that saturates the Arango request timeout on any
+            // non-trivial library (observed 18–26 s on a 60k-chunk corpus for
+            // 20-token clarify-context follow-ups).
             return Ok(rows);
         }
 
-        let should_merge_direct_scan = rows.is_empty() || query_terms.len() > 1;
-        if !should_merge_direct_scan {
-            return Ok(rows);
-        }
-
-        // Arango search views can lag briefly behind chunk writes. Also, for multi-token
-        // queries they can surface partial token matches from older revisions before the
-        // freshly written exact phrase becomes visible. Merge in a direct collection scan
-        // so fresh exact-text hits are visible and rank above stale partial matches.
+        // Backstop: the ArangoSearch view can briefly lag behind chunk writes
+        // (commitIntervalMsec window). Only when the view returns zero rows do
+        // we run a direct collection scan so freshly written chunks remain
+        // retrievable. Terms are capped so a clarify-context follow-up cannot
+        // explode this into a 25 s scan.
+        const FALLBACK_MAX_TERMS: usize = 8;
+        const FALLBACK_MAX_QUERY_LOWER_LEN: usize = 128;
+        let mut fallback_terms: Vec<String> = query_terms.to_vec();
+        fallback_terms.sort_by_key(|t| std::cmp::Reverse(t.chars().count()));
+        fallback_terms.truncate(FALLBACK_MAX_TERMS);
+        let fallback_query_lower: String =
+            query_lower.chars().take(FALLBACK_MAX_QUERY_LOWER_LEN).collect();
         let cursor = self
             .client
             .query_json(
@@ -520,12 +819,23 @@ impl ArangoSearchStore {
                 serde_json::json!({
                     "@collection": KNOWLEDGE_CHUNK_COLLECTION,
                     "library_id": library_id,
-                    "query_lower": query_lower,
-                    "query_terms": query_terms,
+                    "query_lower": fallback_query_lower,
+                    "query_terms": fallback_terms,
                     "limit": normalized_limit,
                 }),
             )
             .await
+            .map_err(|err| {
+                tracing::error!(
+                    target: "ironrag::retrieval",
+                    error = %err,
+                    library_id = %library_id,
+                    query_len = query.len(),
+                    term_count = fallback_terms.len(),
+                    "lexical chunk search fallback scan failed"
+                );
+                err
+            })
             .context("failed to search knowledge chunks via direct fallback scan")?;
         let direct_rows: Vec<KnowledgeChunkSearchRow> = decode_many_results(cursor)?;
         if direct_rows.is_empty() {
@@ -764,43 +1074,69 @@ impl ArangoSearchStore {
         decode_many_results(cursor)
     }
 
+    /// Runs APPROX_NEAR_COSINE over `knowledge_chunk_vector`, then post-
+    /// filters the global ANN candidates by library + embedding model.
+    ///
+    /// Arango 3.12's vector index requires the `LET score =
+    /// APPROX_NEAR_COSINE(...)` calculation to live in a `FOR` loop with
+    /// no upstream FILTER on indexed columns; mixing them yields
+    /// "AQL: failed vector search" at runtime. The canonical workaround
+    /// (per Arango docs) is unfiltered ANN with over-fetch + an outer
+    /// FILTER on the candidate set.
+    ///
+    /// We over-fetch by a constant factor so a heavily heterogeneous
+    /// collection (multiple libraries, multiple embedding models)
+    /// still has enough candidates after filtering to fill `@limit`.
+    /// `freshness_generation` deliberately is NOT filtered here — it
+    /// was the source of a previous incident where the eq-filter on
+    /// library-wide MAX revision_number dropped most vectors on
+    /// heterogeneous libraries with mixed per-document revision
+    /// numbers. The coherence boundary is
+    /// `document.readable_revision_id`, enforced downstream by
+    /// `map_chunk_hit`.
     pub async fn search_chunk_vectors_by_similarity(
         &self,
         library_id: Uuid,
         embedding_model_key: &str,
-        freshness_generation: i64,
         query_vector: &[f32],
         limit: usize,
         n_probe: Option<u64>,
     ) -> anyhow::Result<Vec<KnowledgeChunkVectorSearchRow>> {
+        let limit = limit.max(1);
+        let over_fetch = limit.saturating_mul(8).max(64);
         let cursor = self
             .client
             .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.library_id == @library_id
-                   AND vector.embedding_model_key == @embedding_model_key
-                   AND vector.freshness_generation == @freshness_generation
-                 LET score = APPROX_NEAR_COSINE(vector.vector, @query_vector, @options)
-                 SORT score DESC, vector.chunk_id ASC
-                 LIMIT @limit
-                 RETURN {
-                    vector_id: vector.vector_id,
-                    workspace_id: vector.workspace_id,
-                    library_id: vector.library_id,
-                    chunk_id: vector.chunk_id,
-                    revision_id: vector.revision_id,
-                    embedding_model_key: vector.embedding_model_key,
-                    vector_kind: vector.vector_kind,
-                    freshness_generation: vector.freshness_generation,
-                    score: score
-                 }",
+                "LET candidates = (
+                     FOR vector IN @@collection
+                         LET score = APPROX_NEAR_COSINE(vector.vector, @query_vector, @options)
+                         SORT score DESC
+                         LIMIT @over_fetch
+                         RETURN {
+                             vector_id: vector.vector_id,
+                             workspace_id: vector.workspace_id,
+                             library_id: vector.library_id,
+                             chunk_id: vector.chunk_id,
+                             revision_id: vector.revision_id,
+                             embedding_model_key: vector.embedding_model_key,
+                             vector_kind: vector.vector_kind,
+                             freshness_generation: vector.freshness_generation,
+                             score: score
+                         }
+                 )
+                 FOR c IN candidates
+                     FILTER c.library_id == @library_id
+                       AND c.embedding_model_key == @embedding_model_key
+                     SORT c.score DESC, c.chunk_id ASC
+                     LIMIT @limit
+                     RETURN c",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
                     "library_id": library_id,
                     "embedding_model_key": embedding_model_key,
-                    "freshness_generation": freshness_generation,
                     "query_vector": query_vector,
-                    "limit": limit.max(1),
+                    "limit": limit,
+                    "over_fetch": over_fetch,
                     "options": vector_search_options(n_probe),
                 }),
             )
@@ -809,42 +1145,50 @@ impl ArangoSearchStore {
         decode_many_results(cursor)
     }
 
+    /// See docs on `search_chunk_vectors_by_similarity` for why ANN runs
+    /// before FILTER and why we over-fetch.
     pub async fn search_entity_vectors_by_similarity(
         &self,
         library_id: Uuid,
         embedding_model_key: &str,
-        freshness_generation: i64,
         query_vector: &[f32],
         limit: usize,
         n_probe: Option<u64>,
     ) -> anyhow::Result<Vec<KnowledgeEntityVectorSearchRow>> {
+        let limit = limit.max(1);
+        let over_fetch = limit.saturating_mul(8).max(64);
         let cursor = self
             .client
             .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.library_id == @library_id
-                   AND vector.embedding_model_key == @embedding_model_key
-                   AND vector.freshness_generation == @freshness_generation
-                 LET score = APPROX_NEAR_COSINE(vector.vector, @query_vector, @options)
-                 SORT score DESC, vector.entity_id ASC
-                 LIMIT @limit
-                 RETURN {
-                    vector_id: vector.vector_id,
-                    workspace_id: vector.workspace_id,
-                    library_id: vector.library_id,
-                    entity_id: vector.entity_id,
-                    embedding_model_key: vector.embedding_model_key,
-                    vector_kind: vector.vector_kind,
-                    freshness_generation: vector.freshness_generation,
-                    score: score
-                 }",
+                "LET candidates = (
+                     FOR vector IN @@collection
+                         LET score = APPROX_NEAR_COSINE(vector.vector, @query_vector, @options)
+                         SORT score DESC
+                         LIMIT @over_fetch
+                         RETURN {
+                             vector_id: vector.vector_id,
+                             workspace_id: vector.workspace_id,
+                             library_id: vector.library_id,
+                             entity_id: vector.entity_id,
+                             embedding_model_key: vector.embedding_model_key,
+                             vector_kind: vector.vector_kind,
+                             freshness_generation: vector.freshness_generation,
+                             score: score
+                         }
+                 )
+                 FOR c IN candidates
+                     FILTER c.library_id == @library_id
+                       AND c.embedding_model_key == @embedding_model_key
+                     SORT c.score DESC, c.entity_id ASC
+                     LIMIT @limit
+                     RETURN c",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
                     "library_id": library_id,
                     "embedding_model_key": embedding_model_key,
-                    "freshness_generation": freshness_generation,
                     "query_vector": query_vector,
-                    "limit": limit.max(1),
+                    "limit": limit,
+                    "over_fetch": over_fetch,
                     "options": vector_search_options(n_probe),
                 }),
             )
@@ -874,6 +1218,55 @@ fn lexical_query_terms(query: &str) -> Vec<String> {
         }
     }
     terms
+}
+
+fn title_ngram_terms(query_terms: &[String]) -> Vec<String> {
+    let mut terms = query_terms
+        .iter()
+        .filter(|term| term.chars().count() >= TITLE_NGRAM_MIN_TERM_CHARS)
+        .cloned()
+        .collect::<Vec<_>>();
+    terms.sort_by(|left, right| {
+        right.chars().count().cmp(&left.chars().count()).then_with(|| left.cmp(right))
+    });
+    terms.truncate(TITLE_NGRAM_MAX_TERMS);
+    terms
+}
+
+fn title_identity_terms(query: &str, query_terms: &[String]) -> Vec<String> {
+    let numeric_literals = numeric_title_literals(query);
+    if !numeric_literals.is_empty() {
+        return numeric_literals;
+    }
+    if query_terms.len() > TITLE_IDENTITY_MAX_TERMS {
+        return Vec::new();
+    }
+    query_terms.to_vec()
+}
+
+fn numeric_title_literals(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for token in query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '.' && ch != '-' && ch != '_' && ch != '/')
+        .map(|token| {
+            token.trim_matches(|ch: char| {
+                !ch.is_alphanumeric() && ch != '.' && ch != '-' && ch != '_' && ch != '/'
+            })
+        })
+        .filter(|token| token.chars().count() >= 2)
+        .filter(|token| token.chars().any(|ch| ch.is_ascii_digit()))
+        .map(str::to_lowercase)
+    {
+        if seen.insert(token.clone()) {
+            terms.push(token);
+        }
+    }
+    terms
+}
+
+fn title_soft_raw_enabled(query_terms: &[String]) -> bool {
+    query_terms.len() <= TITLE_IDENTITY_MAX_TERMS
 }
 
 fn decode_single_result<T>(cursor: serde_json::Value) -> anyhow::Result<T>
@@ -909,7 +1302,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{KnowledgeChunkVectorRow, KnowledgeEntityVectorRow, lexical_query_terms};
+    use super::{
+        KnowledgeChunkVectorRow, KnowledgeEntityVectorRow, lexical_query_terms,
+        numeric_title_literals, title_identity_terms, title_ngram_terms, title_soft_raw_enabled,
+    };
 
     #[test]
     fn lexical_query_terms_keep_cyrillic_and_deduplicate() {
@@ -923,6 +1319,73 @@ mod tests {
                 "endpoint".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn title_ngram_terms_keep_longest_search_terms() {
+        let terms = lexical_query_terms("how configure TargetName callback payment");
+        assert_eq!(
+            title_ngram_terms(&terms),
+            vec!["targetname".to_string(), "configure".to_string(), "callback".to_string(),]
+        );
+    }
+
+    #[test]
+    fn title_ngram_terms_drop_short_suffix_noise() {
+        let terms = lexical_query_terms("что нового в последних релизах");
+        assert_eq!(title_ngram_terms(&terms), vec!["последних".to_string()]);
+    }
+
+    #[test]
+    fn title_identity_terms_keep_numeric_literal_and_drop_surrounding_noise() {
+        let terms = lexical_query_terms("что нового в версии 9.8.765");
+        assert_eq!(
+            title_identity_terms("что нового в версии 9.8.765", &terms),
+            vec!["9.8.765".to_string()]
+        );
+    }
+
+    #[test]
+    fn numeric_title_literals_preserve_dotted_versions() {
+        assert_eq!(
+            numeric_title_literals("release 9.8.765, build 432-1"),
+            vec!["9.8.765".to_string(), "432-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn title_identity_terms_keep_short_exact_title_queries() {
+        let terms = lexical_query_terms("История изменений");
+        assert_eq!(
+            title_identity_terms("История изменений", &terms),
+            vec!["история".to_string(), "изменений".to_string()]
+        );
+    }
+
+    #[test]
+    fn title_identity_terms_drop_long_natural_language_queries() {
+        let terms =
+            lexical_query_terms("что нового в последних релизах по каждой версии список изменений");
+        assert!(
+            title_identity_terms(
+                "что нового в последних релизах по каждой версии список изменений",
+                &terms
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn title_soft_raw_disabled_for_long_natural_language_queries() {
+        let terms =
+            lexical_query_terms("что нового в последних релизах по каждой версии список изменений");
+        assert!(!title_soft_raw_enabled(&terms));
+    }
+
+    #[test]
+    fn title_soft_raw_enabled_for_short_title_lookup_queries() {
+        let terms = lexical_query_terms("how configure payment");
+        assert!(title_soft_raw_enabled(&terms));
     }
 
     #[test]

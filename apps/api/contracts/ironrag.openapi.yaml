@@ -477,6 +477,49 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiErrorBody"
+  /v1/catalog/libraries/{libraryId}/web-ingest-policy:
+    put:
+      tags: [catalog]
+      summary: Update one library web ingest policy
+      operationId: updateCatalogLibraryWebIngestPolicy
+      parameters:
+        - in: path
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebIngestPolicy"
+      responses:
+        "200":
+          description: Updated library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogLibraryResponse"
+        "400":
+          description: Invalid web ingest policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "401":
+          description: Missing or insufficient authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
+        "404":
+          description: Library not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorBody"
   /v1/iam/session/login:
     post:
       tags: [iam]
@@ -1313,12 +1356,12 @@ paths:
             schema:
               $ref: "#/components/schemas/BatchDocumentIdsRequest"
       responses:
-        "200":
+        "202":
           description: Batch delete accepted
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BatchDocumentActionResponse"
+                $ref: "#/components/schemas/BatchDocumentOperationAcceptedResponse"
         "401":
           description: Missing or insufficient authorization
           content:
@@ -1361,12 +1404,12 @@ paths:
             schema:
               $ref: "#/components/schemas/BatchDocumentIdsRequest"
       responses:
-        "200":
+        "202":
           description: Batch reprocess accepted
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BatchDocumentActionResponse"
+                $ref: "#/components/schemas/BatchDocumentOperationAcceptedResponse"
         "401":
           description: Missing or insufficient authorization
           content:
@@ -3179,7 +3222,24 @@ components:
             type: string
             format: uuid
           minItems: 1
-          maxItems: 500
+          maxItems: 100000
+    BatchDocumentOperationAcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [batchOperationId, total, libraryId, workspaceId]
+      properties:
+        batchOperationId:
+          type: string
+          format: uuid
+        total:
+          type: integer
+          minimum: 1
+        libraryId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
     BatchDocumentActionResponse:
       type: object
       additionalProperties: false
@@ -3600,10 +3660,38 @@ components:
             - type: integer
               minimum: 1
             - type: "null"
+        extraIgnorePatterns:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebIngestIgnorePattern"
         idempotencyKey:
           oneOf:
             - type: string
             - type: "null"
+    WebIngestIgnorePattern:
+      type: object
+      additionalProperties: false
+      required: [kind, value]
+      properties:
+        kind:
+          type: string
+          enum: [url_prefix, path_prefix, glob]
+        value:
+          type: string
+        source:
+          oneOf:
+            - type: string
+              enum: [library, run]
+            - type: "null"
+    WebIngestPolicy:
+      type: object
+      additionalProperties: false
+      required: [ignorePatterns]
+      properties:
+        ignorePatterns:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebIngestIgnorePattern"
     WebIngestRunReceipt:
       type: object
       additionalProperties: false
@@ -3667,7 +3755,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        [runId, libraryId, mode, boundaryPolicy, maxDepth, maxPages, runState, seedUrl, counts]
+        [runId, libraryId, mode, boundaryPolicy, maxDepth, maxPages, ignorePatterns, runState, seedUrl, counts]
       properties:
         runId:
           type: string
@@ -3685,6 +3773,10 @@ components:
           type: integer
         maxPages:
           type: integer
+        ignorePatterns:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebIngestIgnorePattern"
         runState:
           type: string
           enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
@@ -3702,7 +3794,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        [runId, mutationId, workspaceId, libraryId, mode, seedUrl, normalizedSeedUrl, boundaryPolicy, maxDepth, maxPages, runState, requestedAt, counts]
+        [runId, mutationId, workspaceId, libraryId, mode, seedUrl, normalizedSeedUrl, boundaryPolicy, maxDepth, maxPages, ignorePatterns, runState, requestedAt, counts]
       properties:
         runId:
           type: string
@@ -3737,6 +3829,10 @@ components:
           type: integer
         maxPages:
           type: integer
+        ignorePatterns:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebIngestIgnorePattern"
         runState:
           type: string
           enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
@@ -3811,10 +3907,14 @@ components:
           enum: [same_host, external]
         candidateState:
           type: string
-          enum: [discovered, eligible, duplicate, excluded, blocked, queued, processing, processed, failed, canceled]
+          enum: [discovered, eligible, duplicate, excluded, blocked, queued, processing, materialized, processed, failed, canceled]
         classificationReason:
           oneOf:
             - $ref: "#/components/schemas/WebClassificationReason"
+            - type: "null"
+        classificationDetail:
+          oneOf:
+            - type: string
             - type: "null"
         contentType:
           oneOf:
@@ -3874,10 +3974,11 @@ components:
       enum:
         - seed_accepted
         - duplicate_canonical_url
+        - duplicate_content
         - outside_boundary_policy
         - exceeded_max_depth
         - exceeded_max_pages
-        - system_page
+        - ignore_pattern
         - unsupported_scheme
         - invalid_url
         - inaccessible

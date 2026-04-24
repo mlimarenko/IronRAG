@@ -61,29 +61,180 @@ fn cache_key(library_id: Uuid, projection_version: i64) -> String {
     format!("graph:{library_id}:v{projection_version}")
 }
 
-/// Pattern matching every cached graph topology key for one library.
-fn cache_key_pattern(library_id: Uuid) -> String {
-    format!("graph:{library_id}:*")
-}
-
-/// Drops every cached graph topology for one library. Invoked by the
-/// projection pipeline right after the admitted projection_version
-/// changes so subsequent reads rebuild against fresh data.
+/// Drops the cached graph topology for one library at one specific
+/// `projection_version`. The cache key shape
+/// `graph:{library_id}:v{projection_version}` means each version has
+/// its own key — reads always look up the current version, so older
+/// orphaned keys simply age out via the 24 h TTL. Invalidation is
+/// therefore scoped: we delete the exact key we know is about to go
+/// stale (a newly published `ready` snapshot for this version), and
+/// leave any previous-version keys in place where they continue to
+/// serve any in-flight reads keyed on the old snapshot. This replaces
+/// an earlier wildcard `graph:{lib}:*` DELETE that wiped historical
+/// versions on every snapshot upsert and produced visible cache churn
+/// during high-throughput targeted refreshes.
 pub async fn invalidate_graph_topology_cache(
     redis: &redis::Client,
     library_id: Uuid,
+    projection_version: i64,
 ) -> anyhow::Result<()> {
     let mut conn = redis
         .get_multiplexed_async_connection()
         .await
         .context("connect to redis for graph topology cache invalidation")?;
-    let pattern = cache_key_pattern(library_id);
-    let keys: Vec<String> = conn.keys(&pattern).await.context("list graph topology cache keys")?;
-    if keys.is_empty() {
-        return Ok(());
-    }
-    let _: i64 = conn.del(&keys).await.context("delete graph topology cache keys")?;
+    let key = cache_key(library_id, projection_version);
+    let _: i64 = conn.del(&key).await.context("delete graph topology cache key")?;
     Ok(())
+}
+
+/// Per-library prewarm state — now tracks both "in-flight" and
+/// "another publish arrived while in-flight, run again after" so a
+/// burst of publishes never leaves the cache stale.
+///
+/// Previous behaviour: if a prewarm was already running for a library,
+/// the next publish simply skipped — the in-flight task would be
+/// reading the projection state from Postgres at some point in the
+/// past, so its eventual SET could be older than the latest publish.
+/// On heavy-ingest libraries with `content_mutation` jobs firing
+/// `ready` 20–30 times a minute, the cache could trail the live
+/// graph by one whole debounce cycle.
+///
+/// New behaviour: if `pending` is already true when a publish arrives,
+/// the incoming prewarm still skips (only one task runs), but the
+/// running task notices `pending` on exit and re-runs itself. This
+/// coalesces bursts into "one run now + one final run at the end",
+/// which converges on the latest state without thrashing.
+static PREWARM_STATE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, PrewarmState>>,
+> = std::sync::OnceLock::new();
+
+#[derive(Debug, Default, Clone, Copy)]
+struct PrewarmState {
+    /// A prewarm task is currently running for this library.
+    running: bool,
+    /// Another publish arrived while a task was running; when the
+    /// current task finishes, it should start one more to pick up
+    /// the latest state.
+    pending: bool,
+}
+
+fn prewarm_state() -> &'static std::sync::Mutex<std::collections::HashMap<Uuid, PrewarmState>> {
+    PREWARM_STATE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Forces a fresh build of the NDJSON topology and writes it straight
+/// to Redis under the current `(library_id, projection_version)` key —
+/// **bypassing** the `build_graph_topology_bytes` cache check so a
+/// prior cached value cannot short-circuit into returning stale bytes
+/// during the projection publish window.
+///
+/// Call site: projection publish path and API boot. Intentionally
+/// does not invalidate first — the SET completes atomically in Redis,
+/// so concurrent reads either see the old bytes or the new bytes,
+/// never an empty window.
+///
+/// Debounced via [`PREWARM_IN_FLIGHT`] so a burst of publishes only
+/// runs one rebuild at a time per library; the tail is dropped because
+/// any in-flight rebuild is already reading the latest projection
+/// state from Postgres anyway.
+pub async fn prewarm_graph_topology_cache(state: &AppState, library_id: Uuid) {
+    {
+        let mut state_map = prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state_map.entry(library_id).or_default();
+        if entry.running {
+            // A task is already running: mark pending so the running task
+            // re-runs itself at the end and picks up our publish.
+            entry.pending = true;
+            tracing::debug!(
+                %library_id,
+                "graph topology cache prewarm coalesced: existing task will re-run for latest state",
+            );
+            return;
+        }
+        entry.running = true;
+        entry.pending = false;
+    }
+
+    // Loop so coalesced publishes re-run without re-entry. Exit when
+    // no pending arrived during the last run. The lock is only held
+    // during the short state transition — never across the actual
+    // rebuild.
+    loop {
+        run_prewarm_once(state, library_id).await;
+
+        let mut state_map = prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state_map.entry(library_id).or_default();
+        if entry.pending {
+            entry.pending = false;
+            entry.running = true;
+            // drop lock + loop re-runs without holding it
+            continue;
+        }
+        entry.running = false;
+        return;
+    }
+}
+
+async fn run_prewarm_once(state: &AppState, library_id: Uuid) {
+    let snapshot =
+        match repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+        {
+            Ok(Some(snapshot))
+                if snapshot.graph_status != "empty" && snapshot.projection_version > 0 =>
+            {
+                snapshot
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    %library_id,
+                    "graph topology cache prewarm skipped: no ready snapshot",
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %library_id,
+                    error = format!("{error:#}"),
+                    "graph topology cache prewarm: snapshot lookup failed",
+                );
+                return;
+            }
+        };
+
+    let projection_version = snapshot.projection_version;
+    let built = match build_compact_topology(state, library_id, projection_version).await {
+        Ok(topology) => topology,
+        Err(error) => {
+            tracing::warn!(
+                %library_id,
+                projection_version,
+                error = format!("{error:#}"),
+                "graph topology cache prewarm: build failed",
+            );
+            return;
+        }
+    };
+    let mut buffer = Vec::<u8>::with_capacity(estimated_capacity(&built));
+    render_ndjson_into(&mut buffer, &built);
+    let cache_key = cache_key(library_id, projection_version);
+    if let Err(error) =
+        redis_set_bytes(&state.persistence.redis, &cache_key, &buffer, CACHE_TTL_SECONDS).await
+    {
+        tracing::warn!(
+            %library_id,
+            projection_version,
+            error = format!("{error:#}"),
+            "graph topology cache prewarm: SET failed",
+        );
+        return;
+    }
+    tracing::info!(
+        %library_id,
+        projection_version,
+        bytes = buffer.len(),
+        "graph topology cache prewarmed",
+    );
 }
 
 /// Builds the full compact NDJSON graph topology for one library and
@@ -228,29 +379,71 @@ async fn build_compact_topology(
     library_id: Uuid,
     projection_version: i64,
 ) -> anyhow::Result<CompactTopology> {
-    let node_rows = repositories::list_admitted_runtime_graph_nodes_by_library(
+    // Canonical topology load in 0.3.3:
+    //   1. Load the compact edge list (slim columns) in parallel with
+    //      the document-link aggregate — both are library-scoped scans.
+    //   2. Derive the admitted node id set from the edge endpoints once,
+    //      in memory.
+    //   3. Fetch only the node rows we need — `document`-type nodes
+    //      (always surfaced as graph siloes) plus the admitted ids.
+    //   Steps 1+2 parallelise the two slowest queries, step 3 replaces
+    //   a query whose CTE previously re-scanned every edge in the
+    //   library (8 s on 80 k edges / 40 k nodes) with a single `id =
+    //   any($3) or node_type = 'document'` index probe.
+    let edges_started_at = std::time::Instant::now();
+    let (edge_rows_compact, document_link_rows) = tokio::try_join!(
+        async {
+            repositories::list_admitted_runtime_graph_edges_compact_by_library(
+                &state.persistence.postgres,
+                library_id,
+                projection_version,
+            )
+            .await
+            .context("load admitted runtime_graph_edge rows for topology stream")
+        },
+        async {
+            repositories::list_runtime_graph_document_links_by_library(
+                &state.persistence.postgres,
+                library_id,
+                projection_version,
+            )
+            .await
+            .context("load runtime_graph_document_link rows for topology stream")
+        },
+    )?;
+    tracing::debug!(
+        %library_id,
+        projection_version,
+        edge_count = edge_rows_compact.len(),
+        document_link_count = document_link_rows.len(),
+        elapsed_ms = edges_started_at.elapsed().as_millis() as u64,
+        "graph topology: edges + document_links loaded",
+    );
+
+    let mut admitted_node_ids: HashSet<Uuid> = HashSet::with_capacity(edge_rows_compact.len() * 2);
+    for edge in &edge_rows_compact {
+        admitted_node_ids.insert(edge.from_node_id);
+        admitted_node_ids.insert(edge.to_node_id);
+    }
+    let admitted_node_ids_vec: Vec<Uuid> = admitted_node_ids.iter().copied().collect();
+
+    let nodes_started_at = std::time::Instant::now();
+    let node_rows = repositories::list_runtime_graph_nodes_by_ids_or_document_type(
         &state.persistence.postgres,
         library_id,
         projection_version,
+        &admitted_node_ids_vec,
     )
     .await
     .context("load admitted runtime_graph_node rows for topology stream")?;
-
-    let edge_rows = repositories::list_admitted_runtime_graph_edges_by_library(
-        &state.persistence.postgres,
-        library_id,
+    tracing::debug!(
+        %library_id,
         projection_version,
-    )
-    .await
-    .context("load admitted runtime_graph_edge rows for topology stream")?;
-
-    let document_link_rows = repositories::list_runtime_graph_document_links_by_library(
-        &state.persistence.postgres,
-        library_id,
-        projection_version,
-    )
-    .await
-    .context("load runtime_graph_document_link rows for topology stream")?;
+        node_count = node_rows.len(),
+        admitted_ids = admitted_node_ids_vec.len(),
+        elapsed_ms = nodes_started_at.elapsed().as_millis() as u64,
+        "graph topology: nodes loaded via admitted ids",
+    );
 
     // `document` nodes carry their original content_document.id inside
     // metadata_json.document_id — that is the UUID the frontend uses to
@@ -323,8 +516,8 @@ async fn build_compact_topology(
 
     // Edges between entity nodes only — document supports are represented
     // via the doc_links section, matching existing frontend semantics.
-    let mut compact_edges: Vec<CompactEdge> = Vec::with_capacity(edge_rows.len());
-    for row in &edge_rows {
+    let mut compact_edges: Vec<CompactEdge> = Vec::with_capacity(edge_rows_compact.len());
+    for row in &edge_rows_compact {
         if document_node_ids.contains(&row.from_node_id)
             || document_node_ids.contains(&row.to_node_id)
         {
@@ -563,9 +756,23 @@ fn push_line(buffer: &mut Vec<u8>, value: &Value) {
 // Redis helpers
 // ---------------------------------------------------------------------------
 
+/// redis-rs 1.2 defaults the per-command response timeout to 500 ms,
+/// which is fine for ~100-byte IR cache reads but blows up on the
+/// graph topology payload (17+ MB on a reference-sized library).
+/// The prod symptom was `redis SET EX graph topology cache: timed out:
+/// timed out` right after every prewarm — the cache appeared populated
+/// in the log then disappeared because the SET had already failed at
+/// the client. 10 s comfortably covers a 20 MB SET over the bridged
+/// Docker network; any slower and something else is wrong.
+const TOPOLOGY_CACHE_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn topology_connection_config() -> redis::AsyncConnectionConfig {
+    redis::AsyncConnectionConfig::new().set_response_timeout(Some(TOPOLOGY_CACHE_RESPONSE_TIMEOUT))
+}
+
 async fn redis_get_bytes(client: &redis::Client, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
     let mut conn = client
-        .get_multiplexed_async_connection()
+        .get_multiplexed_async_connection_with_config(&topology_connection_config())
         .await
         .context("connect to redis for graph topology cache read")?;
     let value: Option<Vec<u8>> = conn.get(key).await.context("redis GET graph topology cache")?;
@@ -579,7 +786,7 @@ async fn redis_set_bytes(
     ttl_seconds: i64,
 ) -> anyhow::Result<()> {
     let mut conn = client
-        .get_multiplexed_async_connection()
+        .get_multiplexed_async_connection_with_config(&topology_connection_config())
         .await
         .context("connect to redis for graph topology cache write")?;
     let _: () = conn

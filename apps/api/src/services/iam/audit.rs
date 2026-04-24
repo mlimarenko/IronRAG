@@ -78,6 +78,12 @@ pub struct AppendQueryExecutionAuditCommand {
     pub context_bundle_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
+    /// Truncated user question rendered into the `internal_message`
+    /// so an operator scanning the audit log sees what was asked
+    /// without cross-referencing the `query_turn_content` table.
+    /// Callers should already trim to a sensible length (roughly 200
+    /// characters) — longer values are cut again inside the renderer.
+    pub question_preview: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -180,6 +186,23 @@ impl AuditService {
             ));
         }
 
+        // Billing rows for this execution (query_compile + question
+        // embedding + answer generation + any HyDE / CRAG retries)
+        // are already persisted by the answer pipeline by the time we
+        // reach this point. Pulling the summary here keeps the audit
+        // log self-describing: the `internal_message` says how much
+        // the turn cost and which models ran, without forcing every
+        // consumer to join against `billing_provider_call`.
+        let assistant_summary = self
+            .list_assistant_call_summaries(state, &[command.query_execution_id])
+            .await
+            .ok()
+            .and_then(|map| map.get(&command.query_execution_id).cloned());
+
+        let internal_message =
+            render_query_execution_audit_message(&command, assistant_summary.as_ref());
+        let redacted_message = render_query_execution_audit_redacted(assistant_summary.as_ref());
+
         self.append_event(
             state,
             AppendAuditEventCommand {
@@ -189,18 +212,8 @@ impl AuditService {
                 request_id: command.request_id,
                 trace_id: None,
                 result_kind: "succeeded".to_string(),
-                redacted_message: Some("assistant call completed".to_string()),
-                internal_message: Some(format!(
-                    "principal {} executed assistant session {}, execution {}, runtime {}, bundle {}",
-                    command.actor_principal_id,
-                    command.query_session_id,
-                    command.query_execution_id,
-                    command.runtime_execution_id.map_or_else(
-                        || "none".to_string(),
-                        |runtime_execution_id| runtime_execution_id.to_string(),
-                    ),
-                    command.context_bundle_id
-                )),
+                redacted_message: Some(redacted_message),
+                internal_message: Some(internal_message),
                 subjects,
             },
         )
@@ -586,6 +599,94 @@ fn map_internal_event(row: audit_repository::AuditEventRow) -> AuditEventInterna
         redacted_message: row.redacted_message,
         internal_message: row.internal_message,
     }
+}
+
+/// Maximum characters of the user's question the audit log keeps in
+/// the `internal_message`. Large enough to tell what was asked at a
+/// glance, small enough that the audit stream stays scannable and
+/// does not balloon storage.
+const AUDIT_QUESTION_PREVIEW_CHARS: usize = 160;
+
+fn render_query_execution_audit_message(
+    command: &AppendQueryExecutionAuditCommand,
+    assistant_summary: Option<&AuditAssistantCallSummary>,
+) -> String {
+    let question_fragment = command
+        .question_preview
+        .as_deref()
+        .map(|raw| truncate_on_char_boundary(raw.trim(), AUDIT_QUESTION_PREVIEW_CHARS))
+        .filter(|value| !value.is_empty())
+        .map_or_else(String::new, |preview| format!(r#" question: "{preview}""#));
+
+    let ai_fragment = assistant_summary
+        .map(|summary| format!(" | {}", format_assistant_call_summary_for_audit(summary)))
+        .unwrap_or_default();
+
+    format!(
+        "principal {} executed assistant session {}, execution {}, runtime {}, bundle {}{}{}",
+        command.actor_principal_id,
+        command.query_session_id,
+        command.query_execution_id,
+        command.runtime_execution_id.map_or_else(
+            || "none".to_string(),
+            |runtime_execution_id| runtime_execution_id.to_string(),
+        ),
+        command.context_bundle_id,
+        question_fragment,
+        ai_fragment,
+    )
+}
+
+fn render_query_execution_audit_redacted(
+    assistant_summary: Option<&AuditAssistantCallSummary>,
+) -> String {
+    // The redacted view intentionally omits the question text (may
+    // contain PII the caller has not opted into exposing) but keeps
+    // the AI cost summary, which is already aggregate and safe.
+    match assistant_summary {
+        Some(summary) => format!(
+            "assistant call completed | {}",
+            format_assistant_call_summary_for_audit(summary)
+        ),
+        None => "assistant call completed".to_string(),
+    }
+}
+
+fn format_assistant_call_summary_for_audit(summary: &AuditAssistantCallSummary) -> String {
+    let models_fragment = if summary.models.is_empty() {
+        "models: none".to_string()
+    } else {
+        let rendered = summary
+            .models
+            .iter()
+            .map(|model| format!("{}/{}", model.provider_kind, model.model_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("models: {rendered}")
+    };
+
+    let cost_fragment = match (summary.total_cost, summary.currency_code.as_deref()) {
+        (Some(cost), Some(currency)) => format!(", cost: {cost} {currency}"),
+        (Some(cost), None) => format!(", cost: {cost}"),
+        _ => String::new(),
+    };
+
+    format!("calls: {} | {}{}", summary.provider_call_count, models_fragment, cost_fragment,)
+}
+
+fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(max_chars + 1);
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 fn map_event_subject(row: audit_repository::AuditEventSubjectRow) -> AuditEventSubject {

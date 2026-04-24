@@ -17,7 +17,6 @@ pub struct RuntimeGraphCanonicalSummaryRow {
     pub generated_from_mutation_id: Option<Uuid>,
     pub warning_text: Option<String>,
     pub generated_at: DateTime<Utc>,
-    pub superseded_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -48,13 +47,10 @@ pub async fn supersede_runtime_graph_canonical_summaries_for_target(
     keep_source_truth_version: i64,
 ) -> Result<u64, sqlx::Error> {
     sqlx::query(
-        "update runtime_graph_canonical_summary
-         set superseded_at = now(),
-             updated_at = now()
+        "delete from runtime_graph_canonical_summary
          where library_id = $1
            and target_kind = $2
            and target_id = $3
-           and superseded_at is null
            and source_truth_version <> $4",
     )
     .bind(library_id)
@@ -76,11 +72,8 @@ pub async fn supersede_runtime_graph_canonical_summaries_for_library(
     keep_source_truth_version: i64,
 ) -> Result<u64, sqlx::Error> {
     sqlx::query(
-        "update runtime_graph_canonical_summary
-         set superseded_at = now(),
-             updated_at = now()
+        "delete from runtime_graph_canonical_summary
          where library_id = $1
-           and superseded_at is null
            and source_truth_version <> $2",
     )
     .bind(library_id)
@@ -106,11 +99,8 @@ pub async fn supersede_runtime_graph_canonical_summaries_for_targets(
     }
 
     sqlx::query(
-        "update runtime_graph_canonical_summary
-         set superseded_at = now(),
-             updated_at = now()
+        "delete from runtime_graph_canonical_summary
          where library_id = $1
-           and superseded_at is null
            and source_truth_version <> $2
            and (
                 (target_kind = 'node' and target_id = any($3))
@@ -161,11 +151,10 @@ pub async fn upsert_runtime_graph_canonical_summary(
              generated_from_mutation_id = excluded.generated_from_mutation_id,
              warning_text = excluded.warning_text,
              generated_at = now(),
-             superseded_at = null,
              updated_at = now()
          returning id, workspace_id, library_id, target_kind, target_id, summary_text,
             confidence_status, support_count, source_truth_version, generated_from_mutation_id,
-            warning_text, generated_at, superseded_at, created_at, updated_at",
+            warning_text, generated_at, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
     .bind(input.workspace_id)
@@ -195,12 +184,11 @@ pub async fn get_active_runtime_graph_canonical_summary_by_target(
     sqlx::query_as::<_, RuntimeGraphCanonicalSummaryRow>(
         "select id, workspace_id, library_id, target_kind, target_id, summary_text,
             confidence_status, support_count, source_truth_version, generated_from_mutation_id,
-            warning_text, generated_at, superseded_at, created_at, updated_at
+            warning_text, generated_at, created_at, updated_at
          from runtime_graph_canonical_summary
          where library_id = $1
            and target_kind = $2
            and target_id = $3
-           and superseded_at is null
          order by generated_at desc, created_at desc
          limit 1",
     )

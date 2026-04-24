@@ -1,10 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
 use crate::{
     infra::arangodb::document_store::{
         KnowledgeDocumentRow, KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
+    },
+    services::query::latest_versions::{
+        compare_version_desc, extract_semver_like_version, latest_version_family_key,
+        question_requests_latest_versions, requested_latest_version_count,
+        text_has_release_version_marker,
     },
     services::query::planner::{QueryIntentProfile, UnsupportedCapabilityIntent},
     shared::extraction::table_summary::parse_table_column_summary,
@@ -107,29 +112,221 @@ When Context includes a short title, report name, validation target, or formats-
 
 pub(crate) fn build_deterministic_technical_answer(
     question: &str,
+    query_ir: &crate::domains::query_ir::QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     build_graphql_absence_answer(question, chunks)
-        .or_else(|| build_transport_contract_comparison_answer(question, chunks))
-        .or_else(|| build_port_and_protocol_answer_from_facts(question, evidence, chunks))
-        .or_else(|| build_port_answer_from_facts(question, evidence, chunks))
-        .or_else(|| build_single_endpoint_answer_from_facts(question, evidence, chunks))
-        .or_else(|| build_multi_document_endpoint_answer_from_facts(question, evidence, chunks))
-        .or_else(|| build_exact_technical_literal_answer(question, evidence, chunks))
+        .or_else(|| build_transport_contract_comparison_answer(question, query_ir, chunks))
+        .or_else(|| build_port_and_protocol_answer_from_facts(question, query_ir, evidence, chunks))
+        .or_else(|| build_port_answer_from_facts(question, query_ir, evidence, chunks))
+        .or_else(|| build_single_endpoint_answer_from_facts(question, query_ir, evidence, chunks))
+        .or_else(|| {
+            build_multi_document_endpoint_answer_from_facts(question, query_ir, evidence, chunks)
+        })
+        .or_else(|| build_exact_technical_literal_answer(question, query_ir, evidence, chunks))
 }
 
 pub(crate) fn build_deterministic_grounded_answer(
     question: &str,
-    ir: Option<&crate::domains::query_ir::QueryIR>,
+    query_ir: &crate::domains::query_ir::QueryIR,
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     build_table_summary_grounded_answer(question, chunks)
-        .or_else(|| build_table_row_grounded_answer(question, ir, chunks))
+        .or_else(|| build_table_row_grounded_answer(question, Some(query_ir), chunks))
+        .or_else(|| build_latest_version_grounded_answer(question, chunks))
         .or_else(|| build_focused_document_answer(question, chunks))
         .or_else(|| build_multi_document_role_answer(question, chunks))
-        .or_else(|| build_deterministic_technical_answer(question, evidence, chunks))
+        .or_else(|| build_deterministic_technical_answer(question, query_ir, evidence, chunks))
+}
+
+fn build_latest_version_grounded_answer(
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
+    if !question_requests_latest_versions(question) {
+        return None;
+    }
+    let requested_count = requested_latest_version_count(question);
+    let mut documents = chunks
+        .iter()
+        .filter_map(|chunk| {
+            let label = chunk.document_label.trim();
+            if !text_has_release_version_marker(label) {
+                return None;
+            }
+            let version = extract_semver_like_version(label)?;
+            Some(LatestVersionAnswerDocument {
+                document_id: chunk.document_id,
+                label: label.to_string(),
+                family_key: latest_version_family_key(label),
+                version,
+                chunks: vec![chunk.clone()],
+            })
+        })
+        .fold(HashMap::<Uuid, LatestVersionAnswerDocument>::new(), |mut acc, document| {
+            acc.entry(document.document_id)
+                .and_modify(|existing| existing.chunks.extend(document.chunks.clone()))
+                .or_insert(document);
+            acc
+        })
+        .into_values()
+        .collect::<Vec<_>>();
+    if documents.is_empty() {
+        return None;
+    }
+    if requested_count > 1 {
+        let family_sizes =
+            documents.iter().fold(HashMap::<String, usize>::new(), |mut acc, document| {
+                *acc.entry(document.family_key.clone()).or_default() += 1;
+                acc
+            });
+        let top_two_counts = {
+            let mut counts = family_sizes.values().copied().collect::<Vec<_>>();
+            counts.sort_unstable_by(|left, right| right.cmp(left));
+            counts
+        };
+        if let Some((family_key, family_count)) = family_sizes
+            .iter()
+            .max_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
+            .map(|(family_key, count)| (family_key.clone(), *count))
+        {
+            let runner_up = top_two_counts.get(1).copied().unwrap_or(0);
+            if family_count >= requested_count && family_count > runner_up {
+                documents.retain(|document| document.family_key == family_key);
+            }
+        }
+    }
+    documents.sort_by(|left, right| {
+        compare_version_desc(&left.version, &right.version)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    documents.dedup_by(|left, right| {
+        left.version == right.version && left.label.eq_ignore_ascii_case(&right.label)
+    });
+    documents.truncate(requested_count);
+    if documents.is_empty() {
+        return None;
+    }
+
+    let mut rendered = Vec::new();
+    let mut missing_change_lists = 0usize;
+    for document in &mut documents {
+        document.chunks.sort_by(|left, right| {
+            left.chunk_index
+                .cmp(&right.chunk_index)
+                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+        });
+        let version_text =
+            document.version.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
+        rendered.push(format!("Версия {version_text}"));
+        let changes = extract_latest_version_change_lines(&document.chunks);
+        if changes.is_empty() {
+            missing_change_lists += 1;
+            rendered.push(
+                "- Список изменений не попал в релизные фрагменты, которые вошли в текущий контекст."
+                    .to_string(),
+            );
+        } else {
+            rendered.extend(changes.into_iter().map(|line| format!("- {line}")));
+        }
+        rendered.push(String::new());
+    }
+    if rendered.last().is_some_and(|line| line.is_empty()) {
+        rendered.pop();
+    }
+    if rendered.is_empty() {
+        return None;
+    }
+    let body = rendered.join("\n");
+    if missing_change_lists == 0 {
+        Some(body)
+    } else {
+        Some(format!(
+            "Ниже перечислены последние релизы, которые уверенно попали в контекст. Для части версий список изменений в текущих фрагментах неполный.\n\n{body}"
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct LatestVersionAnswerDocument {
+    document_id: Uuid,
+    label: String,
+    family_key: String,
+    version: Vec<u32>,
+    chunks: Vec<RuntimeMatchedChunk>,
+}
+
+fn extract_latest_version_change_lines(chunks: &[RuntimeMatchedChunk]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut seen = HashSet::<String>::new();
+    let mut in_change_section = false;
+    for chunk in chunks {
+        let text = repair_technical_layout_noise(&chunk.source_text);
+        for raw_line in text.lines() {
+            let compact = raw_line.split_whitespace().collect::<Vec<_>>().join(" ");
+            if compact.is_empty() {
+                continue;
+            }
+            let lower = compact.to_lowercase();
+            if lower.contains("новые возможности")
+                || lower.contains("список изменений")
+                || lower.contains("история изменений")
+            {
+                in_change_section = true;
+                continue;
+            }
+            if lower.starts_with("версия ") || lower.starts_with("version ") {
+                continue;
+            }
+            if lower.contains("руководство администратора") {
+                continue;
+            }
+            if !in_change_section && !looks_like_latest_version_change_line(&compact) {
+                continue;
+            }
+            if looks_like_latest_version_section_heading(&compact) {
+                continue;
+            }
+            let candidate = compact
+                .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '•' | '·' | '–'))
+                .trim();
+            if candidate.starts_with('#') {
+                continue;
+            }
+            if candidate.chars().count() < 8 {
+                continue;
+            }
+            if seen.insert(candidate.to_string()) {
+                lines.push(candidate.to_string());
+            }
+            if lines.len() >= 6 {
+                return lines;
+            }
+        }
+    }
+    lines
+}
+
+fn looks_like_latest_version_change_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    line.starts_with('-')
+        || line.starts_with('*')
+        || line.starts_with('•')
+        || lower.starts_with("добав")
+        || lower.starts_with("реализ")
+        || lower.starts_with("исправ")
+        || lower.starts_with("обнов")
+        || lower.starts_with("понижен")
+        || lower.starts_with("начиная")
+}
+
+fn looks_like_latest_version_section_heading(line: &str) -> bool {
+    matches!(
+        line.to_lowercase().as_str(),
+        "новые возможности" | "исправленные ошибки" | "исправления" | "доработки"
+    )
 }
 
 pub(crate) fn build_missing_explicit_document_answer(

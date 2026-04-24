@@ -8,6 +8,11 @@ server {
     server_name _;
     root /usr/share/nginx/html;
     index index.html;
+    # Backend/worker containers are recreated independently during deploys.
+    # nginx's default one-shot name resolution can pin /v1 traffic to a stale
+    # container IP until the frontend itself restarts, so re-resolve Docker DNS.
+    resolver 127.0.0.11 ipv6=off valid=10s;
+    set $ironrag_api_upstream ${IRONRAG_API_UPSTREAM};
 
     client_max_body_size 100M;
 
@@ -26,9 +31,16 @@ server {
         # snapshot export); nginx default buffering re-frames those
         # and truncates the trailing zero-length chunk, producing
         # ERR_INCOMPLETE_CHUNKED_ENCODING in the browser.
+        # NB: only response buffering is disabled. proxy_request_buffering
+        # is left at default (on) — disabling it forces every POST to
+        # stream-forward as HTTP/1.1 chunked, which axum + the small
+        # JSON bodies we exchange for /v1/query/sessions and /v1/mcp
+        # tool-calls handled pathologically (request hung at the FE
+        # nginx layer with no log line, never reached backend). Streaming
+        # uploads are not part of our surface, so request buffering
+        # stays on.
         proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_pass ${IRONRAG_API_UPSTREAM};
+        proxy_pass $ironrag_api_upstream;
     }
 
     location /assets/ {

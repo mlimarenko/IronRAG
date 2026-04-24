@@ -5,6 +5,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { useApp } from "@/contexts/AppContext";
 import {
+  adminApi,
   apiFetch,
   billingApi,
   documentsApi,
@@ -69,6 +70,10 @@ import { DocumentsInspectorPanel } from "@/pages/documents/DocumentsInspectorPan
 import { DocumentsOverlays } from "@/pages/documents/DocumentsOverlays";
 import { WebRunsPanel } from "@/pages/documents/WebRunsPanel";
 import { BulkRerunProgressBanner } from "@/pages/documents/BulkRerunProgressBanner";
+import {
+  formatWebIngestPatterns,
+  parseWebIngestPatternText,
+} from "@/pages/documents/webIngestPatterns";
 import {
   buildUploadCandidates,
   normalizeUploadName,
@@ -217,7 +222,6 @@ export default function DocumentsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [costMap, setCostMap] = useState<Record<string, number>>({});
   const [libraryTotalCost, setLibraryTotalCost] = useState<number | null>(null);
 
   // Debounced search — the query string updates immediately for shareable
@@ -275,9 +279,18 @@ export default function DocumentsPage() {
   const [boundaryPolicy, setBoundaryPolicy] = useState("same_host");
   const [maxDepth, setMaxDepth] = useState("3");
   const [maxPages, setMaxPages] = useState("100");
+  const [libraryIgnorePatternsText, setLibraryIgnorePatternsText] =
+    useState("");
+  const [libraryIgnorePatternsSavedText, setLibraryIgnorePatternsSavedText] =
+    useState("");
+  const [libraryIgnorePatternsLoadedFor, setLibraryIgnorePatternsLoadedFor] =
+    useState<string | null>(null);
+  const [libraryIgnorePatternsLoading, setLibraryIgnorePatternsLoading] =
+    useState(false);
   const [webIngestLoading, setWebIngestLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"documents" | "web">("documents");
   const [webRuns, setWebRuns] = useState<WebIngestRunListItem[]>([]);
+  const [webRunsRefreshing, setWebRunsRefreshing] = useState(false);
 
   // ----- Bulk selection -----
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -289,14 +302,15 @@ export default function DocumentsPage() {
   // which kicks off the expansion below.
   const [expandingSelection, setExpandingSelection] = useState(false);
 
-  // ----- Async batch rerun progress -----
+  // ----- Async batch document operation progress -----
   //
-  // Canonical progress indicator for `POST /content/documents/batch-reprocess`.
+  // Canonical progress indicator for async batch document endpoints.
   // The server returns 202 immediately with a parent `ops_async_operation` id;
   // the UI polls that id until it enters a terminal state. One tiny inline
   // progress block — no modal — keeps the documents surface the primary
-  // work area while the rerun is in flight.
+  // work area while the operation is in flight.
   const [bulkRerun, setBulkRerun] = useState<{
+    kind: "delete" | "reprocess";
     operationId: string;
     total: number;
     completed: number;
@@ -344,6 +358,43 @@ export default function DocumentsPage() {
     [],
   );
 
+  const loadLibraryWebIngestPolicy = useCallback(
+    async (libraryId: string) => {
+      setLibraryIgnorePatternsLoading(true);
+      try {
+        const library = await adminApi.getLibrary(libraryId);
+        const formattedPolicy = formatWebIngestPatterns(
+          library.webIngestPolicy?.ignorePatterns,
+        );
+        setLibraryIgnorePatternsText(formattedPolicy);
+        setLibraryIgnorePatternsSavedText(formattedPolicy);
+        setLibraryIgnorePatternsLoadedFor(libraryId);
+        return formattedPolicy;
+      } catch (err) {
+        setLibraryIgnorePatternsLoadedFor(null);
+        toast.error(errorMessage(err, t("documents.ignorePatternsLoadFailed")));
+        return null;
+      } finally {
+        setLibraryIgnorePatternsLoading(false);
+      }
+    },
+    [errorMessage, t],
+  );
+
+  useEffect(() => {
+    const libraryId = activeLibrary?.id;
+    if (!libraryId) {
+      setLibraryIgnorePatternsText("");
+      setLibraryIgnorePatternsSavedText("");
+      setLibraryIgnorePatternsLoadedFor(null);
+      return;
+    }
+    setLibraryIgnorePatternsText("");
+    setLibraryIgnorePatternsSavedText("");
+    setLibraryIgnorePatternsLoadedFor(null);
+    void loadLibraryWebIngestPolicy(libraryId);
+  }, [activeLibrary?.id, loadLibraryWebIngestPolicy]);
+
   const editAvailability = useCallback(
     (doc: DocumentItem | null) => {
       if (!doc) {
@@ -387,7 +438,7 @@ export default function DocumentsPage() {
    * every pagination click.
    */
   const fetchPage = useCallback(
-    async (cursor: string | null, refreshTotal: boolean) => {
+    async (cursor: string | null) => {
       if (!activeLibrary) return;
       // First render (no items yet) must show the big loader, every other
       // fetch goes through the non-blanking refresh path so the table /
@@ -404,73 +455,26 @@ export default function DocumentsPage() {
       setLoadError(null);
       const { sortBy, sortOrder } = splitSortValue(sortValue);
       try {
-        // `includeTotal` triggers a separate library-wide aggregate CTE on
-        // the backend that is O(documents) and trips the >1 s slow-query
-        // threshold on reference-sized libraries. We pay it on the first
-        // load per filter set and on explicit refreshes (upload, batch
-        // action, manual reload) — the polling effect (2.5 s tick) reuses
-        // the previous counts. They snap on the next filter change or
-        // explicit reload, which is far cheaper than recomputing the
-        // aggregate every 2.5 s during a long batch rerun.
-        const [page, costs, libraryCostSummary] = await Promise.all([
-          documentsApi.list({
-            libraryId: activeLibrary.id,
-            limit: pageSize,
-            cursor: cursor ?? undefined,
-            search: debouncedSearch || undefined,
-            sortBy,
-            sortOrder,
-            includeTotal: refreshTotal,
-            status:
-              statusBackendFilter.length > 0 ? statusBackendFilter : undefined,
-          }),
-          refreshTotal
-            ? billingApi
-                .getLibraryDocumentCosts(activeLibrary.id)
-                .catch(() => [])
-            : Promise.resolve(null),
-          refreshTotal
-            ? billingApi
-                .getLibraryCostSummary(activeLibrary.id)
-                .catch(() => null)
-            : Promise.resolve(null),
-        ]);
+        // Canonical list fetch: one query, no `includeTotal`, no
+        // library-wide billing rollup. Per-row `cost` arrives on each
+        // `DocumentListItem` via the LATERAL subquery in
+        // `list_document_page_rows`, so the column renders without any
+        // second roundtrip. Aggregates (status counts + library total
+        // cost) live on a separate `fetchAggregates` flow that only
+        // fires when the filter set actually changes.
+        const page = await documentsApi.list({
+          libraryId: activeLibrary.id,
+          limit: pageSize,
+          cursor: cursor ?? undefined,
+          search: debouncedSearch || undefined,
+          sortBy,
+          sortOrder,
+          status:
+            statusBackendFilter.length > 0 ? statusBackendFilter : undefined,
+        });
         const mapped = page.items.map((raw) => mapListItem(raw, t));
-        if (costs) {
-          const newCostMap: Record<string, number> = {};
-          for (const c of costs) {
-            const parsed = parseFloat(c.totalCost);
-            if (!Number.isNaN(parsed)) {
-              newCostMap[c.documentId] = parsed;
-            }
-          }
-          for (const doc of mapped) {
-            const cost = newCostMap[doc.id];
-            if (cost != null) doc.cost = cost;
-          }
-          setCostMap(newCostMap);
-        } else {
-          for (const doc of mapped) {
-            const cost = costMap[doc.id];
-            if (cost != null) doc.cost = cost;
-          }
-        }
         setItems(mapped);
         setNextCursor(page.nextCursor);
-        // Counts are only present in the response when the backend was
-        // asked for them via `includeTotal`. On a polling refresh we
-        // intentionally skip the aggregate, so keep the previously
-        // observed counts rather than blanking them.
-        if (refreshTotal) {
-          setTotalCount(page.totalCount ?? null);
-          setStatusCounts(page.statusCounts ?? null);
-          if (libraryCostSummary) {
-            const parsed = parseFloat(libraryCostSummary.totalCost);
-            if (!Number.isNaN(parsed)) {
-              setLibraryTotalCost(parsed);
-            }
-          }
-        }
       } catch (err) {
         setLoadError(errorMessage(err, t("documents.failedToLoad")));
         if (isFirstLoad) {
@@ -487,7 +491,6 @@ export default function DocumentsPage() {
     },
     [
       activeLibrary,
-      costMap,
       debouncedSearch,
       errorMessage,
       pageSize,
@@ -497,21 +500,60 @@ export default function DocumentsPage() {
     ],
   );
 
+  // Aggregates flow: status counts (expensive `COUNT(*) FILTER`) +
+  // library-wide cost summary. Fires ONLY when the filter set changes
+  // (library / search / status bucket), not on pagination or polling.
+  // Keeping this off the page fetch path means flipping to page 2 does
+  // not re-run the O(documents) aggregate on the server.
+  const fetchAggregates = useCallback(async () => {
+    if (!activeLibrary) return;
+    const { sortBy, sortOrder } = splitSortValue(sortValue);
+    try {
+      const [totalsPage, librarySummary] = await Promise.all([
+        documentsApi.list({
+          libraryId: activeLibrary.id,
+          limit: 1,
+          cursor: undefined,
+          search: debouncedSearch || undefined,
+          sortBy,
+          sortOrder,
+          includeTotal: true,
+          status:
+            statusBackendFilter.length > 0 ? statusBackendFilter : undefined,
+        }),
+        billingApi.getLibraryCostSummary(activeLibrary.id).catch(() => null),
+      ]);
+      setTotalCount(totalsPage.totalCount ?? null);
+      setStatusCounts(totalsPage.statusCounts ?? null);
+      if (librarySummary) {
+        const parsed = parseFloat(librarySummary.totalCost);
+        if (!Number.isNaN(parsed)) {
+          setLibraryTotalCost(parsed);
+        }
+      }
+    } catch {
+      // Aggregates are decorative (counts + banner total). A failure
+      // here must not blank the list surface — fetchPage owns the
+      // authoritative error path. Keep whatever stale counts we have.
+    }
+  }, [activeLibrary, debouncedSearch, sortValue, statusBackendFilter]);
+
   // Whenever library, search, sort, status filter, or page size changes,
-  // reset the cursor stack to the first page and fetch. Explicit Prev/Next
-  // never triggers this effect — it's the single source of truth for
-  // "re-start the paginator".
+  // reset the cursor stack and fetch the first page. Aggregates are
+  // refreshed on the same transition but through a separate query, so a
+  // slow `COUNT(*)` never blocks the list render.
   useEffect(() => {
     if (!activeLibrary) return;
     setCursorStack([null]);
-    void fetchPage(null, true);
+    void fetchPage(null);
+    void fetchAggregates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLibrary, debouncedSearch, sortValue, statusBucketKey, pageSize]);
 
   const goToNextPage = useCallback(() => {
     if (!nextCursor || isLoading) return;
     setCursorStack((prev) => [...prev, nextCursor]);
-    void fetchPage(nextCursor, false);
+    void fetchPage(nextCursor);
   }, [fetchPage, isLoading, nextCursor]);
 
   const goToPreviousPage = useCallback(() => {
@@ -519,7 +561,7 @@ export default function DocumentsPage() {
     const nextStack = cursorStack.slice(0, -1);
     const target = nextStack[nextStack.length - 1] ?? null;
     setCursorStack(nextStack);
-    void fetchPage(target, false);
+    void fetchPage(target);
   }, [cursorStack, fetchPage, isLoading]);
 
   const currentPageNumber = cursorStack.length;
@@ -553,6 +595,11 @@ export default function DocumentsPage() {
     items.length === 0 ? 0 : (currentPageNumber - 1) * pageSize + 1;
   const visibleRangeEnd =
     items.length === 0 ? 0 : (currentPageNumber - 1) * pageSize + items.length;
+  const showPaginationFooter =
+    items.length > 0 ||
+    cursorStack.length > 1 ||
+    nextCursor != null ||
+    (filteredTotal ?? 0) > 0;
 
   /**
    * Reset the pagination stack and reload the first page. Used by every
@@ -562,8 +609,9 @@ export default function DocumentsPage() {
    */
   const loadFirstPage = useCallback(async () => {
     setCursorStack([null]);
-    await fetchPage(null, true);
-  }, [fetchPage]);
+    await fetchPage(null);
+    void fetchAggregates();
+  }, [fetchPage, fetchAggregates]);
 
   // Grace deadline for "keep polling the list even if the current rows
   // still look terminal". Retry / reprocess mutations set this to
@@ -595,7 +643,7 @@ export default function DocumentsPage() {
     if (!hasInFlight && !withinGrace) return;
     const currentCursor = cursorStack[cursorStack.length - 1] ?? null;
     const id = window.setInterval(() => {
-      void fetchPage(currentCursor, false);
+      void fetchPage(currentCursor);
     }, LIST_POLL_INTERVAL_MS);
     return () => window.clearInterval(id);
   }, [activeLibrary, items, listPollGraceUntil, cursorStack, fetchPage]);
@@ -623,25 +671,39 @@ export default function DocumentsPage() {
     }
   }, [items]);
 
+  const refreshWebRuns = useCallback(
+    async (options?: { silent?: boolean; replaceOnError?: boolean }) => {
+      if (!activeLibrary) {
+        setWebRuns([]);
+        return;
+      }
+      if (!options?.silent) {
+        setWebRunsRefreshing(true);
+      }
+      try {
+        const runs = await documentsApi.listWebRuns(activeLibrary.id);
+        setWebRuns(runs);
+      } catch (err) {
+        if (options?.replaceOnError) {
+          setWebRuns([]);
+        } else if (!options?.silent) {
+          toast.error(errorMessage(err, t("documents.webRunsFailed")));
+        }
+      } finally {
+        if (!options?.silent) {
+          setWebRunsRefreshing(false);
+        }
+      }
+    },
+    [activeLibrary, errorMessage, t],
+  );
+
   // Web runs are owned by the web tab — load them alongside the first
   // documents page so the tab counter is accurate. Separate lifetime from
   // the documents list keeps the heavy list out of the web-tab path.
   useEffect(() => {
-    if (!activeLibrary) return;
-    let cancelled = false;
-    documentsApi
-      .listWebRuns(activeLibrary.id)
-      .then((runs) => {
-        if (cancelled) return;
-        setWebRuns(runs);
-      })
-      .catch(() => {
-        if (!cancelled) setWebRuns([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeLibrary]);
+    void refreshWebRuns({ silent: true, replaceOnError: true });
+  }, [refreshWebRuns]);
 
   // ----- Selected document detail refresh (inspector only) -----
 
@@ -802,9 +864,7 @@ export default function DocumentsPage() {
     setUploadQueue((prev) => {
       const failed = prev.filter((item) => item.state === "error");
       if (failed.length > 0) {
-        toast.error(
-          t("documents.uploadBatchFailed", { count: failed.length }),
-        );
+        toast.error(t("documents.uploadBatchFailed", { count: failed.length }));
       }
       return failed;
     });
@@ -973,6 +1033,30 @@ export default function DocumentsPage() {
     }
     setWebIngestLoading(true);
     try {
+      let ignorePatternText = libraryIgnorePatternsText;
+      if (libraryIgnorePatternsLoadedFor !== activeLibrary.id) {
+        const loadedPolicyText = await loadLibraryWebIngestPolicy(
+          activeLibrary.id,
+        );
+        if (loadedPolicyText == null) {
+          return;
+        }
+        ignorePatternText = loadedPolicyText;
+      }
+      const ignorePatterns = parseWebIngestPatternText(ignorePatternText);
+      let normalizedPolicyText = formatWebIngestPatterns(ignorePatterns);
+      if (normalizedPolicyText !== libraryIgnorePatternsSavedText) {
+        const updatedLibrary = await adminApi.updateWebIngestPolicy(
+          activeLibrary.id,
+          { ignorePatterns },
+        );
+        normalizedPolicyText = formatWebIngestPatterns(
+          updatedLibrary.webIngestPolicy?.ignorePatterns ?? ignorePatterns,
+        );
+        setLibraryIgnorePatternsSavedText(normalizedPolicyText);
+      }
+      setLibraryIgnorePatternsText(normalizedPolicyText);
+      setLibraryIgnorePatternsLoadedFor(activeLibrary.id);
       await documentsApi.createWebIngestRun({
         libraryId: activeLibrary.id,
         seedUrl: url,
@@ -980,6 +1064,7 @@ export default function DocumentsPage() {
         boundaryPolicy,
         maxDepth: parseInt(maxDepth, 10),
         maxPages: parseInt(maxPages, 10),
+        extraIgnorePatterns: [],
       });
       toast.success(t("documents.webIngestStarted"));
       setAddLinkOpen(false);
@@ -988,6 +1073,7 @@ export default function DocumentsPage() {
       setBoundaryPolicy("same_host");
       setMaxDepth("3");
       setMaxPages("30");
+      await refreshWebRuns({ silent: true });
       await loadFirstPage();
     } catch (err) {
       toast.error(errorMessage(err, t("documents.webIngestFailed")));
@@ -999,12 +1085,30 @@ export default function DocumentsPage() {
     boundaryPolicy,
     crawlMode,
     errorMessage,
+    libraryIgnorePatternsLoadedFor,
+    libraryIgnorePatternsSavedText,
+    libraryIgnorePatternsText,
+    loadLibraryWebIngestPolicy,
     loadFirstPage,
     maxDepth,
     maxPages,
     seedUrl,
     t,
+    refreshWebRuns,
   ]);
+
+  const handleCancelWebRun = useCallback(
+    async (runId: string) => {
+      try {
+        await documentsApi.cancelWebRun(runId);
+        toast.success(t("documents.webIngestCancelRequested"));
+        await refreshWebRuns({ silent: true });
+      } catch (err) {
+        toast.error(errorMessage(err, t("documents.webIngestCancelFailed")));
+      }
+    },
+    [errorMessage, refreshWebRuns, t],
+  );
 
   // ----- Bulk selection -----
 
@@ -1091,13 +1195,30 @@ export default function DocumentsPage() {
   const handleBulkDelete = async () => {
     if (!confirm(t("documents.confirmBulkDelete", { count: selectedCount })))
       return;
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
     try {
-      await documentsApi.batchDelete(Array.from(selectedIds));
-      toast.success(t("documents.bulkDeleteSuccess", { count: selectedCount }));
+      const accepted = await documentsApi.batchDelete(ids);
+      setListPollGraceUntil(Date.now() + LIST_POLL_GRACE_MS);
       clearSelection();
-      await loadFirstPage();
-    } catch {
-      toast.error(t("documents.bulkDeleteFailed"));
+      setBulkRerun({
+        kind: "delete",
+        operationId: accepted.batchOperationId,
+        total: accepted.total,
+        completed: 0,
+        failed: 0,
+        inFlight: accepted.total,
+        status: "processing",
+      });
+      bulkRerunAbortedRef.current = false;
+      pollBulkRerunProgress(
+        "delete",
+        accepted.batchOperationId,
+        1500,
+        accepted.total,
+      );
+    } catch (err) {
+      toast.error(errorMessage(err, t("documents.bulkDeleteFailed")));
     }
   };
 
@@ -1137,6 +1258,7 @@ export default function DocumentsPage() {
       setListPollGraceUntil(Date.now() + LIST_POLL_GRACE_MS);
       clearSelection();
       setBulkRerun({
+        kind: "reprocess",
         operationId: accepted.batchOperationId,
         total: accepted.total,
         completed: 0,
@@ -1145,14 +1267,24 @@ export default function DocumentsPage() {
         status: "processing",
       });
       bulkRerunAbortedRef.current = false;
-      pollBulkRerunProgress(accepted.batchOperationId, 1500);
+      pollBulkRerunProgress(
+        "reprocess",
+        accepted.batchOperationId,
+        1500,
+        accepted.total,
+      );
     } catch {
       toast.error(t("documents.bulkReprocessFailed"));
     }
   };
 
   const pollBulkRerunProgress = useCallback(
-    (operationId: string, delayMs: number) => {
+    (
+      kind: "delete" | "reprocess",
+      operationId: string,
+      delayMs: number,
+      expectedTotal: number,
+    ) => {
       if (bulkRerunPollRef.current) {
         clearTimeout(bulkRerunPollRef.current);
       }
@@ -1160,9 +1292,14 @@ export default function DocumentsPage() {
         if (bulkRerunAbortedRef.current) return;
         try {
           const detail = await opsApi.getAsyncOperation(operationId);
+          const progressTotal = Math.max(
+            expectedTotal,
+            detail.progress.total || 0,
+          );
           setBulkRerun({
+            kind,
             operationId,
-            total: detail.progress.total || 0,
+            total: progressTotal,
             completed: detail.progress.completed,
             failed: detail.progress.failed,
             inFlight: detail.progress.inFlight,
@@ -1172,22 +1309,37 @@ export default function DocumentsPage() {
             bulkRerunPollRef.current = null;
             if (detail.status === "ready") {
               toast.success(
-                t("documents.bulkReprocessSuccess", {
-                  count: detail.progress.completed,
-                }),
+                t(
+                  kind === "delete"
+                    ? "documents.bulkDeleteSuccess"
+                    : "documents.bulkReprocessSuccess",
+                  {
+                    count: detail.progress.completed,
+                  },
+                ),
               );
             } else if (detail.progress.completed > 0) {
               toast.warning(
-                t("documents.bulkReprocessPartial", {
-                  ok: detail.progress.completed,
-                  failed: detail.progress.failed,
-                }),
+                t(
+                  kind === "delete"
+                    ? "documents.bulkDeletePartial"
+                    : "documents.bulkReprocessPartial",
+                  {
+                    ok: detail.progress.completed,
+                    failed: detail.progress.failed,
+                  },
+                ),
               );
             } else {
               toast.error(
-                t("documents.bulkReprocessAllFailed", {
-                  count: detail.progress.failed,
-                }),
+                t(
+                  kind === "delete"
+                    ? "documents.bulkDeleteAllFailed"
+                    : "documents.bulkReprocessAllFailed",
+                  {
+                    count: detail.progress.failed,
+                  },
+                ),
               );
             }
             await loadFirstPage();
@@ -1200,12 +1352,12 @@ export default function DocumentsPage() {
           }
           // Gentle backoff: 1.5s -> 2s -> 3s -> 5s ceiling.
           const nextDelay = Math.min(Math.round(delayMs * 1.35), 5000);
-          pollBulkRerunProgress(operationId, nextDelay);
+          pollBulkRerunProgress(kind, operationId, nextDelay, expectedTotal);
         } catch {
           // Transient poll failure — keep trying, but surface a single toast
           // and back off to the ceiling so we do not hammer the backend.
           const nextDelay = Math.min(Math.round(delayMs * 1.5), 5000);
-          pollBulkRerunProgress(operationId, nextDelay);
+          pollBulkRerunProgress(kind, operationId, nextDelay, expectedTotal);
         }
       }, delayMs);
     },
@@ -1371,7 +1523,9 @@ export default function DocumentsPage() {
         setMaxDepth={setMaxDepth}
         setMaxPages={setMaxPages}
         setSeedUrl={setSeedUrl}
+        onRefreshWebRuns={() => void refreshWebRuns()}
         t={t}
+        webRunsRefreshing={webRunsRefreshing}
         webRunsCount={webRuns.length}
       />
 
@@ -1919,7 +2073,7 @@ export default function DocumentsPage() {
                       </tbody>
                     </table>
                   </div>
-                  {items.length > 0 && (
+                  {showPaginationFooter && (
                     <div className="shrink-0 border-t bg-background/95 px-4 py-3 shadow-[0_-8px_24px_hsl(var(--background)/0.9)] backdrop-blur supports-[backdrop-filter]:bg-background/85">
                       <div className="flex flex-wrap items-center gap-3">
                         <span className="text-xs font-medium text-muted-foreground tabular-nums">
@@ -1996,18 +2150,29 @@ export default function DocumentsPage() {
               )}
             </>
           ) : (
-            <WebRunsPanel
-              t={t}
-              webRuns={webRuns}
-              onReuseRun={(run) => {
-                setSeedUrl(run.seedUrl);
-                setCrawlMode(run.mode);
-                setBoundaryPolicy(run.boundaryPolicy || "same_host");
-                setMaxDepth(String(run.maxDepth ?? 3));
-                setMaxPages(String(run.maxPages ?? 100));
-                setAddLinkOpen(true);
-              }}
-            />
+            <div className="flex h-full min-h-0 flex-col">
+              <WebRunsPanel
+                t={t}
+                isRefreshingRuns={webRunsRefreshing}
+                onCancelRun={(runId) => void handleCancelWebRun(runId)}
+                onRefreshRuns={() => void refreshWebRuns()}
+                onReuseRun={(run) => {
+                  setSeedUrl(run.seedUrl);
+                  setCrawlMode(run.mode);
+                  setBoundaryPolicy(run.boundaryPolicy || "same_host");
+                  setMaxDepth(String(run.maxDepth ?? 3));
+                  setMaxPages(String(run.maxPages ?? 100));
+                  if (run.ignorePatterns) {
+                    setLibraryIgnorePatternsText(
+                      formatWebIngestPatterns(run.ignorePatterns),
+                    );
+                    setLibraryIgnorePatternsLoadedFor(activeLibrary.id);
+                  }
+                  setAddLinkOpen(true);
+                }}
+                webRuns={webRuns}
+              />
+            </div>
           )}
         </div>
 
@@ -2044,6 +2209,8 @@ export default function DocumentsPage() {
         handleDelete={handleDelete}
         handleReplaceFile={handleReplaceFile}
         handleStartWebIngest={handleStartWebIngest}
+        libraryIgnorePatternsLoading={libraryIgnorePatternsLoading}
+        libraryIgnorePatternsText={libraryIgnorePatternsText}
         maxDepth={maxDepth}
         maxPages={maxPages}
         replaceFile={replaceFile}
@@ -2057,6 +2224,7 @@ export default function DocumentsPage() {
         setBoundaryPolicy={setBoundaryPolicy}
         setCrawlMode={setCrawlMode}
         setDeleteDocOpen={setDeleteDocOpen}
+        setLibraryIgnorePatternsText={setLibraryIgnorePatternsText}
         setMaxDepth={setMaxDepth}
         setMaxPages={setMaxPages}
         setReplaceFile={setReplaceFile}

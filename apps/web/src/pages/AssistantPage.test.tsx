@@ -11,8 +11,11 @@ const { useAppMock, queryApiMock } = vi.hoisted(() => ({
     listSessions: vi.fn(),
     getSession: vi.fn(),
     createSession: vi.fn(),
-    createTurnStream: vi.fn(),
+    createTurnWithFallback: vi.fn(),
+    getExecution: vi.fn(),
+    getRuntimeExecution: vi.fn(),
     getExecutionLlmContext: vi.fn(),
+    recoverTurnAfterStreamFailure: vi.fn(),
   },
 }));
 
@@ -129,8 +132,8 @@ describe('AssistantPage integration', () => {
   });
 
   it('streams a turn through onDelta and replaces the placeholder with the final answer + evidence', async () => {
-    queryApiMock.createTurnStream.mockImplementation(async (_sessionId, _q, handlers) => {
-      handlers.onRuntime?.();
+    queryApiMock.createTurnWithFallback.mockImplementation(async (_sessionId, _q, handlers) => {
+      handlers.onRuntime?.({ runtimeExecutionId: 'runtime-1' });
       handlers.onDelta?.('Hello');
       handlers.onDelta?.(' world');
       return {
@@ -191,10 +194,74 @@ describe('AssistantPage integration', () => {
     await flushUi();
 
     expect(queryApiMock.createSession).toHaveBeenCalledWith('ws-1', 'library-1');
-    expect(queryApiMock.createTurnStream).toHaveBeenCalledTimes(1);
+    expect(queryApiMock.createTurnWithFallback).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain('Hello world');
     // Evidence panel renders the verification badge + segment ref title.
     expect(container.textContent).toContain('Deployment Guide');
+  });
+
+  it('recovers the persisted answer after a late stream interruption', async () => {
+    queryApiMock.createTurnWithFallback.mockImplementation(async (_sessionId, _q, handlers) => {
+      handlers.onRuntime?.({ runtimeExecutionId: 'runtime-1' });
+      throw new Error('Error in input stream');
+    });
+    queryApiMock.recoverTurnAfterStreamFailure.mockResolvedValue({
+      execution: {
+        id: 'exec-1',
+        runtimeExecutionId: 'runtime-1',
+        lifecycleState: 'completed',
+        completedAt: '2026-04-10T11:00:05Z',
+      },
+      responseTurn: {
+        id: 'turn-1',
+        contentText: 'Recovered answer',
+        createdAt: '2026-04-10T11:00:05Z',
+        executionId: 'exec-1',
+      },
+      preparedSegmentReferences: [
+        {
+          documentId: 'doc-1',
+          segmentId: 'seg-1',
+          documentTitle: 'Recovered Guide',
+          sourceUri: null,
+          sourceAccess: null,
+          headingTrail: ['Recovery', 'Guide'],
+          sectionPath: [],
+          blockKind: 'heading',
+          rank: 1,
+          score: 0.91,
+        },
+      ],
+      technicalFactReferences: [],
+      entityReferences: [],
+      relationReferences: [],
+      verificationState: 'passed',
+      verificationWarnings: [],
+      runtimeStageSummaries: [],
+    });
+
+    await renderPage();
+
+    setTextareaValue('Where is the docs page?');
+    await flushUi();
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(queryApiMock.recoverTurnAfterStreamFailure).toHaveBeenCalledWith(
+      'runtime-1',
+    );
+    expect(container.textContent).toContain('Recovered answer');
+    expect(container.textContent).toContain('Recovered Guide');
+    expect(container.textContent).not.toContain('Error in input stream');
   });
 
   it('shows the query-not-configured empty state when the active library lacks the binding', async () => {
@@ -236,6 +303,28 @@ describe('AssistantPage integration', () => {
           content: 'We moved to keyset pagination.',
           timestamp: '2026-04-10T10:00:02Z',
           executionId: 'exec-prev',
+          evidence: {
+            preparedSegmentReferences: [
+              {
+                documentId: 'doc-1',
+                segmentId: 'seg-1',
+                documentTitle: 'Pagination Design',
+                sourceUri: null,
+                sourceAccess: null,
+                headingTrail: ['Pagination', 'Design'],
+                sectionPath: [],
+                blockKind: 'heading',
+                rank: 1,
+                score: 0.91,
+              },
+            ],
+            technicalFactReferences: [],
+            entityReferences: [],
+            relationReferences: [],
+            verificationState: 'passed',
+            verificationWarnings: [],
+            runtimeStageSummaries: [],
+          },
         },
       ],
     });
@@ -253,5 +342,6 @@ describe('AssistantPage integration', () => {
 
     expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1');
     expect(container.textContent).toContain('We moved to keyset pagination');
+    expect(container.textContent).toContain('Pagination Design');
   });
 });

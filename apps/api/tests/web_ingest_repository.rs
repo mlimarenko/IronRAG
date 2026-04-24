@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use chrono::{TimeZone, Utc};
+use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
@@ -138,6 +139,7 @@ impl WebIngestRepositoryFixture {
                 boundary_policy,
                 max_depth,
                 max_pages,
+                ignore_patterns: json!([]),
                 run_state: "accepted",
                 requested_by_principal_id: Some(self.principal_id),
                 requested_at: None,
@@ -173,6 +175,7 @@ impl WebIngestRepositoryFixture {
                 host_classification: "same_host",
                 candidate_state,
                 classification_reason,
+                classification_detail: None,
                 content_type: Some("text/html"),
                 http_status: Some(200),
                 snapshot_storage_key: None,
@@ -396,6 +399,7 @@ async fn web_discovered_page_repository_allows_canonical_duplicates_and_rolls_up
                 host_classification: "same_host",
                 candidate_state: "duplicate",
                 classification_reason: Some("duplicate_canonical_url"),
+                classification_detail: None,
                 content_type: Some("text/html"),
                 http_status: Some(200),
                 snapshot_storage_key: None,

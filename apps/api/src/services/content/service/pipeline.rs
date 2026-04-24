@@ -162,6 +162,27 @@ impl ContentService {
             &command.file_bytes,
         )?;
         let file_checksum = sha256_hex_bytes(&command.file_bytes);
+        let checksum_value = format!("sha256:{file_checksum}");
+        // Content-identity dedup. Before touching storage or the
+        // mutation pipeline, refuse uploads whose SHA-256 already
+        // matches a non-deleted document in this library. Operators
+        // asked for an explicit signal (not a silent ack) because a
+        // previous crawl had thousands of URL variants collapsing onto
+        // the same page body and quietly accepting them hid the
+        // duplication until the docs table was full of $0.000 ghosts.
+        if let Some(existing_document_id) =
+            repositories::content_repository::find_active_document_by_library_checksum(
+                &state.persistence.postgres,
+                command.library_id,
+                &checksum_value,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        {
+            return Err(ApiError::Conflict(format!(
+                "duplicate content: identical file already exists in this library as document {existing_document_id}"
+            )));
+        }
         let file_name = command.file_name.trim().to_string();
         let title = command
             .title
@@ -219,6 +240,45 @@ impl ContentService {
         state: &AppState,
         command: MaterializeWebCaptureCommand,
     ) -> Result<MaterializedWebCapture, ApiError> {
+        // Content-dedup within the library. Web sites routinely expose
+        // the same body under many URL variants (viewlabel.action with
+        // different query strings, labels/pages mirrored across spaces,
+        // …) and without this check we end up with a thousand
+        // `$0.000`-cost ghost documents pointing at the same bytes.
+        // Lookup is best-effort (not advisory-locked) — a simultaneous
+        // re-crawl of the same variant inside the same run is already
+        // filtered by canonical-URL dedup in recursive.rs; what this
+        // catches is the variant-on-variant collapse.
+        if let Some(existing_document_id) =
+            repositories::content_repository::find_active_document_by_library_checksum(
+                &state.persistence.postgres,
+                command.library_id,
+                &command.checksum,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        {
+            let mutation_item = self
+                .create_mutation_item(
+                    state,
+                    CreateMutationItemCommand {
+                        mutation_id: command.mutation_id,
+                        document_id: Some(existing_document_id),
+                        base_revision_id: None,
+                        result_revision_id: None,
+                        item_state: "skipped".to_string(),
+                        message: Some(format!(
+                            "skipped: duplicate content already ingested as document {existing_document_id}"
+                        )),
+                    },
+                )
+                .await?;
+            return Ok(MaterializedWebCapture::DuplicateContent {
+                existing_document_id,
+                mutation_item,
+            });
+        }
+
         let document = match self
             .get_document_by_external_key(state, command.library_id, &command.final_url)
             .await?
@@ -312,7 +372,7 @@ impl ContentService {
             .promote_pending_document_mutation_head(state, document.id, command.mutation_id)
             .await?;
 
-        Ok(MaterializedWebCapture { document, revision, mutation_item, job_id: job.id })
+        Ok(MaterializedWebCapture::Ingested { document, revision, mutation_item, job_id: job.id })
     }
 
     pub async fn append_inline_mutation(
@@ -848,6 +908,143 @@ impl ContentService {
         context: &InlineMutationContext,
         attempt_id: Uuid,
     ) -> Result<(), ApiError> {
+        // --- Stage: embed_chunk ------------------------------------------
+        // Mirrors the background-ingest worker: embed this revision's
+        // chunks synchronously using the library's EmbedChunk binding so
+        // the vector lane has queryable rows before we even flip
+        // `vector_state` to ready. Prior to this stage the pipeline was
+        // a no-op that still promoted vector_state and gave every query
+        // a silent zero-vector-hits failure mode.
+        state
+            .canonical_services
+            .ingest
+            .record_stage_event(
+                state,
+                RecordStageEventCommand {
+                    attempt_id,
+                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                    stage_state: "started".to_string(),
+                    message: Some("embedding chunks".to_string()),
+                    details_json: serde_json::json!({
+                        "revisionId": context.revision_id,
+                    }),
+                    provider_kind: None,
+                    model_name: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
+                    cached_tokens: None,
+                    estimated_cost: None,
+                    currency_code: None,
+                    elapsed_ms: None,
+                },
+            )
+            .await?;
+        let embed_chunk_start = Instant::now();
+        let embed_chunk_result = state
+            .canonical_services
+            .search
+            .embed_chunks_for_revision(state, context.library_id, context.revision_id)
+            .await;
+        let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
+        let embed_chunk_success = match &embed_chunk_result {
+            Ok(outcome) => {
+                if let (Some(provider), Some(model), Some(usage_json)) = (
+                    outcome.provider_kind.clone(),
+                    outcome.model_name.clone(),
+                    outcome.usage_json.clone(),
+                ) {
+                    if let Err(error) = state
+                        .canonical_services
+                        .billing
+                        .capture_ingest_attempt(
+                            state,
+                            CaptureIngestAttemptBillingCommand {
+                                workspace_id: context.workspace_id,
+                                library_id: context.library_id,
+                                attempt_id,
+                                binding_id: None,
+                                provider_kind: provider,
+                                model_name: model,
+                                call_kind: "embed_chunk".to_string(),
+                                usage_json,
+                            },
+                        )
+                        .await
+                    {
+                        warn!(
+                            attempt_id = %attempt_id,
+                            ?error,
+                            "embed_chunk billing capture failed; continuing ingest",
+                        );
+                    }
+                }
+                state
+                    .canonical_services
+                    .ingest
+                    .record_stage_event(
+                        state,
+                        RecordStageEventCommand {
+                            attempt_id,
+                            stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                            stage_state: "completed".to_string(),
+                            message: Some("chunk embeddings persisted".to_string()),
+                            details_json: serde_json::json!({
+                                "chunksEmbedded": outcome.chunks_embedded,
+                                "providerKind": outcome.provider_kind,
+                                "modelName": outcome.model_name,
+                            }),
+                            provider_kind: outcome.provider_kind.clone(),
+                            model_name: outcome.model_name.clone(),
+                            prompt_tokens: outcome.prompt_tokens,
+                            completion_tokens: outcome.completion_tokens,
+                            total_tokens: outcome.total_tokens,
+                            cached_tokens: None,
+                            estimated_cost: None,
+                            currency_code: None,
+                            elapsed_ms: embed_chunk_elapsed_ms,
+                        },
+                    )
+                    .await?;
+                true
+            }
+            Err(error) => {
+                warn!(
+                    attempt_id = %attempt_id,
+                    revision_id = %context.revision_id,
+                    ?error,
+                    "chunk embedding failed; vector lane will remain empty for this revision",
+                );
+                state
+                    .canonical_services
+                    .ingest
+                    .record_stage_event(
+                        state,
+                        RecordStageEventCommand {
+                            attempt_id,
+                            stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+                            stage_state: "failed".to_string(),
+                            message: Some("chunk embedding failed".to_string()),
+                            details_json: serde_json::json!({
+                                "error": format!("{error:#}"),
+                            }),
+                            provider_kind: None,
+                            model_name: None,
+                            prompt_tokens: None,
+                            completion_tokens: None,
+                            total_tokens: None,
+                            cached_tokens: None,
+                            estimated_cost: None,
+                            currency_code: None,
+                            elapsed_ms: embed_chunk_elapsed_ms,
+                        },
+                    )
+                    .await?;
+                false
+            }
+        };
+        drop(embed_chunk_result);
+
         state
             .canonical_services
             .ingest
@@ -892,7 +1089,6 @@ impl ContentService {
 
         match graph_materialization {
             Ok(graph_materialization) => {
-                let embed_start = Instant::now();
                 let graph_outcome = state
                     .canonical_services
                     .graph
@@ -904,18 +1100,18 @@ impl ContentService {
                         Some(attempt_id),
                     )
                     .await;
-                let embed_elapsed_ms = embed_start.elapsed().as_millis() as i64;
                 graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
 
                 match graph_outcome {
                     Ok(graph_outcome) => {
+                        // Graph node/edge embedding usage is captured as
+                        // its own `embed_graph` billing call_kind. Earlier
+                        // versions filed this under the `embed_chunk`
+                        // stage name, conflating graph embedding with
+                        // (previously non-existent) chunk embedding.
                         if let Some(embedding_usage) = graph_outcome.embedding_usage {
-                            // Capture embedding usage for stage event before billing consumes it
                             let embed_provider = embedding_usage.provider_kind.clone();
                             let embed_model = embedding_usage.model_name.clone();
-                            let embed_prompt = embedding_usage.prompt_tokens;
-                            let embed_completion = embedding_usage.completion_tokens;
-                            let embed_total = embedding_usage.total_tokens;
 
                             if let Err(error) = state
                                 .canonical_services
@@ -938,66 +1134,9 @@ impl ContentService {
                                 warn!(
                                     attempt_id = %attempt_id,
                                     ?error,
-                                    "embedding billing capture failed; continuing ingest",
+                                    "embed_graph billing capture failed; continuing ingest",
                                 );
                             }
-
-                            state
-                                .canonical_services
-                                .ingest
-                                .record_stage_event(
-                                    state,
-                                    RecordStageEventCommand {
-                                        attempt_id,
-                                        stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
-                                        stage_state: "started".to_string(),
-                                        message: Some(
-                                            "embedding rebuilt graph nodes and edges".to_string(),
-                                        ),
-                                        details_json: serde_json::json!({
-                                            "providerKind": embed_provider,
-                                            "modelName": embed_model,
-                                        }),
-                                        provider_kind: embed_provider.clone(),
-                                        model_name: embed_model.clone(),
-                                        prompt_tokens: None,
-                                        completion_tokens: None,
-                                        total_tokens: None,
-                                        cached_tokens: None,
-                                        estimated_cost: None,
-                                        currency_code: None,
-                                        elapsed_ms: None,
-                                    },
-                                )
-                                .await?;
-                            state
-                                .canonical_services
-                                .ingest
-                                .record_stage_event(
-                                    state,
-                                    RecordStageEventCommand {
-                                        attempt_id,
-                                        stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
-                                        stage_state: "completed".to_string(),
-                                        message: Some(
-                                            "graph node/edge embeddings computed".to_string(),
-                                        ),
-                                        details_json: serde_json::json!({
-                                            "providerKind": embed_provider,
-                                            "modelName": embed_model,
-                                        }),
-                                        provider_kind: embed_provider,
-                                        model_name: embed_model,
-                                        prompt_tokens: embed_prompt,
-                                        completion_tokens: embed_completion,
-                                        total_tokens: embed_total,
-                                        cached_tokens: None,
-                                        estimated_cost: None,
-                                        currency_code: None,
-                                        elapsed_ms: Some(embed_elapsed_ms),
-                                    },
-                                )
-                                .await?;
                         }
                         state
                             .canonical_services
@@ -1038,8 +1177,9 @@ impl ContentService {
                     Err(error) => {
                         graph_failure = Some(format!("graph reconcile failed: {error:#}"));
                         // extract_graph itself succeeded — failure is in the
-                        // embed/reconcile phase. Close extract_graph normally
-                        // so the UI shows where the pipeline actually broke.
+                        // reconcile/graph-embed phase. Close extract_graph
+                        // normally so the UI shows where the pipeline
+                        // actually broke.
                         state
                             .canonical_services
                             .ingest
@@ -1048,9 +1188,9 @@ impl ContentService {
                                 RecordStageEventCommand {
                                     attempt_id,
                                     stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
-                                    stage_state: "completed".to_string(),
+                                    stage_state: "failed".to_string(),
                                     message: Some(
-                                        "graph candidates extracted".to_string(),
+                                        format!("graph reconcile failed: {error:#}"),
                                     ),
                                     details_json: serde_json::json!({
                                         "chunksProcessed": graph_materialization.chunk_count,
@@ -1068,31 +1208,6 @@ impl ContentService {
                                     estimated_cost: None,
                                     currency_code: None,
                                     elapsed_ms: Some(extract_elapsed_ms),
-                                },
-                            )
-                            .await?;
-                        state
-                            .canonical_services
-                            .ingest
-                            .record_stage_event(
-                                state,
-                                RecordStageEventCommand {
-                                    attempt_id,
-                                    stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
-                                    stage_state: "failed".to_string(),
-                                    message: Some("graph reconcile/embedding failed".to_string()),
-                                    details_json: serde_json::json!({
-                                        "error": format!("{error:#}"),
-                                    }),
-                                    provider_kind: None,
-                                    model_name: None,
-                                    prompt_tokens: None,
-                                    completion_tokens: None,
-                                    total_tokens: None,
-                                    cached_tokens: None,
-                                    estimated_cost: None,
-                                    currency_code: None,
-                                    elapsed_ms: Some(embed_elapsed_ms),
                                 },
                             )
                             .await?;
@@ -1149,15 +1264,18 @@ impl ContentService {
             })?;
         let now = Utc::now();
         let graph_state_label = if graph_ready { "ready" } else { "failed" };
+        let vector_state_label = if embed_chunk_success { "ready" } else { "failed" };
+        let vector_ready_at =
+            if embed_chunk_success { revision.vector_ready_at.or(Some(now)) } else { None };
         state
             .arango_document_store
             .update_revision_readiness(
                 revision.revision_id,
                 &revision.text_state,
-                "ready",
+                vector_state_label,
                 graph_state_label,
                 revision.text_readable_at,
-                revision.vector_ready_at.or(Some(now)),
+                vector_ready_at,
                 revision.graph_ready_at.or(graph_ready.then_some(now)),
                 revision.superseded_by_revision_id,
             )

@@ -16,7 +16,9 @@ use crate::{
         repositories::{self, RuntimeGraphSnapshotRow},
     },
     services::graph::summary::GraphSummaryRefreshRequest,
-    services::knowledge::graph_stream::invalidate_graph_topology_cache,
+    services::knowledge::graph_stream::{
+        invalidate_graph_topology_cache, prewarm_graph_topology_cache,
+    },
     shared::json_coercion::from_value_or_default,
 };
 
@@ -24,11 +26,14 @@ use crate::{
 /// Called after every `upsert_runtime_graph_snapshot` so the next topology
 /// request rebuilds against the freshly admitted projection. Cache failures
 /// must not block the projection pipeline — log and continue.
-async fn invalidate_topology_cache(state: &AppState, library_id: Uuid) {
-    if let Err(error) = invalidate_graph_topology_cache(&state.persistence.redis, library_id).await
+async fn invalidate_topology_cache(state: &AppState, library_id: Uuid, projection_version: i64) {
+    if let Err(error) =
+        invalidate_graph_topology_cache(&state.persistence.redis, library_id, projection_version)
+            .await
     {
         tracing::warn!(
             %library_id,
+            projection_version,
             error = format!("{error:#}"),
             "graph topology cache invalidation failed",
         );
@@ -136,7 +141,7 @@ pub async fn ensure_empty_graph_snapshot(
     )
     .await
     .context("failed to persist empty graph snapshot")?;
-    invalidate_topology_cache(state, library_id).await;
+    invalidate_topology_cache(state, library_id, projection_version).await;
 
     Ok(GraphProjectionOutcome {
         projection_version,
@@ -196,7 +201,14 @@ pub async fn project_canonical_graph(
     )
     .await
     .context("failed to mark graph snapshot as building")?;
-    invalidate_topology_cache(state, scope.library_id).await;
+    // Intentionally DO NOT invalidate the topology cache here. The
+    // `building` transition advertises work in flight but the previous
+    // `ready` snapshot (same projection_version as the cache key) is
+    // still the canonical active graph until the next `ready` upsert
+    // below swaps it out. Dropping the cache here caused every ingest
+    // cycle on a library to DEL the only live key before the replacement
+    // landed, forcing every concurrent GET to rebuild from Postgres and
+    // producing 25 s cold-path storms on reference libraries.
 
     if nodes.is_empty() && edges.is_empty() {
         let outcome =
@@ -276,7 +288,7 @@ pub async fn project_canonical_graph(
         )
         .await
         .context("failed to mark graph snapshot as failed after graph-store refresh error")?;
-        invalidate_topology_cache(state, scope.library_id).await;
+        invalidate_topology_cache(state, scope.library_id, scope.projection_version).await;
         return Err(error).context("failed to refresh the canonical graph view");
     }
 
@@ -292,7 +304,14 @@ pub async fn project_canonical_graph(
     )
     .await
     .context("failed to mark graph snapshot as ready")?;
-    invalidate_topology_cache(state, scope.library_id).await;
+    // No explicit invalidate: `schedule_topology_prewarm` rebuilds the
+    // NDJSON and writes it with `SET EX` under the same
+    // `graph:{library_id}:v{projection_version}` key, atomically
+    // overwriting any prior cached value. Calling `invalidate_topology_cache`
+    // first opened a window where every concurrent GET paid the full
+    // rebuild cost while the prewarm was still running — removing the
+    // DEL closes that window without affecting correctness.
+    schedule_topology_prewarm(state, scope.library_id);
     maybe_apply_summary_refresh(state, scope).await?;
 
     Ok(GraphProjectionOutcome {
@@ -301,6 +320,18 @@ pub async fn project_canonical_graph(
         edge_count: edge_writes.len(),
         graph_status: "ready".to_string(),
     })
+}
+
+/// Dispatches a detached task that rebuilds the NDJSON topology under
+/// the newly published `(library_id, projection_version)` cache key so
+/// the next operator GET lands a cache hit. The projection pipeline
+/// returns without waiting: prewarm failure is a soft degradation
+/// (lazy rebuild still works), not a projection failure.
+fn schedule_topology_prewarm(state: &AppState, library_id: Uuid) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        prewarm_graph_topology_cache(&state, library_id).await;
+    });
 }
 
 async fn synchronize_projection_support_counts(
@@ -480,7 +511,17 @@ async fn project_targeted_canonical_graph(
     )
     .await
     .context("failed to persist targeted graph snapshot state")?;
-    invalidate_topology_cache(state, scope.library_id).await;
+    // Intentionally DO NOT invalidate the topology cache on a targeted
+    // refresh. Targeted refreshes are per-chunk incremental updates
+    // that do NOT bump `projection_version` — the cache key shape is
+    // `graph:{library_id}:v{projection_version}`, so the cached bytes
+    // remain a consistent "graph as-of v{N}" snapshot. Invalidating
+    // here caused every chunk merge during a live ingest to DEL the
+    // topology key for a reference-sized 17 MB NDJSON blob,
+    // forcing every concurrent operator GET to rebuild from Postgres
+    // — observed on prod as the cache getting deleted within a
+    // minute of a boot prewarm. The next full `project_canonical_graph`
+    // pass bumps the version and refreshes cache canonically.
     maybe_apply_summary_refresh(state, scope).await?;
 
     Ok(GraphProjectionOutcome {

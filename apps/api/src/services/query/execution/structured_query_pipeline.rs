@@ -1,3 +1,8 @@
+// Structured-query pipeline with CRAG rewrite retry. Call sites are
+// gated out of the v0.3.2 retrieval default path; file stays as the
+// canonical home for when we re-enable it.
+#![allow(dead_code)]
+
 use anyhow::Context;
 use uuid::Uuid;
 
@@ -17,24 +22,67 @@ use crate::{
 
 use super::*;
 
-pub(crate) async fn execute_structured_query(
+/// Runs planning, retrieval, optional CRAG retry, and rerank — the
+/// portion of the structured-query pipeline that must happen BEFORE
+/// the compiled `QueryIR` is consumed. Returns the reranked bundle so
+/// the caller (`answer_pipeline::prepare_answer_query`) can slot an
+/// IR-aware consolidation stage between rerank and assembly without
+/// duplicating context-assembly logic.
+///
+/// The entry point is split (rather than `execute_structured_query`
+/// monolithic) because context assembly (`truncate_bundle`, grouped
+/// references, `assemble_bounded_context`) consumes the bundle —
+/// running consolidation AFTER would be a no-op on a dropped bundle.
+pub(crate) async fn retrieve_and_rerank_structured_query(
     state: &AppState,
     library_id: Uuid,
     question: &str,
     mode: RuntimeQueryMode,
     top_k: usize,
-    include_debug: bool,
-) -> anyhow::Result<RuntimeStructuredQueryResult> {
+) -> anyhow::Result<StructuredQueryRerankStage> {
+    let plan_started = std::time::Instant::now();
     let planning_stage =
         run_async_try_op((), |_| plan_structured_query(state, library_id, question, mode, top_k))
             .await?;
+    let plan_elapsed_ms = plan_started.elapsed().as_millis();
+    let retrieve_started = std::time::Instant::now();
     let retrieval_stage = run_async_try_op(planning_stage, |planning_stage| {
-        retrieve_structured_query(state, library_id, question, planning_stage)
+        retrieve_structured_query(state, library_id, question, planning_stage, None)
     })
     .await?;
+    let retrieve_elapsed_ms = retrieve_started.elapsed().as_millis();
+    tracing::info!(
+        stage = "retrieval.plan_and_retrieve",
+        plan_ms = plan_elapsed_ms,
+        retrieve_ms = retrieve_elapsed_ms,
+        chunk_count = retrieval_stage.bundle.chunks.len(),
+        entity_count = retrieval_stage.bundle.entities.len(),
+        relationship_count = retrieval_stage.bundle.relationships.len(),
+        "structured retrieval inner stages"
+    );
 
     let retrieval_stage = {
-        if should_skip_crag_retry(&retrieval_stage.planning.plan, &retrieval_stage.bundle.chunks) {
+        // Fix C: zero-chunk retrievals don't benefit from a CRAG
+        // rewrite+retry — the library simply has nothing matching
+        // the query's semantic neighbourhood. Rewriting with the LLM
+        // and re-embedding+re-searching costs 10-30 s per attempt
+        // and almost always comes back empty a second time, which
+        // is what produced the `-32001 Request timed out` storm on
+        // the MCP grounded_answer surface. The CRAG paper assumes a
+        // non-empty but low-relevance retrieval; empty retrievals
+        // should fall through to the verifier, which marks the
+        // answer `insufficient_evidence` and lets the caller decide.
+        if retrieval_stage.bundle.chunks.is_empty() {
+            tracing::info!(
+                stage = "crag",
+                chunk_count = 0,
+                "CRAG retry skipped: retrieval returned zero chunks (empty library or scope mismatch)"
+            );
+            retrieval_stage
+        } else if should_skip_crag_retry(
+            &retrieval_stage.planning.plan,
+            &retrieval_stage.bundle.chunks,
+        ) {
             tracing::info!(
                 stage = "crag",
                 exact_literal_technical = true,
@@ -96,6 +144,7 @@ pub(crate) async fn execute_structured_query(
                             retry_limit,
                             &retry_embed.embedding,
                             &stage.planning.document_index,
+                            None,
                         )
                         .await
                     }
@@ -125,14 +174,51 @@ pub(crate) async fn execute_structured_query(
         }
     };
 
+    let rerank_started = std::time::Instant::now();
     let rerank_stage = run_async_try_op(retrieval_stage, |retrieval_stage| {
         rerank_structured_query(state, question, retrieval_stage)
     })
     .await?;
+    let rerank_elapsed_ms = rerank_started.elapsed().as_millis();
+    tracing::info!(
+        stage = "retrieval.rerank",
+        rerank_ms = rerank_elapsed_ms,
+        "structured retrieval rerank stage"
+    );
+    Ok(rerank_stage)
+}
+
+/// Finalize a reranked bundle into a `RuntimeStructuredQueryResult`
+/// (context assembly + diagnostics). Runs AFTER the caller has had a
+/// chance to mutate `rerank_stage.retrieval.bundle` (e.g. via
+/// `focused_document_consolidation`) so the assembled context reflects
+/// those edits.
+pub(crate) async fn finalize_structured_query(
+    state: &AppState,
+    question: &str,
+    query_ir: &crate::domains::query_ir::QueryIR,
+    rerank_stage: StructuredQueryRerankStage,
+    include_debug: bool,
+    focused_document_id: Option<Uuid>,
+) -> anyhow::Result<RuntimeStructuredQueryResult> {
+    let assemble_started = std::time::Instant::now();
     let assembly_stage = run_async_try_op(rerank_stage, |rerank_stage| {
-        assemble_structured_query(state, question, rerank_stage, include_debug)
+        assemble_structured_query(
+            state,
+            question,
+            query_ir,
+            rerank_stage,
+            include_debug,
+            focused_document_id,
+        )
     })
     .await?;
+    let assemble_elapsed_ms = assemble_started.elapsed().as_millis();
+    tracing::info!(
+        stage = "retrieval.assemble",
+        assemble_ms = assemble_elapsed_ms,
+        "structured retrieval assemble stage"
+    );
 
     let enrichment = QueryExecutionEnrichment {
         planning: assembly_stage.rerank.retrieval.planning.planning.clone(),
@@ -149,6 +235,24 @@ pub(crate) async fn execute_structured_query(
         &assembly_stage.context_text,
     );
 
+    // Snapshot the final ranked chunks so the turn layer can write
+    // `query_chunk_reference` audit rows keyed by the execution_id.
+    // Rank is 1-based, score is f64 (f32 retrieval score widened) to
+    // match the table definition.
+    let chunk_references: Vec<_> = assembly_stage
+        .rerank
+        .retrieval
+        .bundle
+        .chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| super::types::QueryChunkReferenceSnapshot {
+            chunk_id: chunk.chunk_id,
+            rank: (index as i32) + 1,
+            score: chunk.score.unwrap_or(0.0) as f64,
+        })
+        .collect();
+
     Ok(RuntimeStructuredQueryResult {
         planned_mode: assembly_stage.rerank.retrieval.planning.plan.planned_mode,
         embedding_usage: assembly_stage.rerank.retrieval.planning.embedding_usage,
@@ -158,10 +262,11 @@ pub(crate) async fn execute_structured_query(
         technical_literal_chunks: assembly_stage.technical_literal_chunks,
         diagnostics,
         retrieved_documents: assembly_stage.retrieved_documents,
+        chunk_references,
     })
 }
 
-async fn plan_structured_query(
+pub(crate) async fn plan_structured_query(
     state: &AppState,
     library_id: Uuid,
     question: &str,
@@ -275,11 +380,12 @@ async fn plan_structured_query(
     })
 }
 
-async fn retrieve_structured_query(
+pub(crate) async fn retrieve_structured_query(
     state: &AppState,
     library_id: Uuid,
     question: &str,
     planning: StructuredQueryPlanningStage,
+    query_ir: Option<&crate::domains::query_ir::QueryIR>,
 ) -> anyhow::Result<StructuredQueryRetrievalStage> {
     let plan = &planning.plan;
     let provider_profile = &planning.provider_profile;
@@ -302,8 +408,12 @@ async fn retrieve_structured_query(
             .map(move |value| (document.document_id, value))
         }),
     );
+    let mut targeted_document_ids = explicit_target_document_ids;
+    if let Some(ir) = query_ir {
+        targeted_document_ids.extend(focused_target_document_ids_from_query_ir(ir, document_index));
+    }
     let locked_target_document_ids =
-        (!explicit_target_document_ids.is_empty()).then_some(&explicit_target_document_ids);
+        (!targeted_document_ids.is_empty()).then_some(&targeted_document_ids);
 
     let bundle = match plan.planned_mode {
         RuntimeQueryMode::Document => {
@@ -317,6 +427,7 @@ async fn retrieve_structured_query(
                 candidate_limit,
                 question_embedding,
                 document_index,
+                query_ir,
             )
             .await?;
             RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks }
@@ -366,6 +477,7 @@ async fn retrieve_structured_query(
                 candidate_limit,
                 question_embedding,
                 document_index,
+                query_ir,
             )
             .await?;
             bundle
@@ -404,6 +516,7 @@ async fn retrieve_structured_query(
                 candidate_limit,
                 question_embedding,
                 document_index,
+                query_ir,
             )
             .await?;
             local
@@ -413,7 +526,7 @@ async fn retrieve_structured_query(
     Ok(StructuredQueryRetrievalStage { planning, bundle })
 }
 
-async fn rerank_structured_query(
+pub(crate) async fn rerank_structured_query(
     state: &AppState,
     question: &str,
     mut retrieval: StructuredQueryRetrievalStage,
@@ -441,8 +554,10 @@ async fn rerank_structured_query(
 async fn assemble_structured_query(
     state: &AppState,
     question: &str,
+    query_ir: &crate::domains::query_ir::QueryIR,
     mut rerank: StructuredQueryRerankStage,
     _include_debug: bool,
+    focused_document_id: Option<Uuid>,
 ) -> anyhow::Result<StructuredQueryAssemblyStage> {
     let plan = &rerank.retrieval.planning.plan;
     let bundle = &mut rerank.retrieval.bundle;
@@ -451,12 +566,14 @@ async fn assemble_structured_query(
         &bundle.chunks,
         &rerank.retrieval.planning.document_index,
         plan.top_k,
+        focused_document_id,
     )
     .await;
     let pagination_requested = question_mentions_pagination(question);
-    let literal_focus_keywords = technical_literal_focus_keywords(question, None);
+    let literal_focus_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let technical_literal_chunks = select_technical_literal_chunks(
         question,
+        query_ir,
         &bundle.chunks,
         rerank.retrieval.planning.technical_literal_intent,
         plan.top_k,
@@ -464,7 +581,7 @@ async fn assemble_structured_query(
         pagination_requested,
     );
     let technical_literal_groups =
-        collect_technical_literal_groups(question, &technical_literal_chunks);
+        collect_technical_literal_groups(question, query_ir, &technical_literal_chunks);
     let technical_literals_text =
         render_exact_technical_literals_section(&technical_literal_groups);
     truncate_bundle(bundle, plan.top_k);

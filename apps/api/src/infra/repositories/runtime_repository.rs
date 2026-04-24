@@ -177,6 +177,8 @@ pub struct NewRuntimeStageRecord<'a> {
     pub attempt_no: i32,
     pub stage_state: &'a str,
     pub deterministic: bool,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
     pub input_summary_json: serde_json::Value,
     pub output_summary_json: serde_json::Value,
     pub failure_code: Option<&'a str>,
@@ -384,7 +386,7 @@ pub async fn create_runtime_stage_record(
             failure_code, failure_summary_redacted
          ) values (
             $1, $2, $3::runtime_stage_kind, $4, $5, $6::runtime_stage_state, $7,
-            now(), now(), $8, $9, $10, $11
+            $8, $9, $10, $11, $12, $13
          )
          returning
             id,
@@ -408,6 +410,8 @@ pub async fn create_runtime_stage_record(
     .bind(input.attempt_no)
     .bind(input.stage_state)
     .bind(input.deterministic)
+    .bind(input.started_at)
+    .bind(input.completed_at)
     .bind(input.input_summary_json.clone())
     .bind(input.output_summary_json.clone())
     .bind(input.failure_code)

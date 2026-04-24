@@ -130,26 +130,22 @@ pub(super) fn build_mcp_search_subjects(
     subjects
 }
 
-pub(super) fn search_scope_from_request(
-    auth: &AuthContext,
-    library_ids: Option<&[Uuid]>,
-) -> McpAuditScope {
-    McpAuditScope {
-        workspace_id: auth.workspace_id,
-        library_id: library_ids.and_then(single_scope_id),
-        document_id: None,
-    }
-}
-
 pub(super) fn search_scope_from_response(
     auth: &AuthContext,
     payload: &McpSearchDocumentsResponse,
 ) -> McpAuditScope {
+    let library_ids = payload
+        .hits
+        .iter()
+        .map(|hit| hit.library_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     McpAuditScope {
         workspace_id: auth
             .workspace_id
             .or_else(|| payload.hits.first().map(|hit| hit.workspace_id)),
-        library_id: single_scope_id(&payload.library_ids),
+        library_id: single_scope_id(&library_ids),
         document_id: None,
     }
 }
@@ -176,5 +172,15 @@ fn sort_and_dedup_subjects(subjects: &mut Vec<AppendAuditEventSubjectCommand>) {
 }
 
 fn single_scope_id(values: &[Uuid]) -> Option<Uuid> {
-    (values.len() == 1).then_some(values[0])
+    // `then_some(values[0])` evaluates the argument eagerly, which
+    // panics with an out-of-bounds index when `values.len() == 0`.
+    // Observed in production: an MCP tool-call escalation asked the
+    // audit service to record a turn against a zero-scope token,
+    // the eager index panicked, nginx returned 502 and the backend
+    // lost the response. The `match` keeps the short-circuit lazy
+    // and explicit.
+    match values {
+        [single] => Some(*single),
+        _ => None,
+    }
 }

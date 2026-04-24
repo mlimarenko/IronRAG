@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
+use futures::stream::{self, StreamExt};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
@@ -23,6 +24,11 @@ use crate::{
     services::knowledge::service::RefreshKnowledgeLibraryGenerationCommand,
 };
 
+/// Per-batch size used for chunk embedding requests. Keeps each call below
+/// the typical 8k-token provider soft cap even when chunks run long and
+/// reduces the blast radius of one bad chunk failing the whole revision.
+const CHUNK_EMBEDDING_BATCH_SIZE: usize = 16;
+
 const VECTOR_KIND_CHUNK: &str = "chunk_embedding";
 const VECTOR_KIND_ENTITY: &str = "entity_embedding";
 const FACT_FETCH_MULTIPLIER: usize = 2;
@@ -34,6 +40,19 @@ pub struct ChunkEmbeddingWrite {
     pub model_catalog_id: Uuid,
     pub embedding_vector: Vec<f32>,
     pub active: bool,
+}
+
+/// Outcome of an ingest-time chunk-embed call for a single revision.
+/// Feeds the `embed_chunk` stage event (chunk count, elapsed, billing).
+#[derive(Debug, Clone, Default)]
+pub struct EmbedChunksStageOutcome {
+    pub chunks_embedded: usize,
+    pub usage_json: Option<serde_json::Value>,
+    pub provider_kind: Option<String>,
+    pub model_name: Option<String>,
+    pub prompt_tokens: Option<i32>,
+    pub completion_tokens: Option<i32>,
+    pub total_tokens: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,6 +318,215 @@ impl SearchService {
         Ok(())
     }
 
+    /// Embeds every chunk of a single revision using the library's active
+    /// EmbedChunk binding, persists the vectors into Arango's
+    /// `knowledge_chunk_vector` collection, and returns per-stage usage
+    /// for billing + stage-event reporting.
+    ///
+    /// Called inline from the ingest worker and inline-mutation pipelines
+    /// so a newly readable revision gets queryable vectors before graph
+    /// extraction runs. The revision's `vector_state` / library's
+    /// `active_vector_generation` only flip to "ready" when this returns
+    /// a matching chunks_embedded count — no silent "pretend ready"
+    /// divergence between revision metadata and actual vector inventory.
+    pub async fn embed_chunks_for_revision(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        revision_id: Uuid,
+    ) -> Result<EmbedChunksStageOutcome> {
+        let revision = state
+            .arango_document_store
+            .get_revision(revision_id)
+            .await
+            .with_context(|| format!("failed to load revision {revision_id}"))?
+            .ok_or_else(|| anyhow!("knowledge revision {revision_id} not found"))?;
+        let chunks = state
+            .arango_document_store
+            .list_chunks_by_revision(revision_id)
+            .await
+            .with_context(|| format!("failed to list chunks for revision {revision_id}"))?;
+        if chunks.is_empty() {
+            return Ok(EmbedChunksStageOutcome::default());
+        }
+
+        let binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
+            .await?
+            .ok_or_else(|| {
+                anyhow!("active embedding binding is not configured for library {library_id}")
+            })?;
+        let model_catalog_id = binding.model_catalog_id;
+        let embedding_model_key = model_catalog_id.to_string();
+        let parallelism = state.settings.ingestion_embedding_parallelism.max(1);
+        let freshness_generation = revision.revision_number;
+
+        let provider_kind_owned = binding.provider_kind.clone();
+        let model_name_owned = binding.model_name.clone();
+        let api_key_owned = binding.api_key.clone();
+        let base_url_owned = binding.provider_base_url.clone();
+
+        type ChunkBatch = Vec<usize>;
+        let mut batches: Vec<ChunkBatch> = Vec::new();
+        let mut current: ChunkBatch = Vec::with_capacity(CHUNK_EMBEDDING_BATCH_SIZE);
+        for index in 0..chunks.len() {
+            current.push(index);
+            if current.len() == CHUNK_EMBEDDING_BATCH_SIZE {
+                batches.push(std::mem::replace(
+                    &mut current,
+                    Vec::with_capacity(CHUNK_EMBEDDING_BATCH_SIZE),
+                ));
+            }
+        }
+        if !current.is_empty() {
+            batches.push(current);
+        }
+
+        let chunks_ref = &chunks;
+        let batch_responses = stream::iter(batches.into_iter().map(|batch| {
+            let provider_kind = provider_kind_owned.clone();
+            let model_name = model_name_owned.clone();
+            let api_key = api_key_owned.clone();
+            let base_url = base_url_owned.clone();
+            async move {
+                let inputs: Vec<String> =
+                    batch.iter().map(|index| chunks_ref[*index].normalized_text.clone()).collect();
+                let first_offset = batch.first().copied().unwrap_or_default();
+                let response = state
+                    .llm_gateway
+                    .embed_many(EmbeddingBatchRequest {
+                        provider_kind,
+                        model_name,
+                        inputs,
+                        api_key_override: api_key,
+                        base_url_override: base_url,
+                    })
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to embed chunk batch for revision {revision_id} starting at offset {first_offset}"
+                        )
+                    })?;
+                anyhow::Ok((batch, response))
+            }
+        }))
+        .buffer_unordered(parallelism)
+        .collect::<Vec<_>>()
+        .await;
+
+        let mut prompt_token_sum: i64 = 0;
+        let mut completion_token_sum: i64 = 0;
+        let mut total_token_sum: i64 = 0;
+        let mut saw_prompt = false;
+        let mut saw_completion = false;
+        let mut saw_total = false;
+        let mut chunks_embedded = 0usize;
+
+        for batch_result in batch_responses {
+            let (batch, batch_response) = batch_result?;
+            if batch_response.embeddings.len() != batch.len() {
+                bail!(
+                    "embedding batch returned {} vectors for {} chunks",
+                    batch_response.embeddings.len(),
+                    batch.len(),
+                );
+            }
+            if let Some(prompt) =
+                batch_response.usage_json.get("prompt_tokens").and_then(|v| v.as_i64())
+            {
+                prompt_token_sum += prompt;
+                saw_prompt = true;
+            }
+            if let Some(completion) =
+                batch_response.usage_json.get("completion_tokens").and_then(|v| v.as_i64())
+            {
+                completion_token_sum += completion;
+                saw_completion = true;
+            }
+            if let Some(total) =
+                batch_response.usage_json.get("total_tokens").and_then(|v| v.as_i64())
+            {
+                total_token_sum += total;
+                saw_total = true;
+            }
+
+            let mut batch_rows: Vec<KnowledgeChunkVectorRow> = Vec::with_capacity(batch.len());
+            for (chunk_index, vector) in batch.iter().zip(batch_response.embeddings.iter()) {
+                let chunk = &chunks[*chunk_index];
+                batch_rows.push(KnowledgeChunkVectorRow {
+                    key: build_chunk_vector_key(
+                        chunk.chunk_id,
+                        model_catalog_id,
+                        freshness_generation,
+                    ),
+                    arango_id: None,
+                    arango_rev: None,
+                    vector_id: Uuid::now_v7(),
+                    workspace_id: chunk.workspace_id,
+                    library_id: chunk.library_id,
+                    chunk_id: chunk.chunk_id,
+                    revision_id: chunk.revision_id,
+                    embedding_model_key: embedding_model_key.clone(),
+                    vector_kind: VECTOR_KIND_CHUNK.to_string(),
+                    dimensions: embedding_dimensions(vector.as_slice()).with_context(|| {
+                        format!(
+                            "failed to resolve chunk embedding dimensions for {}",
+                            chunk.chunk_id
+                        )
+                    })?,
+                    vector: vector.clone(),
+                    freshness_generation,
+                    created_at: Utc::now(),
+                });
+            }
+            // Collapse N sequential `upsert_chunk_vector` AQLs into one
+            // bulk FOR/UPSERT round-trip per embedding batch.
+            if !batch_rows.is_empty() {
+                state
+                    .arango_search_store
+                    .upsert_chunk_vectors_bulk(&batch_rows)
+                    .await
+                    .context("failed to bulk-persist chunk vectors")?;
+                chunks_embedded += batch_rows.len();
+            }
+        }
+
+        let prompt_tokens = saw_prompt.then(|| i32::try_from(prompt_token_sum).unwrap_or(i32::MAX));
+        let completion_tokens =
+            saw_completion.then(|| i32::try_from(completion_token_sum).unwrap_or(i32::MAX));
+        let total_tokens = if saw_total {
+            Some(i32::try_from(total_token_sum).unwrap_or(i32::MAX))
+        } else if saw_prompt || saw_completion {
+            Some(
+                i32::try_from(prompt_token_sum.saturating_add(completion_token_sum))
+                    .unwrap_or(i32::MAX),
+            )
+        } else {
+            None
+        };
+
+        let usage_json = serde_json::json!({
+            "provider_kind": binding.provider_kind,
+            "model_name": binding.model_name,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "chunks_embedded": chunks_embedded,
+        });
+
+        Ok(EmbedChunksStageOutcome {
+            chunks_embedded,
+            usage_json: Some(usage_json),
+            provider_kind: Some(binding.provider_kind),
+            model_name: Some(binding.model_name),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        })
+    }
+
     pub async fn rebuild_chunk_embeddings(
         &self,
         state: &AppState,
@@ -313,6 +541,7 @@ impl SearchService {
                 anyhow!("active embedding binding is not configured for library {}", library_id)
             })?;
         let model_catalog_id = embedding_binding.model_catalog_id;
+        let embedding_model_key = model_catalog_id.to_string();
         let chunks = list_knowledge_chunks_by_library(state, library_id)
             .await
             .context("failed to load knowledge chunks for chunk embedding rebuild")?;
@@ -320,70 +549,163 @@ impl SearchService {
             return Ok(0);
         }
 
+        // Resolve per-chunk freshness generation up-front so the parallel
+        // embed path doesn't stack N+1 `get_revision` reads inside each
+        // batch. Falls back to `chunk.text_generation`, then to the
+        // revision number fetched once per distinct revision.
+        let mut revision_number_cache: std::collections::HashMap<Uuid, i64> =
+            std::collections::HashMap::new();
+        let mut freshness_per_chunk: Vec<i64> = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            if let Some(generation) = chunk.vector_generation.or(chunk.text_generation) {
+                freshness_per_chunk.push(generation);
+                continue;
+            }
+            let cached = revision_number_cache.get(&chunk.revision_id).copied();
+            let rn = if let Some(rn) = cached {
+                rn
+            } else {
+                let revision = state
+                    .arango_document_store
+                    .get_revision(chunk.revision_id)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load revision {} for chunk generation",
+                            chunk.revision_id
+                        )
+                    })?
+                    .ok_or_else(|| anyhow!("knowledge revision {} not found", chunk.revision_id))?;
+                revision_number_cache.insert(chunk.revision_id, revision.revision_number);
+                revision.revision_number
+            };
+            freshness_per_chunk.push(rn);
+        }
+
+        let parallelism = state.settings.ingestion_embedding_parallelism.max(1);
+        let provider_kind_owned = embedding_binding.provider_kind.clone();
+        let model_name_owned = embedding_binding.model_name.clone();
+        let api_key_owned = embedding_binding.api_key.clone();
+        let base_url_owned = embedding_binding.provider_base_url.clone();
+
+        type ChunkBatch = Vec<usize>;
+        let mut batches: Vec<ChunkBatch> = Vec::new();
+        let mut current: ChunkBatch = Vec::with_capacity(CHUNK_EMBEDDING_BATCH_SIZE);
+        for index in 0..chunks.len() {
+            current.push(index);
+            if current.len() == CHUNK_EMBEDDING_BATCH_SIZE {
+                batches.push(std::mem::replace(
+                    &mut current,
+                    Vec::with_capacity(CHUNK_EMBEDDING_BATCH_SIZE),
+                ));
+            }
+        }
+        if !current.is_empty() {
+            batches.push(current);
+        }
+
+        // Each task embeds one batch AND persists its vectors before
+        // returning — so the outer `collect` sees already-upserted
+        // batches and only has to fold per-batch counters. Previous
+        // version collected all embed futures first and only upserted
+        // in a serial second pass, so no vectors landed in Arango
+        // during the embedding phase — a 15+ min window where queries
+        // saw zero hits even though the backfill was "working".
+        let chunks_ref = &chunks;
+        let freshness_ref = &freshness_per_chunk;
+        let embedding_model_key_ref = &embedding_model_key;
+        let search_store = &state.arango_search_store;
+        let batch_results = stream::iter(batches.into_iter().map(|batch| {
+            let provider_kind = provider_kind_owned.clone();
+            let model_name = model_name_owned.clone();
+            let api_key = api_key_owned.clone();
+            let base_url = base_url_owned.clone();
+            async move {
+                let inputs: Vec<String> =
+                    batch.iter().map(|idx| chunks_ref[*idx].normalized_text.clone()).collect();
+                let first_offset = batch.first().copied().unwrap_or_default();
+                let response = state
+                    .llm_gateway
+                    .embed_many(EmbeddingBatchRequest {
+                        provider_kind,
+                        model_name,
+                        inputs,
+                        api_key_override: api_key,
+                        base_url_override: base_url,
+                    })
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to rebuild chunk embeddings (batch starting at offset {first_offset})"
+                        )
+                    })?;
+                if response.embeddings.len() != batch.len() {
+                    bail!(
+                        "embedding batch returned {} vectors for {} chunks",
+                        response.embeddings.len(),
+                        batch.len(),
+                    );
+                }
+
+                let mut local_touched = Vec::new();
+                let mut local_max_gen: Option<i64> = None;
+                for (index, embedding) in batch.iter().zip(response.embeddings.iter()) {
+                    let chunk = &chunks_ref[*index];
+                    let freshness_generation = freshness_ref[*index];
+                    let row = KnowledgeChunkVectorRow {
+                        key: build_chunk_vector_key(
+                            chunk.chunk_id,
+                            model_catalog_id,
+                            freshness_generation,
+                        ),
+                        arango_id: None,
+                        arango_rev: None,
+                        vector_id: Uuid::now_v7(),
+                        workspace_id: chunk.workspace_id,
+                        library_id: chunk.library_id,
+                        chunk_id: chunk.chunk_id,
+                        revision_id: chunk.revision_id,
+                        embedding_model_key: embedding_model_key_ref.clone(),
+                        vector_kind: VECTOR_KIND_CHUNK.to_string(),
+                        dimensions: embedding_dimensions(embedding.as_slice()).with_context(
+                            || {
+                                format!(
+                                    "failed to resolve rebuilt chunk vector dimensions for {}",
+                                    chunk.chunk_id
+                                )
+                            },
+                        )?,
+                        vector: embedding.clone(),
+                        freshness_generation,
+                        created_at: Utc::now(),
+                    };
+                    search_store.upsert_chunk_vector(&row).await.with_context(|| {
+                        format!("failed to persist rebuilt chunk vector for {}", chunk.chunk_id)
+                    })?;
+                    local_touched.push(chunk.revision_id);
+                    local_max_gen = Some(local_max_gen.map_or(freshness_generation, |current| {
+                        current.max(freshness_generation)
+                    }));
+                }
+                anyhow::Ok((batch.len(), local_touched, local_max_gen))
+            }
+        }))
+        .buffer_unordered(parallelism)
+        .collect::<Vec<_>>()
+        .await;
+
         let mut touched_revision_ids = BTreeSet::new();
         let mut max_vector_generation = None::<i64>;
         let mut rebuilt = 0usize;
-        for chunk_batch in chunks.chunks(64) {
-            let batch_response = state
-                .llm_gateway
-                .embed_many(EmbeddingBatchRequest {
-                    provider_kind: embedding_binding.provider_kind.clone(),
-                    model_name: embedding_binding.model_name.clone(),
-                    inputs: chunk_batch.iter().map(|chunk| chunk.normalized_text.clone()).collect(),
-                    api_key_override: embedding_binding.api_key.clone(),
-                    base_url_override: embedding_binding.provider_base_url.clone(),
-                })
-                .await
-                .context("failed to rebuild chunk embeddings")?;
-            if batch_response.embeddings.len() != chunk_batch.len() {
-                return Err(anyhow!(
-                    "embedding batch returned {} vectors for {} chunks",
-                    batch_response.embeddings.len(),
-                    chunk_batch.len()
-                ));
+        for batch_result in batch_results {
+            let (count, local_touched, local_max_gen) = batch_result?;
+            rebuilt += count;
+            for revision_id in local_touched {
+                touched_revision_ids.insert(revision_id);
             }
-
-            for (chunk, embedding) in chunk_batch.iter().zip(batch_response.embeddings.iter()) {
-                let freshness_generation =
-                    resolve_chunk_vector_generation(state, chunk).await.with_context(|| {
-                        format!("failed to resolve chunk vector generation for {}", chunk.chunk_id)
-                    })?;
-                let row = KnowledgeChunkVectorRow {
-                    key: build_chunk_vector_key(
-                        chunk.chunk_id,
-                        model_catalog_id,
-                        freshness_generation,
-                    ),
-                    arango_id: None,
-                    arango_rev: None,
-                    vector_id: Uuid::now_v7(),
-                    workspace_id: chunk.workspace_id,
-                    library_id: chunk.library_id,
-                    chunk_id: chunk.chunk_id,
-                    revision_id: chunk.revision_id,
-                    embedding_model_key: model_catalog_id.to_string(),
-                    vector_kind: VECTOR_KIND_CHUNK.to_string(),
-                    dimensions: embedding_dimensions(embedding.as_slice()).with_context(|| {
-                        format!(
-                            "failed to resolve rebuilt chunk vector dimensions for {}",
-                            chunk.chunk_id
-                        )
-                    })?,
-                    vector: embedding.clone(),
-                    freshness_generation,
-                    created_at: Utc::now(),
-                };
-                let _ = state.arango_search_store.upsert_chunk_vector(&row).await.with_context(
-                    || format!("failed to persist rebuilt chunk vector for {}", chunk.chunk_id),
-                )?;
-                self.activate_chunk_embedding_index(state, chunk.chunk_id, model_catalog_id)
-                    .await?;
-                touched_revision_ids.insert(chunk.revision_id);
-                max_vector_generation = Some(
-                    max_vector_generation
-                        .map_or(freshness_generation, |current| current.max(freshness_generation)),
-                );
-                rebuilt += 1;
+            if let Some(gen_value) = local_max_gen {
+                max_vector_generation =
+                    Some(max_vector_generation.map_or(gen_value, |current| current.max(gen_value)));
             }
         }
 

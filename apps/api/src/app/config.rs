@@ -479,7 +479,13 @@ fn settings_config_builder()
         .set_default("arangodb_database", "ironrag")?
         .set_default("arangodb_username", "root")?
         .set_default("arangodb_password", "ironrag-dev")?
-        .set_default("arangodb_request_timeout_seconds", 15)?
+        // 15s was too tight on reference libraries: the two Arango
+        // cursors called per turn (`aggregate_library_generation_signals`
+        // and `list_documents_by_library`) each push past 15s under
+        // ingest-concurrent load, surfacing as `error sending request
+        // for url ... /_api/cursor`. 30s covers the observed tail
+        // without masking genuine failures.
+        .set_default("arangodb_request_timeout_seconds", 30)?
         .set_default("arangodb_bootstrap_collections", true)?
         .set_default("arangodb_bootstrap_views", true)?
         .set_default("arangodb_bootstrap_graph", true)?

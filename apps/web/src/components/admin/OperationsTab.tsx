@@ -380,11 +380,6 @@ export function OperationsTab({
             <Activity className="h-4 w-4 text-muted-foreground" />
             {t('admin.operations')}
           </h2>
-          {opsStatusMeta && (
-            <span className={`status-badge ${opsStatusMeta.badgeClass}`}>
-              {opsStatusMeta.label}
-            </span>
-          )}
           {opsError && <span className="text-xs text-status-failed">{opsError}</span>}
         </div>
         <div className="flex items-center gap-2">
@@ -424,21 +419,6 @@ export function OperationsTab({
               </div>
             ))}
           </div>
-          {opsActionItems.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {opsActionItems.map((item) => (
-                <button
-                  key={item.key}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${getOperationsActionToneClass(item.tone)}`}
-                  onClick={() => item.actionPath && navigate(item.actionPath)}
-                >
-                  {item.tone === 'failed' ? <XCircle className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
-                  {item.title}
-                  {item.actionPath && <ExternalLink className="h-3 w-3 ml-1 opacity-60" />}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       ) : !opsLoading && !opsError && (
         <div className="text-sm text-muted-foreground text-center p-6 border rounded-xl bg-surface-sunken mb-4 shrink-0">
@@ -528,13 +508,12 @@ export function OperationsTab({
                           </div>
                         </td>
                         <td className="px-3 py-2.5">
-                          <div className="font-semibold text-xs leading-tight">{evt.message}</div>
-                          <div className="text-[11px] text-muted-foreground font-mono mt-0.5">{evt.action}</div>
-                          {evt.assistantCall && (
-                            <div className="mt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                              {t('admin.auditAssistantLabel')}
-                            </div>
-                          )}
+                          <div
+                            className="font-semibold text-xs leading-tight truncate max-w-md"
+                            title={evt.message}
+                          >
+                            {evt.message.split(' | ')[0]}
+                          </div>
                         </td>
                         <td className="px-3 py-2.5 text-xs text-muted-foreground font-medium whitespace-nowrap">{evt.actor}</td>
                         <td className="px-3 py-2.5 text-xs whitespace-nowrap">
@@ -547,16 +526,11 @@ export function OperationsTab({
                         </td>
                         <td className="px-3 py-2.5 text-xs text-muted-foreground max-w-64">
                           {evt.assistantCall ? (
-                            <div className="space-y-0.5">
-                              <div className="font-medium text-foreground truncate" title={assistantModels}>
-                                {assistantModels}
-                              </div>
-                              <div className="truncate" title={assistantCost}>
-                                {t('admin.auditAssistantMeta', {
-                                  cost: assistantCost,
-                                  count: evt.assistantCall.providerCallCount,
-                                })}
-                              </div>
+                            <div className="truncate" title={assistantModels}>
+                              {t('admin.auditAssistantMeta', {
+                                cost: assistantCost,
+                                count: evt.assistantCall.providerCallCount,
+                              })}
                             </div>
                           ) : (
                             <div className="truncate" title={evt.subjectSummary ?? undefined}>

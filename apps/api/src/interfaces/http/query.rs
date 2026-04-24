@@ -28,6 +28,7 @@ use crate::{
         QueryRuntimeStageSummary, QueryTurn, QueryVerificationState, QueryVerificationWarning,
         TechnicalFactReference,
     },
+    infra::repositories::catalog_repository,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -38,6 +39,7 @@ use crate::{
     },
     services::{
         iam::audit::{AppendAuditEventCommand, AppendQueryExecutionAuditCommand},
+        mcp::access::library_catalog_ref,
         query::service::{
             CreateConversationCommand, ExecuteConversationTurnCommand, QueryTurnProgressEvent,
         },
@@ -124,15 +126,15 @@ struct AssistantSystemPromptQuery {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AssistantSystemPromptResponse {
-    /// Raw template with the `{LIBRARY_ID}` placeholder. This is what
+    /// Raw template with the `{LIBRARY_REF}` placeholder. This is what
     /// external MCP clients (Claude Desktop, Codex, Cursor, Continue.dev,
     /// …) should paste into their own system prompt when attaching
     /// IronRAG's MCP server, so every agent — in-app or external — shares
     /// the same grounding discipline.
     template: String,
-    /// Template rendered with the requested `libraryId` substituted in,
-    /// when one was passed. Same text the in-app assistant agent uses for
-    /// that library.
+    /// Template rendered with the canonical `<workspace>/<library>` ref
+    /// of the requested `libraryId`, when one was passed. Same text the
+    /// in-app assistant agent uses for that library.
     rendered: Option<String>,
     library_id: Option<Uuid>,
 }
@@ -160,8 +162,17 @@ async fn get_assistant_system_prompt(
     Query(query): Query<AssistantSystemPromptQuery>,
 ) -> Result<Json<AssistantSystemPromptResponse>, ApiError> {
     let rendered = if let Some(library_id) = query.library_id {
-        let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_QUERY_READ).await?;
-        Some(crate::services::query::assistant_prompt::render(library_id, None))
+        let library =
+            load_library_and_authorize(&auth, &state, library_id, POLICY_QUERY_READ).await?;
+        let workspace = catalog_repository::get_workspace_by_id(
+            &state.persistence.postgres,
+            library.workspace_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("workspace", library.workspace_id))?;
+        let library_ref = library_catalog_ref(&workspace.slug, &library.slug);
+        Some(crate::services::query::assistant_prompt::render(&library_ref, None))
     } else {
         None
     };
@@ -227,6 +238,7 @@ async fn create_session(
                 library_id: payload.library_id,
                 created_by_principal_id: Some(auth.principal_id),
                 title: payload.title,
+                request_surface: "ui".to_string(),
             },
         )
         .await?;
@@ -305,6 +317,7 @@ async fn create_session_turn(
                 conversation_id: session_id,
                 author_principal_id: Some(auth.principal_id),
                 content_text: payload.content_text,
+                external_prior_turns: Vec::new(),
                 top_k: payload.top_k.unwrap_or(8),
                 include_debug: payload.include_debug.unwrap_or(false),
                 auth: auth.clone(),
@@ -745,6 +758,7 @@ async fn append_query_execution_audit(
                 context_bundle_id: outcome.context_bundle_id,
                 workspace_id: outcome.execution.workspace_id,
                 library_id: outcome.execution.library_id,
+                question_preview: Some(outcome.request_turn.content_text.clone()),
             },
         )
         .await
@@ -782,6 +796,7 @@ fn create_session_turn_stream(
                     conversation_id: session_id,
                     author_principal_id: Some(principal_id),
                     content_text: payload.content_text,
+                    external_prior_turns: Vec::new(),
                     top_k: payload.top_k.unwrap_or(8),
                     include_debug: payload.include_debug.unwrap_or(false),
                     auth: auth.clone(),
@@ -810,8 +825,15 @@ fn create_session_turn_stream(
         receiver.recv().await.map(|frame| (Ok(frame.into_event()), receiver))
     });
 
+    // Keep-alive interval is intentionally short. Firefox Enhanced
+    // Tracking Protection (and some corporate proxies) time out idle
+    // fetch streams around 10 s; retrieval + context assembly can eat
+    // 15-20 s before the first real `runtime`/`delta` frame, so we
+    // need a filler frame under that ceiling. 3 s is cheap — comment
+    // frames are ~15 bytes — and keeps the long-running turn stream
+    // intact even when the retrieval stage takes its full budget.
     Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(3)).text("keep-alive"))
 }
 
 enum QueryTurnStreamFrame {

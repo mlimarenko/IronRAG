@@ -153,6 +153,7 @@ struct McpKnowledgeFixture {
     temp_arango: TempArangoDatabase,
     workspace_id: Uuid,
     library_id: Uuid,
+    library_ref: String,
 }
 
 struct SeededGraphFixture {
@@ -223,6 +224,7 @@ impl McpKnowledgeFixture {
             temp_arango,
             workspace_id: workspace.id,
             library_id: library.id,
+            library_ref: format!("{}/{}", workspace.slug, library.slug),
         })
     }
 
@@ -733,7 +735,7 @@ async fn graph_tools_return_ranked_coherent_subgraphs_instead_of_orphaned_slices
                 json!({
                     "name": "search_entities",
                     "arguments": {
-                        "libraryId": fixture.library_id,
+                        "library": fixture.library_ref.clone(),
                         "query": "Orion",
                         "limit": 2,
                     },
@@ -754,7 +756,7 @@ async fn graph_tools_return_ranked_coherent_subgraphs_instead_of_orphaned_slices
                 json!({
                     "name": "get_graph_topology",
                     "arguments": {
-                        "libraryId": fixture.library_id,
+                        "library": fixture.library_ref.clone(),
                         "limit": 2,
                     },
                 }),
@@ -817,7 +819,7 @@ async fn graph_tools_return_ranked_coherent_subgraphs_instead_of_orphaned_slices
                 json!({
                     "name": "list_relations",
                     "arguments": {
-                        "libraryId": fixture.library_id,
+                        "library": fixture.library_ref.clone(),
                         "limit": 2,
                     },
                 }),
@@ -867,7 +869,7 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
                 json!({
                     "name": "upload_documents",
                     "arguments": {
-                        "libraryId": fixture.library_id,
+                        "library": fixture.library_ref.clone(),
                         "documents": [{
                             "fileName": "mcp-knowledge-upload.txt",
                             "mimeType": "text/plain",
@@ -956,7 +958,7 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
                         "name": "search_documents",
                         "arguments": {
                             "query": "Shared async operation proof",
-                            "libraryIds": [fixture.library_id],
+                            "libraries": [fixture.library_ref.clone()],
                             "limit": 5,
                         },
                     }),
@@ -1000,7 +1002,7 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
                         "name": "search_documents",
                         "arguments": {
                             "query": "mcp-knowledge-upload.txt",
-                            "libraryIds": [fixture.library_id],
+                            "libraries": [fixture.library_ref.clone()],
                             "limit": 5,
                         },
                     }),
@@ -1039,7 +1041,7 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
                         "name": "search_documents",
                         "arguments": {
                             "query": "Upload Proof",
-                            "libraryIds": [fixture.library_id],
+                            "libraries": [fixture.library_ref.clone()],
                             "limit": 5,
                         },
                     }),

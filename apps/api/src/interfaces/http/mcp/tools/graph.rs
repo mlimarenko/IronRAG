@@ -22,12 +22,11 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Search knowledge graph entities by name or label within one library. Returns scored entity matches ordered by relevance.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId", "query"],
+                "required": ["library", "query"],
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Target library UUID."
+                        "description": "Target fully-qualified library ref."
                     },
                     "query": {
                         "type": "string",
@@ -46,12 +45,11 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Get the knowledge graph topology for one library, including documents, entities, relations, and document-entity links. Results are truncated by default (200 entities, 500 relations); use limit to control the entity cap.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId"],
+                "required": ["library"],
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Target library UUID."
+                        "description": "Target fully-qualified library ref."
                     },
                     "limit": {
                         "type": "integer",
@@ -66,12 +64,11 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Returns relations from the knowledge graph, ordered by support count.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId"],
+                "required": ["library"],
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Target library UUID."
+                        "description": "Target fully-qualified library ref."
                     },
                     "limit": {
                         "type": "integer",
@@ -86,12 +83,11 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Lists detected communities in the knowledge graph with their summaries, top entities, and sizes.",
             input_schema: json!({
                 "type": "object",
-                "required": ["libraryId"],
+                "required": ["library"],
                 "properties": {
-                    "libraryId": {
+                    "library": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Target library UUID."
+                        "description": "Target fully-qualified library ref."
                     },
                     "limit": {
                         "type": "integer",
@@ -123,18 +119,17 @@ pub(crate) async fn call_tool(
 async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpSearchEntitiesRequest>(arguments.clone()) {
         Ok(args) => {
-            let library_id = args.library_id;
             let limit = args.limit.unwrap_or(20).clamp(1, 200);
             match crate::services::mcp::access::authorize_library_for_mcp(
                 context.auth,
                 context.state,
-                library_id,
+                &args.library,
             )
             .await
             {
-                Ok(()) => match crate::services::mcp::access::search_entities(
+                Ok(library) => match crate::services::mcp::access::search_entities(
                     context.state,
-                    library_id,
+                    library.id,
                     &args.query,
                     limit,
                 )
@@ -150,7 +145,7 @@ async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                             Some(format!("entity search returned {} hit(s)", entities.len())),
                             Some(format!(
                                 "principal {} searched entities in library {}",
-                                context.auth.principal_id, library_id
+                                context.auth.principal_id, library.id
                             )),
                             Vec::new(),
                         )
@@ -161,8 +156,8 @@ async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                             context.request_id,
                             McpAuditActionKind::SearchEntities,
                             McpAuditScope {
-                                workspace_id: context.auth.workspace_id,
-                                library_id: Some(library_id),
+                                workspace_id: Some(library.workspace_id),
+                                library_id: Some(library.id),
                                 document_id: None,
                             },
                             json!({
@@ -183,7 +178,7 @@ async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                         McpAuditActionKind::SearchEntities,
                         McpAuditScope {
                             workspace_id: context.auth.workspace_id,
-                            library_id: Some(library_id),
+                            library_id: None,
                             document_id: None,
                         },
                         &error,
@@ -217,17 +212,16 @@ async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
 async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpGetGraphTopologyRequest>(arguments.clone()) {
         Ok(args) => {
-            let library_id = args.library_id;
             match crate::services::mcp::access::authorize_library_for_mcp(
                 context.auth,
                 context.state,
-                library_id,
+                &args.library,
             )
             .await
             {
-                Ok(()) => match crate::services::mcp::access::get_graph_topology(
+                Ok(library) => match crate::services::mcp::access::get_graph_topology(
                     context.state,
-                    library_id,
+                    library.id,
                     args.limit,
                 )
                 .await
@@ -242,7 +236,7 @@ async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> 
                             Some("graph topology loaded".to_string()),
                             Some(format!(
                                 "principal {} loaded graph topology for library {}",
-                                context.auth.principal_id, library_id
+                                context.auth.principal_id, library.id
                             )),
                             Vec::new(),
                         )
@@ -253,8 +247,8 @@ async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> 
                             context.request_id,
                             McpAuditActionKind::GetGraphTopology,
                             McpAuditScope {
-                                workspace_id: context.auth.workspace_id,
-                                library_id: Some(library_id),
+                                workspace_id: Some(library.workspace_id),
+                                library_id: Some(library.id),
                                 document_id: None,
                             },
                             json!({ "tool": "get_graph_topology" }),
@@ -269,8 +263,8 @@ async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> 
                             context.request_id,
                             McpAuditActionKind::GetGraphTopology,
                             McpAuditScope {
-                                workspace_id: context.auth.workspace_id,
-                                library_id: Some(library_id),
+                                workspace_id: Some(library.workspace_id),
+                                library_id: Some(library.id),
                                 document_id: None,
                             },
                             &error,
@@ -288,7 +282,7 @@ async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> 
                         McpAuditActionKind::GetGraphTopology,
                         McpAuditScope {
                             workspace_id: context.auth.workspace_id,
-                            library_id: Some(library_id),
+                            library_id: None,
                             document_id: None,
                         },
                         &error,
@@ -322,18 +316,17 @@ async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> 
 async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpListRelationsRequest>(arguments.clone()) {
         Ok(args) => {
-            let library_id = args.library_id;
             let limit = args.limit.unwrap_or(100).clamp(1, 500);
             match crate::services::mcp::access::authorize_library_for_mcp(
                 context.auth,
                 context.state,
-                library_id,
+                &args.library,
             )
             .await
             {
-                Ok(()) => match crate::services::mcp::access::list_relations(
+                Ok(library) => match crate::services::mcp::access::list_relations(
                     context.state,
-                    library_id,
+                    library.id,
                     limit,
                 )
                 .await
@@ -348,7 +341,7 @@ async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                             Some(format!("listed {} relation(s)", payload.len())),
                             Some(format!(
                                 "principal {} listed relations for library {}",
-                                context.auth.principal_id, library_id
+                                context.auth.principal_id, library.id
                             )),
                             Vec::new(),
                         )
@@ -359,8 +352,8 @@ async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                             context.request_id,
                             McpAuditActionKind::ListRelations,
                             McpAuditScope {
-                                workspace_id: context.auth.workspace_id,
-                                library_id: Some(library_id),
+                                workspace_id: Some(library.workspace_id),
+                                library_id: Some(library.id),
                                 document_id: None,
                             },
                             json!({
@@ -378,8 +371,8 @@ async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                             context.request_id,
                             McpAuditActionKind::ListRelations,
                             McpAuditScope {
-                                workspace_id: context.auth.workspace_id,
-                                library_id: Some(library_id),
+                                workspace_id: Some(library.workspace_id),
+                                library_id: Some(library.id),
                                 document_id: None,
                             },
                             &error,
@@ -397,7 +390,7 @@ async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                         McpAuditActionKind::ListRelations,
                         McpAuditScope {
                             workspace_id: context.auth.workspace_id,
-                            library_id: Some(library_id),
+                            library_id: None,
                             document_id: None,
                         },
                         &error,
@@ -431,18 +424,17 @@ async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpT
 async fn get_communities(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpGetCommunitiesRequest>(arguments.clone()) {
         Ok(args) => {
-            let library_id = args.library_id;
             let limit = args.limit.unwrap_or(50).clamp(1, 500);
             match crate::services::mcp::access::authorize_library_for_mcp(
                 context.auth,
                 context.state,
-                library_id,
+                &args.library,
             )
             .await
             {
-                Ok(()) => match crate::services::mcp::access::get_communities(
+                Ok(library) => match crate::services::mcp::access::get_communities(
                     context.state,
-                    library_id,
+                    library.id,
                     limit,
                 )
                 .await
@@ -454,8 +446,8 @@ async fn get_communities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                             context.request_id,
                             McpAuditActionKind::GetCommunities,
                             McpAuditScope {
-                                workspace_id: context.auth.workspace_id,
-                                library_id: Some(library_id),
+                                workspace_id: Some(library.workspace_id),
+                                library_id: Some(library.id),
                                 document_id: None,
                             },
                             json!({
@@ -473,8 +465,8 @@ async fn get_communities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                             context.request_id,
                             McpAuditActionKind::GetCommunities,
                             McpAuditScope {
-                                workspace_id: context.auth.workspace_id,
-                                library_id: Some(library_id),
+                                workspace_id: Some(library.workspace_id),
+                                library_id: Some(library.id),
                                 document_id: None,
                             },
                             &error,
@@ -492,7 +484,7 @@ async fn get_communities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                         McpAuditActionKind::GetCommunities,
                         McpAuditScope {
                             workspace_id: context.auth.workspace_id,
-                            library_id: Some(library_id),
+                            library_id: None,
                             document_id: None,
                         },
                         &error,

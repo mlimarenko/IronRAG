@@ -74,13 +74,21 @@ export function mapListItem(raw: RawDocumentListItem, t: TFunction): DocumentIte
   const fileName = safeDecode(raw.fileName);
   const fileType = deriveExtension(fileName, raw.fileType);
 
+  // Per-row cost arrives on every list response (see
+  // list_document_page_rows LATERAL on billing_execution_cost). A valid
+  // numeric value — including `0` — is preserved; only a missing /
+  // non-numeric value collapses to `null`. The render path renders
+  // `$0.000` for `0` and `—` for `null`, matching the prior UI.
+  const costValue = parseFloat(raw.cost);
+  const cost = Number.isFinite(costValue) ? costValue : null;
+
   return {
     id: raw.id,
     fileName,
     fileType,
     fileSize: raw.fileSize ?? 0,
     uploadedAt: raw.uploadedAt,
-    cost: null,
+    cost,
     status: raw.status,
     readiness: raw.readiness,
     stage: humanizeDocumentStage(raw.stage, t),

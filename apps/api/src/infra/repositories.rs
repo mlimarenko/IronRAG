@@ -39,8 +39,6 @@ mod runtime_graph_repository;
 mod runtime_graph_summary_repository;
 pub mod runtime_provider_repository;
 pub mod runtime_repository;
-#[allow(clippy::missing_errors_doc)]
-pub mod runtime_vector_repository;
 
 pub use self::catalog_repository::{
     get_library_source_truth_version, touch_library_source_truth_version,
@@ -49,7 +47,6 @@ pub use document_runtime_repository::*;
 pub use runtime_graph_repository::*;
 pub use runtime_graph_summary_repository::*;
 pub use runtime_provider_repository::*;
-pub use runtime_vector_repository::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

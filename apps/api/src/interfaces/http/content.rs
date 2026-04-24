@@ -251,6 +251,8 @@ fn map_document_list_entry(entry: ContentDocumentListEntry) -> ContentDocumentLi
         source_kind: entry.source_kind,
         source_uri: entry.source_uri,
         source_access: entry.source_access,
+        cost: entry.cost_total.to_string(),
+        cost_currency_code: entry.cost_currency_code,
     }
 }
 

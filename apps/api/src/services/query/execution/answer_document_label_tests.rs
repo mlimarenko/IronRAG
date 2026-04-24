@@ -46,6 +46,8 @@ fn focused_answer_document_id_prefers_explicit_extension_match() {
     let chunks = vec![
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: csv_id,
             document_label: "people-100.csv".to_string(),
             excerpt: String::new(),
@@ -54,6 +56,8 @@ fn focused_answer_document_id_prefers_explicit_extension_match() {
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id: xlsx_id,
             document_label: "people-100.xlsx".to_string(),
             excerpt: String::new(),
@@ -77,6 +81,8 @@ fn build_table_row_grounded_answer_supports_canonical_row_tokens() {
     let chunks = (1..=5)
         .map(|row_number| RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "sample-heavy-1.xls".to_string(),
             excerpt: String::new(),
@@ -99,6 +105,8 @@ fn build_table_row_grounded_answer_supports_russian_industry_synonym() {
     let document_id = Uuid::now_v7();
     let chunks = vec![RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "organizations-100.csv".to_string(),
         excerpt: String::new(),
@@ -124,6 +132,8 @@ fn build_table_row_grounded_answer_lists_values_for_targeted_single_value_sheets
     let chunks = vec![
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "sample-simple-2.xls".to_string(),
             excerpt: String::new(),
@@ -132,6 +142,8 @@ fn build_table_row_grounded_answer_lists_values_for_targeted_single_value_sheets
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "sample-simple-2.xls".to_string(),
             excerpt: String::new(),
@@ -169,6 +181,8 @@ fn build_table_summary_grounded_answer_reports_most_frequent_values() {
         .enumerate()
         .map(|(index, summary)| RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "organizations-100.csv".to_string(),
             excerpt: String::new(),
@@ -201,6 +215,8 @@ fn build_table_summary_grounded_answer_reports_no_single_most_frequent_value() {
         .into_iter()
         .map(|summary| RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "customers-100.csv".to_string(),
             excerpt: String::new(),
@@ -234,6 +250,8 @@ fn build_table_summary_grounded_answer_reports_average_values() {
         .into_iter()
         .map(|summary| RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "products-100.csv".to_string(),
             excerpt: String::new(),
@@ -261,6 +279,8 @@ fn build_table_summary_grounded_answer_reports_average_number_of_employees() {
         .into_iter()
         .map(|summary| RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "organizations-100.csv".to_string(),
             excerpt: String::new(),
@@ -284,6 +304,8 @@ fn build_table_summary_grounded_answer_derives_average_from_table_rows() {
     let chunks = (1..=4)
         .map(|value| RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "sample-heavy-1.xls".to_string(),
             excerpt: String::new(),
@@ -307,6 +329,8 @@ fn render_table_summary_chunk_section_derives_from_table_rows() {
     let chunks = vec![
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "sample-heavy-1.xls".to_string(),
             excerpt: String::new(),
@@ -315,6 +339,8 @@ fn render_table_summary_chunk_section_derives_from_table_rows() {
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
             document_id,
             document_label: "sample-heavy-1.xls".to_string(),
             excerpt: String::new(),

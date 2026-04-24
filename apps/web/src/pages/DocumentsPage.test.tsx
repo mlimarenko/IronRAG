@@ -87,6 +87,7 @@ function listPage(
     sourceKind?: string;
     sourceUri?: string;
     sourceAccess?: { kind: 'stored_document' | 'external_url'; href: string };
+    cost?: string;
   }>,
 ) {
   return {
@@ -106,6 +107,12 @@ function listPage(
       sourceKind: raw.sourceKind,
       sourceUri: raw.sourceUri,
       sourceAccess: raw.sourceAccess,
+      // Canonical per-row cost (0.3.2): emitted by the backend LATERAL
+      // on `billing_execution_cost` via `list_document_page_rows`.
+      // A raw `"0"` renders as `$0.000`; a missing / non-numeric value
+      // renders as `—`.
+      cost: raw.cost ?? '0',
+      costCurrencyCode: 'USD',
     })),
     nextCursor: null,
     totalCount: items.length,
@@ -255,24 +262,45 @@ describe('DocumentsPage', () => {
       'doc-1',
       '## Sheet1\n\n| Item | Qty |\n| --- | --- |\n| Widget | 9 |',
     );
-    expect(documentsApiMock.list).toHaveBeenCalledTimes(2);
+    // Canonical post-0.3.2 fetch budget for a render + refresh:
+    //   initial effect      → 2 calls (fetchPage + fetchAggregates,
+    //                          both hit `documentsApi.list`)
+    //   loadFirstPage after  → 2 calls (same split)
+    // Each flip through `documentsApi.list` is one indexed query; the
+    // old flow wrapped `includeTotal` into the page query, which ran a
+    // full-library status aggregate on every page change.
+    expect(documentsApiMock.list).toHaveBeenCalledTimes(4);
     expect(documentsApiMock.get).toHaveBeenCalledWith('doc-1');
   });
 
-  it('shows zero cost documents when billing returns an explicit zero row', async () => {
-    billingApiMock.getLibraryDocumentCosts.mockResolvedValue([
-      { documentId: 'doc-1', totalCost: '0', currencyCode: 'USD', providerCallCount: 0 },
-    ]);
+  it('shows zero cost documents as "$0.000" when the list row reports cost "0"', async () => {
+    // Canonical post-0.3.2 cost path: the backend list endpoint
+    // attributes cost per row via `billing_execution_cost`, so the
+    // frontend never calls `/billing/library-document-costs` during
+    // normal page rendering. A row with a literal "0" renders as
+    // "$0.000" (a billable execution landed with zero cost), a row
+    // with no cost at all renders as "—".
+    documentsApiMock.list.mockResolvedValue(
+      listPage([
+        { id: 'doc-1', fileName: 'inventory.xlsx', sourceKind: 'upload', cost: '0' },
+      ]),
+    );
 
     await renderPage();
 
     expect(container.textContent).toContain('$0.000');
+    // The library-wide total cost banner still uses the separate
+    // `/billing/library-cost-summary` endpoint; with a zero summary
+    // the banner stays hidden (rendered only when `totalCost > 0`).
+    expect(container.textContent).not.toContain('Total cost');
   });
 
-  it('shows the library-wide total cost instead of summing the visible page', async () => {
-    billingApiMock.getLibraryDocumentCosts.mockResolvedValue([
-      { documentId: 'doc-1', totalCost: '1.000', currencyCode: 'USD', providerCallCount: 1 },
-    ]);
+  it('shows the library-wide total cost banner alongside the per-row cost from the list payload', async () => {
+    documentsApiMock.list.mockResolvedValue(
+      listPage([
+        { id: 'doc-1', fileName: 'inventory.xlsx', sourceKind: 'upload', cost: '1.000' },
+      ]),
+    );
     billingApiMock.getLibraryCostSummary.mockResolvedValue({
       totalCost: '3.500',
       currencyCode: 'USD',
@@ -282,9 +310,13 @@ describe('DocumentsPage', () => {
 
     await renderPage();
 
+    // The list payload is the canonical source for per-row `cost`;
+    // the library-wide cost-summary endpoint feeds only the banner.
     expect(container.textContent).toContain('Total cost');
     expect(container.textContent).toContain('$3.500');
     expect(container.textContent).toContain('$1.000');
+    // Frontend no longer calls `/billing/library-document-costs` at all.
+    expect(billingApiMock.getLibraryDocumentCosts).not.toHaveBeenCalled();
   });
 
   it('loads code-like documents from raw source text instead of prepared segments', async () => {

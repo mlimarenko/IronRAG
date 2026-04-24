@@ -44,7 +44,6 @@ pub(crate) struct ResolvedDocumentState {
 #[derive(Debug, Clone)]
 pub(crate) struct McpSearchEmbeddingContext {
     pub(crate) model_catalog_id: Uuid,
-    pub(crate) freshness_generation: i64,
     pub(crate) query_vector: Vec<f32>,
 }
 

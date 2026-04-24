@@ -40,6 +40,11 @@ pub(super) const BATCH_MAX_DOCUMENT_IDS: usize = 100_000;
 /// Respectful throughput limit — not maximum parallelism.
 const BATCH_REPROCESS_DEFAULT_PARALLELISM: usize = 4;
 
+/// Default concurrency for child mutations inside a batch delete.
+/// Keep this lower than the foreground pool size because each delete
+/// briefly holds a document advisory lock and performs follow-up cleanup.
+const BATCH_DELETE_DEFAULT_PARALLELISM: usize = 4;
+
 /// Default total wall-clock budget for a batch rerun. The parent
 /// `ops_async_operation` is force-failed with `batch_timeout` when exceeded.
 const BATCH_REPROCESS_DEFAULT_TIMEOUT_SECS: u64 = 60 * 60;
@@ -60,23 +65,6 @@ pub(super) fn ensure_batch_document_id_limit(document_count: usize) -> Result<()
 #[serde(rename_all = "camelCase")]
 pub(super) struct BatchDeleteRequest {
     pub document_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct BatchDeleteResponse {
-    pub deleted_count: usize,
-    pub failed_count: usize,
-    pub results: Vec<BatchDeleteResult>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct BatchDeleteResult {
-    pub document_id: Uuid,
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,7 +97,7 @@ pub(super) struct BatchReprocessRequest {
     pub document_ids: Vec<Uuid>,
 }
 
-/// Canonical 202 Accepted response for `POST /content/documents/batch-reprocess`.
+/// Canonical 202 Accepted response for async batch document operations.
 ///
 /// The batch is executed on a background task; callers poll
 /// `GET /v1/ops/operations/{batchOperationId}` to observe progress and the
@@ -118,7 +106,7 @@ pub(super) struct BatchReprocessRequest {
 /// aggregated with a single indexed query.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchReprocessAcceptedResponse {
+pub(super) struct BatchDocumentOperationAcceptedResponse {
     pub batch_operation_id: Uuid,
     pub total: usize,
     pub library_id: Uuid,
@@ -129,82 +117,78 @@ pub(super) struct BatchReprocessAcceptedResponse {
     level = "info",
     name = "http.batch_delete_documents",
     skip_all,
-    fields(document_count = request.document_ids.len(), deleted_count, failed_count)
+    fields(document_count = request.document_ids.len(), batch_operation_id)
 )]
 pub(super) async fn batch_delete_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(request): Json<BatchDeleteRequest>,
-) -> Result<Json<BatchDeleteResponse>, ApiError> {
+) -> Result<(StatusCode, Json<BatchDocumentOperationAcceptedResponse>), ApiError> {
     let span = tracing::Span::current();
     ensure_batch_document_id_limit(request.document_ids.len())?;
 
-    // Fan out per-document authorize + admit_mutation with bounded
-    // concurrency. The previous sequential loop turned a 100-document
-    // batch into 200+ serialized DB round-trips; for the canonical
-    // fix we keep the same per-document authorization semantics (one
-    // bad doc can't leak info about others) but run them in parallel.
-    // `buffer_unordered` caps concurrency so we don't flood the pool.
-    const BATCH_CONCURRENCY: usize = 8;
-    let auth_ref = &auth;
-    let state_ref = &state;
-    let results: Vec<BatchDeleteResult> =
-        futures::stream::iter(request.document_ids.iter().copied())
-            .map(|document_id| async move {
-                match load_canonical_content_document_and_authorize(
-                    auth_ref,
-                    state_ref,
-                    document_id,
-                    POLICY_DOCUMENTS_WRITE,
-                )
-                .await
-                {
-                    Ok(document) => {
-                        match state_ref
-                            .canonical_services
-                            .content
-                            .admit_mutation(
-                                state_ref,
-                                AdmitMutationCommand {
-                                    workspace_id: document.workspace_id,
-                                    library_id: document.library_id,
-                                    document_id,
-                                    operation_kind: "delete".to_string(),
-                                    idempotency_key: None,
-                                    requested_by_principal_id: Some(auth_ref.principal_id),
-                                    request_surface: "rest".to_string(),
-                                    source_identity: None,
-                                    revision: None,
-                                    parent_async_operation_id: None,
-                                },
-                            )
-                            .await
-                        {
-                            Ok(_) => BatchDeleteResult { document_id, success: true, error: None },
-                            Err(error) => BatchDeleteResult {
-                                document_id,
-                                success: false,
-                                error: Some(error.to_string()),
-                            },
-                        }
-                    }
-                    Err(error) => BatchDeleteResult {
-                        document_id,
-                        success: false,
-                        error: Some(error.to_string()),
-                    },
-                }
-            })
-            .buffer_unordered(BATCH_CONCURRENCY)
-            .collect()
+    let document_ids: Vec<Uuid> = request.document_ids.clone();
+    let (workspace_id, library_id) =
+        resolve_single_library_for_documents(&auth, &state, &document_ids).await?;
+
+    let parent_operation = state
+        .canonical_services
+        .ops
+        .create_async_operation(
+            &state,
+            CreateAsyncOperationCommand {
+                workspace_id,
+                library_id,
+                operation_kind: "batch_delete_documents".to_string(),
+                surface_kind: "rest".to_string(),
+                requested_by_principal_id: Some(auth.principal_id),
+                status: "processing".to_string(),
+                subject_kind: "library".to_string(),
+                subject_id: Some(library_id),
+                parent_async_operation_id: None,
+                completed_at: None,
+                failure_code: None,
+            },
+        )
+        .await?;
+    let parent_id = parent_operation.id;
+    span.record("batch_operation_id", parent_id.to_string().as_str());
+
+    let total = document_ids.len();
+    let principal_id = auth.principal_id;
+    let state_for_task = state.clone();
+    let parallelism = batch_delete_parallelism();
+
+    tokio::spawn(
+        async move {
+            execute_batch_delete(
+                state_for_task,
+                parent_id,
+                workspace_id,
+                library_id,
+                principal_id,
+                document_ids,
+                parallelism,
+            )
             .await;
+        }
+        .instrument(tracing::info_span!(
+            "batch_delete_documents.worker",
+            batch_operation_id = %parent_id,
+            total,
+            parallelism
+        )),
+    );
 
-    let deleted_count = results.iter().filter(|row| row.success).count();
-    let failed_count = results.len() - deleted_count;
-
-    span.record("deleted_count", deleted_count);
-    span.record("failed_count", failed_count);
-    Ok(Json(BatchDeleteResponse { deleted_count, failed_count, results }))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BatchDocumentOperationAcceptedResponse {
+            batch_operation_id: parent_id,
+            total,
+            library_id,
+            workspace_id,
+        }),
+    ))
 }
 
 #[tracing::instrument(
@@ -295,7 +279,7 @@ pub(super) async fn batch_reprocess_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(request): Json<BatchReprocessRequest>,
-) -> Result<(StatusCode, Json<BatchReprocessAcceptedResponse>), ApiError> {
+) -> Result<(StatusCode, Json<BatchDocumentOperationAcceptedResponse>), ApiError> {
     ensure_batch_document_id_limit(request.document_ids.len())?;
     let span = Span::current();
 
@@ -360,13 +344,21 @@ pub(super) async fn batch_reprocess_documents(
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(BatchReprocessAcceptedResponse {
+        Json(BatchDocumentOperationAcceptedResponse {
             batch_operation_id: parent_id,
             total,
             library_id,
             workspace_id,
         }),
     ))
+}
+
+fn batch_delete_parallelism() -> usize {
+    std::env::var("IRONRAG_BATCH_DELETE_PARALLELISM")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(BATCH_DELETE_DEFAULT_PARALLELISM)
 }
 
 fn batch_reprocess_parallelism() -> usize {
@@ -418,7 +410,8 @@ async fn resolve_single_library_for_documents(
                     && expected_workspace == document.workspace_id => {}
             _ => {
                 return Err(ApiError::BadRequest(
-                    "batch rerun requires every document to belong to the same library".to_string(),
+                    "batch operation requires every document to belong to the same library"
+                        .to_string(),
                 ));
             }
         }
@@ -427,6 +420,235 @@ async fn resolve_single_library_for_documents(
         (Some(library_id), Some(workspace_id)) => Ok((workspace_id, library_id)),
         _ => Err(ApiError::BadRequest("documentIds must not be empty".to_string())),
     }
+}
+
+/// Background executor for batch delete.
+///
+/// Each document still goes through the canonical delete mutation path, so
+/// audit/mutation/async-operation state stays identical to single-document
+/// delete. The batch-specific difference is graph convergence: child deletes
+/// remove only document-local artifacts, then the parent deletes graph evidence
+/// for successfully deleted documents and refreshes only those graph targets.
+#[allow(clippy::too_many_arguments)]
+async fn execute_batch_delete(
+    state: AppState,
+    parent_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    principal_id: Uuid,
+    document_ids: Vec<Uuid>,
+    parallelism: usize,
+) {
+    let state = Arc::new(state);
+    let total = document_ids.len();
+    info!(%parent_id, %library_id, %workspace_id, total, parallelism, "batch delete started");
+
+    let child_outcome = run_batch_delete_children(
+        state.clone(),
+        parent_id,
+        principal_id,
+        document_ids,
+        parallelism,
+    )
+    .await;
+
+    let graph_cleanup = match state
+        .canonical_services
+        .content
+        .cleanup_deleted_documents_graph_evidence(
+            state.as_ref(),
+            library_id,
+            &child_outcome.deleted_document_ids,
+        )
+        .await
+    {
+        Ok(cleanup) => cleanup,
+        Err(error) => {
+            error!(
+                %parent_id,
+                %library_id,
+                error = %error,
+                "batch delete final graph cleanup failed"
+            );
+            if let Err(update_error) = state
+                .canonical_services
+                .ops
+                .update_async_operation(
+                    state.as_ref(),
+                    UpdateAsyncOperationCommand {
+                        operation_id: parent_id,
+                        status: "failed".to_string(),
+                        completed_at: Some(Utc::now()),
+                        failure_code: Some("graph_cleanup_failed".to_string()),
+                    },
+                )
+                .await
+            {
+                error!(
+                    %parent_id,
+                    error = %update_error,
+                    "failed to mark batch delete parent after graph cleanup failure"
+                );
+            }
+            return;
+        }
+    };
+    let graph_projection_required = graph_cleanup.requires_graph_convergence();
+
+    if child_outcome.failure_count < total
+        && graph_projection_required
+        && let Err(error) = state
+            .canonical_services
+            .content
+            .refresh_deleted_library_graph_projection_for_cleanup(
+                state.as_ref(),
+                library_id,
+                graph_cleanup,
+            )
+            .await
+    {
+        error!(
+            %parent_id,
+            %library_id,
+            error = %error,
+            "batch delete final graph projection failed"
+        );
+        if let Err(update_error) = state
+            .canonical_services
+            .ops
+            .update_async_operation(
+                state.as_ref(),
+                UpdateAsyncOperationCommand {
+                    operation_id: parent_id,
+                    status: "failed".to_string(),
+                    completed_at: Some(Utc::now()),
+                    failure_code: Some("graph_projection_failed".to_string()),
+                },
+            )
+            .await
+        {
+            error!(
+                %parent_id,
+                error = %update_error,
+                "failed to mark batch delete parent after graph projection failure"
+            );
+        }
+        return;
+    }
+    if !graph_projection_required {
+        info!(
+            %parent_id,
+            %library_id,
+            "batch delete skipped graph projection because selected documents had no graph evidence"
+        );
+    }
+
+    let (status, failure_code) = if child_outcome.failure_count == 0 {
+        ("ready".to_string(), None)
+    } else {
+        (
+            "failed".to_string(),
+            Some(format!("delete_failed:{}/{total}", child_outcome.failure_count)),
+        )
+    };
+
+    if let Err(error) = state
+        .canonical_services
+        .ops
+        .update_async_operation(
+            state.as_ref(),
+            UpdateAsyncOperationCommand {
+                operation_id: parent_id,
+                status: status.clone(),
+                completed_at: Some(Utc::now()),
+                failure_code,
+            },
+        )
+        .await
+    {
+        error!(%parent_id, error = %error, "failed to settle batch delete parent");
+    } else {
+        info!(%parent_id, failures = child_outcome.failure_count, total, %status, "batch delete completed");
+    }
+}
+
+#[derive(Debug, Default)]
+struct BatchDeleteChildOutcome {
+    deleted_document_ids: Vec<Uuid>,
+    failure_count: usize,
+}
+
+async fn run_batch_delete_children(
+    state: Arc<AppState>,
+    parent_id: Uuid,
+    principal_id: Uuid,
+    document_ids: Vec<Uuid>,
+    parallelism: usize,
+) -> BatchDeleteChildOutcome {
+    use futures::stream;
+
+    let parallelism = parallelism.max(1);
+    let child_results = stream::iter(document_ids)
+        .map(|document_id| {
+            let state = state.clone();
+            async move {
+                match delete_single_document(&state, Some(parent_id), principal_id, document_id)
+                    .await
+                {
+                    Ok(_) => Ok(document_id),
+                    Err(error) => {
+                        error!(%parent_id, %document_id, error = %error, "batch child delete failed");
+                        Err(())
+                    }
+                }
+            }
+        })
+        .buffer_unordered(parallelism)
+        .collect::<Vec<Result<Uuid, ()>>>()
+        .await;
+    let mut outcome = BatchDeleteChildOutcome::default();
+    for result in child_results {
+        match result {
+            Ok(document_id) => outcome.deleted_document_ids.push(document_id),
+            Err(()) => outcome.failure_count += 1,
+        }
+    }
+    outcome
+}
+
+async fn delete_single_document(
+    state: &AppState,
+    parent_id: Option<Uuid>,
+    principal_id: Uuid,
+    document_id: Uuid,
+) -> Result<ContentMutationAdmission, ApiError> {
+    let document = content_repository::get_document_by_id(&state.persistence.postgres, document_id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+    if document.document_state == "deleted" || document.deleted_at.is_some() {
+        return Err(ApiError::resource_not_found("document", document_id));
+    }
+
+    state
+        .canonical_services
+        .content
+        .admit_mutation(
+            state,
+            AdmitMutationCommand {
+                workspace_id: document.workspace_id,
+                library_id: document.library_id,
+                document_id,
+                operation_kind: "delete".to_string(),
+                idempotency_key: None,
+                requested_by_principal_id: Some(principal_id),
+                request_surface: "rest".to_string(),
+                source_identity: None,
+                revision: None,
+                parent_async_operation_id: parent_id,
+            },
+        )
+        .await
 }
 
 /// Background executor for the batch rerun. Drives children through
@@ -489,6 +711,18 @@ async fn execute_batch_reprocess(
             }
         }
         info!(%parent_id, failures = failure_count, total, "batch reprocess admit phase completed");
+
+        // Once all docs were admitted, the child async_op rows own the
+        // remaining work. The parent row stayed `processing` forever on
+        // happy paths before this — the HTTP endpoint derived the
+        // effective final status from child progress, but any direct
+        // SQL reader (metrics, admin tools, `completed_at IS NULL`
+        // queries) saw a row stuck for the library's full life. Poll
+        // the aggregate count and settle the parent once every child
+        // reaches a terminal state. `in_flight == 0` means every
+        // `ops_async_operation` row with `parent_async_operation_id =
+        // parent_id` has a `completed_at`.
+        settle_parent_when_children_terminal(state.clone(), parent_id).await;
     };
 
     match tokio::time::timeout(timeout, worker).await {
@@ -519,6 +753,107 @@ async fn execute_batch_reprocess(
     }
 }
 
+/// Poll the batch parent's child-progress aggregate and flip the
+/// parent to a terminal state once every child row settles. The
+/// aggregate already exposed the effective status on the HTTP read
+/// path — this routine closes the gap for any consumer that reads
+/// `ops_async_operation` directly (SQL dashboards, admin tools,
+/// `completed_at IS NULL` metrics).
+///
+/// Bounded by a fresh wall-clock budget independent of the admit
+/// phase: the children run asynchronously through the ingest queue
+/// long after admit returns, and the admit timeout is usually seconds
+/// while child processing can take minutes. The outer
+/// `tokio::time::timeout` on the worker future still fires if the
+/// admit phase itself hangs; this inner loop fires only when admit
+/// completed normally.
+///
+/// On poll-budget exhaustion the parent is LEFT as-is — the HTTP
+/// read path keeps deriving the effective status from child progress
+/// so UX is unchanged, and a future poll (e.g. a restart of the
+/// backend process with a stale parent) can resume. No partial
+/// settle: the parent either transitions to a terminal state based
+/// on real child counts or stays `processing`.
+async fn settle_parent_when_children_terminal(state: Arc<AppState>, parent_id: Uuid) {
+    // 30 min cap: matches the worst observed reference-scale batch rerun
+    // wall time (9929 docs × graph rebuild). Past this window the
+    // aggregate polling itself is the bigger cost; fall through.
+    const SETTLE_BUDGET: Duration = Duration::from_secs(30 * 60);
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+    let deadline = tokio::time::Instant::now() + SETTLE_BUDGET;
+    loop {
+        let progress = match state
+            .canonical_services
+            .ops
+            .get_async_operation_progress(state.as_ref(), parent_id)
+            .await
+        {
+            Ok(progress) => progress,
+            Err(error) => {
+                error!(
+                    %parent_id,
+                    error = %error,
+                    "failed to read batch parent progress — leaving parent row unsettled"
+                );
+                return;
+            }
+        };
+        // `total == 0` means the parent admits nothing — happens when
+        // the caller passed an empty document list; `run_batch_reprocess_children`
+        // already handled the all-empty case, so fall through cleanly.
+        if progress.total == 0 {
+            return;
+        }
+        if progress.in_flight == 0 {
+            let (status, failure_code) = if progress.failed == 0 {
+                ("ready".to_string(), None)
+            } else {
+                (
+                    "failed".to_string(),
+                    Some(format!("children_failed:{}/{}", progress.failed, progress.total)),
+                )
+            };
+            if let Err(error) = state
+                .canonical_services
+                .ops
+                .update_async_operation(
+                    state.as_ref(),
+                    UpdateAsyncOperationCommand {
+                        operation_id: parent_id,
+                        status: status.clone(),
+                        completed_at: Some(Utc::now()),
+                        failure_code,
+                    },
+                )
+                .await
+            {
+                error!(%parent_id, error = %error, "failed to settle batch parent on children terminal");
+            } else {
+                info!(
+                    %parent_id,
+                    total = progress.total,
+                    completed = progress.completed,
+                    failed = progress.failed,
+                    %status,
+                    "batch parent settled on children terminal"
+                );
+            }
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            warn!(
+                %parent_id,
+                total = progress.total,
+                in_flight = progress.in_flight,
+                "batch parent settle budget exhausted; leaving row unsettled (effective status still derived from children)"
+            );
+            return;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 /// Runs the child mutations in bounded parallel and returns the failure count.
 /// Successes and failures are both tracked via child `ops_async_operation`
 /// rows created by `admit_mutation`; this function is only responsible for
@@ -534,7 +869,7 @@ async fn run_batch_reprocess_children(
     use futures::stream;
 
     let parallelism = parallelism.max(1);
-    let failure_count = stream::iter(document_ids.into_iter())
+    let failure_count = stream::iter(document_ids)
         .map(|document_id| {
             let state = state.clone();
             async move {

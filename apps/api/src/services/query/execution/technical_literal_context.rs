@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use crate::domains::query_ir::QueryIR;
+
 #[cfg(test)]
 use super::concise_document_subject_label;
 use super::retrieve::focused_excerpt_for;
@@ -44,6 +46,7 @@ impl TechnicalLiteralDocumentGroup {
 
 pub(super) fn collect_technical_literal_groups(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Vec<TechnicalLiteralDocumentGroup> {
     let intent: TechnicalLiteralIntent = detect_technical_literal_intent(question);
@@ -52,12 +55,12 @@ pub(super) fn collect_technical_literal_groups(
     }
 
     let mut groups: Vec<TechnicalLiteralDocumentGroup> = Vec::new();
-    let literal_focus_keywords = technical_literal_focus_keywords(question, None);
+    let literal_focus_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let pagination_requested = question_mentions_pagination(question);
 
     for chunk in select_document_balanced_chunks(
         question,
-        None,
+        Some(query_ir),
         chunks,
         &literal_focus_keywords,
         pagination_requested,
@@ -183,9 +186,10 @@ pub(super) fn render_exact_technical_literals_section(
 #[cfg(test)]
 pub(super) fn build_exact_technical_literals_section(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let groups = collect_technical_literal_groups(question, chunks);
+    let groups = collect_technical_literal_groups(question, query_ir, chunks);
     render_exact_technical_literals_section(&groups)
 }
 

@@ -457,7 +457,13 @@ impl OpsService {
 /// context. This path is 2 queries total: one Postgres aggregate over
 /// `derived_status` and one point lookup on `runtime_graph_snapshot`.
 pub struct LibraryCoverageFast {
-    pub readiness: content_repository::LibraryDocumentReadinessAggregate,
+    /// Canonical per-library metrics row produced by
+    /// `aggregate_library_document_metrics`. Replaces the retired
+    /// `LibraryDocumentReadinessAggregate` — every downstream consumer
+    /// reads from this single source so `/ops/libraries/{id}` and
+    /// `/ops/libraries/{id}/dashboard` can never disagree on the
+    /// numbers.
+    pub metrics: ironrag_contracts::documents::LibraryDocumentMetrics,
     pub graph_snapshot: Option<repositories::RuntimeGraphSnapshotRow>,
     pub latest_generation_id: Option<Uuid>,
 }
@@ -467,7 +473,7 @@ pub async fn load_library_coverage_fast(
     library_id: Uuid,
     latest_generation: Option<&KnowledgeLibraryGeneration>,
 ) -> Result<LibraryCoverageFast, ApiError> {
-    let readiness = content_repository::aggregate_library_document_readiness(
+    let metrics = content_repository::aggregate_library_document_metrics(
         &state.persistence.postgres,
         library_id,
     )
@@ -478,7 +484,7 @@ pub async fn load_library_coverage_fast(
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     Ok(LibraryCoverageFast {
-        readiness,
+        metrics,
         graph_snapshot,
         latest_generation_id: latest_generation.map(|generation| generation.id),
     })
@@ -492,17 +498,16 @@ fn map_library_facts_from_aggregate(
     has_bundle_failures: bool,
 ) -> OpsLibraryState {
     let latest_knowledge_generation = knowledge_generations.first();
-    let readable_document_count = coverage.readiness.readable_count;
-    let failed_document_count = coverage.readiness.failed_count;
+    let readable_document_count = coverage.metrics.ready;
+    let failed_document_count = coverage.metrics.failed + coverage.metrics.canceled;
     // Approximation: "rebuilding" docs are those whose latest mutation is
-    // still in-flight. The old path split this into vector vs relation
-    // rebuilding by reading each doc's Arango revision state — on a
-    // large library that enumeration dominates latency. The canonical
-    // replacement reports one bucket keyed by the in-flight mutation
-    // signal, which is precise enough to drive the
-    // healthy/rebuilding/processing banner and does not pretend to
-    // differentiate between stale vectors and stale relations here.
-    let processing_count_usize = usize::try_from(coverage.readiness.processing_count).unwrap_or(0);
+    // still in-flight. The canonical metrics aggregate counts both
+    // `processing` (running attempt) and `queued` (enqueued, not yet
+    // leased) as work-in-flight; we merge them here to feed the
+    // healthy/rebuilding/processing banner and the derived
+    // degraded_state heuristic.
+    let in_flight = coverage.metrics.processing + coverage.metrics.queued;
+    let processing_count_usize = usize::try_from(in_flight).unwrap_or(0);
     let stale_vector_count = processing_count_usize;
     let stale_relation_count = processing_count_usize;
 
@@ -537,11 +542,13 @@ fn build_library_warnings_from_aggregate(
 ) -> Vec<OpsLibraryWarning> {
     let mut warnings = Vec::new();
 
-    // One "rebuilding" bucket keyed on in-flight mutation count — no
-    // per-doc Arango revision state reads. See the comment in
-    // `map_library_facts_from_aggregate` for why this is the canonical
-    // signal here.
-    if coverage.readiness.processing_count > 0 {
+    // One "rebuilding" bucket keyed on in-flight document count (the
+    // canonical `processing + queued` split from the metrics row).
+    // See `map_library_facts_from_aggregate` for why this is the
+    // canonical signal here — no per-doc Arango revision reads, no
+    // drift vs the dashboard counts.
+    let in_flight = coverage.metrics.processing + coverage.metrics.queued;
+    if in_flight > 0 {
         warnings.push(derived_warning(library_id, "stale_vectors", "warning", Utc::now()));
         warnings.push(derived_warning(library_id, "stale_relations", "warning", Utc::now()));
     }
@@ -639,18 +646,22 @@ mod tests {
     };
     use crate::domains::knowledge::KnowledgeLibraryGeneration;
     use crate::domains::ops::OpsLibraryWarning;
-    use crate::infra::repositories::content_repository::LibraryDocumentReadinessAggregate;
     use chrono::Utc;
+    use ironrag_contracts::documents::LibraryDocumentMetrics;
     use uuid::Uuid;
 
     fn coverage_with_processing(processing_count: i64) -> LibraryCoverageFast {
         LibraryCoverageFast {
-            readiness: LibraryDocumentReadinessAggregate {
-                active_count: processing_count.max(1),
-                deleted_count: 0,
-                failed_count: 0,
-                processing_count,
-                readable_count: 0,
+            metrics: LibraryDocumentMetrics {
+                total: processing_count.max(1),
+                ready: 0,
+                processing: processing_count,
+                queued: 0,
+                failed: 0,
+                canceled: 0,
+                graph_ready: 0,
+                graph_sparse: 0,
+                recomputed_at: Utc::now(),
             },
             graph_snapshot: None,
             latest_generation_id: None,

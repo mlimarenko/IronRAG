@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState, domains::provider_profiles::EffectiveProviderProfile,
-    infra::arangodb::graph_store::GraphViewNodeWrite, services::query::planner::RuntimeQueryPlan,
+    services::query::planner::RuntimeQueryPlan,
 };
 
 use super::{
@@ -32,7 +32,6 @@ pub(crate) async fn retrieve_entity_hits(
             .search_entity_vectors_by_similarity(
                 library_id,
                 &context.model_catalog_id.to_string(),
-                context.freshness_generation,
                 question_embedding,
                 limit.max(1),
                 Some(16),
@@ -41,8 +40,8 @@ pub(crate) async fn retrieve_entity_hits(
             .context("failed to search canonical entity vectors for runtime query")?
             .into_iter()
             .filter_map(|hit| {
-                graph_index.nodes.get(&hit.entity_id).map(|node| RuntimeMatchedEntity {
-                    node_id: node.node_id,
+                graph_index.node(hit.entity_id).map(|node| RuntimeMatchedEntity {
+                    node_id: node.id,
                     label: node.label.clone(),
                     node_type: node.node_type.clone(),
                     score: Some(hit.score as f32),
@@ -137,13 +136,12 @@ pub(crate) fn map_edge_hit(
     edge_id: Uuid,
     score: Option<f32>,
     graph_index: &QueryGraphIndex,
-    node_index: &HashMap<Uuid, GraphViewNodeWrite>,
 ) -> Option<RuntimeMatchedRelationship> {
-    let edge = graph_index.edges.get(&edge_id)?;
-    let from_node = node_index.get(&edge.from_node_id)?;
-    let to_node = node_index.get(&edge.to_node_id)?;
+    let edge = graph_index.edge(edge_id)?;
+    let from_node = graph_index.node(edge.from_node_id)?;
+    let to_node = graph_index.node(edge.to_node_id)?;
     Some(RuntimeMatchedRelationship {
-        edge_id: edge.edge_id,
+        edge_id: edge.id,
         relation_type: edge.relation_type.clone(),
         from_node_id: edge.from_node_id,
         from_label: from_node.label.clone(),
@@ -218,17 +216,21 @@ fn lexical_entity_hits(
     let search_keywords: &[String] =
         if plan.entity_keywords.is_empty() { &plan.keywords } else { &plan.entity_keywords };
     let mut hits = graph_index
-        .nodes
-        .values()
+        .nodes()
         .filter(|node| node.node_type != "document")
         .filter(|node| {
             search_keywords.iter().any(|keyword| {
                 node.label.to_ascii_lowercase().contains(keyword)
-                    || node.aliases.iter().any(|alias| alias.to_ascii_lowercase().contains(keyword))
+                    || crate::shared::json_coercion::from_value_or_default::<Vec<String>>(
+                        "runtime_graph_node.aliases_json",
+                        &node.aliases_json,
+                    )
+                    .into_iter()
+                    .any(|alias| alias.to_ascii_lowercase().contains(keyword))
             })
         })
         .map(|node| RuntimeMatchedEntity {
-            node_id: node.node_id,
+            node_id: node.id,
             label: node.label.clone(),
             node_type: node.node_type.clone(),
             score: Some(0.2),
@@ -243,14 +245,13 @@ fn lexical_relationship_hits(
     graph_index: &QueryGraphIndex,
 ) -> Vec<RuntimeMatchedRelationship> {
     let mut hits = graph_index
-        .edges
-        .values()
+        .edges()
         .filter(|edge| {
             plan.keywords
                 .iter()
                 .any(|keyword| edge.relation_type.to_ascii_lowercase().contains(keyword))
         })
-        .filter_map(|edge| map_edge_hit(edge.edge_id, Some(0.2), graph_index, &graph_index.nodes))
+        .filter_map(|edge| map_edge_hit(edge.id, Some(0.2), graph_index))
         .collect::<Vec<_>>();
     hits.sort_by(score_desc_relationships);
     hits
@@ -267,8 +268,7 @@ pub(crate) fn related_edges_for_entities(
         .map(|entity| (entity.node_id, score_value(entity.score)))
         .collect::<HashMap<_, _>>();
     let mut relationships = graph_index
-        .edges
-        .values()
+        .edges()
         .filter(|edge| {
             entity_ids.contains(&edge.from_node_id) || entity_ids.contains(&edge.to_node_id)
         })
@@ -281,7 +281,7 @@ pub(crate) fn related_edges_for_entities(
                 (Some(score), None) | (None, Some(score)) => score,
                 (None, None) => 0.5,
             };
-            map_edge_hit(edge.edge_id, Some(relevance), graph_index, &graph_index.nodes)
+            map_edge_hit(edge.id, Some(relevance), graph_index)
         })
         .collect::<Vec<_>>();
     relationships.sort_by(score_desc_relationships);
@@ -301,7 +301,7 @@ pub(crate) fn entities_from_relationships(
             if !seen.insert(node_id) {
                 continue;
             }
-            if let Some(node) = graph_index.nodes.get(&node_id) {
+            if let Some(node) = graph_index.node(node_id) {
                 entities.push(RuntimeMatchedEntity {
                     node_id,
                     label: node.label.clone(),

@@ -122,6 +122,18 @@ services:
       - --server.authentication=true
       - --experimental-vector-index=true
       - --database.directory=/var/lib/arangodb3
+      # Memory caps for small (≤ 8 GB) hosts. Without these, the default
+      # per-AQL-query memory limit is auto-sized to roughly half the host
+      # RAM (~4.6 GB on an 8 GB box) and five parallel queries can reserve
+      # 23 GB of virtual memory under concurrent load, enough to
+      # trigger the OOM killer on small hosts. 256 MB / query is
+      # ample for an ArangoSearch + vector-index workload; RocksDB buffers
+      # and block cache are capped separately so ingest writes don't bloat
+      # resident memory.
+      - --query.memory-limit=268435456
+      - --query.cache-mode=demand
+      - --rocksdb.block-cache-size=536870912
+      - --rocksdb.total-write-buffer-size=268435456
     healthcheck:
       test:
         [

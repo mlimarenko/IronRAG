@@ -52,9 +52,17 @@ pub struct ProviderModelSelection {
 pub struct EffectiveProviderProfile {
     pub indexing: ProviderModelSelection,
     pub embedding: ProviderModelSelection,
-    pub query_compile: ProviderModelSelection,
+    /// Optional: the query compiler has a fallback IR path when the
+    /// binding is missing (see `services/query/compiler.rs`), so a
+    /// library without `query_compile` configured stays usable for
+    /// ingest and degraded-mode grounded answers.
+    pub query_compile: Option<ProviderModelSelection>,
     pub answer: ProviderModelSelection,
-    pub vision: ProviderModelSelection,
+    /// Optional: vision binding is only exercised for multimodal
+    /// ingest paths (PDFs with embedded images, screenshots). Text-only
+    /// libraries and local-Ollama setups without a vision-capable
+    /// model must stay operational.
+    pub vision: Option<ProviderModelSelection>,
 }
 
 impl EffectiveProviderProfile {
@@ -62,13 +70,13 @@ impl EffectiveProviderProfile {
     pub const fn selection_for_binding_purpose(
         &self,
         binding_purpose: AiBindingPurpose,
-    ) -> &ProviderModelSelection {
+    ) -> Option<&ProviderModelSelection> {
         match binding_purpose {
-            AiBindingPurpose::ExtractText | AiBindingPurpose::ExtractGraph => &self.indexing,
-            AiBindingPurpose::EmbedChunk | AiBindingPurpose::QueryRetrieve => &self.embedding,
-            AiBindingPurpose::QueryCompile => &self.query_compile,
-            AiBindingPurpose::QueryAnswer => &self.answer,
-            AiBindingPurpose::Vision => &self.vision,
+            AiBindingPurpose::ExtractText | AiBindingPurpose::ExtractGraph => Some(&self.indexing),
+            AiBindingPurpose::EmbedChunk | AiBindingPurpose::QueryRetrieve => Some(&self.embedding),
+            AiBindingPurpose::QueryCompile => self.query_compile.as_ref(),
+            AiBindingPurpose::QueryAnswer => Some(&self.answer),
+            AiBindingPurpose::Vision => self.vision.as_ref(),
         }
     }
 
@@ -79,6 +87,6 @@ impl EffectiveProviderProfile {
         task_kind: RuntimeTaskKind,
     ) -> Option<&ProviderModelSelection> {
         AiBindingPurpose::for_runtime_task_kind(task_kind)
-            .map(|binding_purpose| self.selection_for_binding_purpose(binding_purpose))
+            .and_then(|binding_purpose| self.selection_for_binding_purpose(binding_purpose))
     }
 }

@@ -30,7 +30,7 @@ use axum::{
 use tower::ServiceExt;
 
 #[test]
-fn capability_snapshot_serializes_null_workspace_scope_and_tool_list() {
+fn capability_snapshot_omits_absent_workspace_scope_and_keeps_tool_list() {
     let value = serde_json::to_value(McpCapabilitySnapshot {
         token_id: Some(Uuid::nil()),
         token_kind: "instance_admin".to_string(),
@@ -42,7 +42,7 @@ fn capability_snapshot_serializes_null_workspace_scope_and_tool_list() {
     })
     .unwrap();
 
-    assert!(value.get("workspaceScope").is_some_and(serde_json::Value::is_null));
+    assert!(value.get("workspaceScope").is_none());
     assert_eq!(value.get("tools"), Some(&json!(["list_workspaces", "search_documents"])));
 }
 
@@ -114,7 +114,7 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
     let value = serde_json::to_value(McpSearchDocumentsResponse {
         query: "memory".to_string(),
         limit: 2,
-        library_ids: vec![Uuid::nil()],
+        libraries: vec!["default/default-library".to_string()],
         hits: vec![
             McpDocumentHit {
                 document_id: readable_document_id,
@@ -200,6 +200,7 @@ async fn mcp_specific_api_errors_emit_contract_error_kinds() {
 struct McpDiscoveryContractFixture {
     state: AppState,
     workspace_id: Uuid,
+    workspace_ref: String,
 }
 
 impl McpDiscoveryContractFixture {
@@ -214,7 +215,7 @@ impl McpDiscoveryContractFixture {
         )
         .await
         .context("failed to create mcp empty discovery workspace")?;
-        Ok(Self { state, workspace_id: workspace.id })
+        Ok(Self { state, workspace_id: workspace.id, workspace_ref: workspace.slug })
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
@@ -527,16 +528,20 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
             .iter()
             .find(|tool| tool["name"] == json!("create_workspace"))
             .context("create_workspace tool missing from tools/list")?;
-        assert_eq!(workspace_tool["inputSchema"]["required"], json!(["name"]));
+        assert_eq!(workspace_tool["inputSchema"]["required"], json!(["workspace"]));
 
         let library_tool = tool_items
             .iter()
             .find(|tool| tool["name"] == json!("create_library"))
             .context("create_library tool missing from tools/list")?;
-        assert_eq!(library_tool["inputSchema"]["required"], json!(["workspaceId", "name"]));
+        assert_eq!(library_tool["inputSchema"]["required"], json!(["library"]));
 
         let workspace_response = fixture
-            .tool_call(&token, "create_workspace", json!({ "name": "Agent Workspace ++" }))
+            .tool_call(
+                &token,
+                "create_workspace",
+                json!({ "workspace": "agent-workspace", "title": "Agent Workspace ++" }),
+            )
             .await?;
         let created_workspace_id =
             workspace_response["result"]["structuredContent"]["workspace"]["workspaceId"]
@@ -545,7 +550,7 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
                 .parse::<Uuid>()
                 .context("create_workspace returned invalid workspaceId")?;
         assert_eq!(
-            workspace_response["result"]["structuredContent"]["workspace"]["slug"],
+            workspace_response["result"]["structuredContent"]["workspace"]["ref"],
             json!("agent-workspace")
         );
 
@@ -554,14 +559,14 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
                 &token,
                 "create_library",
                 json!({
-                    "workspaceId": fixture.workspace_id,
-                    "name": "Agent Library ++",
+                    "library": format!("{}/agent-library", fixture.workspace_ref),
+                    "title": "Agent Library ++",
                 }),
             )
             .await?;
         assert_eq!(
-            library_response["result"]["structuredContent"]["library"]["slug"],
-            json!("agent-library")
+            library_response["result"]["structuredContent"]["library"]["ref"],
+            json!(format!("{}/agent-library", fixture.workspace_ref))
         );
         assert_eq!(
             library_response["result"]["structuredContent"]["library"]["ingestionReadiness"]["ready"],
@@ -617,7 +622,7 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
             .iter()
             .find(|tool| tool["name"] == json!("submit_web_ingest_run"))
             .context("submit_web_ingest_run tool missing from tools/list")?;
-        assert_eq!(submit_tool["inputSchema"]["required"], json!(["libraryId", "seedUrl", "mode"]));
+        assert_eq!(submit_tool["inputSchema"]["required"], json!(["library", "seedUrl", "mode"]));
         assert_eq!(
             submit_tool["inputSchema"]["properties"]["mode"]["enum"],
             json!(["single_page", "recursive_crawl"])

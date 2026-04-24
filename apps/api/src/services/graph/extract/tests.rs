@@ -99,18 +99,18 @@ fn sample_profile() -> EffectiveProviderProfile {
             provider_kind: SupportedProviderKind::OpenAi,
             model_name: "text-embedding-3-small".to_string(),
         },
-        query_compile: ProviderModelSelection {
+        query_compile: Some(ProviderModelSelection {
             provider_kind: SupportedProviderKind::OpenAi,
             model_name: "gpt-5.4-nano".to_string(),
-        },
+        }),
         answer: ProviderModelSelection {
             provider_kind: SupportedProviderKind::OpenAi,
             model_name: "gpt-5.4".to_string(),
         },
-        vision: ProviderModelSelection {
+        vision: Some(ProviderModelSelection {
             provider_kind: SupportedProviderKind::OpenAi,
             model_name: "gpt-5.4-mini".to_string(),
-        },
+        }),
     }
 }
 

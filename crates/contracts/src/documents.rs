@@ -23,6 +23,13 @@ pub enum DocumentStatus {
     Ready,
     ReadyNoGraph,
     Failed,
+    /// Ingest was cancelled by operator or superseded by a newer
+    /// mutation. Distinct from `Failed` — the operator started it
+    /// and then withdrew, the document was not rejected by the
+    /// pipeline. Rendered with neutral styling in the UI; mixing
+    /// cancels into failures was masking real pipeline failures on
+    /// the dashboard.
+    Canceled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +112,35 @@ pub struct DocumentsOverview {
     pub graph_sparse_documents: i32,
 }
 
+/// Canonical per-library document metrics. One authoritative shape
+/// that every surface (`/ops/libraries/{id}/dashboard`,
+/// `/content/libraries/{id}/documents?includeTotal=true`,
+/// `/knowledge/libraries/{id}/summary`) MUST read from — no more
+/// three overlapping aggregates that drift apart on production.
+///
+/// Invariants enforced by the canonical aggregator:
+///   * `total == ready + processing + queued + failed + canceled`
+///   * `graph_ready + graph_sparse == ready` (graph readiness is a
+///     split of the ready bucket; it does not overlap with processing
+///     / queued / failed / canceled).
+///
+/// `in_flight` is intentionally NOT a field on this struct — it is a
+/// derived value `processing + queued`. Adding it would invite the
+/// same kind of double-counting drift we just finished removing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDocumentMetrics {
+    pub total: i64,
+    pub ready: i64,
+    pub processing: i64,
+    pub queued: i64,
+    pub failed: i64,
+    pub canceled: i64,
+    pub graph_ready: i64,
+    pub graph_sparse: i64,
+    pub recomputed_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentFilterState {
@@ -167,6 +203,15 @@ pub struct WebRunCounts {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WebIngestIgnorePattern {
+    pub kind: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebIngestRunSummary {
     pub run_id: Uuid,
     pub library_id: Uuid,
@@ -174,6 +219,7 @@ pub struct WebIngestRunSummary {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
+    pub ignore_patterns: Vec<WebIngestIgnorePattern>,
     pub run_state: WebIngestRunState,
     pub seed_url: String,
     pub counts: WebRunCounts,
@@ -216,6 +262,11 @@ pub struct DashboardAttentionItem {
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSurface {
     pub overview: DocumentsOverview,
+    /// Canonical metrics row — the UI should prefer this over the
+    /// legacy `overview` for new widgets. `overview` stays for
+    /// backwards compatibility (existing dashboard cards still read
+    /// it) but is derived from the same metrics source server-side.
+    pub document_metrics: LibraryDocumentMetrics,
     pub metrics: Vec<DashboardMetric>,
     pub recent_documents: Vec<DocumentSummary>,
     pub recent_web_runs: Vec<WebIngestRunSummary>,

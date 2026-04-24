@@ -440,7 +440,7 @@ impl ContentService {
         .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
         let latest_revision_no =
             self.load_document_latest_revision_no(state, command.document_id).await?;
-        self.promote_knowledge_document_best_effort(
+        self.promote_knowledge_document(
             state,
             PromoteKnowledgeDocumentCommand {
                 document_id: command.document_id,
@@ -450,9 +450,9 @@ impl ContentService {
                 latest_revision_no,
                 deleted_at: document.deleted_at,
             },
-            "post-head-promotion knowledge document sync failed after canonical head update",
+            "knowledge document sync failed after canonical head update; Postgres head is committed and the Arango mirror may be stale until retry",
         )
-        .await;
+        .await?;
         Ok(ContentDocumentHead {
             document_id: row.document_id,
             active_revision_id: row.active_revision_id,
@@ -464,21 +464,29 @@ impl ContentService {
         })
     }
 
-    pub(crate) async fn promote_knowledge_document_best_effort(
+    pub(crate) async fn promote_knowledge_document(
         &self,
         state: &AppState,
         command: PromoteKnowledgeDocumentCommand,
         failure_message: &'static str,
-    ) {
-        if let Err(error) =
-            state.canonical_services.knowledge.promote_document(state, command.clone()).await
-        {
-            tracing::warn!(
-                document_id = %command.document_id,
-                ?error,
-                "{failure_message}"
-            );
-        }
+    ) -> Result<(), ApiError> {
+        state
+            .canonical_services
+            .knowledge
+            .promote_document(state, command.clone())
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::error!(
+                    document_id = %command.document_id,
+                    ?error,
+                    "{failure_message}"
+                );
+                match error {
+                    ApiError::Internal => ApiError::InternalMessage(failure_message.to_string()),
+                    other => other,
+                }
+            })
     }
 
     pub(crate) async fn promote_pending_document_mutation_head(
@@ -1424,6 +1432,41 @@ impl RevisionTableGraphContext {
     }
 }
 
+/// Process-local TTL cache for `load_sub_type_hints_for_extraction`.
+///
+/// The underlying SQL is a library-wide full scan of
+/// `runtime_graph_node` with a JSON-path group-by — measured at
+/// ~3.5 s on a mid-size prod corpus under merge load, and the function
+/// is called once per
+/// `extract_graph` stage (so 1× per document ingested). Under a bulk
+/// 24-concurrent worker drain this aggregated to 20+ calls per 30 min
+/// window and dominated the slow-statement log after I3 bulk upserts
+/// removed the previous merge-side contention. The returned hints
+/// change slowly — a single ingest adds at most a handful of
+/// (node_type, sub_type) pairs out of thousands — so a short TTL is
+/// sound; readers see at worst a minute-old hint set.
+///
+/// Cache is keyed by `(library_id, projection_version)` so a new
+/// projection version (published at the end of a full graph rebuild)
+/// transparently invalidates. Missing/stale entries fall through to
+/// the SQL path; SQL failure still yields empty hints, matching the
+/// prior fail-open behaviour.
+const SUB_TYPE_HINTS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Clone)]
+struct SubTypeHintsCacheEntry {
+    hints: GraphExtractionSubTypeHints,
+    fetched_at: std::time::Instant,
+}
+
+fn sub_type_hints_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<(Uuid, i64), SubTypeHintsCacheEntry>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(Uuid, i64), SubTypeHintsCacheEntry>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Loads vocabulary-aware extraction hints: observed `sub_type` values per
 /// `node_type` for the current library at the active projection version.
 ///
@@ -1447,6 +1490,16 @@ async fn load_sub_type_hints_for_extraction(
             return GraphExtractionSubTypeHints::default();
         }
     };
+
+    // Cache hit: fresh entry for the same (library, projection_version).
+    {
+        let guard = sub_type_hints_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = guard.get(&(library_id, projection_scope.projection_version)) {
+            if entry.fetched_at.elapsed() < SUB_TYPE_HINTS_CACHE_TTL {
+                return entry.hints.clone();
+            }
+        }
+    }
 
     let rows = match repositories::list_observed_sub_type_hints(
         &state.persistence.postgres,
@@ -1485,7 +1538,20 @@ async fn load_sub_type_hints_for_extraction(
         }
     }
 
-    GraphExtractionSubTypeHints { by_node_type: groups }
+    let hints = GraphExtractionSubTypeHints { by_node_type: groups };
+    {
+        let mut guard = sub_type_hints_cache().lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(
+            (library_id, projection_scope.projection_version),
+            SubTypeHintsCacheEntry { hints: hints.clone(), fetched_at: std::time::Instant::now() },
+        );
+        // Опtimistic housekeeping: drop stale entries when the cache
+        // accumulates across many libraries.
+        if guard.len() > 64 {
+            guard.retain(|_, entry| entry.fetched_at.elapsed() < SUB_TYPE_HINTS_CACHE_TTL);
+        }
+    }
+    hints
 }
 
 fn build_revision_table_graph_context(

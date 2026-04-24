@@ -15,23 +15,19 @@
 //! the text here, serve it from `/v1/query/assistant/system-prompt`,
 //! and render it in the admin UI with a copy button. Do not fork.
 //!
-//! The prompt is deliberately tool-agnostic — it talks about "the
-//! MCP tools below", not about specific names, so a subset or a
-//! superset of tools still works. Per-tool guidance (continuation
-//! token mechanics, search vs read vs list semantics) lives in the
-//! tool `description` fields themselves, where MCP clients will
-//! already see it. Prompt + tool descriptions are a pair.
-
-use uuid::Uuid;
+//! Per-tool guidance (continuation token mechanics, search vs read vs
+//! list semantics) lives in the tool `description` fields themselves,
+//! where MCP clients will already see it. Prompt + tool descriptions
+//! are a pair.
 
 /// Library-agnostic canonical system prompt. Substitute
-/// `{LIBRARY_ID}` with the active library id via [`render`] (for the
+/// `{LIBRARY_REF}` with the active library ref via [`render`] (for the
 /// in-app agent) or leave the placeholder in when publishing to
 /// external MCP clients (they'll fill it in themselves per user
 /// request).
 pub const ASSISTANT_SYSTEM_PROMPT_TEMPLATE: &str = r#"You are an assistant connected to the IronRAG knowledge platform via MCP tools. You behave like a vanilla MCP user agent: you have NO built-in retrieval, no hidden context, and no special access — only the tools exposed by the server.
 
-The user is currently working in library `{LIBRARY_ID}`. Pass this library id to every tool that requires a `libraryId` argument unless the user explicitly asks you to look at a different library.
+The user is currently working in library `{LIBRARY_REF}`. This is a canonical library ref in the form `<workspace>/<library>`. Pass it to every tool that requires a `library` argument unless the user explicitly asks you to look at a different library. If a tool needs a `workspace` argument, use the `<workspace>` part of that same ref.
 
 Workflow:
 1. Decide which tool(s) you need to answer the question.
@@ -41,28 +37,122 @@ Workflow:
 5. If the tools return nothing useful, say so honestly — do NOT invent facts.
 
 Tool selection heuristics:
-- Meta questions ("what is this library about", "what documents do you have") — call `list_documents` first, optionally `list_libraries` or `get_graph_topology`.
-- Record or aggregate questions ("top customers", "how many products", "popular cities") — call `search_documents` to find candidates, then `read_document` on the most relevant hits to load real content before computing the answer.
-- Image questions — use `list_documents` or `search_documents` to find the image document, then `read_document`. Image reads include `sourceAccess` plus a `visualDescription` derived from the original source image; prefer that grounded description over guessing from OCR fragments.
+- If the user wants an answer grounded in the library, call `grounded_answer`. This includes ordinary factual questions, setup/how-to questions, troubleshooting questions, broad questions that need clarification, and follow-up questions about one provider or module.
+- When the latest user message is a short follow-up that depends on prior chat history (single-word picks, "what about the other one?", "а для нового протокола?"), prefer calling `grounded_answer` with `conversationTurns` carrying the real prior user/assistant turns. If your client cannot pass prior turns to the tool, rewrite the latest message into one self-contained question before calling IronRAG tools.
+- Meta questions ("what is this library about", "what documents do you have") — call `list_documents` first, optionally `list_libraries`.
+- If the available tools do not expose raw document-reading functions, do not invent a manual retrieval workflow. Answer from `grounded_answer`, or say that the current surface cannot inspect raw document bodies directly.
 
 Grounding discipline — these are hard rules, violate them and you will produce hallucinations:
 
-* Never call the same tool twice with an identical argument payload in one turn. If you need more of the same document, pass the `continuationToken` from the previous `read_document` response. If a search returned nothing useful, broaden or narrow the query — do not rerun the same query with a synonym.
+* Never call the same tool twice with an identical argument payload in one turn. If a tool returned nothing useful, change the scope or the question instead of repeating the same request.
 
-* Never answer a content question from a document's table of contents alone. A PDF's first pages are almost always ToC and section headers; if the only text you have is dotted chapter lines like `.........................` or raw heading trails, you have not read the actual content. Paginate with `continuationToken` to reach the real chapters before answering.
+* Never use `list_documents` to decide that content is missing for a normal content/setup question. A zero-count inventory result or a narrow status filter does NOT prove that the library lacks relevant evidence. For content questions, the absence check must come from `grounded_answer`.
 
 * If three consecutive tool calls produced no new grounded information, STOP iterating and answer honestly with what you already have, or explicitly say the library does not contain the requested information. Do not pile on more speculative searches.
-
-* When a tool returns a `hasMore: true` flag together with a `continuationToken`, that is the signal that you are looking at a partial result. Either continue paging (same tool with the token) or narrow the scope (more specific search query) before committing to an answer.
 "#;
 
 /// Render the canonical prompt with a concrete library id and an
 /// optional conversation-history preamble. This is what the in-app
 /// agent hands to the LLM.
 #[must_use]
-pub fn render(library_id: Uuid, conversation_history: Option<&str>) -> String {
-    let mut prompt =
-        ASSISTANT_SYSTEM_PROMPT_TEMPLATE.replace("{LIBRARY_ID}", &library_id.to_string());
+pub fn render(library_ref: &str, conversation_history: Option<&str>) -> String {
+    let mut prompt = ASSISTANT_SYSTEM_PROMPT_TEMPLATE.replace("{LIBRARY_REF}", library_ref);
+    if let Some(history) = conversation_history.map(str::trim).filter(|h| !h.is_empty()) {
+        prompt.push_str("\nRecent conversation (oldest first):\n");
+        prompt.push_str(history);
+    }
+    prompt
+}
+
+/// System prompt for the single-shot grounded-answer fast path.
+///
+/// The tool-using agent loop is the fallback for when the prepared
+/// retrieval context is not enough — but most user questions on a
+/// well-indexed library are answered directly from the context the
+/// runtime already assembled in `prepare_answer_query` (retrieved
+/// chunks + library summary + recent documents + graph-aware
+/// context). Feeding that context to the model once, with no tools,
+/// lets a single LLM round-trip stand in for the 8-11 round-trip
+/// agent loop whenever the evidence is already there.
+///
+/// The prompt must steer the model toward the same output format the
+/// tool-loop would produce (grounded, cited, no hallucinated facts)
+/// without giving it the option to "look around" via tools. If the
+/// model cannot answer from context, it says so — the outer caller
+/// then escalates to the tool loop.
+/// System prompt for the post-retrieval clarify path. The runtime
+/// router decided — based on retrieval being multi-modal across
+/// several distinct named variants — that no single-shot answer
+/// will usefully cover the question, and that asking the user to
+/// pick one of the named variants is better than hedging into
+/// "there are scattered mentions but no full guide". The prompt
+/// receives `{CLARIFY_VARIANTS}` as a pre-rendered list of labels
+/// that the caller pulled from retrieved document titles / graph
+/// node labels; the model's only job is to write ONE short
+/// clarifying question that enumerates those labels.
+///
+/// The prompt is deliberately short and corpus-agnostic — the
+/// variants list is the only piece of library-specific text that
+/// reaches the model. No hardcoded entity names or product words.
+pub const GROUNDED_CLARIFY_SYSTEM_PROMPT: &str = r#"You are the IronRAG clarification stage. The runtime decided that the user's question could not be answered cleanly from the retrieved evidence because the library contains several distinct variants or subsystems under the topic they asked about.
+
+Your job: write ONE short message in the user's language that:
+1. States briefly that the topic covers several distinct options in this library.
+2. If the user's question is broad enough that the variants themselves are already useful information, say that the library contains separate variants or guides for this topic before you ask the follow-up.
+3. Lists the candidate variants the runtime already found, verbatim as provided, as a short bulleted menu.
+4. Asks the user to pick which one they want, OR to add any other constraint that narrows the question (specific provider, subsystem, document, environment).
+
+Rules:
+* Use ONLY the variants given below under "Candidate variants". Do not invent extra options. Do not drop any of the provided ones.
+* Do not invent setup details, parameters, or commands that are not present in the variants list. You may summarise that these variants exist; you may not pretend you saw deeper content.
+* Keep it concise: 1-2 short lines of context, then the bullet list, then a one-line ask.
+* No emojis, no markdown headings. Plain short bullets are fine.
+* Match the user's language (Russian if the question is Russian, English if English, etc.).
+
+Candidate variants:
+{CLARIFY_VARIANTS}
+"#;
+
+pub const GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT: &str = r#"You are the IronRAG grounded-answer stage. The runtime already retrieved the most relevant documents, chunks, graph-aware context, and library summary for the user's question. Your job is to write the final answer from exactly that evidence in one shot — no tool calls are available.
+
+Rules:
+* Answer in the user's language.
+* Stay strictly inside the provided context. Do not invent documents, values, commands, or configuration keys that are not present in the context.
+* Cite document titles or external keys inline when they meaningfully support a claim. When the retrieved brief for a document shows `(source: <url>)` next to its title, quote that URL inline too — format it as `[Title](<url>)` in Russian replies or as plain `(<url>)` if markdown would not render. Do not fabricate URLs that are not in the provided context. Do not narrate the retrieval process ("I searched for…").
+* Short or one-word questions (a surname, a product name, an acronym) are still questions. If the context mentions the requested entity or topic, summarise what it says about it — role, parent document, associated process — even if the evidence is partial. Surfacing real references is far more useful than refusing.
+* Refuse with the explicit short message "В предоставленных документах ответа на этот вопрос нет" (or the other-language equivalent matching the question language) ONLY when the context truly contains no mention of the entity or topic at all. Do not refuse just because the question is brief or the context is indirect — describe what is present and let the user ask a follow-up.
+* Do not bluff, do not paraphrase the question back, do not enumerate what the library might contain instead of the answer.
+* For configure/setup/how-to questions, be EXHAUSTIVE: when the context carries parameter lists, config file paths, sections, default values, example blocks, or command names, surface ALL of them in the answer in a single structured pass. Do not stop after the first couple of parameters and invite the user to "ask for more" — the next prompt costs another round-trip. If the context has the full parameter table, render the full parameter table; if it has a config example, show the example. Concise does not mean partial.
+* Do not truncate a valid long answer into a preview "i can continue if you want". The user already asked; continuing costs them another question.
+"#;
+
+/// Render the single-shot system prompt with the grounded context
+/// block appended. The tool-using loop receives a different prompt
+/// (see [`ASSISTANT_SYSTEM_PROMPT_TEMPLATE`]) because its model has
+/// to plan tool calls; this path gives the model the evidence
+/// directly and asks for an answer.
+#[must_use]
+pub fn render_single_shot(grounded_context: &str, conversation_history: Option<&str>) -> String {
+    let mut prompt = GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT.to_string();
+    if let Some(history) = conversation_history.map(str::trim).filter(|h| !h.is_empty()) {
+        prompt.push_str("\nRecent conversation (oldest first):\n");
+        prompt.push_str(history);
+    }
+    prompt.push_str("\n\nGrounded context retrieved by the runtime:\n");
+    prompt.push_str(grounded_context.trim());
+    prompt
+}
+
+/// Render the clarification system prompt with the variants list
+/// substituted in. Callers pass the human-readable variant labels
+/// (document titles, graph node labels, grouped reference titles)
+/// already deduplicated and trimmed; this function renders them as
+/// a plain bulleted list and injects them into the prompt template.
+#[must_use]
+pub fn render_clarify(variants: &[String], conversation_history: Option<&str>) -> String {
+    let rendered =
+        variants.iter().map(|variant| format!("- {variant}")).collect::<Vec<_>>().join("\n");
+    let mut prompt = GROUNDED_CLARIFY_SYSTEM_PROMPT.replace("{CLARIFY_VARIANTS}", &rendered);
     if let Some(history) = conversation_history.map(str::trim).filter(|h| !h.is_empty()) {
         prompt.push_str("\nRecent conversation (oldest first):\n");
         prompt.push_str(history);
@@ -73,32 +163,42 @@ pub fn render(library_id: Uuid, conversation_history: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ASSISTANT_SYSTEM_PROMPT_TEMPLATE, render};
-    use uuid::Uuid;
 
     #[test]
-    fn template_carries_library_placeholder() {
-        assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("{LIBRARY_ID}"));
+    fn template_carries_library_ref_placeholder() {
+        assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("{LIBRARY_REF}"));
     }
 
     #[test]
-    fn render_substitutes_library_id() {
-        let id = Uuid::now_v7();
-        let rendered = render(id, None);
-        assert!(rendered.contains(&id.to_string()));
-        assert!(!rendered.contains("{LIBRARY_ID}"));
+    fn render_substitutes_library_ref() {
+        let rendered = render("workspace-a/library-b", None);
+        assert!(rendered.contains("workspace-a/library-b"));
+        assert!(!rendered.contains("{LIBRARY_REF}"));
     }
 
     #[test]
     fn render_appends_conversation_history_when_present() {
-        let id = Uuid::now_v7();
-        let rendered = render(id, Some("[earlier] user: hi\nassistant: hello"));
+        let rendered =
+            render("workspace-a/library-b", Some("[earlier] user: hi\nassistant: hello"));
         assert!(rendered.contains("Recent conversation"));
         assert!(rendered.contains("earlier"));
     }
 
     #[test]
     fn render_skips_empty_history() {
-        let rendered = render(Uuid::now_v7(), Some("   "));
+        let rendered = render("workspace-a/library-b", Some("   "));
         assert!(!rendered.contains("Recent conversation"));
+    }
+
+    #[test]
+    fn template_forbids_using_list_documents_as_content_absence_check() {
+        assert!(
+            ASSISTANT_SYSTEM_PROMPT_TEMPLATE
+                .contains("Never use `list_documents` to decide that content is missing")
+        );
+        assert!(
+            ASSISTANT_SYSTEM_PROMPT_TEMPLATE
+                .contains("ordinary factual questions, setup/how-to questions")
+        );
     }
 }

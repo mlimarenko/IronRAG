@@ -406,6 +406,11 @@ impl AuditEventsFixture {
                     library_id: self.library_id,
                     created_by_principal_id: Some(actor_principal_id),
                     title: Some(format!("[{}] audit assistant call", surface_kind)),
+                    request_surface: if surface_kind == "mcp" {
+                        "mcp".to_string()
+                    } else {
+                        "ui".to_string()
+                    },
                 },
             )
             .await
@@ -495,6 +500,9 @@ impl AuditEventsFixture {
             &billing_repository::UpsertBillingExecutionCost {
                 owning_execution_kind: "query_execution",
                 owning_execution_id: execution_id,
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                knowledge_document_id: None,
                 total_cost,
                 currency_code: "USD",
                 provider_call_count: 1,
@@ -518,6 +526,7 @@ impl AuditEventsFixture {
                     context_bundle_id,
                     workspace_id: self.workspace_id,
                     library_id: self.library_id,
+                    question_preview: None,
                 },
             )
             .await

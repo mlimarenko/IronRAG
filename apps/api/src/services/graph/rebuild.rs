@@ -267,7 +267,6 @@ pub async fn reconcile_revision_graph(
             library_id,
             document_id,
             previous_active_revision_id,
-            None,
         )
         .await
         .with_context(|| {
@@ -287,6 +286,28 @@ pub async fn reconcile_revision_graph(
             .context("failed to resolve active projection scope for revision graph reconcile")?;
     let existing_graph_is_empty =
         snapshot.as_ref().is_none_or(|value| value.node_count <= 0 && value.edge_count <= 0);
+    if document_row.document_state == "deleted" || document_row.deleted_at.is_some() {
+        tracing::info!(
+            %library_id,
+            %document_id,
+            %revision_id,
+            "revision graph reconcile skipped because document is deleted"
+        );
+        let projection = preserve_runtime_graph_snapshot(
+            state,
+            library_id,
+            projection_scope.projection_version,
+            snapshot,
+            "deleted revision graph reconcile",
+        )
+        .await?;
+        return Ok(RevisionGraphReconcileOutcome {
+            graph_ready: false,
+            graph_contribution_count: 0,
+            projection,
+            embedding_usage: None,
+        });
+    }
 
     let extraction_records = repositories::list_runtime_graph_extraction_records_by_document(
         &state.persistence.postgres,
@@ -588,33 +609,14 @@ pub async fn reconcile_revision_graph(
             .await
             .context("failed to project reconciled revision graph")?
     } else if let Some(snapshot) = snapshot {
-        repositories::upsert_runtime_graph_snapshot(
-            &state.persistence.postgres,
+        preserve_runtime_graph_snapshot(
+            state,
             library_id,
-            "ready",
             projection_scope.projection_version,
-            snapshot.node_count,
-            snapshot.edge_count,
-            Some(snapshot.provenance_coverage_percent.unwrap_or(100.0)),
-            None,
+            Some(snapshot),
+            "no-op revision graph reconcile",
         )
-        .await
-        .context("failed to preserve ready graph snapshot during no-op revision reconcile")?;
-        if let Err(error) =
-            invalidate_graph_topology_cache(&state.persistence.redis, library_id).await
-        {
-            tracing::warn!(
-                %library_id,
-                error = format!("{error:#}"),
-                "graph topology cache invalidation failed during no-op reconcile",
-            );
-        }
-        GraphProjectionOutcome {
-            projection_version: projection_scope.projection_version,
-            node_count: usize::try_from(snapshot.node_count).unwrap_or_default(),
-            edge_count: usize::try_from(snapshot.edge_count).unwrap_or_default(),
-            graph_status: "ready".to_string(),
-        }
+        .await?
     } else {
         ensure_empty_graph_snapshot(state, library_id, projection_scope.projection_version)
             .await
@@ -640,6 +642,54 @@ async fn run_rebuild_projection(
     failure_context: &str,
 ) -> anyhow::Result<GraphProjectionOutcome> {
     project_canonical_graph(state, scope).await.with_context(|| failure_context.to_string())
+}
+
+async fn preserve_runtime_graph_snapshot(
+    state: &AppState,
+    library_id: Uuid,
+    projection_version: i64,
+    snapshot: Option<repositories::RuntimeGraphSnapshotRow>,
+    context: &str,
+) -> anyhow::Result<GraphProjectionOutcome> {
+    if let Some(snapshot) = snapshot {
+        repositories::upsert_runtime_graph_snapshot(
+            &state.persistence.postgres,
+            library_id,
+            "ready",
+            projection_version,
+            snapshot.node_count,
+            snapshot.edge_count,
+            Some(snapshot.provenance_coverage_percent.unwrap_or(100.0)),
+            None,
+        )
+        .await
+        .with_context(|| format!("failed to preserve ready graph snapshot during {context}"))?;
+        if let Err(error) = invalidate_graph_topology_cache(
+            &state.persistence.redis,
+            library_id,
+            projection_version,
+        )
+        .await
+        {
+            tracing::warn!(
+                %library_id,
+                projection_version,
+                error = format!("{error:#}"),
+                %context,
+                "graph topology cache invalidation failed while preserving graph snapshot",
+            );
+        }
+        return Ok(GraphProjectionOutcome {
+            projection_version,
+            node_count: usize::try_from(snapshot.node_count).unwrap_or_default(),
+            edge_count: usize::try_from(snapshot.edge_count).unwrap_or_default(),
+            graph_status: "ready".to_string(),
+        });
+    }
+
+    ensure_empty_graph_snapshot(state, library_id, projection_version)
+        .await
+        .with_context(|| format!("failed to persist empty graph snapshot during {context}"))
 }
 
 fn synthesize_document_row(

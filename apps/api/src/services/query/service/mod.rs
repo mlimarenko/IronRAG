@@ -27,7 +27,7 @@ use crate::{
     domains::query::{
         PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryExecution,
         QueryGraphEdgeReference, QueryGraphNodeReference, QueryRuntimeStageSummary, QueryTurn,
-        QueryVerificationState, RuntimeQueryMode, TechnicalFactReference,
+        QueryTurnKind, QueryVerificationState, RuntimeQueryMode, TechnicalFactReference,
     },
     infra::arangodb::context_store::KnowledgeContextBundleReferenceSetRow,
 };
@@ -83,6 +83,17 @@ pub struct CreateConversationCommand {
     pub library_id: Uuid,
     pub created_by_principal_id: Option<Uuid>,
     pub title: Option<String>,
+    /// Originating surface — `'ui'` for the web assistant, `'mcp'`
+    /// for the grounded_answer tool. Drives the UI session-listing
+    /// filter so MCP-born conversations never leak into the web
+    /// assistant surface.
+    pub request_surface: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalConversationTurn {
+    pub turn_kind: QueryTurnKind,
+    pub content_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +101,7 @@ pub struct ExecuteConversationTurnCommand {
     pub conversation_id: Uuid,
     pub author_principal_id: Option<Uuid>,
     pub content_text: String,
+    pub external_prior_turns: Vec<ExternalConversationTurn>,
     pub top_k: usize,
     pub include_debug: bool,
     /// Auth context of the user issuing the turn — used by the in-app
@@ -155,7 +167,6 @@ impl QueryService {
 #[derive(Debug, Clone)]
 pub(crate) struct QueryEmbeddingContext {
     pub(crate) model_catalog_id: Uuid,
-    pub(crate) freshness_generation: i64,
     pub(crate) query_vector: Vec<f32>,
 }
 

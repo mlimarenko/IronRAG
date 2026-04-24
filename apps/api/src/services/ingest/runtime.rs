@@ -13,8 +13,8 @@ use crate::{
         ai::AiBindingPurpose,
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
     },
-    infra::repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
-    integrations::llm::{EmbeddingBatchRequest, EmbeddingBatchResponse},
+    infra::repositories::{RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+    integrations::llm::EmbeddingBatchRequest,
     shared::json_coercion::from_value_or_default,
 };
 
@@ -181,10 +181,37 @@ async fn resolve_library_binding_selection(
     Ok(ProviderModelSelection { provider_kind, model_name: binding.model_name })
 }
 
+async fn resolve_optional_library_binding_selection(
+    state: &AppState,
+    library_id: Uuid,
+    binding_purpose: AiBindingPurpose,
+) -> anyhow::Result<Option<ProviderModelSelection>> {
+    let binding_label = binding_purpose_label(binding_purpose);
+    let Some(binding) = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, binding_purpose)
+        .await
+        .with_context(|| format!("failed to resolve active {binding_label} binding"))?
+    else {
+        return Ok(None);
+    };
+    let provider_kind = binding.provider_kind.parse().map_err(|error: String| {
+        anyhow::anyhow!("invalid provider kind for {binding_label}: {error}")
+    })?;
+    Ok(Some(ProviderModelSelection { provider_kind, model_name: binding.model_name }))
+}
+
 pub async fn resolve_effective_provider_profile(
     state: &AppState,
     library_id: Uuid,
 ) -> anyhow::Result<EffectiveProviderProfile> {
+    // Required bindings block ingest / query flow: ExtractGraph,
+    // EmbedChunk, QueryAnswer. QueryCompile and Vision are optional —
+    // the compiler falls back to a deterministic IR when its binding
+    // is missing, and Vision only fires on multimodal ingest paths
+    // (text-only libraries and local Ollama setups without a
+    // vision-capable model must keep working).
     Ok(EffectiveProviderProfile {
         indexing: resolve_library_binding_selection(
             state,
@@ -198,7 +225,7 @@ pub async fn resolve_effective_provider_profile(
             AiBindingPurpose::EmbedChunk,
         )
         .await?,
-        query_compile: resolve_library_binding_selection(
+        query_compile: resolve_optional_library_binding_selection(
             state,
             library_id,
             AiBindingPurpose::QueryCompile,
@@ -206,8 +233,12 @@ pub async fn resolve_effective_provider_profile(
         .await?,
         answer: resolve_library_binding_selection(state, library_id, AiBindingPurpose::QueryAnswer)
             .await?,
-        vision: resolve_library_binding_selection(state, library_id, AiBindingPurpose::Vision)
-            .await?,
+        vision: resolve_optional_library_binding_selection(
+            state,
+            library_id,
+            AiBindingPurpose::Vision,
+        )
+        .await?,
     })
 }
 
@@ -233,44 +264,6 @@ pub async fn resolve_effective_runtime_task_context(
         provider_profile: resolve_effective_provider_profile(state, library_id).await?,
         runtime_overrides: bounded_runtime_overrides(state, task_spec),
     })
-}
-
-fn build_runtime_graph_node_vector_target_inputs(
-    nodes: &[&RuntimeGraphNodeRow],
-    batch_response: &EmbeddingBatchResponse,
-) -> Vec<repositories::RuntimeVectorTargetUpsertInput> {
-    nodes
-        .iter()
-        .zip(batch_response.embeddings.iter())
-        .map(|(node, embedding)| repositories::RuntimeVectorTargetUpsertInput {
-            library_id: node.library_id,
-            target_kind: "entity".to_string(),
-            target_id: node.id,
-            provider_kind: batch_response.provider_kind.clone(),
-            model_name: batch_response.model_name.clone(),
-            dimensions: i32::try_from(embedding.len()).ok(),
-            embedding_json: serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
-        })
-        .collect()
-}
-
-fn build_runtime_graph_edge_vector_target_inputs(
-    edges: &[RuntimeGraphEdgeRow],
-    batch_response: &EmbeddingBatchResponse,
-) -> Vec<repositories::RuntimeVectorTargetUpsertInput> {
-    edges
-        .iter()
-        .zip(batch_response.embeddings.iter())
-        .map(|(edge, embedding)| repositories::RuntimeVectorTargetUpsertInput {
-            library_id: edge.library_id,
-            target_kind: "relation".to_string(),
-            target_id: edge.id,
-            provider_kind: batch_response.provider_kind.clone(),
-            model_name: batch_response.model_name.clone(),
-            dimensions: i32::try_from(embedding.len()).ok(),
-            embedding_json: serde_json::to_value(embedding).unwrap_or_else(|_| json!([])),
-        })
-        .collect()
 }
 
 pub async fn embed_runtime_graph_nodes(
@@ -363,19 +356,13 @@ pub async fn embed_runtime_graph_nodes(
                 batch.len(),
             );
         }
-        let node_slice: Vec<&RuntimeGraphNodeRow> =
-            batch.iter().map(|(index, _)| nodes_to_embed[*index]).collect();
-        repositories::upsert_runtime_vector_targets(
-            &state.persistence.postgres,
-            &build_runtime_graph_node_vector_target_inputs(&node_slice, &batch_response),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to persist graph node embedding batch starting with {}",
-                node_slice.first().map(|node| node.id).unwrap_or_default()
-            )
-        })?;
+        // Postgres `runtime_vector_target` is a legacy write-only store
+        // from the pgvector era; vector similarity now runs entirely in
+        // Arango (`search_chunk_vectors_by_similarity`) with its own
+        // upsert path. We accumulate token usage and drop the embeddings
+        // on the floor here so every ingest stops growing the dead
+        // 8+ GB Postgres table.
+        let _ = batch;
         usage.absorb_usage_json(&batch_response.usage_json);
     }
 
@@ -470,22 +457,11 @@ pub async fn embed_runtime_graph_edges(
                 batch.len(),
             );
         }
-        let edge_slice: Vec<&RuntimeGraphEdgeRow> =
-            batch.iter().map(|(index, _)| &edges[*index]).collect();
-        // upsert_runtime_vector_targets needs slice ref; build a temporary owned slice from references.
-        let edge_owned: Vec<RuntimeGraphEdgeRow> =
-            edge_slice.iter().map(|e| (*e).clone()).collect();
-        repositories::upsert_runtime_vector_targets(
-            &state.persistence.postgres,
-            &build_runtime_graph_edge_vector_target_inputs(&edge_owned, &batch_response),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to persist graph edge embedding batch starting with {}",
-                edge_owned.first().map(|edge| edge.id).unwrap_or_default()
-            )
-        })?;
+        // Same rationale as the node-embedding path above: Postgres
+        // `runtime_vector_target` is a legacy write-only store; the live
+        // vector-search pipeline runs in Arango. Drop the embeddings,
+        // keep the usage accounting.
+        let _ = batch;
         usage.absorb_usage_json(&batch_response.usage_json);
     }
 
@@ -530,7 +506,6 @@ fn build_graph_edge_embedding_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     #[test]
     fn stage_usage_summary_exposes_finalized_tokens_without_consuming() {
@@ -547,40 +522,5 @@ mod tests {
         assert_eq!(usage.completion_tokens(), Some(5));
         assert_eq!(usage.total_tokens(), Some(155));
         assert!(usage.has_token_usage());
-    }
-
-    #[test]
-    fn graph_target_batches_keep_target_identity() {
-        let library_id = Uuid::now_v7();
-        let nodes = vec![RuntimeGraphNodeRow {
-            id: Uuid::now_v7(),
-            library_id,
-            canonical_key: "entity::acme-corp".to_string(),
-            label: "Acme Corp".to_string(),
-            node_type: "entity".to_string(),
-            aliases_json: json!([]),
-            summary: Some("Budget owner".to_string()),
-            metadata_json: json!({}),
-            support_count: 1,
-            projection_version: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }];
-        let batch_response = EmbeddingBatchResponse {
-            provider_kind: "openai".to_string(),
-            model_name: "text-embedding-3-small".to_string(),
-            dimensions: 1536,
-            embeddings: vec![vec![0.2; 1536]],
-            usage_json: json!({}),
-        };
-
-        let node_refs = nodes.iter().collect::<Vec<_>>();
-        let target_rows =
-            build_runtime_graph_node_vector_target_inputs(node_refs.as_slice(), &batch_response);
-
-        assert_eq!(target_rows.len(), 1);
-        assert_eq!(target_rows[0].target_kind, "entity");
-        assert_eq!(target_rows[0].target_id, nodes[0].id);
-        assert_eq!(target_rows[0].dimensions, Some(1536));
     }
 }

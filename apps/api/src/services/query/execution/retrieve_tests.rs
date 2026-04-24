@@ -8,13 +8,19 @@ use super::super::{
     requested_initial_table_row_count,
 };
 use super::{
-    canonical_document_revision_id, chunk_answer_source_text, explicit_target_document_ids,
-    map_chunk_hit,
+    DOCUMENT_IDENTITY_SCORE_FLOOR, canonical_document_revision_id, chunk_answer_source_text,
+    explicit_target_document_ids, latest_version_documents, map_chunk_hit, merge_chunks,
 };
 use crate::infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow};
 use crate::services::query::{
     execution::{
         RuntimeMatchedChunk, normalized_document_target_candidates, should_skip_vector_search,
+    },
+    latest_versions::{
+        compare_version_desc, extract_semver_like_version, latest_version_chunk_score,
+        latest_version_context_top_k, latest_version_family_key, latest_version_scope_terms,
+        question_requests_latest_versions, requested_latest_version_count,
+        text_has_release_version_marker,
     },
     planner::{QueryIntentProfile, RuntimeQueryPlan},
 };
@@ -160,6 +166,161 @@ fn requested_initial_table_row_count_detects_english_row_ranges() {
 }
 
 #[test]
+fn latest_version_question_detection_supports_russian_and_english() {
+    assert!(question_requests_latest_versions("Что нового в последних 5 релизах?"));
+    assert!(question_requests_latest_versions("latest 3 release notes"));
+    assert!(!question_requests_latest_versions("как настроить оплату"));
+}
+
+#[test]
+fn requested_latest_version_count_defaults_and_caps() {
+    assert_eq!(requested_latest_version_count("последние релизы"), 5);
+    assert_eq!(requested_latest_version_count("последние 3 версии"), 3);
+    assert_eq!(requested_latest_version_count("latest 100 releases"), 10);
+    assert_eq!(requested_latest_version_count("latest version 9.8.765"), 5);
+    assert_eq!(requested_latest_version_count("latest 2024.10 release"), 5);
+}
+
+#[test]
+fn latest_version_chunk_merge_limit_preserves_requested_document_coverage() {
+    assert_eq!(latest_version_context_top_k("latest 10 releases", 8), 40);
+    assert_eq!(latest_version_context_top_k("latest 3 releases", 20), 20);
+}
+
+#[test]
+fn latest_version_chunk_score_keeps_first_chunk_for_each_version_before_second_chunks() {
+    let newest_second = latest_version_chunk_score(DOCUMENT_IDENTITY_SCORE_FLOOR, 5, 0, 1);
+    let oldest_first = latest_version_chunk_score(DOCUMENT_IDENTITY_SCORE_FLOOR, 5, 4, 0);
+
+    assert!(oldest_first > newest_second);
+}
+
+#[test]
+fn extract_semver_like_version_reads_title_versions() {
+    assert_eq!(extract_semver_like_version("Version 9.8.765 - Product"), Some(vec![9, 8, 765]));
+    assert_eq!(extract_semver_like_version("No release number"), None);
+}
+
+#[test]
+fn compare_version_desc_orders_newer_versions_first() {
+    assert_eq!(compare_version_desc(&[9, 8, 765], &[9, 8, 764]), std::cmp::Ordering::Less);
+    assert_eq!(compare_version_desc(&[9, 8, 762], &[9, 8, 763]), std::cmp::Ordering::Greater);
+}
+
+#[test]
+fn latest_version_documents_select_newest_distinct_versions() {
+    let docs = [
+        sample_document_row("release-9.8.762.html", "Version 9.8.762"),
+        sample_document_row("release-9.8.765.html", "Version 9.8.765"),
+        sample_document_row("release-9.8.763.html", "Version 9.8.763"),
+        sample_document_row("guide.html", "Setup Guide"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&index, 3, &[]);
+    let versions = selected.into_iter().map(|document| document.version).collect::<Vec<_>>();
+
+    assert_eq!(versions, vec![vec![9, 8, 765], vec![9, 8, 763], vec![9, 8, 762]]);
+}
+
+#[test]
+fn latest_version_documents_require_release_marker_and_respect_scope_terms() {
+    let docs = [
+        sample_document_row("alpha-release-9.8.765.html", "Alpha Version 9.8.765"),
+        sample_document_row("beta-release-9.9.999.html", "Beta Version 9.9.999"),
+        sample_document_row("oauth-2.0-guide.html", "OAuth 2.0 Guide"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected =
+        latest_version_documents(&index, 5, &latest_version_scope_terms("latest alpha release"));
+    let titles = selected.into_iter().map(|document| document.title).collect::<Vec<_>>();
+
+    assert_eq!(titles, vec!["Alpha Version 9.8.765".to_string()]);
+    assert!(!text_has_release_version_marker("OAuth 2.0 Guide"));
+}
+
+#[test]
+fn latest_version_documents_fall_back_when_instruction_words_are_not_scope() {
+    let docs = [
+        sample_document_row("release-9.8.765.html", "Version 9.8.765"),
+        sample_document_row("release-9.9.999.html", "Version 9.9.999"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(
+        &index,
+        1,
+        &latest_version_scope_terms("что нового в последних релизах, дай список изменений"),
+    );
+
+    assert_eq!(selected[0].version, vec![9, 9, 999]);
+}
+
+#[test]
+fn latest_version_documents_do_not_collapse_same_version_across_titles() {
+    let docs = [
+        sample_document_row("alpha-release-9.8.765.html", "Alpha Version 9.8.765"),
+        sample_document_row("beta-release-9.8.765.html", "Beta Version 9.8.765"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&index, 5, &[]);
+
+    assert_eq!(selected.len(), 2);
+}
+
+#[test]
+fn latest_version_documents_choose_dominant_release_family_for_multi_release_queries() {
+    let docs = [
+        sample_document_row("alpha-1.2.12.html", "Version 1.2.12 - Alpha Suite"),
+        sample_document_row("alpha-1.2.11.html", "Version 1.2.11 - Alpha Suite"),
+        sample_document_row("alpha-1.2.10.html", "Version 1.2.10 - Alpha Suite"),
+        sample_document_row("beta-9.9.999.html", "Version 9.9.999 - Beta Suite"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&index, 3, &[]);
+    let titles = selected.into_iter().map(|document| document.title).collect::<Vec<_>>();
+
+    assert_eq!(
+        titles,
+        vec![
+            "Version 1.2.12 - Alpha Suite".to_string(),
+            "Version 1.2.11 - Alpha Suite".to_string(),
+            "Version 1.2.10 - Alpha Suite".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn latest_version_family_key_normalizes_only_the_version_literal() {
+    assert_eq!(
+        latest_version_family_key("Version 1.2.12 - Alpha Suite"),
+        latest_version_family_key("Version 1.2.11 - Alpha Suite")
+    );
+    assert_ne!(
+        latest_version_family_key("Version 1.2.12 - Alpha Suite"),
+        latest_version_family_key("Version 1.2.12 - Beta Suite")
+    );
+}
+
+#[test]
 fn map_chunk_hit_skips_noncanonical_revision_chunks() {
     let document = sample_document_row("people-100.csv", "people-100.csv");
     let canonical_revision_id = canonical_document_revision_id(&document).unwrap();
@@ -195,11 +356,47 @@ fn map_chunk_hit_skips_noncanonical_revision_chunks() {
     assert!(map_chunk_hit(chunk, 1.0, &document_index, &[]).is_none());
 }
 
+fn runtime_chunk(label: &str, score: f32) -> RuntimeMatchedChunk {
+    RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        document_id: Uuid::now_v7(),
+        document_label: label.to_string(),
+        excerpt: label.to_string(),
+        score: Some(score),
+        source_text: label.to_string(),
+    }
+}
+
+#[test]
+fn merge_chunks_preserves_identity_scale_scores() {
+    let ordinary = runtime_chunk("ordinary", 10.0);
+    let identity = runtime_chunk("identity", DOCUMENT_IDENTITY_SCORE_FLOOR);
+
+    let merged = merge_chunks(vec![ordinary], vec![identity.clone()], 8);
+
+    assert_eq!(merged[0].chunk_id, identity.chunk_id);
+    assert_eq!(merged[0].score, Some(DOCUMENT_IDENTITY_SCORE_FLOOR));
+}
+
+#[test]
+fn merge_chunks_normalizes_ordinary_scores() {
+    let first = runtime_chunk("first", 10_000.0);
+    let second = runtime_chunk("second", 9_000.0);
+
+    let merged = merge_chunks(vec![first], vec![second], 8);
+
+    assert!(merged.iter().all(|chunk| chunk.score.is_some_and(|score| score < 1.0)));
+}
+
 #[test]
 fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
     let document_id = Uuid::now_v7();
     let heading = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "customers-100.xlsx".to_string(),
         excerpt: "customers-100".to_string(),
@@ -208,6 +405,8 @@ fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
     };
     let summary = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "customers-100.xlsx".to_string(),
         excerpt: "City".to_string(),
@@ -216,6 +415,8 @@ fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
     };
     let row = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id,
         document_label: "customers-100.xlsx".to_string(),
         excerpt: "Row 1".to_string(),
@@ -240,6 +441,8 @@ fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
 fn merge_canonical_table_aggregation_chunks_keeps_existing_when_no_direct_analytics_exist() {
     let heading = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
         document_id: Uuid::now_v7(),
         document_label: "customers-100.xlsx".to_string(),
         excerpt: "customers-100".to_string(),
@@ -255,7 +458,15 @@ fn merge_canonical_table_aggregation_chunks_keeps_existing_when_no_direct_analyt
 }
 
 #[test]
-fn should_skip_vector_search_for_exact_literal_technical_queries() {
+fn vector_search_always_runs_regardless_of_exact_literal_flag() {
+    // Canonical contract since v0.3.3: vector retrieval is always
+    // exercised alongside lexical. The `exact_literal_technical` flag
+    // on the intent profile influences ranking/boost, never excludes
+    // the whole vector lane. Prod smoke on short configure-style
+    // Russian questions showed the old skip-vector-on-exact-literal
+    // path caused relevant config chunks to miss top-10 (BM25 stem
+    // collision on `настро*` promoted unrelated templates over the
+    // actual configuration sections).
     let mut literal_plan = RuntimeQueryPlan {
         requested_mode: crate::domains::query::RuntimeQueryMode::Document,
         planned_mode: crate::domains::query::RuntimeQueryMode::Document,
@@ -273,7 +484,7 @@ fn should_skip_vector_search_for_exact_literal_technical_queries() {
 
     assert!(!should_skip_vector_search(&literal_plan));
     literal_plan.intent_profile.exact_literal_technical = true;
-    assert!(should_skip_vector_search(&literal_plan));
+    assert!(!should_skip_vector_search(&literal_plan));
 }
 
 fn sample_document_row(file_name: &str, title: &str) -> KnowledgeDocumentRow {

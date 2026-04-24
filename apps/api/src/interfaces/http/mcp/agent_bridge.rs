@@ -15,6 +15,7 @@ use crate::{
     app::state::AppState, integrations::llm::ChatToolDef, interfaces::http::auth::AuthContext,
 };
 
+use super::McpToolSurface;
 use super::tools::{
     ToolCallContext,
     catalog::{call_tool as catalog_call, descriptor as catalog_descriptor},
@@ -33,7 +34,7 @@ use super::tools::{
 #[must_use]
 pub fn list_assistant_tools(auth: &AuthContext) -> Vec<ChatToolDef> {
     let mut out = Vec::new();
-    for name in visible_tool_names(auth) {
+    for name in visible_tool_names(auth, McpToolSurface::Answer) {
         let descriptor = catalog_descriptor(&name)
             .or_else(|| documents_descriptor(&name))
             .or_else(|| runtime_descriptor(&name))

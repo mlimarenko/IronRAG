@@ -249,6 +249,17 @@ pub struct AppState {
     /// assistant execution, used by the chat debug panel. Bounded
     /// FIFO, never persisted.
     pub llm_context_debug: crate::services::query::llm_context_debug::LlmContextDebugStore,
+    /// Per-library cache of admitted runtime graph projections keyed
+    /// by `(library_id, projection_version)`. The projection is
+    /// loaded lazily on first use and reused for every subsequent
+    /// query against the same version — grounded_answer pulled
+    /// 100k+ edges from Postgres on every turn before this, which
+    /// dominated MCP tool-call latency on large libraries. A version
+    /// bump from `services::graph::projection::next_projection_version`
+    /// is atomic, so cache hits can never serve a stale graph; on
+    /// miss we also evict any older versions for the same library.
+    pub runtime_graph_projection_cache:
+        crate::services::knowledge::runtime_read::RuntimeGraphProjectionCache,
 }
 
 impl AppState {
@@ -452,6 +463,8 @@ impl AppState {
             resolve_settle_blockers_services,
             llm_context_debug:
                 crate::services::query::llm_context_debug::LlmContextDebugStore::default(),
+            runtime_graph_projection_cache:
+                crate::services::knowledge::runtime_read::RuntimeGraphProjectionCache::default(),
         })
     }
 

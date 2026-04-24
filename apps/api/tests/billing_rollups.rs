@@ -137,6 +137,7 @@ impl BillingRollupsFixture {
                 created_by_principal_id: None,
                 title: Some("Billing Rollup Conversation"),
                 conversation_state: "active",
+                request_surface: "ui",
             },
             5,
         )

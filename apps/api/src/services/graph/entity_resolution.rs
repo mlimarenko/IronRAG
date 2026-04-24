@@ -292,23 +292,13 @@ fn node_aliases(node: &RuntimeGraphNodeRow) -> Vec<String> {
         .collect()
 }
 
-fn check_alias_match(a: &RuntimeGraphNodeRow, b: &RuntimeGraphNodeRow) -> Option<MergeCandidate> {
-    let a_aliases = node_aliases(a);
-    let b_aliases = node_aliases(b);
-    let a_norm = crate::services::graph::identity::normalize_graph_identity_component(&a.label);
-    let b_norm = crate::services::graph::identity::normalize_graph_identity_component(&b.label);
-    let a_alias_norms = a_aliases
-        .iter()
-        .map(|alias| crate::services::graph::identity::normalize_graph_identity_component(alias))
-        .collect::<Vec<_>>();
-    let b_alias_norms = b_aliases
-        .iter()
-        .map(|alias| crate::services::graph::identity::normalize_graph_identity_component(alias))
-        .collect::<Vec<_>>();
-    check_alias_match_precomputed(a, b, &a_norm, &a_alias_norms, &b_norm, &b_alias_norms)
-}
+// `check_alias_match` removed in the tech-debt sweep — every caller
+// has migrated to `check_alias_match_precomputed` below which takes
+// pre-normalised label / alias vectors. The per-pair wrapper that
+// recomputed NFKC on every invocation was the O(N²) hot spot its
+// replacement was written to avoid.
 
-/// Same contract as [`check_alias_match`] but with the normalized label
+/// Pairwise alias match with the normalized label
 /// and normalized-aliases vectors provided by the caller. Used by the
 /// O(N²) pass in [`find_merge_candidates`] so the expensive NFKC pass
 /// only runs once per node instead of once per pair.
@@ -894,7 +884,30 @@ mod tests {
             updated_at: now,
         };
 
-        let candidate = check_alias_match(&a, &b);
+        let a_label_norm =
+            crate::services::graph::identity::normalize_graph_identity_component(&a.label);
+        let a_alias_norms: Vec<String> = node_aliases(&a)
+            .iter()
+            .map(|alias| {
+                crate::services::graph::identity::normalize_graph_identity_component(alias)
+            })
+            .collect();
+        let b_label_norm =
+            crate::services::graph::identity::normalize_graph_identity_component(&b.label);
+        let b_alias_norms: Vec<String> = node_aliases(&b)
+            .iter()
+            .map(|alias| {
+                crate::services::graph::identity::normalize_graph_identity_component(alias)
+            })
+            .collect();
+        let candidate = check_alias_match_precomputed(
+            &a,
+            &b,
+            &a_label_norm,
+            &a_alias_norms,
+            &b_label_norm,
+            &b_alias_norms,
+        );
         assert!(candidate.is_some());
         let candidate = candidate.unwrap();
         assert_eq!(candidate.keep_node_id, a.id);

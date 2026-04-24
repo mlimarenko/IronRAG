@@ -67,6 +67,7 @@ pub(super) async fn discover_recursive_scope(
     let mut budgeted_urls = HashSet::from([run.normalized_seed_url.clone()]);
     let mut canonical_urls = HashSet::<String>::new();
     let mut eligible_pages = Vec::<WebDiscoveredPageRow>::new();
+    let ignore_patterns = parse_run_ignore_patterns(run.ignore_patterns.clone())?;
 
     let fetch_concurrency = state.settings.web_ingest_crawl_concurrency.max(1);
 
@@ -120,6 +121,7 @@ pub(super) async fn discover_recursive_scope(
                             host_classification: None,
                             candidate_state: WebCandidateState::Blocked.as_str(),
                             classification_reason: failure.candidate_reason.as_deref(),
+                            classification_detail: candidate.classification_detail.as_deref(),
                             content_type: failure.content_type.as_deref(),
                             http_status: failure.http_status,
                             snapshot_storage_key: candidate.snapshot_storage_key.as_deref(),
@@ -174,6 +176,7 @@ pub(super) async fn discover_recursive_scope(
                         classification_reason: Some(
                             WebClassificationReason::OutsideBoundaryPolicy.as_str(),
                         ),
+                        classification_detail: None,
                         content_type: resource.content_type.as_deref(),
                         http_status: Some(resource.http_status),
                         snapshot_storage_key: None,
@@ -208,6 +211,56 @@ pub(super) async fn discover_recursive_scope(
                 continue;
             }
 
+            if let Some(ignore_match) =
+                match_web_ingest_ignore_pattern(&resource.final_url, &ignore_patterns)
+            {
+                let _ = ingest_repository::update_web_discovered_page(
+                    &state.persistence.postgres,
+                    candidate.id,
+                    &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                        final_url: Some(resource.final_url.as_str()),
+                        canonical_url: Some(resource_canonical_url.as_str()),
+                        host_classification: Some(host_classification_label),
+                        candidate_state: WebCandidateState::Excluded.as_str(),
+                        classification_reason: Some(
+                            WebClassificationReason::IgnorePattern.as_str(),
+                        ),
+                        classification_detail: Some(ignore_match.detail.as_str()),
+                        content_type: resource.content_type.as_deref(),
+                        http_status: Some(resource.http_status),
+                        snapshot_storage_key: None,
+                        updated_at: Some(Utc::now()),
+                        document_id: None,
+                        result_revision_id: None,
+                        mutation_item_id: None,
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    error!(
+                        run_id = %run.id,
+                        candidate_id = %candidate.id,
+                        normalized_url = %candidate.normalized_url,
+                        final_url = %resource.final_url,
+                        classification_detail = %ignore_match.detail,
+                        db_error = %error,
+                        "web ingest failed to persist ignore-pattern-excluded candidate"
+                    );
+                    ApiError::Internal
+                })?;
+                telemetry::web_candidate_event(
+                    "candidate_excluded_ignore_pattern",
+                    run.id,
+                    candidate.id,
+                    WebCandidateState::Excluded.as_str(),
+                    &candidate.normalized_url,
+                    candidate.depth,
+                    Some(WebClassificationReason::IgnorePattern.as_str()),
+                    Some(host_classification_label),
+                );
+                continue;
+            }
+
             if canonical_urls.contains(&resource_canonical_url) {
                 let _ = ingest_repository::update_web_discovered_page(
                     &state.persistence.postgres,
@@ -220,6 +273,7 @@ pub(super) async fn discover_recursive_scope(
                         classification_reason: Some(
                             WebClassificationReason::DuplicateCanonicalUrl.as_str(),
                         ),
+                        classification_detail: None,
                         content_type: resource.content_type.as_deref(),
                         http_status: Some(resource.http_status),
                         snapshot_storage_key: None,
@@ -276,6 +330,7 @@ pub(super) async fn discover_recursive_scope(
                     host_classification: Some(host_classification_label),
                     candidate_state: WebCandidateState::Eligible.as_str(),
                     classification_reason: candidate.classification_reason.as_deref(),
+                    classification_detail: candidate.classification_detail.as_deref(),
                     content_type: resource.content_type.as_deref(),
                     http_status: Some(resource.http_status),
                     snapshot_storage_key: Some(snapshot_storage_key.as_str()),
@@ -336,34 +391,45 @@ pub(super) async fn discover_recursive_scope(
                     }
                     seen_urls.insert(resolved_url.clone());
 
-                    let (candidate_state, classification_reason) = if next_depth > run.max_depth {
-                        (
-                            WebCandidateState::Excluded,
-                            Some(WebClassificationReason::ExceededMaxDepth.as_str()),
-                        )
-                    } else if run.boundary_policy == "same_host"
-                        && discovered_host != HostClassification::SameHost
-                    {
-                        (
-                            WebCandidateState::Excluded,
-                            Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
-                        )
-                    } else if let Some(reason) = classify_confluence_system_page(&resolved_url) {
-                        (WebCandidateState::Excluded, Some(reason))
-                    } else if i32::try_from(budgeted_urls.len()).unwrap_or(i32::MAX)
-                        >= run.max_pages
-                    {
-                        (
-                            WebCandidateState::Excluded,
-                            Some(WebClassificationReason::ExceededMaxPages.as_str()),
-                        )
-                    } else {
-                        budgeted_urls.insert(resolved_url.clone());
-                        (
-                            WebCandidateState::Eligible,
-                            Some(WebClassificationReason::SeedAccepted.as_str()),
-                        )
-                    };
+                    let (candidate_state, classification_reason, classification_detail) =
+                        if next_depth > run.max_depth {
+                            (
+                                WebCandidateState::Excluded,
+                                Some(WebClassificationReason::ExceededMaxDepth.as_str()),
+                                None,
+                            )
+                        } else if run.boundary_policy == "same_host"
+                            && discovered_host != HostClassification::SameHost
+                        {
+                            (
+                                WebCandidateState::Excluded,
+                                Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
+                                None,
+                            )
+                        } else if let Some(ignore_match) =
+                            match_web_ingest_ignore_pattern(&resolved_url, &ignore_patterns)
+                        {
+                            (
+                                WebCandidateState::Excluded,
+                                Some(WebClassificationReason::IgnorePattern.as_str()),
+                                Some(ignore_match.detail),
+                            )
+                        } else if i32::try_from(budgeted_urls.len()).unwrap_or(i32::MAX)
+                            >= run.max_pages
+                        {
+                            (
+                                WebCandidateState::Excluded,
+                                Some(WebClassificationReason::ExceededMaxPages.as_str()),
+                                None,
+                            )
+                        } else {
+                            budgeted_urls.insert(resolved_url.clone());
+                            (
+                                WebCandidateState::Eligible,
+                                Some(WebClassificationReason::SeedAccepted.as_str()),
+                                None,
+                            )
+                        };
                     if service.run_cancel_requested(state, run.id).await? {
                         return Ok(eligible_pages);
                     }
@@ -382,6 +448,7 @@ pub(super) async fn discover_recursive_scope(
                             host_classification: discovered_host.as_str(),
                             candidate_state: candidate_state.as_str(),
                             classification_reason,
+                            classification_detail: classification_detail.as_deref(),
                             content_type: None,
                             http_status: None,
                             snapshot_storage_key: None,
@@ -457,6 +524,7 @@ pub(super) async fn queue_recursive_page_jobs(
                 host_classification: Some(page.host_classification.as_str()),
                 candidate_state: WebCandidateState::Queued.as_str(),
                 classification_reason: page.classification_reason.as_deref(),
+                classification_detail: page.classification_detail.as_deref(),
                 content_type: page.content_type.as_deref(),
                 http_status: page.http_status,
                 snapshot_storage_key: page.snapshot_storage_key.as_deref(),
@@ -603,6 +671,7 @@ pub(super) async fn mark_recursive_page_failed(
                 .candidate_reason
                 .as_deref()
                 .or(page.classification_reason.as_deref()),
+            classification_detail: page.classification_detail.as_deref(),
             content_type: failure.content_type.as_deref().or(page.content_type.as_deref()),
             http_status: failure.http_status.or(page.http_status),
             snapshot_storage_key: page.snapshot_storage_key.as_deref(),
@@ -643,6 +712,7 @@ pub(super) async fn cancel_page_candidate(
             host_classification: Some(page.host_classification.as_str()),
             candidate_state: WebCandidateState::Canceled.as_str(),
             classification_reason: Some(WebClassificationReason::CancelRequested.as_str()),
+            classification_detail: page.classification_detail.as_deref(),
             content_type: page.content_type.as_deref(),
             http_status: page.http_status,
             snapshot_storage_key: page.snapshot_storage_key.as_deref(),

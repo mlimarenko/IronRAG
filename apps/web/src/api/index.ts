@@ -11,6 +11,10 @@ export type {
   LibrarySnapshotImportReport,
   DocumentListStatusFilter,
   DocumentListStatusCounts,
+  WebIngestRunListItem,
+  WebIngestRunPageItem,
+  WebIngestRunReceipt,
+  WebRunCounts,
 } from "./documents";
 export { dashboardApi } from "./dashboard";
 export { opsApi, ASYNC_OPERATION_TERMINAL_STATES } from "./ops";
@@ -22,5 +26,10 @@ export type {
 export { queryApi } from "./query";
 export { knowledgeApi } from "./knowledge";
 export { adminApi } from "./admin";
+export type {
+  CatalogLibraryResponse,
+  WebIngestIgnorePattern,
+  WebIngestPolicy,
+} from "./admin";
 export { versionApi } from "./version";
 export type { ReleaseUpdateResponse, ReleaseUpdateStatus } from "./version";

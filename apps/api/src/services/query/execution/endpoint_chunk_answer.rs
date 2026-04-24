@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use crate::domains::query_ir::QueryIR;
+
 use super::{
     document_target::{focused_answer_document_id, question_requests_multi_document_scope},
     endpoint_answer::select_multi_document_scope_ids,
@@ -22,6 +24,7 @@ use super::{
 
 pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_intents(question);
@@ -35,7 +38,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     if question_keywords.is_empty() {
         return None;
     }
@@ -48,16 +51,24 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
             ordered_document_ids.push(chunk.document_id);
         }
     }
-    let scoped_document_ids =
-        select_multi_document_scope_ids(question, &ordered_document_ids, &per_document_chunks);
+    let scoped_document_ids = select_multi_document_scope_ids(
+        question,
+        query_ir,
+        &ordered_document_ids,
+        &per_document_chunks,
+    );
 
     let mut lines = Vec::new();
     for document_id in scoped_document_ids {
         let Some(document_chunks) = per_document_chunks.get(&document_id) else {
             continue;
         };
-        let local_keywords =
-            document_local_focus_keywords(question, None, document_chunks, &question_keywords);
+        let local_keywords = document_local_focus_keywords(
+            question,
+            Some(query_ir),
+            document_chunks,
+            &question_keywords,
+        );
         let mut ranked_chunks = document_chunks.clone();
         ranked_chunks.sort_by(|left, right| {
             let left_match = technical_chunk_selection_score(
@@ -114,6 +125,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
 
 pub(crate) fn build_single_endpoint_answer_from_chunks(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_intents(question);
@@ -129,7 +141,7 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
         return None;
     }
 
-    let question_keywords = technical_literal_focus_keywords(question, None);
+    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     if question_keywords.is_empty() {
         return None;
     }
@@ -141,8 +153,12 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
     }
 
     let pagination_requested = question_mentions_pagination(question);
-    let local_keywords =
-        document_local_focus_keywords(question, None, &candidate_chunks, &question_keywords);
+    let local_keywords = document_local_focus_keywords(
+        question,
+        Some(query_ir),
+        &candidate_chunks,
+        &question_keywords,
+    );
     let mut ranked_chunks = candidate_chunks;
     ranked_chunks.sort_by(|left, right| {
         let left_match = prioritized_technical_chunk_score(

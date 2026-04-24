@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     infra::repositories::iam_repository,
+    interfaces::http::router_support::ApiError,
     services::{
         content::service::{
             AcceptMutationCommand, AdmitMutationCommand, AppendInlineMutationCommand,
@@ -125,6 +126,66 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
         assert_eq!(knowledge_document.active_revision_id, Some(active_revision.id));
         assert_eq!(knowledge_document.readable_revision_id, Some(readable_revision.id));
         assert_ne!(knowledge_document.readable_revision_id, knowledge_document.active_revision_id);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn canonical_content_lifecycle_head_promotion_fails_loudly_when_knowledge_sync_breaks()
+-> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+
+    let result = async {
+        let document = fixture
+            .state
+            .canonical_services
+            .content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("head-sync-failure-doc-{}", Uuid::now_v7())),
+                    file_name: None,
+                    created_by_principal_id: None,
+                },
+            )
+            .await
+            .context("failed to create head sync failure document")?;
+
+        fixture
+            .drop_arango_database()
+            .await
+            .context("failed to drop Arango database before head promotion")?;
+
+        let error = fixture
+            .state
+            .canonical_services
+            .content
+            .promote_document_head(
+                &fixture.state,
+                PromoteHeadCommand {
+                    document_id: document.id,
+                    active_revision_id: None,
+                    readable_revision_id: None,
+                    latest_mutation_id: None,
+                    latest_successful_attempt_id: None,
+                },
+            )
+            .await
+            .expect_err("head promotion must fail when knowledge sync fails");
+        assert!(matches!(error, ApiError::InternalMessage(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("knowledge document sync failed after canonical head update")
+        );
 
         Ok(())
     }
@@ -496,6 +557,7 @@ async fn canonical_content_lifecycle_single_page_web_ingest_materializes_only_th
                     boundary_policy: None,
                     max_depth: None,
                     max_pages: None,
+                    extra_ignore_patterns: Vec::new(),
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,
@@ -505,7 +567,7 @@ async fn canonical_content_lifecycle_single_page_web_ingest_materializes_only_th
             .context("failed to submit single-page web ingest run")?;
 
         assert_eq!(run.mode, "single_page");
-        assert_eq!(run.run_state, "completed");
+        assert_eq!(run.run_state, "processing");
 
         let pages = fixture
             .state

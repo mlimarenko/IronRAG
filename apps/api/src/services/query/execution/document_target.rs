@@ -2,7 +2,11 @@ use std::collections::{BTreeSet, HashMap};
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::QueryIR;
+use crate::{
+    domains::query_ir::{EntityRole, QueryIR, QueryScope},
+    infra::arangodb::document_store::KnowledgeDocumentRow,
+    services::query::text_match::{near_token_overlap_count, normalized_alnum_tokens},
+};
 
 use super::{retrieve::score_value, types::RuntimeMatchedChunk};
 
@@ -105,6 +109,85 @@ pub(crate) fn explicit_document_reference_literals(question: &str) -> Vec<String
         })
         .filter(|token| seen.insert(token.clone()))
         .collect()
+}
+
+fn normalized_focus_tokens(value: &str) -> BTreeSet<String> {
+    normalized_alnum_tokens(value, 3)
+}
+
+fn query_ir_focus_reference_tokens(query_ir: &QueryIR) -> BTreeSet<String> {
+    if let Some(hint) = query_ir.document_focus.as_ref() {
+        let tokens = normalized_focus_tokens(&hint.hint);
+        if !tokens.is_empty() {
+            return tokens;
+        }
+    }
+
+    if !matches!(query_ir.scope, QueryScope::SingleDocument) {
+        return BTreeSet::new();
+    }
+
+    query_ir
+        .target_entities
+        .iter()
+        .filter(|entity| entity.role == EntityRole::Subject)
+        .flat_map(|entity| normalized_focus_tokens(&entity.label).into_iter())
+        .collect()
+}
+
+pub(crate) fn focused_target_document_ids_from_query_ir_values<'a, I>(
+    query_ir: &QueryIR,
+    values: I,
+) -> BTreeSet<Uuid>
+where
+    I: IntoIterator<Item = (Uuid, &'a str)>,
+{
+    let reference_tokens = query_ir_focus_reference_tokens(query_ir);
+    if reference_tokens.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let mut best_overlap_by_document = HashMap::<Uuid, usize>::new();
+    for (document_id, raw_value) in values {
+        let overlap =
+            near_token_overlap_count(&reference_tokens, &normalized_focus_tokens(raw_value));
+        if overlap == 0 {
+            continue;
+        }
+        best_overlap_by_document
+            .entry(document_id)
+            .and_modify(|best| *best = (*best).max(overlap))
+            .or_insert(overlap);
+    }
+
+    let Some(best_overlap) = best_overlap_by_document.values().copied().max() else {
+        return BTreeSet::new();
+    };
+
+    let matched = best_overlap_by_document
+        .into_iter()
+        .filter_map(|(document_id, overlap)| (overlap == best_overlap).then_some(document_id))
+        .collect::<BTreeSet<_>>();
+    if matched.len() == 1 { matched } else { BTreeSet::new() }
+}
+
+pub(crate) fn focused_target_document_ids_from_query_ir(
+    query_ir: &QueryIR,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> BTreeSet<Uuid> {
+    focused_target_document_ids_from_query_ir_values(
+        query_ir,
+        document_index.values().flat_map(|document| {
+            [
+                document.title.as_deref(),
+                document.file_name.as_deref(),
+                Some(document.external_key.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .map(move |value| (document.document_id, value))
+        }),
+    )
 }
 
 /// Does the user's question request retrieval to span multiple documents?
@@ -448,7 +531,14 @@ fn title_case_document_word(word: &str) -> String {
 mod tests {
     use uuid::Uuid;
 
-    use super::{explicit_document_reference_literals, explicit_target_document_ids_from_values};
+    use crate::domains::query_ir::{
+        DocumentHint, EntityMention, QueryAct, QueryIR, QueryLanguage, QueryScope,
+    };
+
+    use super::{
+        explicit_document_reference_literals, explicit_target_document_ids_from_values,
+        focused_target_document_ids_from_query_ir_values,
+    };
 
     #[test]
     fn explicit_target_document_ids_prefer_exact_extension_match() {
@@ -481,4 +571,5 @@ mod tests {
             vec!["people-100.csv".to_string(), "sample-heavy-1.xls".to_string()]
         );
     }
+
 }

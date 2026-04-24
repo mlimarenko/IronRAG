@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::shared::web::ingest::WebIngestIgnorePattern;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestJob {
     pub id: Uuid,
@@ -64,7 +66,7 @@ pub struct WebIngestRunReceipt {
     pub cancel_requested_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebRunCounts {
     pub discovered: i64,
@@ -88,6 +90,7 @@ pub struct WebIngestRunSummary {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
+    pub ignore_patterns: Vec<WebIngestIgnorePattern>,
     pub run_state: String,
     pub seed_url: String,
     pub counts: WebRunCounts,
@@ -108,6 +111,7 @@ pub struct WebIngestRun {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
+    pub ignore_patterns: Vec<WebIngestIgnorePattern>,
     pub run_state: String,
     pub requested_by_principal_id: Option<Uuid>,
     pub requested_at: DateTime<Utc>,
@@ -132,6 +136,7 @@ pub struct WebDiscoveredPage {
     pub host_classification: String,
     pub candidate_state: String,
     pub classification_reason: Option<String>,
+    pub classification_detail: Option<String>,
     pub content_type: Option<String>,
     pub http_status: Option<i32>,
     pub discovered_at: DateTime<Utc>,
