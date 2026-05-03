@@ -118,6 +118,14 @@ pub struct ContentChunk {
     pub token_count: Option<i32>,
     pub normalized_text: String,
     pub text_checksum: String,
+    /// Earliest record timestamp aggregated into this chunk (JSONL ingest
+    /// only; None for non-temporal sources like PDF/image/markdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<DateTime<Utc>>,
+    /// Latest record timestamp aggregated into this chunk. Equals
+    /// `occurred_at` for single-record chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

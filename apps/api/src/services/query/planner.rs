@@ -3,30 +3,18 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::domains::query::{QueryPlanningMetadata, RuntimeQueryMode};
-use crate::services::query::latest_versions::latest_version_context_top_k;
-
 const MAX_TOP_K: usize = 48;
 const DEFAULT_TOP_K: usize = 8;
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 22_000;
 /// Minimum token length after stripping punctuation. Tokens shorter than
-/// this are almost always articles / particles / single letters that
-/// carry zero retrieval signal across any language we serve ("a", "и",
-/// "by"). This replaces the English-only STOP_WORDS list that used to
-/// live here — a length cutoff is language-agnostic and doesn't
-/// hardcode a lexicon.
+/// this mostly carry no retrieval signal; a length cutoff avoids a
+/// language-specific lexicon.
 const TOKEN_MIN_LEN: usize = 3;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UnsupportedCapabilityIntent {
-    GraphQlApi,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryIntentProfile {
     pub exact_literal_technical: bool,
-    pub unsupported_capability: Option<UnsupportedCapabilityIntent>,
     pub multi_document_technical: bool,
 }
 
@@ -72,7 +60,6 @@ pub struct RuntimeQueryPlan {
     pub low_level_keywords: Vec<String>,
     pub entity_keywords: Vec<String>,
     pub concept_keywords: Vec<String>,
-    pub expanded_keywords: Vec<String>,
     pub top_k: usize,
     pub context_budget_chars: usize,
     pub hyde_recommended: bool,
@@ -98,7 +85,7 @@ pub fn extract_keywords(question: &str) -> Vec<String> {
         .split_whitespace()
         .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric()))
         .filter(|token| token.chars().count() >= TOKEN_MIN_LEN)
-        .map(str::to_ascii_lowercase)
+        .map(str::to_lowercase)
         .filter(|token| seen.insert(token.clone()))
         .collect()
 }
@@ -108,74 +95,7 @@ pub fn choose_mode(explicit: Option<RuntimeQueryMode>, question: &str) -> Runtim
     if let Some(explicit) = explicit {
         return explicit;
     }
-
-    let question = question.to_ascii_lowercase();
-    if contains_any(
-        &question,
-        &[
-            "document",
-            "file",
-            "pdf",
-            "docx",
-            "image",
-            "notes",
-            "report",
-            "документ",
-            "файл",
-            "изображен",
-            "картинк",
-            "отчёт",
-            "отчет",
-            "заметк",
-        ],
-    ) {
-        return RuntimeQueryMode::Document;
-    }
-    if contains_any(
-        &question,
-        &[
-            "relationship",
-            "relationships",
-            "connected",
-            "connection",
-            "network",
-            "theme",
-            "themes",
-            "across",
-            "most connected",
-            "связ",
-            "сеть",
-            "темы",
-            "между",
-            "глобальн",
-            "граф",
-        ],
-    ) {
-        return RuntimeQueryMode::Global;
-    }
-    if contains_any(
-        &question,
-        &[
-            "who is",
-            "what is",
-            "tell me about",
-            "entity",
-            "topic",
-            "person",
-            "company",
-            "кто такой",
-            "что такое",
-            "расскажи",
-            "сущност",
-            "тема",
-            "компани",
-            "организац",
-            "персон",
-        ],
-    ) {
-        return RuntimeQueryMode::Local;
-    }
-
+    let _ = question;
     RuntimeQueryMode::Hybrid
 }
 
@@ -196,12 +116,10 @@ pub fn build_query_plan(
     let (high_level_keywords, low_level_keywords) = split_keywords(&keywords);
     let case_preserving = extract_keywords_preserving_case(question);
     let (entity_keywords, concept_keywords) = classify_keyword_levels(&case_preserving);
-    let expanded_keywords = expand_keywords_with_synonyms(&keywords);
 
     let intent_profile = classify_query_intent_profile(question, &keywords);
-    let hyde_recommended = intent_profile.multi_document_technical
-        && !intent_profile.exact_literal_technical
-        && intent_profile.unsupported_capability.is_none();
+    let hyde_recommended =
+        intent_profile.multi_document_technical && !intent_profile.exact_literal_technical;
 
     RuntimeQueryPlan {
         requested_mode,
@@ -212,7 +130,6 @@ pub fn build_query_plan(
         low_level_keywords,
         entity_keywords,
         concept_keywords,
-        expanded_keywords,
         top_k: planned_top_k(question, top_k),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
         hyde_recommended,
@@ -232,14 +149,12 @@ pub fn build_query_plan_from_metadata(
         }
     }
 
-    let expanded_keywords = expand_keywords_with_synonyms(&keywords);
     let case_preserving = extract_keywords_preserving_case(question);
     let (entity_keywords, concept_keywords) = classify_keyword_levels(&case_preserving);
 
     let intent_profile = classify_query_intent_profile(question, &keywords);
-    let hyde_recommended = intent_profile.multi_document_technical
-        && !intent_profile.exact_literal_technical
-        && intent_profile.unsupported_capability.is_none();
+    let hyde_recommended =
+        intent_profile.multi_document_technical && !intent_profile.exact_literal_technical;
 
     RuntimeQueryPlan {
         requested_mode: metadata.requested_mode,
@@ -250,7 +165,6 @@ pub fn build_query_plan_from_metadata(
         low_level_keywords: metadata.keywords.low_level.clone(),
         entity_keywords,
         concept_keywords,
-        expanded_keywords,
         top_k: planned_top_k(question, top_k),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
         hyde_recommended,
@@ -262,73 +176,30 @@ fn classify_query_intent_profile(question: &str, keywords: &[String]) -> QueryIn
     let exact_literal_technical = is_exact_literal_technical_question(&lowered, keywords);
     QueryIntentProfile {
         exact_literal_technical,
-        unsupported_capability: classify_unsupported_capability(&lowered),
         multi_document_technical: exact_literal_technical
             && is_multi_document_technical_question(&lowered),
     }
 }
 
 fn planned_top_k(question: &str, top_k: Option<usize>) -> usize {
-    latest_version_context_top_k(question, top_k.unwrap_or(DEFAULT_TOP_K)).clamp(1, MAX_TOP_K)
+    let _ = question;
+    top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K)
 }
 
 fn is_exact_literal_technical_question(question: &str, keywords: &[String]) -> bool {
-    let markers = [
-        "url",
-        "wsdl",
-        "endpoint",
-        "эндпоинт",
-        "path",
-        "путь",
-        "маршрут",
-        "method",
-        "метод",
-        "parameter",
-        "параметр",
-        "graphql",
-        "rest",
-        "soap",
-        "port",
-        "порт",
-        "status code",
-        "код статуса",
-        "prefix",
-        "префикс",
-    ];
-    let has_marker = markers.iter().any(|marker| question.contains(marker));
-    let has_literal_shape = question.contains("http://")
+    question.contains("http://")
         || question.contains("https://")
         || question.contains('/')
         || keywords.iter().any(|keyword| {
             keyword.contains('_')
                 || keyword.chars().any(|ch| ch.is_ascii_digit())
                 || keyword.chars().any(|ch| ch.is_ascii_uppercase())
-        });
-    has_marker || has_literal_shape
-}
-
-fn classify_unsupported_capability(question: &str) -> Option<UnsupportedCapabilityIntent> {
-    question.contains("graphql").then_some(UnsupportedCapabilityIntent::GraphQlApi)
+        })
 }
 
 fn is_multi_document_technical_question(question: &str) -> bool {
-    let markers = [
-        "compare",
-        "сравни",
-        "оба",
-        "обе",
-        "both",
-        "двух",
-        "два",
-        "нескольк",
-        "cross-document",
-        "multi-document",
-        "разных документ",
-        "нескольких документ",
-        "отдельно",
-        "separately",
-    ];
-    markers.iter().any(|marker| question.contains(marker))
+    let _ = question;
+    false
 }
 
 /// Extracts keywords from a question preserving original case.
@@ -390,35 +261,13 @@ fn split_keywords(keywords: &[String]) -> (Vec<String>, Vec<String>) {
     (high_level_keywords, low_level_keywords)
 }
 
-/// Expands the keyword set with synonyms from known synonym groups.
-/// Keyword expansion used to rewrite queries through a hardcoded
-/// synonym table (auth/oauth, db/database, k8s/kubernetes, …). Removed
-/// when the IR layer landed — the compiled `QueryIR.target_types` now
-/// ties synonyms together through a shared ontology tag (all of these
-/// words map to the same `"auth"` / `"database"` / `"orchestrator"`
-/// tag in Arango), so query expansion is no longer the right place
-/// for this. Kept as an identity function so existing callers still
-/// compile and retrieval still receives the raw keyword list; the
-/// expansion step will be deleted entirely in the next consumer
-/// migration PR.
-#[must_use]
-pub fn expand_keywords_with_synonyms(keywords: &[String]) -> Vec<String> {
-    keywords.to_vec()
-}
-
-fn contains_any(question: &str, fragments: &[&str]) -> bool {
-    fragments.iter().any(|fragment| question.contains(fragment))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn extract_keywords_deduplicates_and_filters_short_tokens() {
-        // The old STOP_WORDS list was replaced with a language-agnostic
-        // minimum token length (TOKEN_MIN_LEN=3). Tokens like "and"
-        // pass the length check now — that is intentional: the IR
+        // Keyword extraction is intentionally language-agnostic: the IR
         // compiler handles routing semantics, not raw keyword lists.
         let keywords = extract_keywords("What themes and themes connect the documents?");
         assert!(keywords.contains(&"themes".to_string()));
@@ -429,18 +278,26 @@ mod tests {
     }
 
     #[test]
-    fn choose_mode_prefers_document_for_file_questions() {
+    fn extract_keywords_uses_unicode_case_folding() {
+        let keywords = extract_keywords("CAFÉ ΔELTA AlphaKey");
+        assert!(keywords.contains(&"café".to_string()));
+        assert!(keywords.contains(&"δelta".to_string()));
+        assert!(keywords.contains(&"alphakey".to_string()));
+    }
+
+    #[test]
+    fn choose_mode_defaults_to_hybrid_without_explicit_metadata() {
         assert_eq!(
             choose_mode(None, "Which document mentions Sarah Chen?"),
-            RuntimeQueryMode::Document
+            RuntimeQueryMode::Hybrid
         );
     }
 
     #[test]
-    fn choose_mode_prefers_global_for_relationship_language() {
+    fn choose_mode_does_not_route_from_raw_relationship_words() {
         assert_eq!(
             choose_mode(None, "What relationships are most connected in this library?"),
-            RuntimeQueryMode::Global
+            RuntimeQueryMode::Hybrid
         );
     }
 
@@ -455,15 +312,15 @@ mod tests {
     }
 
     #[test]
-    fn build_query_plan_expands_top_k_for_latest_version_coverage() {
-        let plan = build_query_plan("Что нового в последних 5 релизах?", None, None, None);
-        assert_eq!(plan.top_k, 20);
+    fn build_query_plan_keeps_top_k_ir_agnostic() {
+        let plan = build_query_plan("What's new in the last 5 releases?", None, None, None);
+        assert_eq!(plan.top_k, 8);
 
         let explicit_low = build_query_plan("latest 5 releases", None, Some(6), None);
-        assert_eq!(explicit_low.top_k, 20);
+        assert_eq!(explicit_low.top_k, 6);
 
         let capped = build_query_plan("latest 100 releases", None, None, None);
-        assert_eq!(capped.top_k, 40);
+        assert_eq!(capped.top_k, 8);
     }
 
     #[test]
@@ -480,7 +337,7 @@ mod tests {
         };
 
         let plan = build_query_plan_from_metadata(
-            "Сравни endpoint orders и inventory",
+            "Compare endpoint orders and inventory",
             &metadata,
             Some(6),
         );
@@ -498,41 +355,7 @@ mod tests {
                 "chen".to_string()
             ]
         );
-        assert!(plan.intent_profile.multi_document_technical);
-    }
-
-    #[test]
-    fn build_query_plan_classifies_exact_literal_and_unsupported_capability() {
-        let plan = build_query_plan(
-            "Есть ли GraphQL endpoint и какой URL у GET /api/status?",
-            None,
-            None,
-            None,
-        );
-
-        assert!(plan.intent_profile.exact_literal_technical);
-        assert_eq!(
-            plan.intent_profile.unsupported_capability,
-            Some(UnsupportedCapabilityIntent::GraphQlApi)
-        );
-    }
-
-    #[test]
-    fn expand_keywords_is_identity_after_ontology_migration() {
-        // The old SYNONYM_GROUPS table is gone — synonyms now live as
-        // shared `target_types` ontology tags produced by QueryCompiler.
-        // The expansion helper is kept as an identity function so the
-        // rest of the pipeline still compiles; see function docstring.
-        let keywords = vec!["auth".to_string(), "database".to_string()];
-        let expanded = expand_keywords_with_synonyms(&keywords);
-        assert_eq!(expanded, keywords);
-    }
-
-    #[test]
-    fn expand_keywords_preserves_originals() {
-        let keywords = vec!["foobar".to_string(), "xyzzy".to_string()];
-        let expanded = expand_keywords_with_synonyms(&keywords);
-        assert_eq!(expanded, keywords);
+        assert!(!plan.intent_profile.multi_document_technical);
     }
 
     #[test]

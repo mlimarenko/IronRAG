@@ -11,7 +11,7 @@ pub use document::{
 
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -131,6 +131,16 @@ pub struct RevisionAdmissionMetadata {
     pub language_code: Option<String>,
     pub source_uri: Option<String>,
     pub storage_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReprocessRevisionSource {
+    pub checksum: String,
+    pub mime_type: String,
+    pub byte_size: i64,
+    pub title: Option<String>,
+    pub source_uri: Option<String>,
+    pub storage_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -293,25 +303,25 @@ pub struct MaterializeRevisionGraphCandidatesCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisionGraphCandidateMaterialization {
     pub chunk_count: usize,
+    pub selected_graph_chunks: usize,
     pub extracted_entities: usize,
     pub extracted_relations: usize,
     pub provider_kind: Option<String>,
     pub model_name: Option<String>,
     pub usage_json: serde_json::Value,
-    /// Number of chunks whose extraction output was reused from a previous
-    /// revision because their text checksum was identical (diff-aware ingest).
-    /// These chunks did not trigger an LLM call.
+    /// Number of chunks whose extraction output was reused from the persistent
+    /// graph extraction cache. These chunks did not trigger an LLM call.
     pub reused_chunks: usize,
-    /// Entities carried over from the previous revision via reuse.
+    /// Entities carried over from cached graph extraction output.
     pub reused_entities: usize,
-    /// Relations carried over from the previous revision via reuse.
+    /// Relations carried over from cached graph extraction output.
     pub reused_relations: usize,
+    pub record_stream_source_units_skipped: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct EditableDocumentContext {
     current_content: String,
-    mime_type: String,
     title: Option<String>,
     language_code: Option<String>,
 }
@@ -331,6 +341,16 @@ struct PendingChunkInsert {
     heading_trail: Vec<String>,
     literal_digest: Option<String>,
     quality_score: Option<f32>,
+    window_text: Option<String>,
+    /// Earliest record timestamp aggregated into this chunk (JSONL ingest
+    /// only; None for non-temporal sources). Computed via the canonical
+    /// `record_jsonl::extract_chunk_temporal_bounds` helper at construction
+    /// time so a single source feeds Postgres + Arango writers downstream.
+    occurred_at: Option<DateTime<Utc>>,
+    /// Latest record timestamp aggregated into this chunk. Equals
+    /// `occurred_at` for single-record chunks; None when `occurred_at` is
+    /// None.
+    occurred_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -553,6 +573,12 @@ fn map_knowledge_chunk_row(row: KnowledgeChunkRow) -> ContentChunk {
         token_count: row.token_count,
         normalized_text: row.normalized_text,
         text_checksum: checksum,
+        // KnowledgeChunkRow (Arango) does not yet carry temporal bounds.
+        // Sprint T1.3 mirrors `occurred_at` / `occurred_until` into Arango;
+        // until then this fallback path returns None and consumers fall back
+        // to the Postgres source-of-truth via list_chunks_by_revision.
+        occurred_at: None,
+        occurred_until: None,
     }
 }
 

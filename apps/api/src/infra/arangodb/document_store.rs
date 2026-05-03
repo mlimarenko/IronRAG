@@ -5,10 +5,11 @@
     clippy::too_many_arguments
 )]
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use uuid::Uuid;
 
 mod decode;
@@ -30,6 +31,13 @@ use crate::infra::arangodb::{
         KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION, KNOWLEDGE_STRUCTURED_REVISION_COLLECTION,
     },
 };
+
+const STRUCTURED_BLOCK_INSERT_MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const STRUCTURED_BLOCK_INSERT_MAX_BATCH_ROWS: usize = 2_000;
+const KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT: usize = 2_000;
+const KNOWLEDGE_CHUNK_WINDOW_FETCH_CONCURRENCY: usize = 4;
+const KNOWLEDGE_CHUNK_REVISION_TERM_LIMIT: usize = 24;
+const KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS: usize = 128;
 
 /// Slim projection for the documents-page inspector counts.
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
@@ -308,6 +316,7 @@ impl ArangoDocumentStore {
                     byte_size: @byte_size,
                     normalized_text: @normalized_text,
                     text_checksum: @text_checksum,
+                    image_checksum: @image_checksum,
                     text_state: @text_state,
                     vector_state: @vector_state,
                     graph_state: @graph_state,
@@ -332,6 +341,7 @@ impl ArangoDocumentStore {
                     byte_size: @byte_size,
                     normalized_text: @normalized_text,
                     text_checksum: @text_checksum,
+                    image_checksum: @image_checksum,
                     text_state: @text_state,
                     vector_state: @vector_state,
                     graph_state: @graph_state,
@@ -360,6 +370,7 @@ impl ArangoDocumentStore {
                     "byte_size": row.byte_size,
                     "normalized_text": row.normalized_text,
                     "text_checksum": row.text_checksum,
+                    "image_checksum": row.image_checksum,
                     "text_state": row.text_state,
                     "vector_state": row.vector_state,
                     "graph_state": row.graph_state,
@@ -586,6 +597,32 @@ impl ArangoDocumentStore {
         decode_optional_single_result(cursor)
     }
 
+    pub async fn update_revision_image_checksum(
+        &self,
+        revision_id: Uuid,
+        image_checksum: Option<&str>,
+    ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR revision IN @@collection
+                 FILTER revision.revision_id == @revision_id
+                 LIMIT 1
+                 UPDATE revision WITH {
+                    image_checksum: @image_checksum
+                 } IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "revision_id": revision_id,
+                    "image_checksum": image_checksum,
+                }),
+            )
+            .await
+            .context("failed to update knowledge revision image checksum")?;
+        decode_optional_single_result(cursor)
+    }
+
     pub async fn update_revision_storage_ref(
         &self,
         revision_id: Uuid,
@@ -638,7 +675,9 @@ impl ArangoDocumentStore {
                     chunk_state: @chunk_state,
                     text_generation: @text_generation,
                     vector_generation: @vector_generation,
-                    quality_score: @quality_score
+                    quality_score: @quality_score,
+                    window_text: @window_text,
+                    raptor_level: @raptor_level
                  }
                  UPDATE {
                     chunk_kind: @chunk_kind,
@@ -654,7 +693,9 @@ impl ArangoDocumentStore {
                     chunk_state: @chunk_state,
                     text_generation: @text_generation,
                     vector_generation: @vector_generation,
-                    quality_score: @quality_score
+                    quality_score: @quality_score,
+                    window_text: @window_text,
+                    raptor_level: @raptor_level
                  }
                  IN @@collection
                  RETURN NEW",
@@ -681,6 +722,8 @@ impl ArangoDocumentStore {
                     "text_generation": row.text_generation,
                     "vector_generation": row.vector_generation,
                     "quality_score": row.quality_score,
+                    "window_text": row.window_text,
+                    "raptor_level": row.raptor_level,
                 }),
             )
             .await
@@ -721,6 +764,8 @@ impl ArangoDocumentStore {
                     "text_generation": row.text_generation,
                     "vector_generation": row.vector_generation,
                     "quality_score": row.quality_score,
+                    "window_text": row.window_text,
+                    "raptor_level": row.raptor_level,
                 })
             })
             .collect::<Vec<_>>();
@@ -738,6 +783,72 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to insert knowledge chunks")?;
+        decode_many_results(cursor)
+    }
+
+    /// List all non-RAPTOR chunks for a library (used by RAPTOR tree builder).
+    /// Capped at 10 000 chunks to avoid memory exhaustion on very large libraries.
+    pub async fn list_chunks_by_library(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.library_id == @library_id
+                 FILTER chunk.raptor_level == null
+                 SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT 10000
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "library_id": library_id,
+                }),
+            )
+            .await
+            .context("failed to list knowledge chunks by library")?;
+        decode_many_results(cursor)
+    }
+
+    /// Defence-in-depth tenant isolation: every call site already scopes
+    /// `revision_ids` by library, but the AQL adds an explicit
+    /// `chunk.library_id == @library_id` filter so the query is safe
+    /// even when a future caller passes mixed-tenant revision UUIDs.
+    pub async fn list_source_profile_chunks_by_revisions(
+        &self,
+        library_id: Uuid,
+        revision_ids: &[Uuid],
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if limit == 0 || revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.library_id == @library_id
+                 LET revision_rank = POSITION(@revision_ids, chunk.revision_id, true)
+                 FILTER revision_rank >= 0
+                 FILTER chunk.chunk_state == 'ready'
+                 FILTER (
+                    chunk.chunk_kind == 'source_profile'
+                    OR STARTS_WITH(chunk.normalized_text, '[source_profile ')
+                    OR STARTS_WITH(chunk.content_text, '[source_profile ')
+                 )
+                 SORT revision_rank ASC, chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT @limit
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "library_id": library_id,
+                    "revision_ids": revision_ids,
+                    "limit": limit,
+                }),
+            )
+            .await
+            .context("failed to list source profile chunks by revisions")?;
         decode_many_results(cursor)
     }
 
@@ -760,6 +871,66 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to list knowledge chunks by revision")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn list_chunks_by_revision_matching_terms(
+        &self,
+        revision_id: Uuid,
+        terms: &[String],
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if limit == 0 || terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let terms = normalized_revision_chunk_terms(terms);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.revision_id == @revision_id
+                   AND chunk.chunk_state == 'ready'
+                 FILTER chunk.chunk_kind != 'source_profile'
+                 FILTER !STARTS_WITH(chunk.normalized_text, '[source_profile ')
+                   AND !STARTS_WITH(chunk.content_text, '[source_profile ')
+                 LET normalized_lower = LOWER(chunk.normalized_text)
+                 LET content_lower = LOWER(chunk.content_text)
+                 LET window_lower = LOWER(chunk.window_text != null ? chunk.window_text : '')
+                 LET matched_terms = UNIQUE(
+                    FOR term IN @terms
+                      FILTER CONTAINS(normalized_lower, term)
+                         OR CONTAINS(content_lower, term)
+                         OR CONTAINS(window_lower, term)
+                      RETURN term
+                 )
+                 FILTER LENGTH(matched_terms) > 0
+                 LET earliest_pos = MIN(
+                    FOR term IN matched_terms
+                      LET normalized_pos = FIND_FIRST(normalized_lower, term)
+                      LET content_pos = FIND_FIRST(content_lower, term)
+                      LET window_pos = FIND_FIRST(window_lower, term)
+                      RETURN MIN([
+                        normalized_pos >= 0 ? normalized_pos : 2147483647,
+                        content_pos >= 0 ? content_pos : 2147483647,
+                        window_pos >= 0 ? window_pos : 2147483647
+                      ])
+                 )
+                 LET score = (LENGTH(matched_terms) * 10000) - earliest_pos
+                 SORT score DESC, chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT @limit
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_id": revision_id,
+                    "terms": terms,
+                    "limit": limit,
+                }),
+            )
+            .await
+            .context("failed to list knowledge chunks by revision terms")?;
         decode_many_results(cursor)
     }
 
@@ -786,17 +957,233 @@ impl ArangoDocumentStore {
                  FILTER chunk.chunk_index >= @min_chunk_index
                  FILTER chunk.chunk_index <= @max_chunk_index
                  SORT chunk.chunk_index ASC, chunk.chunk_id ASC
-                 LIMIT 2000
+                 LIMIT @limit
                  RETURN chunk",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_CHUNK_COLLECTION,
                     "revision_id": revision_id,
                     "min_chunk_index": min_chunk_index,
                     "max_chunk_index": max_chunk_index,
+                    "limit": KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT,
                 }),
             )
             .await
             .context("failed to list knowledge chunks by revision range")?;
+        let rows = decode_many_results(cursor)?;
+        if rows.len() >= KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT {
+            tracing::warn!(
+                stage = "arangodb.chunk_revision_range",
+                %revision_id,
+                min_chunk_index,
+                max_chunk_index,
+                limit = KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT,
+                "chunk revision range fetch hit limit"
+            );
+        }
+        Ok(rows)
+    }
+
+    /// Batched range variant of [`Self::list_chunks_by_revision_range`].
+    /// Callers that already know several inclusive chunk-index windows can
+    /// materialize them through the canonical range query with bounded
+    /// concurrency, avoiding both whole-revision fetches and unbounded
+    /// per-anchor serial round trips.
+    pub async fn list_chunks_by_revision_windows(
+        &self,
+        revision_id: Uuid,
+        windows: &[(i32, i32)],
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        let mut merged_windows = windows
+            .iter()
+            .filter_map(|(min_index, max_index)| {
+                (max_index >= min_index).then_some((*min_index, *max_index))
+            })
+            .collect::<Vec<_>>();
+        if merged_windows.is_empty() {
+            return Ok(Vec::new());
+        }
+        merged_windows.sort_unstable();
+
+        let mut normalized_windows = Vec::<(i32, i32)>::new();
+        for (min_index, max_index) in merged_windows {
+            match normalized_windows.last_mut() {
+                Some((_, last_max)) if min_index <= last_max.saturating_add(1) => {
+                    *last_max = (*last_max).max(max_index);
+                }
+                _ => normalized_windows.push((min_index, max_index)),
+            }
+        }
+        let window_count = normalized_windows.len();
+        let rows_by_window = stream::iter(normalized_windows.into_iter())
+            .map(|(min_index, max_index)| {
+                let store = self.clone();
+                async move {
+                    store.list_chunks_by_revision_range(revision_id, min_index, max_index).await
+                }
+            })
+            .buffer_unordered(KNOWLEDGE_CHUNK_WINDOW_FETCH_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to list knowledge chunks by revision windows")?;
+
+        let mut rows = rows_by_window.into_iter().flatten().collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.chunk_index
+                .cmp(&right.chunk_index)
+                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+        });
+        let mut seen_chunk_ids = BTreeSet::new();
+        rows.retain(|row| seen_chunk_ids.insert(row.chunk_id));
+        let hit_limit = rows.len() >= KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT;
+        rows.truncate(KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT);
+        if hit_limit {
+            tracing::warn!(
+                stage = "arangodb.chunk_windows",
+                %revision_id,
+                window_count,
+                limit = KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT,
+                "chunk window fetch hit limit"
+            );
+        }
+        Ok(rows)
+    }
+
+    /// List the last ready chunks for a revision by `chunk_index`.
+    ///
+    /// Returned rows are sorted back into ascending source order so callers can
+    /// render a chronological/ordinal slice without an extra in-memory reverse.
+    pub async fn list_tail_chunks_by_revision(
+        &self,
+        revision_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "LET tail = (
+                   FOR chunk IN @@collection
+                     FILTER chunk.revision_id == @revision_id
+                     FILTER chunk.chunk_state == 'ready'
+                     SORT chunk.chunk_index DESC, chunk.chunk_id DESC
+                     LIMIT @limit
+                     RETURN chunk
+                 )
+                 FOR chunk IN tail
+                   SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                   RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_id": revision_id,
+                    "limit": limit,
+                }),
+            )
+            .await
+            .context("failed to list tail knowledge chunks by revision")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn list_head_source_unit_blocks_by_revision(
+        &self,
+        revision_id: Uuid,
+        limit: usize,
+        temporal_start: Option<chrono::DateTime<chrono::Utc>>,
+        temporal_end: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
+        let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
+        // T2 minimum-viable: parse `occurred_at=ISO` substring out of the
+        // rendered block text via REGEX_EXTRACT. Avoids the schema bump
+        // that block-level temporal columns would require — record_jsonl
+        // ingest already writes `[unit_id=... occurred_at=ISO ...]`
+        // headers (apps/api/src/shared/extraction/record_jsonl.rs:250),
+        // so the substring is canonical and stable. Tail-N + revision
+        // scope keeps the regex cost bounded.
+        let cursor = self
+            .client
+            .query_json(
+                "FOR block IN @@collection
+                 FILTER block.revision_id == @revision_id
+                 FILTER block.block_kind == 'source_unit'
+                 LET occurred_match = (@temporal_start_iso == null AND @temporal_end_iso == null)
+                     ? null
+                     : REGEX_EXTRACT(block.normalized_text, 'occurred_at=([0-9T:+\\\\-]+)')
+                 LET occurred_iso = (occurred_match != null AND LENGTH(occurred_match) > 0)
+                     ? occurred_match[0]
+                     : null
+                 FILTER (@temporal_start_iso == null AND @temporal_end_iso == null)
+                     OR (occurred_iso != null
+                         AND (@temporal_start_iso == null OR occurred_iso >= @temporal_start_iso)
+                         AND (@temporal_end_iso == null OR occurred_iso <= @temporal_end_iso))
+                 SORT block.ordinal ASC, block.block_id ASC
+                 LIMIT @limit
+                 RETURN block",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
+                    "revision_id": revision_id,
+                    "limit": limit,
+                    "temporal_start_iso": temporal_start_iso,
+                    "temporal_end_iso": temporal_end_iso,
+                }),
+            )
+            .await
+            .context("failed to list head source-unit structured blocks by revision")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn list_tail_source_unit_blocks_by_revision(
+        &self,
+        revision_id: Uuid,
+        limit: usize,
+        temporal_start: Option<chrono::DateTime<chrono::Utc>>,
+        temporal_end: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
+        let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
+        // See `list_head_source_unit_blocks_by_revision` for the
+        // substring-extraction rationale.
+        let cursor = self
+            .client
+            .query_json(
+                "LET tail = (
+                   FOR block IN @@collection
+                     FILTER block.revision_id == @revision_id
+                     FILTER block.block_kind == 'source_unit'
+                     LET occurred_match = (@temporal_start_iso == null AND @temporal_end_iso == null)
+                         ? null
+                         : REGEX_EXTRACT(block.normalized_text, 'occurred_at=([0-9T:+\\\\-]+)')
+                     LET occurred_iso = (occurred_match != null AND LENGTH(occurred_match) > 0)
+                         ? occurred_match[0]
+                         : null
+                     FILTER (@temporal_start_iso == null AND @temporal_end_iso == null)
+                         OR (occurred_iso != null
+                             AND (@temporal_start_iso == null OR occurred_iso >= @temporal_start_iso)
+                             AND (@temporal_end_iso == null OR occurred_iso <= @temporal_end_iso))
+                     SORT block.ordinal DESC, block.block_id DESC
+                     LIMIT @limit
+                     RETURN block
+                 )
+                 FOR block IN tail
+                   SORT block.ordinal ASC, block.block_id ASC
+                   RETURN block",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
+                    "revision_id": revision_id,
+                    "limit": limit,
+                    "temporal_start_iso": temporal_start_iso,
+                    "temporal_end_iso": temporal_end_iso,
+                }),
+            )
+            .await
+            .context("failed to list tail source-unit structured blocks by revision")?;
         decode_many_results(cursor)
     }
 
@@ -1030,46 +1417,44 @@ impl ArangoDocumentStore {
         &self,
         revision_id: Uuid,
         rows: &[KnowledgeStructuredBlockRow],
-    ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>> {
+    ) -> anyhow::Result<()> {
         self.delete_structured_blocks_by_revision(revision_id).await?;
         if rows.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
-        let payload_rows = rows
-            .iter()
-            .map(|row| {
-                serde_json::json!({
-                    "_key": row.key,
-                    "block_id": row.block_id,
-                    "workspace_id": row.workspace_id,
-                    "library_id": row.library_id,
-                    "document_id": row.document_id,
-                    "revision_id": row.revision_id,
-                    "ordinal": row.ordinal,
-                    "block_kind": row.block_kind,
-                    "text": row.text,
-                    "normalized_text": row.normalized_text,
-                    "heading_trail": row.heading_trail,
-                    "section_path": row.section_path,
-                    "page_number": row.page_number,
-                    "span_start": row.span_start,
-                    "span_end": row.span_end,
-                    "parent_block_id": row.parent_block_id,
-                    "table_coordinates_json": row.table_coordinates_json,
-                    "code_language": row.code_language,
-                    "created_at": row.created_at,
-                    "updated_at": row.updated_at,
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut payload_rows = Vec::new();
+        let mut payload_bytes = 0usize;
+        for row in rows {
+            let payload_row = structured_block_payload_json(row);
+            let payload_row_bytes =
+                serde_json::to_vec(&payload_row).map_or(usize::MAX, |bytes| bytes.len());
+            if !payload_rows.is_empty()
+                && (payload_rows.len() >= STRUCTURED_BLOCK_INSERT_MAX_BATCH_ROWS
+                    || payload_bytes.saturating_add(payload_row_bytes)
+                        > STRUCTURED_BLOCK_INSERT_MAX_BATCH_BYTES)
+            {
+                self.insert_structured_block_batch(payload_rows).await?;
+                payload_rows = Vec::new();
+                payload_bytes = 0;
+            }
+            payload_bytes = payload_bytes.saturating_add(payload_row_bytes);
+            payload_rows.push(payload_row);
+        }
+        if !payload_rows.is_empty() {
+            self.insert_structured_block_batch(payload_rows).await?;
+        }
+        Ok(())
+    }
 
-        let cursor = self
-            .client
-            .query_json(
+    async fn insert_structured_block_batch(
+        &self,
+        payload_rows: Vec<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.client
+            .query_json_bulk(
                 "FOR row IN @rows
-                 INSERT row INTO @@collection
-                 RETURN NEW",
+                 INSERT row INTO @@collection",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
                     "rows": payload_rows,
@@ -1077,7 +1462,7 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to replace structured blocks")?;
-        decode_many_results(cursor)
+        Ok(())
     }
 
     pub async fn list_structured_blocks_by_revision(
@@ -1107,9 +1492,7 @@ impl ArangoDocumentStore {
     /// RETURN 1)` which the `(revision_id, ordinal)` persistent index
     /// can cover without loading any block documents. The slice uses
     /// the same index for `LIMIT @offset, @limit`, so only the
-    /// requested page materializes full block rows. This is what
-    /// replaced the "load every block, slice in memory" path that
-    /// used to blow ~1.2 s of wall time on PDF-sized documents.
+    /// requested page materializes full block rows.
     pub async fn list_structured_blocks_page_by_revision(
         &self,
         revision_id: Uuid,
@@ -1209,14 +1592,13 @@ impl ArangoDocumentStore {
     pub async fn delete_structured_blocks_by_revision(
         &self,
         revision_id: Uuid,
-    ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>> {
-        let cursor = self
-            .client
-            .query_json(
+    ) -> anyhow::Result<()> {
+        self.client
+            .query_json_bulk(
                 "FOR block IN @@collection
                  FILTER block.revision_id == @revision_id
                  REMOVE block IN @@collection
-                 RETURN OLD",
+                 OPTIONS { ignoreErrors: true }",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
                     "revision_id": revision_id,
@@ -1224,6 +1606,71 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to delete structured blocks by revision")?;
-        decode_many_results(cursor)
+        Ok(())
+    }
+}
+
+fn normalized_revision_chunk_terms(terms: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = terms
+        .iter()
+        .filter_map(|term| {
+            let value = term.trim().to_lowercase();
+            if value.is_empty() {
+                return None;
+            }
+            let value =
+                value.chars().take(KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS).collect::<String>();
+            seen.insert(value.clone()).then_some(value)
+        })
+        .collect::<Vec<_>>();
+    normalized.sort_by_key(|term| std::cmp::Reverse(term.chars().count()));
+    normalized.truncate(KNOWLEDGE_CHUNK_REVISION_TERM_LIMIT);
+    normalized
+}
+
+fn structured_block_payload_json(row: &KnowledgeStructuredBlockRow) -> serde_json::Value {
+    serde_json::json!({
+        "_key": row.key,
+        "block_id": row.block_id,
+        "workspace_id": row.workspace_id,
+        "library_id": row.library_id,
+        "document_id": row.document_id,
+        "revision_id": row.revision_id,
+        "ordinal": row.ordinal,
+        "block_kind": row.block_kind,
+        "text": row.text,
+        "normalized_text": row.normalized_text,
+        "heading_trail": row.heading_trail,
+        "section_path": row.section_path,
+        "page_number": row.page_number,
+        "span_start": row.span_start,
+        "span_end": row.span_end,
+        "parent_block_id": row.parent_block_id,
+        "table_coordinates_json": row.table_coordinates_json,
+        "code_language": row.code_language,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revision_chunk_terms_are_deduped_bounded_and_longest_first() {
+        let long = "x".repeat(KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS + 8);
+        let terms = normalized_revision_chunk_terms(&[
+            " Beta ".to_string(),
+            "alpha".to_string(),
+            "beta".to_string(),
+            long.clone(),
+            String::new(),
+        ]);
+        assert_eq!(terms.len(), 3);
+        assert_eq!(terms[0].chars().count(), KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS);
+        assert!(terms.contains(&"alpha".to_string()));
+        assert!(terms.contains(&"beta".to_string()));
     }
 }

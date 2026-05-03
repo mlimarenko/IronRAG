@@ -6,6 +6,7 @@ pub(super) mod execution;
 pub(crate) mod latest_versions;
 pub mod llm_context_debug;
 pub(crate) mod planner;
+pub(crate) mod result_cache;
 pub mod search;
 pub mod service;
 pub(crate) mod support;

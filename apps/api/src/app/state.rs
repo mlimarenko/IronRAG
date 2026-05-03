@@ -46,6 +46,7 @@ use crate::{
         ops::service::OpsService,
         query::search::SearchService,
         query::service::QueryService,
+        webhook::WebhookService,
     },
 };
 
@@ -205,6 +206,7 @@ pub struct CanonicalServices {
     pub billing: BillingService,
     pub ops: OpsService,
     pub audit: AuditService,
+    pub webhook: WebhookService,
 }
 
 #[derive(Clone, Default)]
@@ -383,6 +385,7 @@ impl AppState {
             billing: BillingService::new(),
             ops: OpsService::new(),
             audit: AuditService::new(),
+            webhook: WebhookService::new(),
         };
         let pipeline_hardening = PipelineHardeningSettings {
             minimum_slice_capacity: 1,

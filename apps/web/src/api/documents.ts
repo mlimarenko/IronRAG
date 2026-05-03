@@ -1,5 +1,5 @@
 import type { DocumentReadiness, DocumentStatus, SourceAccess } from "@/types";
-import type { WebIngestIgnorePattern } from "./admin";
+import type { WebIngestPattern, WebIngestUrlFilter } from "./admin";
 
 import { ApiError, type ApiErrorBody, apiFetch } from "./client";
 
@@ -221,7 +221,8 @@ interface RawWebIngestRunListItem {
   boundaryPolicy?: string;
   maxDepth?: number;
   maxPages?: number;
-  ignorePatterns?: WebIngestIgnorePattern[];
+  urlFilterMode?: string;
+  urlPatterns?: WebIngestPattern[];
   lastActivityAt?: string;
   counts?: {
     discovered?: number;
@@ -266,7 +267,8 @@ export interface WebIngestRunListItem {
   boundaryPolicy?: string;
   maxDepth?: number;
   maxPages?: number;
-  ignorePatterns?: WebIngestIgnorePattern[];
+  urlFilterMode?: string;
+  urlPatterns?: WebIngestPattern[];
   lastActivityAt?: string;
   counts?: WebRunCounts;
 }
@@ -313,6 +315,9 @@ export interface WebIngestRunReceipt {
 
 export interface PreparedSegmentsPageResponse {
   items?: PreparedSegmentItem[];
+  total?: number;
+  offset?: number;
+  limit?: number;
   [key: string]: unknown;
 }
 
@@ -342,6 +347,13 @@ export interface DocumentUploadOptions {
   title?: string;
 }
 
+interface PreparedSegmentsPageParams {
+  offset?: number;
+  limit?: number;
+}
+
+const PREPARED_SEGMENTS_PAGE_LIMIT = 500;
+
 function normalizeListItems<T>(raw: T[] | ListEnvelope<T>): T[] {
   return Array.isArray(raw) ? raw : (raw.items ?? []);
 }
@@ -358,7 +370,8 @@ function mapWebIngestRunListItem(
     boundaryPolicy: raw.boundaryPolicy,
     maxDepth: raw.maxDepth,
     maxPages: raw.maxPages,
-    ignorePatterns: raw.ignorePatterns,
+    urlFilterMode: raw.urlFilterMode,
+    urlPatterns: raw.urlPatterns,
     lastActivityAt: raw.lastActivityAt,
     counts: raw.counts,
   };
@@ -391,7 +404,7 @@ export interface CreateWebIngestRunRequest {
   boundaryPolicy?: string;
   maxDepth?: number;
   maxPages?: number;
-  extraIgnorePatterns?: WebIngestIgnorePattern[];
+  urlFilter: WebIngestUrlFilter;
 }
 
 export const documentsApi = {
@@ -493,9 +506,49 @@ export const documentsApi = {
   },
   getHead: (documentId: string) =>
     apiFetch<RawDocumentResponse>(`/content/documents/${documentId}/head`),
-  getPreparedSegments: async (documentId: string) => {
-    const response = await apiFetch<PreparedSegmentsPageResponse>(
-      `/content/documents/${documentId}/prepared-segments`,
+  getPreparedSegmentsPage: async (
+    documentId: string,
+    params: PreparedSegmentsPageParams = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.offset != null) qs.set("offset", String(params.offset));
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return apiFetch<PreparedSegmentsPageResponse>(
+      `/content/documents/${documentId}/prepared-segments${suffix}`,
+    );
+  },
+  getAllPreparedSegments: async (documentId: string) => {
+    const segments: PreparedSegmentItem[] = [];
+    let offset = 0;
+
+    while (true) {
+      const response = await documentsApi.getPreparedSegmentsPage(documentId, {
+        offset,
+        limit: PREPARED_SEGMENTS_PAGE_LIMIT,
+      });
+      const pageItems = response.items ?? [];
+      segments.push(...pageItems);
+
+      const total = typeof response.total === "number" ? response.total : null;
+      if (pageItems.length === 0) {
+        break;
+      }
+      if (total != null && segments.length >= total) {
+        break;
+      }
+      if (total == null && pageItems.length < PREPARED_SEGMENTS_PAGE_LIMIT) {
+        break;
+      }
+
+      offset += pageItems.length;
+    }
+
+    return segments;
+  },
+  getTechnicalFacts: async (documentId: string) => {
+    const response = await apiFetch<TechnicalFactsPageResponse>(
+      `/content/documents/${documentId}/technical-facts`,
     );
     return response.items ?? [];
   },
@@ -506,12 +559,6 @@ export const documentsApi = {
       throw new ApiError(response.status, body);
     }
     return response.text();
-  },
-  getTechnicalFacts: async (documentId: string) => {
-    const response = await apiFetch<TechnicalFactsPageResponse>(
-      `/content/documents/${documentId}/technical-facts`,
-    );
-    return response.items ?? [];
   },
   getRevisions: (documentId: string) =>
     apiFetch<RawDocumentRevisionItem[]>(
@@ -551,6 +598,14 @@ export interface LibraryCostSummary {
   providerCallCount: number;
 }
 
+export interface WorkspaceCostSummary {
+  totalCost: string;
+  currencyCode: string;
+  libraryCount: number;
+  documentCount: number;
+  providerCallCount: number;
+}
+
 export const billingApi = {
   getLibraryDocumentCosts: (libraryId: string) =>
     apiFetch<DocumentCostSummary[]>(
@@ -559,6 +614,10 @@ export const billingApi = {
   getLibraryCostSummary: (libraryId: string) =>
     apiFetch<LibraryCostSummary>(
       `/billing/library-cost-summary?libraryId=${libraryId}`,
+    ),
+  getWorkspaceCostSummary: (workspaceId: string) =>
+    apiFetch<WorkspaceCostSummary>(
+      `/billing/workspace-cost-summary?workspaceId=${workspaceId}`,
     ),
 };
 

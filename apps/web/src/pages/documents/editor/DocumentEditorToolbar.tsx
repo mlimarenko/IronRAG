@@ -33,6 +33,7 @@ export function DocumentEditorToolbar({
   const tableActionsDisabled = !editor || !editor.isActive('table');
   const tableActionTitle = tableActionsDisabled ? t('documents.editor.tableSelectionHint') : undefined;
   const historyDisabled = !editor || saving;
+  const showHistory = surfaceMode !== 'raw_text';
   const ribbonActions = actionItems({
     editor,
     saving,
@@ -41,6 +42,12 @@ export function DocumentEditorToolbar({
     tableActionsDisabled,
     tableActionTitle,
   });
+  const helperText = helperCopy(surfaceMode, t);
+  const showRibbon =
+    ribbonActions.primary.length > 0 ||
+    ribbonActions.secondary.length > 0 ||
+    showHistory ||
+    isDirty;
 
   return (
     <div className="flex flex-col gap-3">
@@ -64,41 +71,49 @@ export function DocumentEditorToolbar({
             {statusLabel}
           </Badge>
         </div>
-        <p className="max-w-2xl text-xs text-muted-foreground">
-          {helperCopy(surfaceMode, t)}
-        </p>
+        {helperText ? (
+          <p className="max-w-2xl text-xs text-muted-foreground">
+            {helperText}
+          </p>
+        ) : null}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 bg-muted/25 px-3 py-2">
-        {ribbonActions.primary.length > 0 ? (
-          <ToolbarCluster>{ribbonActions.primary}</ToolbarCluster>
-        ) : null}
-        {ribbonActions.secondary.length > 0 ? (
-          <>
-            <ToolbarDivider />
-            <ToolbarCluster>{ribbonActions.secondary}</ToolbarCluster>
-          </>
-        ) : null}
-        <ToolbarDivider />
-        <ToolbarCluster>
-          <ToolbarButton
-            disabled={historyDisabled}
-            label={t('documents.editor.undo')}
-            onClick={() => editor?.chain().focus().undo().run()}
-          />
-          <ToolbarButton
-            disabled={historyDisabled}
-            label={t('documents.editor.redo')}
-            onClick={() => editor?.chain().focus().redo().run()}
-          />
-        </ToolbarCluster>
-        {isDirty ? (
-          <>
-            <ToolbarDivider />
-            <p className="text-xs text-muted-foreground">{t('documents.editor.unsavedHint')}</p>
-          </>
-        ) : null}
-      </div>
+      {showRibbon ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 bg-muted/25 px-3 py-2">
+          {ribbonActions.primary.length > 0 ? (
+            <ToolbarCluster>{ribbonActions.primary}</ToolbarCluster>
+          ) : null}
+          {ribbonActions.secondary.length > 0 ? (
+            <>
+              <ToolbarDivider />
+              <ToolbarCluster>{ribbonActions.secondary}</ToolbarCluster>
+            </>
+          ) : null}
+          {showHistory ? (
+            <>
+              <ToolbarDivider />
+              <ToolbarCluster>
+                <ToolbarButton
+                  disabled={historyDisabled}
+                  label={t('documents.editor.undo')}
+                  onClick={() => editor?.chain().focus().undo().run()}
+                />
+                <ToolbarButton
+                  disabled={historyDisabled}
+                  label={t('documents.editor.redo')}
+                  onClick={() => editor?.chain().focus().redo().run()}
+                />
+              </ToolbarCluster>
+            </>
+          ) : null}
+          {isDirty ? (
+            <>
+              <ToolbarDivider />
+              <p className="text-xs text-muted-foreground">{t('documents.editor.unsavedHint')}</p>
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -158,6 +173,8 @@ function modeLabel(surfaceMode: EditorSurfaceMode, t: TFunction): string {
       return t('documents.editor.tableMode');
     case 'code':
       return t('documents.editor.codeMode');
+    case 'raw_text':
+      return t('documents.editor.proseMode');
     case 'prose':
     default:
       return t('documents.editor.proseMode');
@@ -170,6 +187,8 @@ function helperCopy(surfaceMode: EditorSurfaceMode, t: TFunction): string {
       return t('documents.editor.tableScrollHint');
     case 'code':
       return t('documents.editor.codeModeHint');
+    case 'raw_text':
+      return '';
     case 'prose':
     default:
       return t('documents.editor.description');
@@ -217,6 +236,11 @@ function actionItems({
   ];
 
   switch (surfaceMode) {
+    case 'raw_text':
+      return {
+        primary: [],
+        secondary: [],
+      };
     case 'table':
       return {
         primary: [

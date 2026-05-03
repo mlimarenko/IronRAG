@@ -1,5 +1,6 @@
+use std::time::Duration;
+
 use chrono::Utc;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -15,27 +16,34 @@ use crate::{
         },
     },
     app::state::AppState,
-    domains::agent_runtime::{
-        RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeExecutionSummary, RuntimeStageKind,
-        RuntimeStageState, RuntimeSurfaceKind, RuntimeTaskKind,
-    },
     domains::catalog::CatalogLifecycleState,
     domains::query::{QueryConversationState, QueryExecutionDetail, QueryVerificationState},
-    infra::repositories::{ai_repository, query_repository, runtime_repository},
+    domains::{
+        agent_runtime::{
+            RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState,
+            RuntimeTaskKind,
+        },
+        ai::AiBindingPurpose,
+    },
+    infra::repositories::{
+        ai_repository, query_repository, query_result_cache_repository, runtime_repository,
+    },
     interfaces::http::router_support::ApiError,
     services::{
         ingest::runtime::bounded_runtime_overrides,
         ops::billing::{CaptureExecutionBillingCommand, CaptureQueryExecutionBillingCommand},
         ops::service::CreateAsyncOperationCommand,
-        query::execution::{RuntimeAnswerQueryResult, generate_answer_query, prepare_answer_query},
+        query::{
+            execution::{RuntimeAnswerQueryResult, generate_answer_query, prepare_answer_query},
+            result_cache,
+        },
     },
 };
 
 use super::{
     CANONICAL_QUERY_MODE, ConversationRuntimeContext, ExecuteConversationTurnCommand, QueryService,
-    QueryTurnExecutionResult, QueryTurnProgressEvent,
+    QueryTurnExecutionResult,
     context::{assemble_context_bundle, load_execution_prepared_reference_context},
-    emit_query_runtime_summary,
     formatting::{
         append_answer_source_links, build_assistant_document_references,
         build_prepared_segment_references, build_technical_fact_references, map_chunk_references,
@@ -51,29 +59,30 @@ use super::{
     },
 };
 
+const REFERENCE_CONTEXT_HYDRATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone)]
+struct QueryResultCacheContext {
+    cache_key: String,
+    readable_content_fingerprint: String,
+    graph_projection_version: i64,
+    graph_topology_generation: i64,
+    binding_fingerprint: String,
+}
+
 impl QueryService {
     pub async fn execute_turn(
         &self,
         state: &AppState,
         command: ExecuteConversationTurnCommand,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
-        self.execute_turn_with_progress(state, command, None).await
+        self.execute_turn_canonical(state, command).await
     }
 
-    pub async fn execute_turn_stream(
+    async fn execute_turn_canonical(
         &self,
         state: &AppState,
         command: ExecuteConversationTurnCommand,
-        progress: UnboundedSender<QueryTurnProgressEvent>,
-    ) -> Result<QueryTurnExecutionResult, ApiError> {
-        self.execute_turn_with_progress(state, command, Some(progress)).await
-    }
-
-    async fn execute_turn_with_progress(
-        &self,
-        state: &AppState,
-        command: ExecuteConversationTurnCommand,
-        progress: Option<UnboundedSender<QueryTurnProgressEvent>>,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
         // Wall-clock clock for the whole turn. Captured at entry so the
         // `query.turn.completed` structured log at the bottom of this
@@ -152,24 +161,103 @@ impl QueryService {
         let binding_id = ai_repository::get_effective_binding_assignment_by_purpose(
             &state.persistence.postgres,
             conversation.library_id,
-            "query_answer",
+            AiBindingPurpose::QueryAnswer.as_str(),
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .map(|binding| binding.id);
 
+        let top_k = command.top_k.clamp(1, 32);
+        let cache_context = build_query_result_cache_context(
+            state,
+            &conversation,
+            &conversation_context,
+            &content_text,
+            top_k,
+        )
+        .await
+        .map_err(|error| {
+            warn!(
+                error = %error,
+                conversation_id = %conversation.id,
+                library_id = %conversation.library_id,
+                "query result cache context unavailable"
+            );
+            ApiError::InternalMessage("query answer coordination is unavailable".to_string())
+        })?;
+        let mut _cache_fill_guard = None;
+        {
+            let cache_context_ref = &cache_context;
+            if let Some(replayed) = self
+                .try_replay_query_result_cache(
+                    state,
+                    cache_context_ref,
+                    &conversation,
+                    &request_turn,
+                )
+                .await?
+            {
+                return Ok(replayed);
+            }
+            let wait_started = std::time::Instant::now();
+            loop {
+                let lock_owner = Uuid::now_v7();
+                match result_cache::try_acquire_fill_guard(
+                    &state.persistence.redis,
+                    &cache_context_ref.cache_key,
+                    lock_owner,
+                )
+                .await
+                {
+                    Ok(Some(guard)) => {
+                        _cache_fill_guard = Some(guard);
+                        break;
+                    }
+                    Ok(None) => {
+                        if wait_started.elapsed() >= result_cache::QUERY_RESULT_CACHE_WAIT_TIMEOUT {
+                            warn!(
+                                cache_key = %cache_context_ref.cache_key,
+                                wait_ms = wait_started.elapsed().as_millis() as u64,
+                                "query result cache fill wait timed out before canonical execution completed"
+                            );
+                            return Err(ApiError::Conflict(
+                                "query answer is still being prepared".to_string(),
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            cache_key = %cache_context_ref.cache_key,
+                            "query result cache fill lock unavailable"
+                        );
+                        return Err(ApiError::InternalMessage(
+                            "query answer coordination is unavailable".to_string(),
+                        ));
+                    }
+                }
+
+                tokio::time::sleep(result_cache::QUERY_RESULT_CACHE_WAIT_INTERVAL).await;
+                if let Some(replayed) = self
+                    .try_replay_query_result_cache(
+                        state,
+                        cache_context_ref,
+                        &conversation,
+                        &request_turn,
+                    )
+                    .await?
+                {
+                    return Ok(replayed);
+                }
+            }
+        }
+
         let execution_id = Uuid::now_v7();
         let execution_context_bundle_id = Uuid::now_v7();
-        let runtime_surface_kind =
-            if progress.is_some() { RuntimeSurfaceKind::Stream } else { RuntimeSurfaceKind::Rest };
         let mut runtime_session =
             seed_query_runtime_session(state, execution_id, &conversation_context).await?;
-        runtime_session.execution.surface_kind = runtime_surface_kind;
+        runtime_session.execution.surface_kind = command.surface_kind;
         let runtime_execution_id = runtime_session.execution.id;
-        emit_query_runtime_summary(
-            progress.as_ref(),
-            RuntimeExecutionSummary::from(&runtime_session.execution),
-        );
         let execution = query_repository::create_execution(
             &state.persistence.postgres,
             &query_repository::NewQueryExecution {
@@ -197,7 +285,7 @@ impl QueryService {
                     workspace_id: conversation.workspace_id,
                     library_id: conversation.library_id,
                     operation_kind: "query_execution".to_string(),
-                    surface_kind: "rest".to_string(),
+                    surface_kind: command.surface_kind.as_str().to_string(),
                     requested_by_principal_id: command.author_principal_id,
                     status: "accepted".to_string(),
                     subject_kind: "query_execution".to_string(),
@@ -222,7 +310,6 @@ impl QueryService {
             )
             .await?;
 
-        let top_k = command.top_k.clamp(1, 32);
         let mut query_embedding_usage = None;
         // Compile + embed both bill separately from answer generation:
         // different bindings, different models, different rates. We
@@ -230,57 +317,6 @@ impl QueryService {
         // `billing_provider_call` at the end of the turn attribute
         // each LLM call to the right `call_kind`.
         let mut query_compile_usage = None;
-        // Bridge the assistant agent's structured progress events into
-        // the turn-level SSE stream. The agent loop needs a `Send`-
-        // cloneable sender so every parallel tool dispatch can emit
-        // `ToolCallStarted` / `ToolCallCompleted` without serialising
-        // through an `&mut FnMut`; we run a small adapter task that
-        // reads `AgentProgressEvent`s off an internal mpsc and forwards
-        // them as `QueryTurnProgressEvent` frames to the SSE channel.
-        let (agent_progress_tx, mut agent_progress_rx) = tokio::sync::mpsc::unbounded_channel::<
-            crate::services::query::agent_loop::AgentProgressEvent,
-        >();
-        let agent_progress_sender = progress.as_ref().map(|_| agent_progress_tx.clone());
-        drop(agent_progress_tx);
-        let sse_progress_clone = progress.clone();
-        let _agent_progress_task = tokio::spawn(async move {
-            use crate::services::query::agent_loop::AgentProgressEvent;
-            while let Some(event) = agent_progress_rx.recv().await {
-                let Some(ref sse) = sse_progress_clone else {
-                    continue;
-                };
-                let frame = match event {
-                    AgentProgressEvent::AnswerDelta(delta) => {
-                        QueryTurnProgressEvent::AnswerDelta(delta)
-                    }
-                    AgentProgressEvent::ToolCallStarted {
-                        iteration,
-                        call_id,
-                        name,
-                        arguments_preview,
-                    } => QueryTurnProgressEvent::AssistantToolCallStarted {
-                        iteration,
-                        call_id,
-                        name,
-                        arguments_preview,
-                    },
-                    AgentProgressEvent::ToolCallCompleted {
-                        iteration,
-                        call_id,
-                        name,
-                        is_error,
-                        result_preview,
-                    } => QueryTurnProgressEvent::AssistantToolCallCompleted {
-                        iteration,
-                        call_id,
-                        name,
-                        is_error,
-                        result_preview,
-                    },
-                };
-                let _ = sse.send(frame);
-            }
-        });
         let outcome: RuntimeTerminalOutcome<QueryAnswerTaskSuccess, QueryAnswerTaskFailure> = {
             if let Err(failure) = begin_query_runtime_stage(
                 state.agent_runtime.executor(),
@@ -289,10 +325,6 @@ impl QueryService {
             )
             .await
             {
-                emit_query_runtime_summary(
-                    progress.as_ref(),
-                    RuntimeExecutionSummary::from(&runtime_session.execution),
-                );
                 // policy-deny before stage work started, zero-duration record is canonical
                 record_query_runtime_stage(
                     state.agent_runtime.executor(),
@@ -302,10 +334,6 @@ impl QueryService {
                     true,
                     Some(&failure),
                     None,
-                );
-                emit_query_runtime_summary(
-                    progress.as_ref(),
-                    RuntimeExecutionSummary::from(&runtime_session.execution),
                 );
                 make_query_terminal_failure_outcome(failure.clone())
             } else {
@@ -334,10 +362,6 @@ impl QueryService {
                             true,
                             None,
                             Some(retrieve_started),
-                        );
-                        emit_query_runtime_summary(
-                            progress.as_ref(),
-                            RuntimeExecutionSummary::from(&runtime_session.execution),
                         );
                         // Persist the final ranked chunks that shaped
                         // this execution's answer context so operators
@@ -386,10 +410,6 @@ impl QueryService {
                             Some(&failure),
                             Some(retrieve_started),
                         );
-                        emit_query_runtime_summary(
-                            progress.as_ref(),
-                            RuntimeExecutionSummary::from(&runtime_session.execution),
-                        );
                         let outcome: RuntimeTerminalOutcome<
                             QueryAnswerTaskSuccess,
                             QueryAnswerTaskFailure,
@@ -399,10 +419,6 @@ impl QueryService {
                             .executor()
                             .finalize_session::<QueryAnswerTask>(runtime_session, outcome)
                             .await;
-                        emit_query_runtime_summary(
-                            progress.as_ref(),
-                            RuntimeExecutionSummary::from(&runtime_result.execution),
-                        );
                         runtime_persistence::persist_runtime_result(
                             &state.persistence.postgres,
                             &runtime_result.execution,
@@ -475,10 +491,6 @@ impl QueryService {
                 )
                 .await
                 {
-                    emit_query_runtime_summary(
-                        progress.as_ref(),
-                        RuntimeExecutionSummary::from(&runtime_session.execution),
-                    );
                     // policy-deny before stage work started, zero-duration record is canonical
                     record_query_runtime_stage(
                         state.agent_runtime.executor(),
@@ -488,10 +500,6 @@ impl QueryService {
                         true,
                         Some(&failure),
                         None,
-                    );
-                    emit_query_runtime_summary(
-                        progress.as_ref(),
-                        RuntimeExecutionSummary::from(&runtime_session.execution),
                     );
                     make_query_terminal_failure_outcome(failure.clone())
                 } else {
@@ -507,6 +515,7 @@ impl QueryService {
                         top_k,
                         command.include_debug,
                         prepared.structured.planned_mode,
+                        &prepared.structured.chunk_references,
                     )
                     .await
                     {
@@ -520,10 +529,6 @@ impl QueryService {
                                 None,
                                 Some(assemble_context_started),
                             );
-                            emit_query_runtime_summary(
-                                progress.as_ref(),
-                                RuntimeExecutionSummary::from(&runtime_session.execution),
-                            );
 
                             if let Err(failure) = begin_query_runtime_stage(
                                 state.agent_runtime.executor(),
@@ -532,10 +537,6 @@ impl QueryService {
                             )
                             .await
                             {
-                                emit_query_runtime_summary(
-                                    progress.as_ref(),
-                                    RuntimeExecutionSummary::from(&runtime_session.execution),
-                                );
                                 // policy-deny before stage work started, zero-duration record is canonical
                                 record_query_runtime_stage(
                                     state.agent_runtime.executor(),
@@ -545,10 +546,6 @@ impl QueryService {
                                     false,
                                     Some(&failure),
                                     None,
-                                );
-                                emit_query_runtime_summary(
-                                    progress.as_ref(),
-                                    RuntimeExecutionSummary::from(&runtime_session.execution),
                                 );
                                 make_query_terminal_failure_outcome(failure.clone())
                             } else {
@@ -560,10 +557,7 @@ impl QueryService {
                                     &conversation_context.effective_query_text,
                                     &content_text,
                                     conversation_context.prompt_history_text.as_deref(),
-                                    None,
                                     prepared,
-                                    agent_progress_sender.clone(),
-                                    &command.auth,
                                 )
                                 .await
                                 {
@@ -582,12 +576,6 @@ impl QueryService {
                                             None,
                                             Some(answer_started),
                                         );
-                                        emit_query_runtime_summary(
-                                            progress.as_ref(),
-                                            RuntimeExecutionSummary::from(
-                                                &runtime_session.execution,
-                                            ),
-                                        );
                                         let answer_text = self
                                             .decorate_answer_with_source_links_if_enabled(
                                                 state,
@@ -604,12 +592,6 @@ impl QueryService {
                                         )
                                         .await
                                         {
-                                            emit_query_runtime_summary(
-                                                progress.as_ref(),
-                                                RuntimeExecutionSummary::from(
-                                                    &runtime_session.execution,
-                                                ),
-                                            );
                                             // policy-deny before stage work started, zero-duration record is canonical
                                             record_query_runtime_stage(
                                                 state.agent_runtime.executor(),
@@ -619,12 +601,6 @@ impl QueryService {
                                                 true,
                                                 Some(&failure),
                                                 None,
-                                            );
-                                            emit_query_runtime_summary(
-                                                progress.as_ref(),
-                                                RuntimeExecutionSummary::from(
-                                                    &runtime_session.execution,
-                                                ),
                                             );
                                             make_query_terminal_failure_outcome(failure.clone())
                                         } else {
@@ -666,12 +642,6 @@ impl QueryService {
                                                                 None,
                                                                 Some(persist_started),
                                                             );
-                                                            emit_query_runtime_summary(
-                                                                progress.as_ref(),
-                                                                RuntimeExecutionSummary::from(
-                                                                    &runtime_session.execution,
-                                                                ),
-                                                            );
                                                             RuntimeTerminalOutcome::Completed {
                                                                 success: QueryAnswerTaskSuccess {
                                                                     answer_text,
@@ -697,12 +667,6 @@ impl QueryService {
                                                                 Some(&failure),
                                                                 Some(persist_started),
                                                             );
-                                                            emit_query_runtime_summary(
-                                                                progress.as_ref(),
-                                                                RuntimeExecutionSummary::from(
-                                                                    &runtime_session.execution,
-                                                                ),
-                                                            );
                                                             make_query_terminal_failure_outcome(
                                                                 failure.clone(),
                                                             )
@@ -722,12 +686,6 @@ impl QueryService {
                                                                 true,
                                                                 Some(&failure),
                                                                 Some(persist_started),
-                                                            );
-                                                            emit_query_runtime_summary(
-                                                                progress.as_ref(),
-                                                                RuntimeExecutionSummary::from(
-                                                                    &runtime_session.execution,
-                                                                ),
                                                             );
                                                             make_query_terminal_failure_outcome(
                                                                 failure.clone(),
@@ -751,12 +709,6 @@ impl QueryService {
                                                         Some(&failure),
                                                         Some(persist_started),
                                                     );
-                                                    emit_query_runtime_summary(
-                                                        progress.as_ref(),
-                                                        RuntimeExecutionSummary::from(
-                                                            &runtime_session.execution,
-                                                        ),
-                                                    );
                                                     make_query_terminal_failure_outcome(
                                                         failure.clone(),
                                                     )
@@ -777,12 +729,6 @@ impl QueryService {
                                             false,
                                             Some(&failure),
                                             Some(answer_started),
-                                        );
-                                        emit_query_runtime_summary(
-                                            progress.as_ref(),
-                                            RuntimeExecutionSummary::from(
-                                                &runtime_session.execution,
-                                            ),
                                         );
                                         make_query_terminal_failure_outcome(failure.clone())
                                     }
@@ -810,10 +756,6 @@ impl QueryService {
                                 Some(&failure),
                                 Some(assemble_context_started),
                             );
-                            emit_query_runtime_summary(
-                                progress.as_ref(),
-                                RuntimeExecutionSummary::from(&runtime_session.execution),
-                            );
                             make_query_terminal_failure_outcome(failure.clone())
                         }
                     }
@@ -826,10 +768,6 @@ impl QueryService {
             .executor()
             .finalize_session::<QueryAnswerTask>(runtime_session, outcome)
             .await;
-        emit_query_runtime_summary(
-            progress.as_ref(),
-            RuntimeExecutionSummary::from(&runtime_result.execution),
-        );
         runtime_persistence::persist_runtime_result(
             &state.persistence.postgres,
             &runtime_result.execution,
@@ -1038,6 +976,7 @@ impl QueryService {
         }
 
         let detail = self.get_execution(state, terminal_execution.id).await?;
+        store_query_result_cache_winner(state, &cache_context, &detail).await;
         let request_turn = detail.request_turn.ok_or(ApiError::Internal)?;
 
         // One structured log line at turn completion with total
@@ -1073,6 +1012,173 @@ impl QueryService {
             verification_state: detail.verification_state,
             verification_warnings: detail.verification_warnings,
         })
+    }
+
+    async fn try_replay_query_result_cache(
+        &self,
+        state: &AppState,
+        cache_context: &QueryResultCacheContext,
+        conversation: &query_repository::QueryConversationRow,
+        request_turn: &query_repository::QueryTurnRow,
+    ) -> Result<Option<QueryTurnExecutionResult>, ApiError> {
+        match result_cache::get_cached_execution_id(
+            &state.persistence.redis,
+            &cache_context.cache_key,
+        )
+        .await
+        {
+            Ok(Some(source_execution_id)) => {
+                if let Some(replayed) = self
+                    .replay_query_result_cache_hit(
+                        state,
+                        cache_context,
+                        conversation,
+                        request_turn,
+                        source_execution_id,
+                    )
+                    .await?
+                {
+                    return Ok(Some(replayed));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    cache_key = %cache_context.cache_key,
+                    "redis query result cache read failed"
+                );
+            }
+        }
+
+        let cached = query_result_cache_repository::get_query_result_cache(
+            &state.persistence.postgres,
+            &cache_context.cache_key,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let Some(cached) = cached else {
+            return Ok(None);
+        };
+        if let Err(error) = result_cache::put_cached_execution_id(
+            &state.persistence.redis,
+            &cache_context.cache_key,
+            cached.source_execution_id,
+        )
+        .await
+        {
+            warn!(
+                error = %error,
+                cache_key = %cache_context.cache_key,
+                source_execution_id = %cached.source_execution_id,
+                "redis query result cache refresh failed"
+            );
+        }
+        self.replay_query_result_cache_hit(
+            state,
+            cache_context,
+            conversation,
+            request_turn,
+            cached.source_execution_id,
+        )
+        .await
+    }
+
+    async fn replay_query_result_cache_hit(
+        &self,
+        state: &AppState,
+        cache_context: &QueryResultCacheContext,
+        conversation: &query_repository::QueryConversationRow,
+        request_turn: &query_repository::QueryTurnRow,
+        source_execution_id: Uuid,
+    ) -> Result<Option<QueryTurnExecutionResult>, ApiError> {
+        let detail = match self.get_execution(state, source_execution_id).await {
+            Ok(detail) => detail,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    cache_key = %cache_context.cache_key,
+                    source_execution_id = %source_execution_id,
+                    "query result cache source execution is unavailable"
+                );
+                if let Err(delete_error) = query_result_cache_repository::delete_query_result_cache(
+                    &state.persistence.postgres,
+                    &cache_context.cache_key,
+                )
+                .await
+                {
+                    warn!(
+                        error = %delete_error,
+                        cache_key = %cache_context.cache_key,
+                        "failed to delete stale query result cache row"
+                    );
+                }
+                return Ok(None);
+            }
+        };
+        if detail.verification_state != QueryVerificationState::Verified {
+            return Ok(None);
+        }
+        let Some(source_response_turn) = detail.response_turn.as_ref() else {
+            return Ok(None);
+        };
+        let answer_text = source_response_turn.content_text.trim();
+        if answer_text.is_empty() {
+            return Ok(None);
+        }
+
+        let response_turn = query_repository::create_turn(
+            &state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: conversation.id,
+                turn_kind: "assistant",
+                author_principal_id: None,
+                content_text: answer_text,
+                execution_id: Some(source_execution_id),
+            },
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        query_result_cache_repository::record_query_execution_replay(
+            &state.persistence.postgres,
+            &query_result_cache_repository::NewQueryExecutionReplay {
+                workspace_id: conversation.workspace_id,
+                library_id: conversation.library_id,
+                conversation_id: conversation.id,
+                request_turn_id: request_turn.id,
+                response_turn_id: response_turn.id,
+                source_execution_id,
+                cache_key: &cache_context.cache_key,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        tracing::info!(
+            stage = "query.result_cache.hit",
+            cache_key = %cache_context.cache_key,
+            source_execution_id = %source_execution_id,
+            conversation_id = %conversation.id,
+            request_turn_id = %request_turn.id,
+            response_turn_id = %response_turn.id,
+            "query result replayed from canonical source execution"
+        );
+
+        Ok(Some(QueryTurnExecutionResult {
+            conversation: map_conversation_row(conversation.clone()),
+            request_turn: map_turn_row(request_turn.clone()),
+            response_turn: Some(map_turn_row(response_turn)),
+            context_bundle_id: detail.execution.context_bundle_id,
+            execution: detail.execution,
+            runtime_summary: detail.runtime_summary,
+            runtime_stage_summaries: detail.runtime_stage_summaries,
+            chunk_references: detail.chunk_references,
+            prepared_segment_references: detail.prepared_segment_references,
+            technical_fact_references: detail.technical_fact_references,
+            graph_node_references: detail.graph_node_references,
+            graph_edge_references: detail.graph_edge_references,
+            verification_state: detail.verification_state,
+            verification_warnings: detail.verification_warnings,
+        }))
     }
 
     pub async fn get_execution(
@@ -1111,8 +1217,30 @@ impl QueryService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let prepared_reference_context =
-            load_execution_prepared_reference_context(state, execution.id).await?;
+        let prepared_reference_context = match tokio::time::timeout(
+            REFERENCE_CONTEXT_HYDRATION_TIMEOUT,
+            load_execution_prepared_reference_context(state, execution.id),
+        )
+        .await
+        {
+            Ok(Ok(reference_context)) => reference_context,
+            Ok(Err(error)) => {
+                warn!(
+                    execution_id = %execution.id,
+                    error = %error,
+                    "failed to resolve prepared references for query execution detail"
+                );
+                Default::default()
+            }
+            Err(_) => {
+                warn!(
+                    execution_id = %execution.id,
+                    timeout_ms = REFERENCE_CONTEXT_HYDRATION_TIMEOUT.as_millis(),
+                    "timed out resolving prepared references for query execution detail"
+                );
+                Default::default()
+            }
+        };
 
         let query_text = execution.query_text.clone();
         let mut graph_node_references = prepared_reference_context
@@ -1195,18 +1323,30 @@ impl QueryService {
             return answer;
         }
 
-        let reference_context =
-            match load_execution_prepared_reference_context(state, execution_id).await {
-                Ok(reference_context) => reference_context,
-                Err(error) => {
-                    warn!(
-                        execution_id = %execution_id,
-                        error = %error,
-                        "failed to resolve prepared-segment source links for assistant answer"
-                    );
-                    return answer;
-                }
-            };
+        let reference_context = match tokio::time::timeout(
+            REFERENCE_CONTEXT_HYDRATION_TIMEOUT,
+            load_execution_prepared_reference_context(state, execution_id),
+        )
+        .await
+        {
+            Ok(Ok(reference_context)) => reference_context,
+            Ok(Err(error)) => {
+                warn!(
+                    execution_id = %execution_id,
+                    error = %error,
+                    "failed to resolve prepared-segment source links for assistant answer"
+                );
+                return answer;
+            }
+            Err(_) => {
+                warn!(
+                    execution_id = %execution_id,
+                    timeout_ms = REFERENCE_CONTEXT_HYDRATION_TIMEOUT.as_millis(),
+                    "timed out resolving prepared-segment source links for assistant answer"
+                );
+                return answer;
+            }
+        };
         let mut prepared_segment_references = build_prepared_segment_references(
             reference_context.bundle_refs.as_ref(),
             &reference_context.structured_block_rows,
@@ -1220,6 +1360,155 @@ impl QueryService {
         ));
 
         append_answer_source_links(answer, &prepared_segment_references)
+    }
+}
+
+async fn build_query_result_cache_context(
+    state: &AppState,
+    conversation: &query_repository::QueryConversationRow,
+    conversation_context: &ConversationRuntimeContext,
+    user_question: &str,
+    top_k: usize,
+) -> anyhow::Result<QueryResultCacheContext> {
+    let readable_content_fingerprint =
+        crate::infra::repositories::content_repository::get_library_readable_content_fingerprint(
+            &state.persistence.postgres,
+            conversation.library_id,
+        )
+        .await?;
+    let (graph_projection_version, graph_topology_generation) =
+        crate::infra::repositories::get_runtime_graph_snapshot(
+            &state.persistence.postgres,
+            conversation.library_id,
+        )
+        .await?
+        .map_or((0, 0), |snapshot| {
+            (snapshot.projection_version.max(0), snapshot.topology_generation.max(0))
+        });
+    let binding_fingerprint =
+        build_query_result_binding_fingerprint(state, conversation.library_id).await?;
+    let cache_key = result_cache::cache_key(&result_cache::QueryResultCacheKeyInput {
+        workspace_id: conversation.workspace_id,
+        library_id: conversation.library_id,
+        readable_content_fingerprint: &readable_content_fingerprint,
+        graph_projection_version,
+        binding_fingerprint: &binding_fingerprint,
+        answer_system_prompt:
+            crate::services::query::assistant_prompt::GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT,
+        answer_runtime_fingerprint: result_cache::answer_runtime_fingerprint(),
+        mode_label: super::runtime_mode_label(CANONICAL_QUERY_MODE),
+        top_k,
+        source_links_enabled: state.settings.query_answer_source_links_enabled,
+        user_question,
+        prompt_history_text: conversation_context.prompt_history_text.as_deref(),
+    });
+    Ok(QueryResultCacheContext {
+        cache_key,
+        readable_content_fingerprint,
+        graph_projection_version,
+        graph_topology_generation,
+        binding_fingerprint,
+    })
+}
+
+async fn build_query_result_binding_fingerprint(
+    state: &AppState,
+    library_id: Uuid,
+) -> anyhow::Result<String> {
+    let mut parts = Vec::new();
+    for purpose in [
+        AiBindingPurpose::QueryCompile,
+        AiBindingPurpose::ExtractGraph,
+        AiBindingPurpose::EmbedChunk,
+        AiBindingPurpose::QueryRetrieve,
+        AiBindingPurpose::QueryAnswer,
+    ] {
+        let binding = ai_repository::get_effective_binding_assignment_by_purpose(
+            &state.persistence.postgres,
+            library_id,
+            purpose.as_str(),
+        )
+        .await?;
+        let part = match binding {
+            Some(binding) => format!(
+                "{}:{}:{}:{}:{}",
+                purpose.as_str(),
+                binding.id,
+                binding.provider_credential_id,
+                binding.model_preset_id,
+                binding.updated_at.timestamp_micros()
+            ),
+            None => format!("{}:none", purpose.as_str()),
+        };
+        parts.push(part);
+    }
+    Ok(parts.join("|"))
+}
+
+async fn store_query_result_cache_winner(
+    state: &AppState,
+    cache_context: &QueryResultCacheContext,
+    detail: &QueryExecutionDetail,
+) {
+    if detail.verification_state != QueryVerificationState::Verified {
+        return;
+    }
+    if detail.execution.failure_code.is_some() || detail.execution.runtime_execution_id.is_none() {
+        return;
+    }
+    let Some(response_turn) = detail.response_turn.as_ref() else {
+        return;
+    };
+    if response_turn.content_text.trim().is_empty() {
+        return;
+    }
+    let row = match query_result_cache_repository::upsert_query_result_cache_winner(
+        &state.persistence.postgres,
+        &query_result_cache_repository::UpsertQueryResultCacheInput {
+            cache_key: &cache_context.cache_key,
+            workspace_id: detail.execution.workspace_id,
+            library_id: detail.execution.library_id,
+            source_execution_id: detail.execution.id,
+            readable_content_fingerprint: &cache_context.readable_content_fingerprint,
+            graph_projection_version: cache_context.graph_projection_version,
+            graph_topology_generation: cache_context.graph_topology_generation,
+            binding_fingerprint: &cache_context.binding_fingerprint,
+        },
+    )
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            warn!(
+                error = %error,
+                cache_key = %cache_context.cache_key,
+                execution_id = %detail.execution.id,
+                "failed to store query result cache winner"
+            );
+            return;
+        }
+    };
+    if let Err(error) = result_cache::put_cached_execution_id(
+        &state.persistence.redis,
+        &cache_context.cache_key,
+        row.source_execution_id,
+    )
+    .await
+    {
+        warn!(
+            error = %error,
+            cache_key = %cache_context.cache_key,
+            source_execution_id = %row.source_execution_id,
+            "failed to refresh redis query result cache winner"
+        );
+    }
+    if row.source_execution_id != detail.execution.id {
+        warn!(
+            cache_key = %cache_context.cache_key,
+            winner_execution_id = %row.source_execution_id,
+            completed_execution_id = %detail.execution.id,
+            "query result cache winner already existed"
+        );
     }
 }
 

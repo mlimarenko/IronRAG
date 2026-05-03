@@ -14,5 +14,7 @@ pub mod ops;
 pub(crate) mod provider_profiles;
 pub mod query;
 pub mod query_ir;
+pub mod recognition;
 pub(crate) mod runtime_graph;
 pub(crate) mod runtime_ingestion;
+pub mod webhook;

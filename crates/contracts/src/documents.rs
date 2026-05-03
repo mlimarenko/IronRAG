@@ -112,11 +112,11 @@ pub struct DocumentsOverview {
     pub graph_sparse_documents: i32,
 }
 
-/// Canonical per-library document metrics. One authoritative shape
-/// that every surface (`/ops/libraries/{id}/dashboard`,
+/// Canonical per-library document metrics — one authoritative shape for all surfaces.
+///
+/// Every surface (`/ops/libraries/{id}/dashboard`,
 /// `/content/libraries/{id}/documents?includeTotal=true`,
-/// `/knowledge/libraries/{id}/summary`) MUST read from — no more
-/// three overlapping aggregates that drift apart on production.
+/// `/knowledge/libraries/{id}/summary`) MUST read from this shape.
 ///
 /// Invariants enforced by the canonical aggregator:
 ///   * `total == ready + processing + queued + failed + canceled`
@@ -203,7 +203,7 @@ pub struct WebRunCounts {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebIngestIgnorePattern {
+pub struct WebIngestPattern {
     pub kind: String,
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,7 +219,8 @@ pub struct WebIngestRunSummary {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
-    pub ignore_patterns: Vec<WebIngestIgnorePattern>,
+    pub url_filter_mode: String,
+    pub url_patterns: Vec<WebIngestPattern>,
     pub run_state: WebIngestRunState,
     pub seed_url: String,
     pub counts: WebRunCounts,

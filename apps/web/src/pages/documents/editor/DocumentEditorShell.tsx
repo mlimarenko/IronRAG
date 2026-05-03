@@ -15,7 +15,11 @@ import { createEditorBaseline, isEditorContentDirty, type DirtyStateBaseline } f
 import { DocumentEditorCanvas } from './DocumentEditorCanvas';
 import { DocumentEditorOverlay } from './DocumentEditorOverlay';
 import { DocumentEditorToolbar } from './DocumentEditorToolbar';
-import { resolveEditorSurfaceMode } from './editorSurfaceMode';
+import {
+  isCodeLikeSourceFormat,
+  isPlainTextSourceFormat,
+  resolveEditorSurfaceMode,
+} from './editorSurfaceMode';
 
 type DocumentEditorShellProps = {
   documentName: string;
@@ -38,6 +42,7 @@ const editorExtensions = [
   TableCell,
   Markdown,
 ];
+const RAW_TEXT_EDITOR_MIN_LENGTH = 512 * 1024;
 
 export function DocumentEditorShell({
   documentName,
@@ -51,9 +56,10 @@ export function DocumentEditorShell({
   sourceFormat,
   t,
 }: DocumentEditorShellProps) {
+  const rawTextEditor = shouldUseRawTextEditor(markdown, sourceFormat);
   const surfaceMode = useMemo(
-    () => resolveEditorSurfaceMode({ markdown, sourceFormat }),
-    [markdown, sourceFormat],
+    () => rawTextEditor ? 'raw_text' : resolveEditorSurfaceMode({ markdown, sourceFormat }),
+    [markdown, rawTextEditor, sourceFormat],
   );
   const [baseline, setBaseline] = useState<DirtyStateBaseline | null>(null);
   const [currentMarkdown, setCurrentMarkdown] = useState('');
@@ -62,9 +68,9 @@ export function DocumentEditorShell({
     {
       immediatelyRender: false,
       extensions: editorExtensions,
-      content: loading ? '' : markdown,
+      content: loading || rawTextEditor ? '' : markdown,
       contentType: 'markdown',
-      editable: !loading && !saving,
+      editable: !rawTextEditor && !loading && !saving,
       editorProps: {
         attributes: {
           class: `document-editor-prosemirror document-editor-prosemirror--${surfaceMode} min-h-[68vh] px-5 py-5 outline-none sm:px-7 sm:py-6 lg:px-8 lg:py-7`,
@@ -78,21 +84,48 @@ export function DocumentEditorShell({
         },
       },
       onUpdate: ({ editor: nextEditor }: { editor: Editor }) => {
+        if (rawTextEditor) {
+          return;
+        }
         setCurrentMarkdown(nextEditor.getMarkdown());
       },
     },
-    [loading, markdown, surfaceMode],
+    [loading, markdown, rawTextEditor, surfaceMode],
   );
 
   useEffect(() => {
     if (!editor) {
       return;
     }
-    editor.setEditable(!loading && !saving);
-  }, [editor, loading, saving]);
+    editor.setEditable(!rawTextEditor && !loading && !saving);
+  }, [editor, loading, rawTextEditor, saving]);
 
   useEffect(() => {
-    if (!open || !editor || loading) {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) {
+        return;
+      }
+
+      if (!open || loading) {
+        setBaseline(null);
+        setCurrentMarkdown('');
+        return;
+      }
+      if (!rawTextEditor) {
+        return;
+      }
+
+      setBaseline(createEditorBaseline(markdown));
+      setCurrentMarkdown(markdown);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, markdown, open, rawTextEditor]);
+
+  useEffect(() => {
+    if (!open || !editor || loading || rawTextEditor) {
       return;
     }
 
@@ -103,10 +136,10 @@ export function DocumentEditorShell({
     }, 0);
 
     return () => window.clearTimeout(syncTimer);
-  }, [editor, loading, markdown, open]);
+  }, [editor, loading, markdown, open, rawTextEditor]);
 
   useEffect(() => {
-    if (!open || !editor || loading) {
+    if (!open || !editor || loading || rawTextEditor) {
       return;
     }
 
@@ -114,7 +147,7 @@ export function DocumentEditorShell({
       editor.commands.focus('start');
     }, 0);
     return () => window.clearTimeout(focusTimer);
-  }, [editor, loading, open]);
+  }, [editor, loading, open, rawTextEditor]);
 
   const isDirty = !loading && !saving && isEditorContentDirty(baseline, currentMarkdown);
   const statusState = saving ? 'saving' : error ? 'error' : isDirty ? 'dirty' : 'clean';
@@ -148,6 +181,10 @@ export function DocumentEditorShell({
   };
 
   const handleSave = () => {
+    if (rawTextEditor) {
+      onSave(currentMarkdown);
+      return;
+    }
     if (!editor) {
       return;
     }
@@ -215,6 +252,9 @@ export function DocumentEditorShell({
           editor={editor}
           error={error}
           loading={loading}
+          onRawTextChange={setCurrentMarkdown}
+          rawTextEditor={rawTextEditor}
+          saving={saving}
           sourceFormat={sourceFormat}
           statusLabel={statusLabel}
           surfaceMode={surfaceMode}
@@ -223,4 +263,12 @@ export function DocumentEditorShell({
       </div>
     </DocumentEditorOverlay>
   );
+}
+
+function shouldUseRawTextEditor(markdown: string, sourceFormat?: string): boolean {
+  if (isPlainTextSourceFormat(sourceFormat)) {
+    return true;
+  }
+
+  return isCodeLikeSourceFormat(sourceFormat) && markdown.length >= RAW_TEXT_EDITOR_MIN_LENGTH;
 }

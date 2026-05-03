@@ -43,10 +43,10 @@ apps/web/src/
 
 ### Assistant
 
-- Owns session list, active session, message history, streaming state, and debug context.
+- Owns session list, active session, message history, pending-turn state, and debug context.
 - Uses `/v1/query/sessions/*` for session CRUD and turn execution.
-- Streaming answers consume SSE from `POST /v1/query/sessions/{sessionId}/turns` with `Accept: text/event-stream`.
-- Only the live assistant bubble should re-render during a streaming turn.
+- Turn execution is one JSON `POST /v1/query/sessions/{sessionId}/turns` request; no UI SSE fallback or recovery lane exists.
+- Only the pending assistant bubble should be replaced when the completed turn arrives.
 
 ### Graph
 

@@ -703,7 +703,8 @@ async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discove
                     boundary_policy: Some("same_host".to_string()),
                     max_depth: Some(1),
                     max_pages: Some(20),
-                    extra_ignore_patterns: Vec::new(),
+                    url_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
+                        .url_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,

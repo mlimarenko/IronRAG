@@ -40,6 +40,7 @@ impl TabularFormat {
 struct ExtractedTable {
     sheet_name: String,
     table_name: Option<String>,
+    caption: Option<String>,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
     header_policy: String,
@@ -58,6 +59,7 @@ impl ExtractedTable {
 
 #[derive(Debug, Clone)]
 struct InferredTabularShape {
+    caption: Option<String>,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
     header_policy: String,
@@ -87,6 +89,9 @@ pub fn extract_tabular(
         {
             paragraph_lines.push(format!("## {}", table_name.trim()));
         }
+        if let Some(caption) = table.caption.as_deref().filter(|value| !value.trim().is_empty()) {
+            paragraph_lines.push(format!("Caption: {}", caption.trim()));
+        }
         if let Some(markdown) = render_markdown_table(&table.headers, &table.rows) {
             paragraph_lines.extend(markdown.lines().map(str::to_string));
         }
@@ -113,6 +118,7 @@ pub fn extract_tabular(
             "tables": tables.iter().map(|table| serde_json::json!({
                 "sheetName": table.sheet_name,
                 "tableName": table.table_name,
+                "caption": table.caption,
                 "rowCount": table.row_count(),
                 "columnCount": table.column_count(),
                 "headerPolicy": table.header_policy,
@@ -220,6 +226,7 @@ fn extract_delimited_tables(
     Ok(vec![ExtractedTable {
         sheet_name,
         table_name: None,
+        caption: inferred.caption,
         headers: inferred.headers,
         rows: inferred.rows,
         header_policy: inferred.header_policy,
@@ -294,6 +301,7 @@ fn extract_workbook_tables(
         tables.push(ExtractedTable {
             sheet_name: sheet_name.trim().to_string(),
             table_name: None,
+            caption: inferred.caption,
             headers: inferred.headers,
             rows: inferred.rows,
             header_policy: inferred.header_policy,
@@ -341,6 +349,7 @@ fn table_to_extracted_table(sheet_name: &str, table: &Table<Data>) -> Option<Ext
     Some(ExtractedTable {
         sheet_name: sheet_name.trim().to_string(),
         table_name: Some(table.name().to_string()),
+        caption: None,
         headers,
         rows,
         header_policy: "explicit_table_headers".to_string(),
@@ -359,6 +368,7 @@ fn build_used_range_rows(range: &Range<Data>) -> Vec<Vec<String>> {
 fn infer_tabular_shape(rows: &[Vec<String>]) -> InferredTabularShape {
     if rows.is_empty() {
         return InferredTabularShape {
+            caption: None,
             headers: Vec::new(),
             rows: Vec::new(),
             header_policy: "empty_table".to_string(),
@@ -368,6 +378,7 @@ fn infer_tabular_shape(rows: &[Vec<String>]) -> InferredTabularShape {
     let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     if width == 0 {
         return InferredTabularShape {
+            caption: None,
             headers: Vec::new(),
             rows: Vec::new(),
             header_policy: "empty_table".to_string(),
@@ -386,6 +397,7 @@ fn infer_tabular_shape(rows: &[Vec<String>]) -> InferredTabularShape {
 
     if normalized_rows.len() == 1 {
         return InferredTabularShape {
+            caption: None,
             headers: synthesized_headers(width),
             rows: normalized_rows,
             header_policy: "synthetic_single_row".to_string(),
@@ -393,13 +405,26 @@ fn infer_tabular_shape(rows: &[Vec<String>]) -> InferredTabularShape {
     }
     if width == 1 {
         return InferredTabularShape {
+            caption: None,
             headers: synthesized_headers(width),
             rows: normalized_rows,
             header_policy: "synthetic_single_column".to_string(),
         };
     }
+    if normalized_rows.len() >= 3
+        && is_single_cell_title_row(&first_row)
+        && should_treat_first_row_as_header(&normalized_rows[1], &normalized_rows[2..])
+    {
+        return InferredTabularShape {
+            caption: first_row_title(&first_row),
+            headers: fill_blank_headers(&normalized_rows[1]),
+            rows: normalized_rows.into_iter().skip(2).collect(),
+            header_policy: "inferred_title_then_header".to_string(),
+        };
+    }
     if should_treat_first_row_as_header(&first_row, &normalized_rows[1..]) {
         return InferredTabularShape {
+            caption: None,
             headers: fill_blank_headers(&first_row),
             rows: normalized_rows.into_iter().skip(1).collect(),
             header_policy: "inferred_first_row_header".to_string(),
@@ -407,9 +432,24 @@ fn infer_tabular_shape(rows: &[Vec<String>]) -> InferredTabularShape {
     }
 
     InferredTabularShape {
+        caption: None,
         headers: synthesized_headers(width),
         rows: normalized_rows,
         header_policy: "synthetic_data_like_header".to_string(),
+    }
+}
+
+fn is_single_cell_title_row(row: &[String]) -> bool {
+    first_row_title(row).is_some()
+}
+
+fn first_row_title(row: &[String]) -> Option<String> {
+    let mut non_empty_cells = row.iter().map(|cell| cell.trim()).filter(|cell| !cell.is_empty());
+    let first = non_empty_cells.next()?;
+    if non_empty_cells.next().is_none() && looks_like_header_label(first) {
+        Some(first.to_string())
+    } else {
+        None
     }
 }
 
@@ -521,6 +561,46 @@ mod tests {
         assert!(output.content_text.contains("| Name | Email |"));
         assert!(output.content_text.contains("| Alice | alice@example.com |"));
         assert_eq!(output.source_map["delimiter"], serde_json::json!(","));
+    }
+
+    #[test]
+    fn uses_second_row_as_headers_after_title_row() {
+        let output = extract_tabular(
+            Some("extensions.csv"),
+            Some("text/csv"),
+            b"Welcome to File Extension FYI Center!\nID,Type,Description\n1,PNG,Portable Network Graphics\n2,GIF,Graphics Interchange Format\n",
+        )
+        .expect("csv extraction");
+
+        assert!(output.content_text.contains("| ID | Type | Description |"));
+        assert!(output.content_text.contains("Caption: Welcome to File Extension FYI Center!"));
+        assert!(output.content_text.contains("| 1 | PNG | Portable Network Graphics |"));
+        assert!(!output.content_text.contains("| Welcome to File Extension FYI Center! |"));
+        assert_eq!(
+            output.source_map["tables"][0]["caption"],
+            serde_json::json!("Welcome to File Extension FYI Center!")
+        );
+        assert_eq!(
+            output.source_map["tables"][0]["headerPolicy"],
+            serde_json::json!("inferred_title_then_header")
+        );
+    }
+
+    #[test]
+    fn keeps_single_data_cell_before_header_as_data() {
+        let output = extract_tabular(
+            Some("measurements.csv"),
+            Some("text/csv"),
+            b"2026\nName,Value\nAcme,42\n",
+        )
+        .expect("csv extraction");
+
+        assert!(output.content_text.contains("| col_1 | col_2 |"));
+        assert!(output.content_text.contains("| 2026 |  |"));
+        assert_eq!(
+            output.source_map["tables"][0]["headerPolicy"],
+            serde_json::json!("synthetic_data_like_header")
+        );
     }
 
     #[test]

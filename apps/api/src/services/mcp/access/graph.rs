@@ -363,14 +363,47 @@ pub async fn get_communities(
     library_id: Uuid,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>, ApiError> {
-    let communities = sqlx::query_as::<_, (i32, Option<String>, Vec<String>, i32, i32)>(
-        "SELECT community_id, summary, top_entities, node_count, edge_count
-         FROM runtime_graph_community
-         WHERE library_id = $1
-         ORDER BY node_count DESC
-         LIMIT $2",
+    let projection_version =
+        match repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        {
+            Some(snapshot) => snapshot.projection_version,
+            None => return Ok(Vec::new()),
+        };
+
+    let communities = sqlx::query_as::<_, (Uuid, Option<String>, Vec<String>, i32, i64)>(
+        "SELECT c.id,
+                c.summary_text,
+                COALESCE(
+                    array_agg(n.label ORDER BY n.support_count DESC, n.label)
+                        FILTER (WHERE n.label IS NOT NULL),
+                    '{}'::text[]
+                ) AS top_entities,
+                cardinality(c.member_node_ids)::integer AS node_count,
+                (
+                    SELECT count(*)::bigint
+                    FROM runtime_graph_edge e
+                    WHERE e.library_id = c.library_id
+                      AND e.projection_version = c.projection_version
+                      AND e.from_node_id = ANY(c.member_node_ids)
+                      AND e.to_node_id = ANY(c.member_node_ids)
+                ) AS edge_count
+         FROM runtime_graph_community c
+         LEFT JOIN LATERAL (
+             SELECT label, support_count
+             FROM runtime_graph_node n
+             WHERE n.id = ANY(c.member_node_ids)
+             ORDER BY support_count DESC, label ASC
+             LIMIT 10
+         ) n ON true
+         WHERE c.library_id = $1 AND c.projection_version = $2
+         GROUP BY c.id, c.summary_text, c.member_node_ids, c.library_id, c.projection_version
+         ORDER BY cardinality(c.member_node_ids) DESC
+         LIMIT $3",
     )
     .bind(library_id)
+    .bind(projection_version)
     .bind(limit as i64)
     .fetch_all(&state.persistence.postgres)
     .await

@@ -13,9 +13,6 @@ use crate::{
 
 /// How many per-entity (upsert node + upsert mentions-edge) pipelines we
 /// allow to run in parallel while merging one chunk's extraction output.
-/// The entity loop used to be serial — 15 entities × 2 Postgres round-trips
-/// = 30 serial awaits per chunk, so a round-trip cost of 5-10 ms bound the
-/// whole merge to 150-300 ms even when extraction returned cheap rows.
 ///
 /// 4 is well under the Postgres pool ceiling (worker pool is 40, and a
 /// single job never monopolises more than its own slot), and round-trips
@@ -572,12 +569,12 @@ async fn upsert_document_node(
     let support_count = existing.as_ref().map_or(1, |row| row.support_count.max(1));
     let aliases = serde_json::json!([label, document.external_key.clone()]);
 
-    repositories::upsert_runtime_graph_node(
+    repositories::upsert_runtime_graph_document_node(
         pool,
         scope.library_id,
+        document.id,
         &canonical_key,
         label,
-        "document",
         aliases,
         Some("Source document node"),
         serde_json::json!({
@@ -842,12 +839,12 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_cyrillic_labels_to_graph_safe_slug() {
+    fn normalizes_non_ascii_labels_to_graph_safe_slug() {
         assert_eq!(
             crate::services::graph::identity::normalize_graph_identity_component(
-                " Первый печатный двор "
+                " Acme Imprenta Düsseldorf "
             ),
-            "первый_печатный_двор"
+            "acme_imprenta_düsseldorf"
         );
     }
 
@@ -855,16 +852,16 @@ mod tests {
     fn normalizes_mixed_script_labels_to_graph_safe_slug() {
         assert_eq!(
             crate::services::graph::identity::normalize_graph_identity_component(
-                " Acme: Чек V2 / QR "
+                " Acme: Receipt V2 / QR "
             ),
-            "acme_чек_v2_qr"
+            "acme_receipt_v2_qr"
         );
     }
 
     #[test]
-    fn rejects_non_canonical_cyrillic_relation_types() {
+    fn rejects_non_canonical_non_ascii_relation_types() {
         assert!(
-            crate::services::graph::identity::normalize_relation_type(" Является частью ")
+            crate::services::graph::identity::normalize_relation_type(" είναι μέρος του ")
                 .is_empty()
         );
     }
@@ -874,14 +871,14 @@ mod tests {
         let candidates = GraphExtractionCandidateSet {
             entities: vec![
                 GraphEntityCandidate {
-                    label: "Касса".to_string(),
+                    label: "Register".to_string(),
                     node_type: RuntimeNodeType::Concept,
                     sub_type: None,
                     aliases: vec![],
                     summary: None,
                 },
                 GraphEntityCandidate {
-                    label: "Касса".to_string(),
+                    label: "Register".to_string(),
                     node_type: RuntimeNodeType::Entity,
                     sub_type: None,
                     aliases: vec![],
@@ -893,7 +890,7 @@ mod tests {
 
         let index = build_entity_key_index(&candidates);
 
-        assert_eq!(index.canonical_node_key_for_label("Касса"), "entity:касса");
+        assert_eq!(index.canonical_node_key_for_label("Register"), "entity:register");
     }
 
     #[test]

@@ -13,6 +13,8 @@ use crate::{
 
 use super::types::*;
 
+const RERANK_RUNTIME_EVIDENCE_TEXT_CHARS: usize = 2_400;
+
 pub(crate) fn apply_hybrid_rerank(
     state: &AppState,
     question: &str,
@@ -93,10 +95,7 @@ pub(crate) fn build_relationship_candidates(
         .iter()
         .map(|relationship| RerankCandidate {
             id: relationship.edge_id.to_string(),
-            text: format!(
-                "{} {} {}",
-                relationship.from_label, relationship.relation_type, relationship.to_label
-            ),
+            text: relationship.reference_excerpt(),
             score: relationship.score,
         })
         .collect()
@@ -107,10 +106,25 @@ pub(crate) fn build_chunk_candidates(chunks: &[RuntimeMatchedChunk]) -> Vec<Rera
         .iter()
         .map(|chunk| RerankCandidate {
             id: chunk.chunk_id.to_string(),
-            text: format!("{} {}", chunk.document_label, chunk.excerpt),
+            text: chunk_rerank_text(chunk),
             score: chunk.score,
         })
         .collect()
+}
+
+fn chunk_rerank_text(chunk: &RuntimeMatchedChunk) -> String {
+    let source_text = chunk.source_text.trim();
+    let excerpt = chunk.excerpt.trim();
+    if source_text.is_empty() || chunk.score_kind == RuntimeChunkScoreKind::Relevance {
+        return format!("{} {}", chunk.document_label, excerpt);
+    }
+    let runtime_text =
+        super::retrieve::excerpt_for(source_text, RERANK_RUNTIME_EVIDENCE_TEXT_CHARS);
+    if excerpt.is_empty() || runtime_text.contains(excerpt) {
+        format!("{} {}", chunk.document_label, runtime_text)
+    } else {
+        format!("{} {}\n{}", chunk.document_label, excerpt, runtime_text)
+    }
 }
 
 pub(crate) fn apply_rerank_outcome(bundle: &mut RetrievalBundle, outcome: &RerankOutcome) {
@@ -158,4 +172,47 @@ fn reorder_by_ids<T>(
         left_order.cmp(&right_order).then_with(|| left_index.cmp(right_index))
     });
     indexed.into_iter().map(|(_, item)| item).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn chunk_with_runtime_text(score_kind: RuntimeChunkScoreKind) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_label: "rare-node-notes.md".to_string(),
+            excerpt: "Short neighboring heading.".to_string(),
+            score_kind,
+            score: Some(0.9),
+            source_text: "Exact runtime evidence: AlphaSwitch escalates through mailbox Z-19."
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn graph_evidence_rerank_candidate_uses_runtime_source_text() {
+        let candidate = build_chunk_candidates(&[chunk_with_runtime_text(
+            RuntimeChunkScoreKind::GraphEvidence,
+        )])
+        .remove(0);
+
+        assert!(candidate.text.contains("AlphaSwitch escalates through mailbox Z-19"));
+    }
+
+    #[test]
+    fn ordinary_rerank_candidate_keeps_excerpt_text() {
+        let candidate =
+            build_chunk_candidates(&[chunk_with_runtime_text(RuntimeChunkScoreKind::Relevance)])
+                .remove(0);
+
+        assert!(candidate.text.contains("Short neighboring heading."));
+        assert!(!candidate.text.contains("AlphaSwitch escalates through mailbox Z-19"));
+    }
 }

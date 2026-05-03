@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
@@ -7,7 +7,7 @@ import { adminApi, apiFetch } from '@/api';
 import { ShellFooter } from '@/components/ShellFooter';
 import {
   Home, FileText, Share2, MessageSquare, Settings, Code2,
-  ChevronDown, LogOut, Menu, X, Plus, Trash2, AlertTriangle
+  ChevronDown, LogOut, Menu, X, Plus, Trash2, AlertTriangle, Search
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -56,10 +56,32 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [newWsName, setNewWsName] = useState('');
   const [newLibName, setNewLibName] = useState('');
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [workspaceSearch, setWorkspaceSearch] = useState('');
+  const [librarySearch, setLibrarySearch] = useState('');
   const shellUserName = user?.displayName ?? t('shell.userFallback');
   const shellAccessLabel = user?.accessLabel ?? t('shell.accessFallback');
 
   const isActive = (path: string) => location.pathname.startsWith(path);
+  const workspaceSearchValue = workspaceSearch.trim().toLowerCase();
+  const librarySearchValue = librarySearch.trim().toLowerCase();
+  const filteredWorkspaces = useMemo(
+    () =>
+      workspaceSearchValue
+        ? workspaces.filter((workspace) =>
+            workspace.name.toLowerCase().includes(workspaceSearchValue),
+          )
+        : workspaces,
+    [workspaceSearchValue, workspaces],
+  );
+  const filteredLibraries = useMemo(
+    () =>
+      librarySearchValue
+        ? libraries.filter((library) =>
+            library.name.toLowerCase().includes(librarySearchValue),
+          )
+        : libraries,
+    [libraries, librarySearchValue],
+  );
 
   const handleCreateWorkspace = async () => {
     if (!newWsName.trim()) return;
@@ -114,6 +136,91 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   const missingPurposes = activeLibrary?.missingBindingPurposes ?? [];
+  const selectorContentClass =
+    'w-[min(22rem,calc(100vw-2rem))] max-h-[min(32rem,calc(100vh-5rem))] overflow-hidden p-0';
+  const selectorListClass = 'max-h-[min(22rem,calc(100vh-13rem))] overflow-y-auto p-1';
+
+  const renderWorkspaceMenu = (align: 'start' | 'end') => (
+    <DropdownMenuContent align={align} className={selectorContentClass}>
+      <div className="border-b p-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={workspaceSearch}
+            onChange={(event) => setWorkspaceSearch(event.target.value)}
+            onKeyDown={(event) => event.stopPropagation()}
+            placeholder={t('shell.searchWorkspaces')}
+            className="h-8 pl-8 text-xs"
+          />
+        </div>
+      </div>
+      <div className={selectorListClass}>
+        {filteredWorkspaces.length === 0 ? (
+          <div className="px-2 py-3 text-xs text-muted-foreground">
+            {t('shell.noWorkspaceMatches')}
+          </div>
+        ) : (
+          filteredWorkspaces.map(ws => (
+            <DropdownMenuItem key={ws.id} onClick={() => setActiveWorkspace(ws)}>
+              <span className="truncate">{ws.name}</span>
+            </DropdownMenuItem>
+          ))
+        )}
+      </div>
+      <DropdownMenuSeparator />
+      <div className="p-1">
+        <DropdownMenuItem onClick={() => setCreateWsOpen(true)}>
+          <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createWorkspace')}
+        </DropdownMenuItem>
+        {activeWorkspace && (
+          <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteWsOpen(true); }} className="text-destructive">
+            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteWorkspace')}
+          </DropdownMenuItem>
+        )}
+      </div>
+    </DropdownMenuContent>
+  );
+
+  const renderLibraryMenu = (align: 'start' | 'end') => (
+    <DropdownMenuContent align={align} className={selectorContentClass}>
+      <div className="border-b p-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={librarySearch}
+            onChange={(event) => setLibrarySearch(event.target.value)}
+            onKeyDown={(event) => event.stopPropagation()}
+            placeholder={t('shell.searchLibraries')}
+            className="h-8 pl-8 text-xs"
+          />
+        </div>
+      </div>
+      <div className={selectorListClass}>
+        {filteredLibraries.length === 0 ? (
+          <div className="px-2 py-3 text-xs text-muted-foreground">
+            {t('shell.noLibraryMatches')}
+          </div>
+        ) : (
+          filteredLibraries.map(lib => (
+            <DropdownMenuItem key={lib.id} onClick={() => setActiveLibrary(lib)}>
+              <span className="truncate">{lib.name}</span>
+            </DropdownMenuItem>
+          ))
+        )}
+      </div>
+      <DropdownMenuSeparator />
+      <div className="p-1">
+        <DropdownMenuItem onClick={() => setCreateLibOpen(true)}>
+          <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createLibrary')}
+        </DropdownMenuItem>
+        {activeLibrary && (
+          <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteLibOpen(true); }} className="text-destructive">
+            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteLibrary')}
+          </DropdownMenuItem>
+        )}
+      </div>
+    </DropdownMenuContent>
+  );
 
   return (
     <div className="h-screen max-h-screen flex flex-col overflow-hidden bg-background">
@@ -180,22 +287,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <ChevronDown className="h-3 w-3 opacity-50" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-[180px]">
-              {workspaces.map(ws => (
-                <DropdownMenuItem key={ws.id} onClick={() => setActiveWorkspace(ws)}>
-                  {ws.name}
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => setCreateWsOpen(true)}>
-                <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createWorkspace')}
-              </DropdownMenuItem>
-              {activeWorkspace && (
-                <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteWsOpen(true); }} className="text-destructive">
-                  <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteWorkspace')}
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
+            {renderWorkspaceMenu('end')}
           </DropdownMenu>
 
           {/* Library selector */}
@@ -210,22 +302,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <ChevronDown className="h-3 w-3 opacity-50" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-[180px]">
-              {libraries.map(lib => (
-                <DropdownMenuItem key={lib.id} onClick={() => setActiveLibrary(lib)}>
-                  {lib.name}
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => setCreateLibOpen(true)}>
-                <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createLibrary')}
-              </DropdownMenuItem>
-              {activeLibrary && (
-                <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteLibOpen(true); }} className="text-destructive">
-                  <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteLibrary')}
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
+            {renderLibraryMenu('end')}
           </DropdownMenu>
 
           {/* User menu */}
@@ -280,22 +357,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <ChevronDown className="h-3 w-3 opacity-50" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-[180px]">
-                {workspaces.map(ws => (
-                  <DropdownMenuItem key={ws.id} onClick={() => setActiveWorkspace(ws)}>
-                    {ws.name}
-                  </DropdownMenuItem>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => setCreateWsOpen(true)}>
-                  <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createWorkspace')}
-                </DropdownMenuItem>
-                {activeWorkspace && (
-                  <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteWsOpen(true); }} className="text-destructive">
-                    <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteWorkspace')}
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuContent>
+              {renderWorkspaceMenu('start')}
             </DropdownMenu>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -304,22 +366,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <ChevronDown className="h-3 w-3 opacity-50" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-[180px]">
-                {libraries.map(lib => (
-                  <DropdownMenuItem key={lib.id} onClick={() => setActiveLibrary(lib)}>
-                    {lib.name}
-                  </DropdownMenuItem>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => setCreateLibOpen(true)}>
-                  <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createLibrary')}
-                </DropdownMenuItem>
-                {activeLibrary && (
-                  <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteLibOpen(true); }} className="text-destructive">
-                    <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteLibrary')}
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuContent>
+              {renderLibraryMenu('start')}
             </DropdownMenu>
           </div>
         </div>

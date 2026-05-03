@@ -29,7 +29,8 @@ use crate::{
             INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH,
             INGEST_STAGE_EXTRACT_TECHNICAL_FACTS, INGEST_STAGE_FINALIZING,
             INGEST_STAGE_PREPARE_STRUCTURE, INGEST_STAGE_WEB_DISCOVERY,
-            INGEST_STAGE_WEB_MATERIALIZE_PAGE, LeaseAttemptCommand, RecordStageEventCommand,
+            INGEST_STAGE_WEB_MATERIALIZE_PAGE, INGEST_STAGE_WEBHOOK_DELIVERY, LeaseAttemptCommand,
+            RecordStageEventCommand,
         },
     },
     shared::extraction::file_extract::{FileExtractionPlan, UploadAdmissionError},
@@ -196,6 +197,7 @@ async fn execute_canonical_ingest_job(
         "content_mutation" => INGEST_STAGE_EXTRACT_CONTENT.to_string(),
         "web_discovery" => INGEST_STAGE_WEB_DISCOVERY.to_string(),
         "web_materialize_page" => INGEST_STAGE_WEB_MATERIALIZE_PAGE.to_string(),
+        "webhook_delivery" => INGEST_STAGE_WEBHOOK_DELIVERY.to_string(),
         other => anyhow::bail!("unsupported canonical ingest job kind {other}"),
     };
 
@@ -344,6 +346,9 @@ async fn execute_canonical_ingest_job(
             "web_materialize_page" => {
                 run_canonical_web_materialize_page_job(&state, &job, attempt_id).await
             }
+            "webhook_delivery" => {
+                crate::services::webhook::delivery::run_webhook_delivery_job(&state, &job).await
+            }
             other => Err(anyhow::anyhow!("unsupported canonical ingest job kind {other}")),
         }
     };
@@ -365,6 +370,7 @@ async fn execute_canonical_ingest_job(
                             "content_mutation" => INGEST_STAGE_FINALIZING.to_string(),
                             "web_discovery" => INGEST_STAGE_WEB_DISCOVERY.to_string(),
                             "web_materialize_page" => INGEST_STAGE_WEB_MATERIALIZE_PAGE.to_string(),
+                            "webhook_delivery" => INGEST_STAGE_WEBHOOK_DELIVERY.to_string(),
                             _ => initial_stage.clone(),
                         }),
                         failure_class: None,
@@ -589,6 +595,18 @@ async fn run_canonical_ingest_pipeline(
         )
         .await
         .context("failed to persist extracted content")?;
+
+    // Persist image_checksum as a supplementary field on the Arango revision document.
+    // Fire-and-forget: a write failure is non-fatal (worst case: chunk reuse skipped on next revision).
+    if let Some(ref checksum) = extracted_content.extraction_plan.image_checksum {
+        if let Err(e) = state
+            .arango_document_store
+            .update_revision_image_checksum(revision_id, Some(checksum.as_str()))
+            .await
+        {
+            tracing::warn!(%revision_id, ?e, "failed to persist image_checksum");
+        }
+    }
 
     let extract_content_elapsed_ms = Some(extract_content_start.elapsed().as_millis() as i64);
 
@@ -913,6 +931,7 @@ async fn run_canonical_ingest_pipeline(
                         message: Some("chunk embeddings persisted".to_string()),
                         details_json: serde_json::json!({
                             "chunksEmbedded": outcome.chunks_embedded,
+                            "chunksReused": outcome.chunks_reused,
                             "providerKind": outcome.provider_kind,
                             "modelName": outcome.model_name,
                         }),
@@ -1070,6 +1089,8 @@ async fn run_canonical_ingest_pipeline(
                                 message: Some("graph candidates extracted and reconciled".to_string()),
                                 details_json: serde_json::json!({
                                     "chunksProcessed": graph_materialization.chunk_count,
+                                    "graphChunksSelected": graph_materialization.selected_graph_chunks,
+                                    "recordStreamSourceUnitsSkipped": graph_materialization.record_stream_source_units_skipped,
                                     "extractedEntityCandidates": graph_materialization.extracted_entities,
                                     "extractedRelationCandidates": graph_materialization.extracted_relations,
                                     "reusedChunks": graph_materialization.reused_chunks,
@@ -1154,6 +1175,8 @@ async fn run_canonical_ingest_pipeline(
                                 ),
                                 details_json: serde_json::json!({
                                     "chunksProcessed": graph_materialization.chunk_count,
+                                    "graphChunksSelected": graph_materialization.selected_graph_chunks,
+                                    "recordStreamSourceUnitsSkipped": graph_materialization.record_stream_source_units_skipped,
                                     "extractedEntityCandidates": graph_materialization.extracted_entities,
                                     "extractedRelationCandidates": graph_materialization.extracted_relations,
                                     "graphReady": false,
@@ -1460,6 +1483,35 @@ async fn run_canonical_ingest_pipeline(
         .converge_document_technical_facts(state, document_id, Some(revision_id))
         .await
         .context("failed to converge typed technical facts for current revision")?;
+
+    // Fire-and-forget outbound webhook fanout for `revision.ready`.
+    // Errors are logged at WARN level and do NOT fail the ingest job.
+    {
+        let event = crate::domains::webhook::WebhookEvent {
+            event_type: "revision.ready".to_string(),
+            event_id: format!("revision.ready:{}:{}", revision_id, uuid::Uuid::now_v7()),
+            workspace_id: job.workspace_id,
+            library_id: Some(job.library_id),
+            payload_json: serde_json::json!({
+                "document_id": document_id,
+                "revision_id": revision_id,
+                "library_id": job.library_id,
+            }),
+        };
+        let errors = crate::services::webhook::outbound::publish_webhook_event(
+            &state.persistence.postgres,
+            &event,
+        )
+        .await;
+        for err in &errors {
+            warn!(
+                %document_id,
+                %revision_id,
+                error = %err,
+                "outbound webhook publish error after promote_document_head"
+            );
+        }
+    }
 
     let finalizing_elapsed_ms = Some(finalizing_start.elapsed().as_millis() as i64);
 

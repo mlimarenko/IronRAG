@@ -1,9 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -19,7 +20,7 @@ use crate::{
             KnowledgeEntityVectorRow, KnowledgeRelationSearchRow, KnowledgeTechnicalFactSearchRow,
         },
     },
-    infra::repositories::ai_repository,
+    infra::repositories::{ai_repository, content_repository},
     integrations::llm::EmbeddingBatchRequest,
     services::knowledge::service::RefreshKnowledgeLibraryGenerationCommand,
 };
@@ -28,6 +29,7 @@ use crate::{
 /// the typical 8k-token provider soft cap even when chunks run long and
 /// reduces the blast radius of one bad chunk failing the whole revision.
 const CHUNK_EMBEDDING_BATCH_SIZE: usize = 16;
+const CHUNK_VECTOR_REUSE_SOURCE_BATCH_SIZE: usize = 128;
 
 const VECTOR_KIND_CHUNK: &str = "chunk_embedding";
 const VECTOR_KIND_ENTITY: &str = "entity_embedding";
@@ -47,6 +49,7 @@ pub struct ChunkEmbeddingWrite {
 #[derive(Debug, Clone, Default)]
 pub struct EmbedChunksStageOutcome {
     pub chunks_embedded: usize,
+    pub chunks_reused: usize,
     pub usage_json: Option<serde_json::Value>,
     pub provider_kind: Option<String>,
     pub model_name: Option<String>,
@@ -101,9 +104,10 @@ impl SearchService {
         } else {
             normalized_limit
         };
+        let (temporal_start, temporal_end) = query_ir.resolved_temporal_bounds();
         let chunk_hits = state
             .arango_search_store
-            .search_chunks(library_id, query, normalized_limit)
+            .search_chunks(library_id, query, normalized_limit, temporal_start, temporal_end)
             .await
             .context("failed to search canonical knowledge chunks")?;
         let technical_fact_hits = state
@@ -199,6 +203,8 @@ impl SearchService {
                 vector,
                 freshness_generation,
                 created_at: Utc::now(),
+                occurred_at: chunk.occurred_at,
+                occurred_until: chunk.occurred_until,
             };
             let _ =
                 state.arango_search_store.upsert_chunk_vector(&row).await.with_context(|| {
@@ -362,16 +368,28 @@ impl SearchService {
         let embedding_model_key = model_catalog_id.to_string();
         let parallelism = state.settings.ingestion_embedding_parallelism.max(1);
         let freshness_generation = revision.revision_number;
+        let reused_chunk_ids = reuse_chunk_vectors_from_parent_revision(
+            state,
+            revision_id,
+            chunks.as_slice(),
+            model_catalog_id,
+            &embedding_model_key,
+            freshness_generation,
+        )
+        .await?;
+        let chunks_to_embed: Vec<&KnowledgeChunkRow> =
+            chunks.iter().filter(|chunk| !reused_chunk_ids.contains(&chunk.chunk_id)).collect();
 
         let provider_kind_owned = binding.provider_kind.clone();
         let model_name_owned = binding.model_name.clone();
         let api_key_owned = binding.api_key.clone();
         let base_url_owned = binding.provider_base_url.clone();
+        let extra_parameters_json_owned = binding.extra_parameters_json.clone();
 
         type ChunkBatch = Vec<usize>;
         let mut batches: Vec<ChunkBatch> = Vec::new();
         let mut current: ChunkBatch = Vec::with_capacity(CHUNK_EMBEDDING_BATCH_SIZE);
-        for index in 0..chunks.len() {
+        for index in 0..chunks_to_embed.len() {
             current.push(index);
             if current.len() == CHUNK_EMBEDDING_BATCH_SIZE {
                 batches.push(std::mem::replace(
@@ -384,12 +402,13 @@ impl SearchService {
             batches.push(current);
         }
 
-        let chunks_ref = &chunks;
+        let chunks_ref = &chunks_to_embed;
         let batch_responses = stream::iter(batches.into_iter().map(|batch| {
             let provider_kind = provider_kind_owned.clone();
             let model_name = model_name_owned.clone();
             let api_key = api_key_owned.clone();
             let base_url = base_url_owned.clone();
+            let extra_parameters_json = extra_parameters_json_owned.clone();
             async move {
                 let inputs: Vec<String> =
                     batch.iter().map(|index| chunks_ref[*index].normalized_text.clone()).collect();
@@ -402,6 +421,7 @@ impl SearchService {
                         inputs,
                         api_key_override: api_key,
                         base_url_override: base_url,
+                        extra_parameters_json,
                     })
                     .await
                     .with_context(|| {
@@ -454,7 +474,7 @@ impl SearchService {
 
             let mut batch_rows: Vec<KnowledgeChunkVectorRow> = Vec::with_capacity(batch.len());
             for (chunk_index, vector) in batch.iter().zip(batch_response.embeddings.iter()) {
-                let chunk = &chunks[*chunk_index];
+                let chunk = chunks_ref[*chunk_index];
                 batch_rows.push(KnowledgeChunkVectorRow {
                     key: build_chunk_vector_key(
                         chunk.chunk_id,
@@ -479,6 +499,8 @@ impl SearchService {
                     vector: vector.clone(),
                     freshness_generation,
                     created_at: Utc::now(),
+                    occurred_at: chunk.occurred_at,
+                    occurred_until: chunk.occurred_until,
                 });
             }
             // Collapse N sequential `upsert_chunk_vector` AQLs into one
@@ -491,6 +513,37 @@ impl SearchService {
                     .context("failed to bulk-persist chunk vectors")?;
                 chunks_embedded += batch_rows.len();
             }
+        }
+
+        let covered_chunk_count = chunks_embedded.saturating_add(reused_chunk_ids.len());
+        if covered_chunk_count != chunks.len() {
+            bail!(
+                "embedding coverage mismatch for revision {revision_id}: {} chunks, {} embedded, {} reused",
+                chunks.len(),
+                chunks_embedded,
+                reused_chunk_ids.len(),
+            );
+        }
+        let persisted_vector_count = state
+            .arango_search_store
+            .count_chunk_vectors_by_revision(
+                revision_id,
+                &embedding_model_key,
+                VECTOR_KIND_CHUNK,
+                freshness_generation,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to verify persisted chunk-vector coverage for revision {revision_id}"
+                )
+            })?;
+        if persisted_vector_count != chunks.len() {
+            bail!(
+                "persisted chunk-vector coverage mismatch for revision {revision_id}: {} chunks, {} current vectors",
+                chunks.len(),
+                persisted_vector_count,
+            );
         }
 
         let prompt_tokens = saw_prompt.then(|| i32::try_from(prompt_token_sum).unwrap_or(i32::MAX));
@@ -514,11 +567,13 @@ impl SearchService {
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "chunks_embedded": chunks_embedded,
+            "chunks_reused": reused_chunk_ids.len(),
         });
 
         Ok(EmbedChunksStageOutcome {
             chunks_embedded,
-            usage_json: Some(usage_json),
+            chunks_reused: reused_chunk_ids.len(),
+            usage_json: (chunks_embedded > 0).then_some(usage_json),
             provider_kind: Some(binding.provider_kind),
             model_name: Some(binding.model_name),
             prompt_tokens,
@@ -587,6 +642,7 @@ impl SearchService {
         let model_name_owned = embedding_binding.model_name.clone();
         let api_key_owned = embedding_binding.api_key.clone();
         let base_url_owned = embedding_binding.provider_base_url.clone();
+        let extra_parameters_json_owned = embedding_binding.extra_parameters_json.clone();
 
         type ChunkBatch = Vec<usize>;
         let mut batches: Vec<ChunkBatch> = Vec::new();
@@ -620,6 +676,7 @@ impl SearchService {
             let model_name = model_name_owned.clone();
             let api_key = api_key_owned.clone();
             let base_url = base_url_owned.clone();
+            let extra_parameters_json = extra_parameters_json_owned.clone();
             async move {
                 let inputs: Vec<String> =
                     batch.iter().map(|idx| chunks_ref[*idx].normalized_text.clone()).collect();
@@ -632,6 +689,7 @@ impl SearchService {
                         inputs,
                         api_key_override: api_key,
                         base_url_override: base_url,
+                        extra_parameters_json,
                     })
                     .await
                     .with_context(|| {
@@ -678,6 +736,8 @@ impl SearchService {
                         vector: embedding.clone(),
                         freshness_generation,
                         created_at: Utc::now(),
+                        occurred_at: chunk.occurred_at,
+                        occurred_until: chunk.occurred_until,
                     };
                     search_store.upsert_chunk_vector(&row).await.with_context(|| {
                         format!("failed to persist rebuilt chunk vector for {}", chunk.chunk_id)
@@ -765,6 +825,7 @@ impl SearchService {
                     inputs: entity_batch.iter().map(build_entity_embedding_input).collect(),
                     api_key_override: embedding_binding.api_key.clone(),
                     base_url_override: embedding_binding.provider_base_url.clone(),
+                    extra_parameters_json: embedding_binding.extra_parameters_json.clone(),
                 })
                 .await
                 .context("failed to rebuild entity vectors")?;
@@ -880,6 +941,173 @@ fn embedding_dimensions(vector: &[f32]) -> Result<i32> {
         return Err(anyhow!("embedding vector must not be empty"));
     }
     i32::try_from(vector.len()).context("embedding vector dimension overflowed i32")
+}
+
+async fn reuse_chunk_vectors_from_parent_revision(
+    state: &AppState,
+    revision_id: Uuid,
+    new_chunks: &[KnowledgeChunkRow],
+    model_catalog_id: Uuid,
+    embedding_model_key: &str,
+    freshness_generation: i64,
+) -> Result<BTreeSet<Uuid>> {
+    if new_chunks.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let Some(revision_row) =
+        content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
+            .await
+            .with_context(|| {
+                format!("failed to load content revision {revision_id} for vector reuse")
+            })?
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(parent_revision_id) = revision_row.parent_revision_id else {
+        return Ok(BTreeSet::new());
+    };
+
+    let mut new_chunks_by_checksum: HashMap<String, Vec<&KnowledgeChunkRow>> = HashMap::new();
+    for chunk in new_chunks {
+        let Some(checksum) = chunk_text_reuse_key(chunk) else { continue };
+        new_chunks_by_checksum.entry(checksum).or_default().push(chunk);
+    }
+    if new_chunks_by_checksum.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let parent_chunks = state
+        .arango_document_store
+        .list_chunks_by_revision(parent_revision_id)
+        .await
+        .with_context(|| {
+            format!("failed to list parent chunks for vector reuse from {parent_revision_id}")
+        })?;
+    if parent_chunks.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let mut parent_chunk_by_id: HashMap<Uuid, &KnowledgeChunkRow> = HashMap::new();
+    let mut parent_ids_by_checksum: HashMap<String, Uuid> = HashMap::new();
+    for parent_chunk in &parent_chunks {
+        let Some(checksum) = chunk_text_reuse_key(parent_chunk) else { continue };
+        if !new_chunks_by_checksum.contains_key(&checksum) {
+            continue;
+        }
+        parent_ids_by_checksum.entry(checksum).or_insert(parent_chunk.chunk_id);
+        parent_chunk_by_id.entry(parent_chunk.chunk_id).or_insert(parent_chunk);
+    }
+    if parent_ids_by_checksum.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let mut reused_chunk_ids = BTreeSet::new();
+    let parent_ids: Vec<Uuid> = parent_ids_by_checksum.values().copied().collect();
+    for parent_batch in parent_ids.chunks(CHUNK_VECTOR_REUSE_SOURCE_BATCH_SIZE) {
+        let vectors = state
+            .arango_search_store
+            .list_chunk_vectors_by_chunks(parent_batch, embedding_model_key, VECTOR_KIND_CHUNK)
+            .await
+            .with_context(|| {
+                format!("failed to load parent chunk vectors for revision {parent_revision_id}")
+            })?;
+        let mut current_vector_by_parent: HashMap<Uuid, KnowledgeChunkVectorRow> = HashMap::new();
+        for vector in vectors {
+            match current_vector_by_parent.get(&vector.chunk_id) {
+                Some(existing) if !chunk_vector_is_newer(&vector, existing) => {}
+                _ => {
+                    current_vector_by_parent.insert(vector.chunk_id, vector);
+                }
+            }
+        }
+
+        let mut rows: Vec<KnowledgeChunkVectorRow> = Vec::with_capacity(CHUNK_EMBEDDING_BATCH_SIZE);
+        for (parent_chunk_id, parent_vector) in current_vector_by_parent {
+            let Some(parent_chunk) = parent_chunk_by_id.get(&parent_chunk_id) else {
+                continue;
+            };
+            let Some(parent_checksum) = chunk_text_reuse_key(parent_chunk) else {
+                continue;
+            };
+            let Some(new_matches) = new_chunks_by_checksum.get(&parent_checksum) else {
+                continue;
+            };
+            for new_chunk in new_matches {
+                if reused_chunk_ids.contains(&new_chunk.chunk_id) {
+                    continue;
+                }
+                rows.push(KnowledgeChunkVectorRow {
+                    key: build_chunk_vector_key(
+                        new_chunk.chunk_id,
+                        model_catalog_id,
+                        freshness_generation,
+                    ),
+                    arango_id: None,
+                    arango_rev: None,
+                    vector_id: Uuid::now_v7(),
+                    workspace_id: new_chunk.workspace_id,
+                    library_id: new_chunk.library_id,
+                    chunk_id: new_chunk.chunk_id,
+                    revision_id: new_chunk.revision_id,
+                    embedding_model_key: embedding_model_key.to_string(),
+                    vector_kind: VECTOR_KIND_CHUNK.to_string(),
+                    dimensions: parent_vector.dimensions,
+                    vector: parent_vector.vector.clone(),
+                    freshness_generation,
+                    created_at: Utc::now(),
+                    occurred_at: new_chunk.occurred_at,
+                    occurred_until: new_chunk.occurred_until,
+                });
+                reused_chunk_ids.insert(new_chunk.chunk_id);
+                if rows.len() == CHUNK_EMBEDDING_BATCH_SIZE {
+                    state
+                        .arango_search_store
+                        .upsert_chunk_vectors_bulk(rows.as_slice())
+                        .await
+                        .context("failed to bulk-persist reused chunk vectors")?;
+                    rows.clear();
+                }
+            }
+        }
+        if !rows.is_empty() {
+            state
+                .arango_search_store
+                .upsert_chunk_vectors_bulk(rows.as_slice())
+                .await
+                .context("failed to bulk-persist reused chunk vectors")?;
+        }
+    }
+
+    if !reused_chunk_ids.is_empty() {
+        tracing::info!(
+            revision_id = %revision_id,
+            parent_revision_id = %parent_revision_id,
+            reused = reused_chunk_ids.len(),
+            total_chunks = new_chunks.len(),
+            "diff-aware ingest: reusing chunk vectors for unchanged chunks",
+        );
+    }
+    Ok(reused_chunk_ids)
+}
+
+fn chunk_vector_is_newer(
+    candidate: &KnowledgeChunkVectorRow,
+    existing: &KnowledgeChunkVectorRow,
+) -> bool {
+    candidate
+        .freshness_generation
+        .cmp(&existing.freshness_generation)
+        .then_with(|| candidate.created_at.cmp(&existing.created_at))
+        .then_with(|| candidate.vector_id.cmp(&existing.vector_id))
+        .is_gt()
+}
+
+fn chunk_text_reuse_key(chunk: &KnowledgeChunkRow) -> Option<String> {
+    (!chunk.normalized_text.trim().is_empty()).then(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(chunk.normalized_text.as_bytes());
+        hex::encode(hasher.finalize())
+    })
 }
 
 async fn load_knowledge_chunk(state: &AppState, chunk_id: Uuid) -> Result<KnowledgeChunkRow> {
@@ -1069,6 +1297,8 @@ mod tests {
             vector: vec![1.0, 2.0, 3.0],
             freshness_generation: 1,
             created_at: Utc::now() - Duration::minutes(1),
+            occurred_at: None,
+            occurred_until: None,
         };
         let new = KnowledgeChunkVectorRow {
             key: "new".to_string(),
@@ -1113,5 +1343,49 @@ mod tests {
         let selected =
             SearchService::new().select_current_entity_vector(&candidates).expect("entity vector");
         assert_eq!(selected.freshness_generation, new.freshness_generation);
+    }
+
+    #[test]
+    fn chunk_text_reuse_key_is_content_addressed() {
+        let left = make_chunk_for_reuse("alpha\nbeta");
+        let right = make_chunk_for_reuse("alpha\nbeta");
+        let changed = make_chunk_for_reuse("alpha\ngamma");
+        let blank = make_chunk_for_reuse("   ");
+
+        assert_eq!(chunk_text_reuse_key(&left), chunk_text_reuse_key(&right));
+        assert_ne!(chunk_text_reuse_key(&left), chunk_text_reuse_key(&changed));
+        assert_eq!(chunk_text_reuse_key(&blank), None);
+    }
+
+    fn make_chunk_for_reuse(normalized_text: &str) -> KnowledgeChunkRow {
+        KnowledgeChunkRow {
+            key: Uuid::now_v7().to_string(),
+            arango_id: None,
+            arango_rev: None,
+            chunk_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: Some("text".to_string()),
+            content_text: normalized_text.to_string(),
+            normalized_text: normalized_text.to_string(),
+            span_start: Some(0),
+            span_end: Some(i32::try_from(normalized_text.len()).unwrap_or(i32::MAX)),
+            token_count: None,
+            support_block_ids: Vec::new(),
+            section_path: Vec::new(),
+            heading_trail: Vec::new(),
+            literal_digest: None,
+            chunk_state: "ready".to_string(),
+            text_generation: Some(1),
+            vector_generation: Some(1),
+            quality_score: None,
+            window_text: None,
+            raptor_level: None,
+            occurred_at: None,
+            occurred_until: None,
+        }
     }
 }

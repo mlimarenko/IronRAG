@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::BTreeSet, time::Instant};
 
 use super::InlineMutationContext;
 
@@ -28,9 +28,12 @@ use crate::{
         ops::billing::CaptureIngestAttemptBillingCommand,
     },
     shared::extraction::{
-        file_extract::build_inline_text_extraction_plan,
+        file_extract::{
+            build_inline_text_extraction_plan, build_inline_text_extraction_plan_for_source,
+        },
         table_graph::{TableGraphProfile, build_graph_table_row_text},
         table_summary::is_table_summary_text,
+        text_quality::is_graph_extraction_text_eligible,
     },
 };
 
@@ -45,17 +48,69 @@ use super::{
     sha256_hex_text, source_uri_for_inline_payload,
 };
 
+const GRAPH_EXTRACTION_MIN_CHUNK_QUALITY_SCORE: f32 = 0.35;
+const CHUNK_KIND_SOURCE_PROFILE: &str = "source_profile";
+const CHUNK_KIND_SOURCE_UNIT: &str = "source_unit";
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct GraphExtractionChunkPolicy {
+    record_stream: bool,
+    selected_record_stream_source_units: BTreeSet<Uuid>,
+}
+
+impl GraphExtractionChunkPolicy {
+    #[must_use]
+    pub(super) fn standard() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub(super) fn record_stream(selected_source_units: BTreeSet<Uuid>) -> Self {
+        Self { record_stream: true, selected_record_stream_source_units: selected_source_units }
+    }
+
+    #[must_use]
+    pub(super) const fn is_record_stream(&self) -> bool {
+        self.record_stream
+    }
+
+    #[must_use]
+    pub(super) fn selected_source_unit_count(&self) -> usize {
+        self.selected_record_stream_source_units.len()
+    }
+
+    #[must_use]
+    fn admits_source_unit(&self, chunk_id: Uuid) -> bool {
+        !self.record_stream || self.selected_record_stream_source_units.contains(&chunk_id)
+    }
+}
+
 pub(super) fn build_graph_chunk_content(
     chunk: &KnowledgeChunkRow,
     table_graph_profile: Option<&TableGraphProfile>,
     row_only_table_graph: bool,
+    policy: &GraphExtractionChunkPolicy,
 ) -> Option<String> {
+    if chunk.chunk_kind.as_deref() == Some(CHUNK_KIND_SOURCE_PROFILE) {
+        return policy.is_record_stream().then(|| chunk.normalized_text.clone());
+    }
+    if chunk.quality_score.is_some_and(|score| score < GRAPH_EXTRACTION_MIN_CHUNK_QUALITY_SCORE) {
+        return None;
+    }
     if row_only_table_graph && chunk.chunk_kind.as_deref() != Some("table_row") {
+        return None;
+    }
+    if chunk.chunk_kind.as_deref() == Some(CHUNK_KIND_SOURCE_UNIT)
+        && !policy.admits_source_unit(chunk.chunk_id)
+    {
         return None;
     }
     if chunk.chunk_kind.as_deref() == Some("metadata_block")
         && is_table_summary_text(&chunk.normalized_text)
     {
+        return None;
+    }
+    if !is_graph_extraction_text_eligible(&chunk.normalized_text) {
         return None;
     }
     if chunk.chunk_kind.as_deref() == Some("table_row") {
@@ -382,8 +437,24 @@ impl ContentService {
     ) -> Result<ContentMutationAdmission, ApiError> {
         let document_context =
             self.load_editable_document_context(state, command.document_id).await?;
+        let source_file_name = document_context.title.clone();
+        let source_mime_type = "text/plain".to_string();
         let merged_text =
             merge_appended_text(&document_context.current_content, &command.appended_text);
+        let merged_checksum = sha256_hex_bytes(merged_text.as_bytes());
+        let storage_file_name = source_file_name
+            .clone()
+            .unwrap_or_else(|| format!("document-{}.txt", command.document_id));
+        let storage_key = self
+            .persist_inline_file_source(
+                state,
+                command.workspace_id,
+                command.library_id,
+                &storage_file_name,
+                &format!("sha256:{merged_checksum}"),
+                merged_text.as_bytes(),
+            )
+            .await?;
         let source_identity = command.source_identity.clone();
         let admission = self
             .admit_mutation(
@@ -399,23 +470,30 @@ impl ContentService {
                     source_identity: source_identity.clone(),
                     revision: Some(RevisionAdmissionMetadata {
                         content_source_kind: "append".to_string(),
-                        checksum: format!("sha256:{}", sha256_hex_bytes(merged_text.as_bytes())),
-                        mime_type: document_context.mime_type,
+                        checksum: format!("sha256:{merged_checksum}"),
+                        mime_type: source_mime_type.clone(),
                         byte_size: i64::try_from(merged_text.len()).unwrap_or(i64::MAX),
-                        title: document_context.title,
+                        title: source_file_name.clone(),
                         language_code: document_context.language_code,
                         source_uri: Some(source_uri_for_inline_payload(
                             "append",
                             source_identity.as_deref(),
                             None,
                         )),
-                        storage_key: None,
+                        storage_key: Some(storage_key),
                     }),
                     parent_async_operation_id: None,
                 },
             )
             .await?;
-        self.materialize_inline_text_mutation(state, &admission, merged_text).await
+        self.materialize_inline_text_mutation(
+            state,
+            &admission,
+            merged_text,
+            source_file_name,
+            Some(source_mime_type),
+        )
+        .await
     }
 
     pub async fn edit_inline_mutation(
@@ -585,6 +663,8 @@ impl ContentService {
         state: &AppState,
         admission: &ContentMutationAdmission,
         text: String,
+        file_name: Option<String>,
+        mime_type: Option<String>,
     ) -> Result<ContentMutationAdmission, ApiError> {
         let context = self.inline_mutation_context_from_admission(admission)?;
         let attempt = self.lease_inline_attempt(state, &context).await?;
@@ -683,7 +763,16 @@ impl ContentService {
                 },
             )
             .await?;
-        let extraction_plan = build_inline_text_extraction_plan(&text);
+        let extraction_plan = if file_name.is_some() || mime_type.is_some() {
+            build_inline_text_extraction_plan_for_source(
+                &text,
+                file_name.as_deref(),
+                mime_type.as_deref(),
+            )
+            .map_err(|error| ApiError::BadRequest(format!("inline extraction failed: {error}")))?
+        } else {
+            build_inline_text_extraction_plan(&text)
+        };
         let preparation = self
             .prepare_and_persist_revision_structure(state, context.revision_id, &extraction_plan)
             .await?;
@@ -991,6 +1080,7 @@ impl ContentService {
                             message: Some("chunk embeddings persisted".to_string()),
                             details_json: serde_json::json!({
                                 "chunksEmbedded": outcome.chunks_embedded,
+                                "chunksReused": outcome.chunks_reused,
                                 "providerKind": outcome.provider_kind,
                                 "modelName": outcome.model_name,
                             }),
@@ -1105,10 +1195,8 @@ impl ContentService {
                 match graph_outcome {
                     Ok(graph_outcome) => {
                         // Graph node/edge embedding usage is captured as
-                        // its own `embed_graph` billing call_kind. Earlier
-                        // versions filed this under the `embed_chunk`
-                        // stage name, conflating graph embedding with
-                        // (previously non-existent) chunk embedding.
+                        // its own `embed_graph` billing call_kind, not
+                        // `embed_chunk` (which covers text chunk embedding).
                         if let Some(embedding_usage) = graph_outcome.embedding_usage {
                             let embed_provider = embedding_usage.provider_kind.clone();
                             let embed_model = embedding_usage.model_name.clone();
@@ -1149,12 +1237,17 @@ impl ContentService {
                                     stage_state: "completed".to_string(),
                                     message: Some("graph candidates extracted and reconciled".to_string()),
                                     details_json: serde_json::json!({
-                                        "chunksProcessed": graph_materialization.chunk_count,
-                                        "extractedEntityCandidates": graph_materialization.extracted_entities,
-                                        "extractedRelationCandidates": graph_materialization.extracted_relations,
-                                        "projectedNodes": graph_outcome.projection.node_count,
-                                        "projectedEdges": graph_outcome.projection.edge_count,
-                                        "projectionVersion": graph_outcome.projection.projection_version,
+	                                        "chunksProcessed": graph_materialization.chunk_count,
+	                                        "graphChunksSelected": graph_materialization.selected_graph_chunks,
+	                                        "recordStreamSourceUnitsSkipped": graph_materialization.record_stream_source_units_skipped,
+	                                        "extractedEntityCandidates": graph_materialization.extracted_entities,
+	                                        "extractedRelationCandidates": graph_materialization.extracted_relations,
+	                                        "reusedChunks": graph_materialization.reused_chunks,
+	                                        "reusedEntities": graph_materialization.reused_entities,
+	                                        "reusedRelations": graph_materialization.reused_relations,
+	                                        "projectedNodes": graph_outcome.projection.node_count,
+	                                        "projectedEdges": graph_outcome.projection.edge_count,
+	                                        "projectionVersion": graph_outcome.projection.projection_version,
                                         "graphStatus": graph_outcome.projection.graph_status,
                                         "graphContributionCount": graph_outcome.graph_contribution_count,
                                         "graphReady": graph_ready,
@@ -1193,12 +1286,17 @@ impl ContentService {
                                         format!("graph reconcile failed: {error:#}"),
                                     ),
                                     details_json: serde_json::json!({
-                                        "chunksProcessed": graph_materialization.chunk_count,
-                                        "extractedEntityCandidates": graph_materialization.extracted_entities,
-                                        "extractedRelationCandidates": graph_materialization.extracted_relations,
-                                        "providerKind": graph_materialization.provider_kind,
-                                        "modelName": graph_materialization.model_name,
-                                    }),
+	                                        "chunksProcessed": graph_materialization.chunk_count,
+	                                        "graphChunksSelected": graph_materialization.selected_graph_chunks,
+	                                        "recordStreamSourceUnitsSkipped": graph_materialization.record_stream_source_units_skipped,
+	                                        "extractedEntityCandidates": graph_materialization.extracted_entities,
+	                                        "extractedRelationCandidates": graph_materialization.extracted_relations,
+	                                        "reusedChunks": graph_materialization.reused_chunks,
+	                                        "reusedEntities": graph_materialization.reused_entities,
+	                                        "reusedRelations": graph_materialization.reused_relations,
+	                                        "providerKind": graph_materialization.provider_kind,
+	                                        "modelName": graph_materialization.model_name,
+	                                    }),
                                     provider_kind: graph_materialization.provider_kind.clone(),
                                     model_name: graph_materialization.model_name.clone(),
                                     prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
@@ -1294,7 +1392,7 @@ impl ContentService {
 mod tests {
     use uuid::Uuid;
 
-    use super::build_graph_chunk_content;
+    use super::{GraphExtractionChunkPolicy, build_graph_chunk_content};
     use crate::infra::arangodb::document_store::KnowledgeChunkRow;
 
     fn make_chunk(chunk_kind: &str, normalized_text: &str) -> KnowledgeChunkRow {
@@ -1322,6 +1420,10 @@ mod tests {
             text_generation: None,
             vector_generation: None,
             quality_score: None,
+            window_text: None,
+            raptor_level: None,
+            occurred_at: None,
+            occurred_until: None,
         }
     }
 
@@ -1332,13 +1434,101 @@ mod tests {
             "Table Summary | Sheet: products | Column: Stock | Value Kind: numeric | Row Count: 100 | Average: 545.71",
         );
 
-        assert_eq!(build_graph_chunk_content(&chunk, None, false), None);
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &GraphExtractionChunkPolicy::standard()),
+            None
+        );
     }
 
     #[test]
     fn build_graph_chunk_content_skips_heading_chunks_for_row_only_table_revisions() {
         let chunk = make_chunk("heading", "test1");
 
-        assert_eq!(build_graph_chunk_content(&chunk, None, true), None);
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, true, &GraphExtractionChunkPolicy::standard()),
+            None
+        );
+    }
+
+    #[test]
+    fn build_graph_chunk_content_skips_low_confidence_text_without_stored_score() {
+        let chunk = make_chunk(
+            "paragraph",
+            concat!(
+                "summary topic alpha beta gamma ",
+                "abCD4efGH hiJKlmNO pQrST uvWXyZab ",
+                "cdEFGh3Ij klMNOprs tuVWxyZq mnOPqRst",
+            ),
+        );
+
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &GraphExtractionChunkPolicy::standard()),
+            None
+        );
+    }
+
+    #[test]
+    fn build_graph_chunk_content_skips_dense_mixed_case_noise() {
+        let chunk = make_chunk(
+            "paragraph",
+            concat!(
+                "abCDEfgH ijKLMnOp qRStuVWx yzABcDef gHIjKLmn ",
+                "opQRS7tu vwXYZabC deFGhIJk lmNOPqRs tuVWxyZa ",
+                "bcDEFgHi jkLMNopQ rsTUVwxy zaBCDefG",
+            ),
+        );
+
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &GraphExtractionChunkPolicy::standard()),
+            None
+        );
+    }
+
+    #[test]
+    fn build_graph_chunk_content_admits_record_stream_profile_only_under_policy() {
+        let chunk = make_chunk("source_profile", "[source_profile records=20]");
+        let standard = GraphExtractionChunkPolicy::standard();
+        assert_eq!(build_graph_chunk_content(&chunk, None, false, &standard), None);
+
+        let record_stream =
+            GraphExtractionChunkPolicy::record_stream(std::collections::BTreeSet::new());
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &record_stream),
+            Some("[source_profile records=20]".to_string())
+        );
+    }
+
+    #[test]
+    fn build_graph_chunk_content_keeps_record_stream_profile_when_quality_is_low() {
+        let mut chunk = make_chunk("source_profile", "[source_profile records=20]");
+        chunk.quality_score = Some(0.0);
+        let policy = GraphExtractionChunkPolicy::record_stream(std::collections::BTreeSet::new());
+
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &policy),
+            Some("[source_profile records=20]".to_string())
+        );
+    }
+
+    #[test]
+    fn build_graph_chunk_content_limits_record_stream_source_units_to_selected_chunks() {
+        let chunk = make_chunk("source_unit", "record ordinal=1 field=value");
+        let standard = GraphExtractionChunkPolicy::standard();
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &standard),
+            Some("record ordinal=1 field=value".to_string())
+        );
+
+        let unselected =
+            GraphExtractionChunkPolicy::record_stream(std::collections::BTreeSet::new());
+        assert_eq!(build_graph_chunk_content(&chunk, None, false, &unselected), None);
+
+        let mut selected_ids = std::collections::BTreeSet::new();
+        selected_ids.insert(chunk.chunk_id);
+        let selected = GraphExtractionChunkPolicy::record_stream(selected_ids);
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &selected),
+            Some("record ordinal=1 field=value".to_string())
+        );
     }
 }

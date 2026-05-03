@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
-import { Bug, CheckCircle2, Loader2, XCircle } from 'lucide-react';
+import { Bug, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { AssistantMessage } from '@/types';
 import { VERIFICATION_CONFIG } from './verificationConfig';
@@ -84,39 +84,7 @@ function ChatMessageImpl({ t, message, onOpenDebug }: ChatMessageProps) {
               <Bug className="h-3 w-3" />
             </button>
           )}
-          {!isUser && message.toolSteps && message.toolSteps.length > 0 && (
-            <div className="mb-3 space-y-1 border-l-2 border-border pl-3 text-xs">
-              {message.toolSteps.map((step) => (
-                <div
-                  key={step.callId}
-                  className={`flex items-start gap-2 ${
-                    step.status === 'error'
-                      ? 'text-destructive'
-                      : step.status === 'done'
-                        ? 'text-muted-foreground'
-                        : 'text-foreground'
-                  }`}
-                >
-                  <span className="mt-0.5 flex-shrink-0">
-                    {step.status === 'running' ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : step.status === 'error' ? (
-                      <XCircle className="h-3 w-3" />
-                    ) : (
-                      <CheckCircle2 className="h-3 w-3" />
-                    )}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="font-mono font-semibold truncate">{step.name}</div>
-                    <div className="font-mono text-[10px] opacity-70 truncate">
-                      {step.argumentsPreview}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          {!isUser && !message.content && (!message.toolSteps || message.toolSteps.length === 0) && (
+          {!isUser && !message.content && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
               <span>{t('assistant.grounding')}</span>

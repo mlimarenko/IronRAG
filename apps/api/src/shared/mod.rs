@@ -9,4 +9,6 @@ pub mod similarity;
 pub mod slugs;
 pub mod status;
 pub mod telemetry;
+pub mod text_tokens;
+pub mod versioning;
 pub mod web;

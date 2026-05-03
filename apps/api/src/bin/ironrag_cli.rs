@@ -9,6 +9,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use ironrag_backend::app::config::Settings;
+use ironrag_backend::app::state::AppState;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
@@ -114,6 +115,23 @@ enum Commands {
         /// Description
         #[arg(short, long)]
         description: Option<String>,
+    },
+
+    // ── RAPTOR tree builder ─────────────────────────────────────────
+    /// Build a RAPTOR hierarchical summary tree for a library.
+    ///
+    /// Loads all leaf chunks for the library, partitions them into clusters,
+    /// generates an LLM summary per cluster, and inserts synthetic
+    /// `raptor_summary` chunks at the requested level.
+    BuildRaptor {
+        /// Library slug or UUID
+        library: String,
+        /// Maximum summary level to build (1 = first layer over raw chunks)
+        #[arg(short, long, default_value = "1")]
+        max_level: u32,
+        /// Target number of source chunks per cluster
+        #[arg(short, long, default_value = "10")]
+        cluster_size: usize,
     },
 
     /// Print CLI build version
@@ -816,6 +834,41 @@ async fn cmd_create_library(
     Ok(())
 }
 
+// ── RAPTOR commands ─────────────────────────────────────────────────
+
+async fn cmd_build_raptor(
+    pool: &PgPool,
+    settings: Settings,
+    library: &str,
+    max_level: u32,
+    cluster_size: usize,
+) -> Result<()> {
+    let library_id = resolve_library_id(pool, library).await?;
+
+    println!(
+        "Building RAPTOR tree for library '{library}' (id: {library_id}), max_level={max_level}, cluster_size={cluster_size}"
+    );
+
+    let state =
+        AppState::new(settings).await.context("failed to initialise AppState for RAPTOR")?;
+
+    for level in 1..=max_level {
+        println!("  Building level {level}...");
+        let result = ironrag_backend::services::graph::raptor::build_raptor_tree(
+            &state,
+            library_id,
+            level,
+            cluster_size,
+        )
+        .await
+        .with_context(|| format!("RAPTOR level {level} failed"))?;
+        println!("  Level {}: {} summaries inserted", result.level, result.summaries_inserted);
+    }
+
+    println!("RAPTOR tree build complete.");
+    Ok(())
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -865,6 +918,11 @@ async fn main() -> Result<()> {
             cmd_create_library(&pool, &workspace, &slug, name.as_deref(), description.as_deref())
                 .await
         }
+
+        Commands::BuildRaptor { library, max_level, cluster_size } => {
+            cmd_build_raptor(&pool, settings, &library, max_level, cluster_size).await
+        }
+
         Commands::Version => unreachable!("handled before pool init"),
     }
 }

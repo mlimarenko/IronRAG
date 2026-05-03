@@ -1,4 +1,11 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+  type SetStateAction,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useApp } from '@/contexts/AppContext';
@@ -11,7 +18,6 @@ import {
 import { errorMessage } from '@/lib/errorMessage';
 import { queryApi } from '@/api';
 import type { AssistantTurnExecutionResponse } from '@/api/query';
-import { SseTransportUnavailableError } from '@/api/query';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -48,16 +54,8 @@ function diagnoseTurnError(err: unknown, raw: string, t: TranslateFn): string {
   const looksLikeNetworkReject =
     lower.includes('networkerror') ||
     lower.includes('failed to fetch') ||
-    lower.includes('load failed') ||
-    lower.includes('input stream') ||
-    lower.includes('stream ended');
-  // If we get here after `createTurnWithFallback`, the original SSE
-  // request was blocked AND the non-SSE fallback was also rejected —
-  // both at the network layer, no backend involvement. Canonical cause
-  // in practice is a browser-side block (Strict Tracking Protection,
-  // uBlock / Privacy Badger, corporate TLS-inspection proxy, service
-  // worker) OR a reverse-proxy that is buffering the SSE stream.
-  if (err instanceof SseTransportUnavailableError || looksLikeNetworkReject) {
+    lower.includes('load failed');
+  if (looksLikeNetworkReject) {
     return t('assistant.errorDiagnosis.networkBlocked');
   }
   if (lower.includes('timeout') || lower.includes('timed out')) {
@@ -104,42 +102,77 @@ export default function AssistantPage() {
 
   const workspaceId = activeWorkspace?.id ?? activeLibrary?.workspaceId;
   const libraryId = activeLibrary?.id;
+  const libraryScopeKey =
+    workspaceId && libraryId ? `${workspaceId}:${libraryId}` : null;
+  const libraryScopeRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    libraryScopeRef.current = libraryScopeKey;
+    setSessions([]);
+    setActiveSession(null);
+    setMessages([]);
+    setRetryable(null);
+    setDebugContext(null);
+    setDebugLoadingId(null);
+    setSessionSearch('');
+  }, [libraryScopeKey]);
 
   const loadSessions = useCallback(async () => {
-    if (!workspaceId || !libraryId) return;
+    if (!workspaceId || !libraryId || !libraryScopeKey) return;
+    const expectedScope = libraryScopeKey;
     try {
       const data = await queryApi.listSessions({ workspaceId, libraryId });
-      setSessions(data.map(mapAssistantSession));
+      if (libraryScopeRef.current !== expectedScope) return;
+      setSessions(
+        data
+          .map(mapAssistantSession)
+          .filter((session) => session.libraryId === libraryId),
+      );
     } catch (err: unknown) {
+      if (libraryScopeRef.current !== expectedScope) return;
       console.error('Failed to load sessions:', err);
       toast.error(errorMessage(err, t('assistant.loadSessionsFailed')));
     }
-  }, [libraryId, t, workspaceId]);
+  }, [libraryId, libraryScopeKey, t, workspaceId]);
 
   useEffect(() => {
     loadSessions();
   }, [loadSessions]);
 
-  const loadSessionMessages = useCallback(async (sessionId: string) => {
-    try {
-      const data = await queryApi.getSession(sessionId);
-      setMessages((data.messages ?? []).map(mapAssistantMessage));
-    } catch {
-      setMessages([]);
-    }
-  }, []);
+  const loadSessionMessages = useCallback(
+    async (sessionId: string) => {
+      if (!libraryId || !libraryScopeKey) return;
+      const expectedLibraryId = libraryId;
+      const expectedScope = libraryScopeKey;
+      try {
+        const data = await queryApi.getSession(sessionId);
+        if (
+          libraryScopeRef.current !== expectedScope ||
+          data.session.libraryId !== expectedLibraryId
+        ) {
+          return;
+        }
+        setMessages(data.messages.map(mapAssistantMessage));
+      } catch {
+        if (libraryScopeRef.current === expectedScope) {
+          setMessages([]);
+        }
+      }
+    },
+    [libraryId, libraryScopeKey],
+  );
 
   const applyTurnResult = useCallback(
-    (streamingId: string, result: AssistantTurnExecutionResponse) => {
+    (pendingId: string, result: AssistantTurnExecutionResponse) => {
       const answerText =
         result.responseTurn?.contentText ?? t('assistant.noResponseGenerated');
       const evidence = mapAssistantTurnToEvidence(result);
 
       setMessages((prev) =>
         prev.map((message) =>
-          message.id === streamingId
+          message.id === pendingId
             ? {
-                id: result.responseTurn?.id ?? streamingId,
+                id: result.responseTurn?.id ?? pendingId,
                 role: 'assistant',
                 content: answerText,
                 timestamp: result.responseTurn?.createdAt ?? message.timestamp,
@@ -155,26 +188,32 @@ export default function AssistantPage() {
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
+      const session = sessions.find(
+        (candidate) =>
+          candidate.id === sessionId && candidate.libraryId === libraryId,
+      );
+      if (!session) return;
       setActiveSession(sessionId);
       loadSessionMessages(sessionId);
     },
-    [loadSessionMessages],
+    [libraryId, loadSessionMessages, sessions],
   );
 
   const handleNewSession = useCallback(() => {
     setActiveSession(null);
     setMessages([]);
+    setRetryable(null);
+    setDebugContext(null);
   }, []);
 
-  // Auto-scroll triggered only when the number of messages changes — streaming
-  // content deltas do not cause a scroll storm. `messages.length` changes
-  // only when a new bubble is added, so the effect runs once per bubble
-  // instead of hundreds of times per stream. Using `scrollTo` + rAF avoids
-  // smooth-scroll jank during rapid updates.
+  // Auto-scroll only when a new bubble is added. Using `scrollTo` + rAF avoids
+  // smooth-scroll jank while React commits the completed turn.
   useEffect(() => {
     if (messages.length === 0) return;
     const frame = requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      if (typeof messagesEndRef.current?.scrollIntoView === 'function') {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }
     });
     return () => cancelAnimationFrame(frame);
   }, [messages.length]);
@@ -184,128 +223,63 @@ export default function AssistantPage() {
     if (!workspaceId || !libraryId) return;
 
     const questionText = inputText.trim();
+    const requestScope = libraryScopeKey;
     const now = Date.now();
+    const setScopedMessages = (updater: SetStateAction<AssistantMessage[]>) => {
+      if (libraryScopeRef.current === requestScope) {
+        setMessages(updater);
+      }
+    };
     const userMsg: AssistantMessage = {
       id: `m-${now}`,
       role: 'user',
       content: questionText,
       timestamp: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+    setScopedMessages((prev) => [...prev, userMsg]);
     setInputText('');
     setIsExecuting(true);
 
-    // Stable ID for the streaming placeholder — created once per send so React
-    // sees a consistent key for the bubble across every delta. Previously the
-    // ID was `m-stream-${Date.now()}` which the placeholder assigned to itself
-    // and re-used correctly, but extracting to a module-level constant makes
-    // the contract explicit to readers.
-    const streamingId = `m-stream-${now}`;
-    let runtimeExecutionId: string | null = null;
+    const pendingId = `m-pending-${now}`;
 
     try {
-      let sessionId = activeSession;
+      let sessionId =
+        sessions.some(
+          (session) =>
+            session.id === activeSession && session.libraryId === libraryId,
+        )
+          ? activeSession
+          : null;
       if (!sessionId) {
         const session = await queryApi.createSession(workspaceId, libraryId);
         sessionId = session.id;
-        setActiveSession(sessionId);
+        if (libraryScopeRef.current === requestScope) {
+          setActiveSession(sessionId);
+        }
       }
 
-      setMessages((prev) => [
+      setScopedMessages((prev) => [
         ...prev,
         {
-          id: streamingId,
+          id: pendingId,
           role: 'assistant',
           content: '',
           timestamp: new Date().toISOString(),
         },
       ]);
 
-      const result = await queryApi.createTurnWithFallback(sessionId, questionText, {
-        onRuntime: (runtime) => {
-          if (typeof runtime.runtimeExecutionId === 'string') {
-            runtimeExecutionId = runtime.runtimeExecutionId;
-          }
-        },
-        onToolCallStarted: (event) => {
-          setMessages((prev) =>
-            prev.map((message) =>
-              message.id === streamingId
-                ? {
-                    ...message,
-                    toolSteps: [
-                      ...(message.toolSteps ?? []),
-                      {
-                        iteration: event.iteration,
-                        callId: event.callId,
-                        name: event.name,
-                        argumentsPreview: event.argumentsPreview,
-                        status: 'running',
-                      },
-                    ],
-                  }
-                : message,
-            ),
-          );
-        },
-        onToolCallCompleted: (event) => {
-          setMessages((prev) =>
-            prev.map((message) =>
-              message.id === streamingId
-                ? {
-                    ...message,
-                    toolSteps: (message.toolSteps ?? []).map((step) =>
-                      step.callId === event.callId
-                        ? {
-                            ...step,
-                            resultPreview: event.resultPreview,
-                            isError: event.isError,
-                            status: event.isError ? 'error' : 'done',
-                          }
-                        : step,
-                    ),
-                  }
-                : message,
-            ),
-          );
-        },
-        onDelta: (delta) => {
-          setMessages((prev) =>
-            prev.map((message) =>
-              message.id === streamingId
-                ? { ...message, content: message.content + delta }
-                : message,
-            ),
-          );
-        },
-      });
+      const result = await queryApi.createTurn(sessionId, questionText);
 
-      applyTurnResult(streamingId, result);
+      if (libraryScopeRef.current === requestScope) {
+        applyTurnResult(pendingId, result);
+      }
 
       loadSessions();
     } catch (err: unknown) {
-      if (!(err instanceof SseTransportUnavailableError) && runtimeExecutionId) {
-        try {
-          const recovered = await queryApi.recoverTurnAfterStreamFailure(
-            runtimeExecutionId,
-          );
-          if (recovered?.responseTurn?.id || recovered?.responseTurn?.contentText) {
-            applyTurnResult(streamingId, recovered);
-            setRetryable(null);
-            loadSessions();
-            return;
-          }
-        } catch (recoveryErr) {
-          console.warn(
-            'Failed to recover assistant turn after stream interruption:',
-            recoveryErr,
-          );
-        }
-      }
       const rawMessage = errorMessage(err, t('assistant.unknownError'));
       const diagnosis = diagnoseTurnError(err, rawMessage, t);
-      setMessages((prev) => [
-        ...prev.filter((message) => !message.id.startsWith('m-stream-')),
+      setScopedMessages((prev) => [
+        ...prev.filter((message) => message.id !== pendingId),
         {
           id: `m-err-${Date.now()}`,
           role: 'assistant',
@@ -313,7 +287,9 @@ export default function AssistantPage() {
           timestamp: new Date().toISOString(),
         },
       ]);
-      setRetryable({ question: questionText, diagnosis });
+      if (libraryScopeRef.current === requestScope) {
+        setRetryable({ question: questionText, diagnosis });
+      }
     } finally {
       setIsExecuting(false);
     }
@@ -335,12 +311,8 @@ export default function AssistantPage() {
     }
   };
 
-  // Memoize the latest-evidence lookup so streaming deltas (which thrash
-  // the `messages` array on every chunk) do not force the evidence panel
-  // to recompute from scratch. Guarded by a ref-equality + length check —
-  // the lookup walks messages in reverse and stops at the first hit, but
-  // during streaming only the last assistant bubble is mutating and it
-  // has no evidence until `completed`, so this runs at most once per turn.
+  // Memoize the latest-evidence lookup. The lookup walks messages in
+  // reverse and stops at the first grounded assistant turn.
   const latestEvidence = useMemo<EvidenceBundle | undefined>(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];

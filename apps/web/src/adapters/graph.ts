@@ -45,15 +45,6 @@ export function mapNodeType(t: string | undefined): GraphNodeType {
   if (t === 'process') return 'process';
   if (t === 'concept') return 'concept';
   if (t === 'attribute') return 'attribute';
-  if (t === 'entity') return 'entity';
-  // Backward compat for legacy type names
-  if (t === 'topic') return 'concept';
-  if (t === 'technology') return 'artifact';
-  if (t === 'api') return 'artifact';
-  if (t === 'code_symbol') return 'artifact';
-  if (t === 'natural_kind') return 'natural';
-  if (t === 'metric') return 'attribute';
-  if (t === 'regulation') return 'artifact';
   return 'entity';
 }
 

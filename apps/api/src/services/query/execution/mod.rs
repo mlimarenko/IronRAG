@@ -4,7 +4,6 @@ use uuid::Uuid;
 mod answer;
 mod answer_pipeline;
 mod canonical_answer_context;
-mod canonical_target;
 mod consolidation;
 mod context;
 mod document_target;
@@ -21,7 +20,8 @@ mod preflight;
 pub(crate) mod question_intent;
 mod rerank;
 mod retrieve;
-mod role_answer;
+mod source_context;
+mod source_profile;
 mod structured_query_pipeline;
 mod table_retrieval;
 mod table_row_answer;
@@ -45,39 +45,39 @@ use crate::domains::query::QueryVerificationState;
 #[cfg(test)]
 use crate::domains::query::QueryVerificationWarning;
 use embed::embed_question;
-use hyde_crag::{evaluate_retrieval_quality, generate_hyde_passage, rewrite_query_for_retry};
+use hyde_crag::generate_hyde_passage;
 #[cfg(test)]
 use port_answer::{build_port_and_protocol_answer, build_port_answer};
 #[cfg(test)]
 use preflight::{
     build_canonical_preflight_answer, build_preflight_answer_chunks,
-    build_preflight_canonical_evidence, preflight_exact_literal_document_scope,
+    build_preflight_canonical_evidence, build_preflight_graph_evidence_context_lines,
+    preflight_exact_literal_document_scope,
 };
 use preflight::{prepare_canonical_answer_preflight, select_technical_literal_chunks};
-#[cfg(test)]
-use question_intent::question_mentions_port;
 #[cfg(test)]
 use technical_literal_context::build_exact_technical_literals_section;
 use technical_literal_context::{
     collect_technical_literal_groups, render_exact_technical_literals_section,
 };
 #[cfg(test)]
+use technical_literals::detect_technical_literal_intent;
+#[cfg(test)]
 use technical_literals::technical_literal_focus_keyword_segments;
 use technical_literals::{
-    TechnicalLiteralIntent, detect_technical_literal_intent, question_mentions_pagination,
-    technical_literal_candidate_limit, technical_literal_focus_keywords,
+    TechnicalLiteralIntent, question_mentions_pagination, technical_literal_candidate_limit,
+    technical_literal_focus_keywords,
 };
 #[cfg(test)]
-use verification::{
-    RuntimeAnswerVerification, enrich_query_assembly_diagnostics, enrich_query_candidate_summary,
-};
+use types::RuntimeAnswerVerification;
+#[cfg(test)]
+use verification::{enrich_query_assembly_diagnostics, enrich_query_candidate_summary};
 
 #[cfg(test)]
 use crate::domains::query::RuntimeQueryMode;
 pub(crate) use answer::*;
 pub(crate) use answer_pipeline::*;
 pub(crate) use canonical_answer_context::*;
-pub(crate) use canonical_target::*;
 pub(crate) use consolidation::*;
 pub(crate) use context::*;
 pub(crate) use document_target::*;
@@ -86,6 +86,7 @@ pub(crate) use endpoint_chunk_answer::*;
 pub(crate) use graph_retrieval::*;
 pub(crate) use rerank::*;
 pub(crate) use retrieve::*;
+pub(crate) use source_context::*;
 pub(crate) use structured_query_pipeline::*;
 pub(crate) use table_retrieval::*;
 pub(crate) use table_row_answer::*;
@@ -97,17 +98,6 @@ pub(crate) use verification::*;
 const HYDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// HyDE generation temperature. Lower = more factual, higher = more creative.
 const HYDE_TEMPERATURE: f64 = 0.3;
-/// CRAG retrieval-confidence + rewrite-retry knobs. Currently wired into
-/// `hyde_crag.rs` and `structured_query_pipeline.rs` as the rewrite path
-/// behind feature-flag-style dead-code; the callers are out of the hot
-/// retrieval path for v0.3.2. Kept in-tree as the next lever once the
-/// structured-query pipeline gets re-enabled.
-#[allow(dead_code)]
-const CRAG_REWRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-#[allow(dead_code)]
-const CRAG_REWRITE_TEMPERATURE: f64 = 0.5;
-#[allow(dead_code)]
-const CRAG_CONFIDENCE_THRESHOLD: f32 = 0.25;
 /// Maximum structured blocks included per answer assembly pass.
 const MAX_ANSWER_BLOCKS: usize = 16;
 /// Maximum chunks selected per document in balanced chunk selection.

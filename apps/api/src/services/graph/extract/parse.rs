@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 
 use crate::domains::runtime_graph::RuntimeNodeType;
+use crate::shared::extraction::text_quality::{
+    is_low_confidence_text, is_structurally_unstable_fragment,
+};
 
 use super::types::{
     FailedNormalizationAttempt, GraphEntityCandidate, GraphExtractionCandidateSet,
@@ -65,6 +68,52 @@ pub fn parse_graph_extraction_output(output_text: &str) -> Result<GraphExtractio
     validate_graph_extraction_candidate_set(&candidate_set)
         .map_err(|failure| anyhow!(failure.summary.clone()))?;
     Ok(candidate_set)
+}
+
+#[must_use]
+pub fn sanitize_graph_extraction_candidate_set(
+    candidate_set: GraphExtractionCandidateSet,
+    source_text: &str,
+) -> GraphExtractionCandidateSet {
+    if is_low_confidence_text(source_text) {
+        return GraphExtractionCandidateSet::default();
+    }
+
+    let entities = candidate_set
+        .entities
+        .into_iter()
+        .filter_map(|mut entity| {
+            if is_unstable_graph_label(&entity.label) {
+                return None;
+            }
+            entity.aliases.retain(|alias| !is_unstable_graph_label(alias));
+            if entity.summary.as_deref().is_some_and(is_low_confidence_text) {
+                entity.summary = None;
+            }
+            Some(entity)
+        })
+        .collect::<Vec<_>>();
+    let relations = candidate_set
+        .relations
+        .into_iter()
+        .filter_map(|mut relation| {
+            if is_unstable_graph_label(&relation.source_label)
+                || is_unstable_graph_label(&relation.target_label)
+            {
+                return None;
+            }
+            if relation.summary.as_deref().is_some_and(is_low_confidence_text) {
+                relation.summary = None;
+            }
+            Some(relation)
+        })
+        .collect::<Vec<_>>();
+
+    GraphExtractionCandidateSet { entities, relations }
+}
+
+fn is_unstable_graph_label(value: &str) -> bool {
+    is_low_confidence_text(value) || is_structurally_unstable_fragment(value)
 }
 
 pub fn validate_graph_extraction_candidate_set(
@@ -196,7 +245,6 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
                 RuntimeNodeType::Entity
             } else {
                 match trimmed.to_ascii_lowercase().as_str() {
-                    "document" => RuntimeNodeType::Document,
                     "person" => RuntimeNodeType::Person,
                     "organization" => RuntimeNodeType::Organization,
                     "location" => RuntimeNodeType::Location,
@@ -207,14 +255,6 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
                     "concept" => RuntimeNodeType::Concept,
                     "attribute" => RuntimeNodeType::Attribute,
                     "entity" => RuntimeNodeType::Entity,
-                    // Backward compatibility
-                    "topic" => RuntimeNodeType::Concept,
-                    "technology" => RuntimeNodeType::Artifact,
-                    "api" => RuntimeNodeType::Artifact,
-                    "code_symbol" => RuntimeNodeType::Artifact,
-                    "natural_kind" => RuntimeNodeType::Natural,
-                    "metric" => RuntimeNodeType::Attribute,
-                    "regulation" => RuntimeNodeType::Artifact,
                     _ => RuntimeNodeType::Entity,
                 }
             }
@@ -260,8 +300,7 @@ fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCa
     // Accept the canonical `source_label` / `target_label` /
     // `relation_type` trio plus the common aliases emitted by smaller
     // Ollama-hosted models (`source`/`from`, `target`/`to`,
-    // `relation`/`type`). Graph extraction used to discard the entire
-    // relation list when the model picked a near-canonical alternative.
+    // `relation`/`type`).
     let source_label = value
         .get("source_label")
         .or_else(|| value.get("source"))

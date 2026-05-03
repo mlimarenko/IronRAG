@@ -354,14 +354,32 @@ export function OperationsTab({
   ]);
 
   useEffect(() => {
-    if (active) {
+    if (!active) {
+      return;
+    }
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) {
+        return;
+      }
       loadOps();
       loadAudit();
-    }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [active, loadOps, loadAudit]);
 
   useEffect(() => {
-    setAuditPage(1);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setAuditPage(1);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [activeLibraryId, activeWorkspaceId]);
 
   const opsStatusMeta = ops ? getOperationsStatusMeta(ops, t) : null;

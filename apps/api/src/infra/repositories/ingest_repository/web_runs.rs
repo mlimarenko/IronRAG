@@ -16,7 +16,8 @@ pub struct WebIngestRunRow {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
-    pub ignore_patterns: Value,
+    pub url_filter_mode: String,
+    pub url_patterns: Value,
     pub run_state: String,
     pub requested_by_principal_id: Option<Uuid>,
     pub requested_at: DateTime<Utc>,
@@ -38,7 +39,8 @@ pub struct NewWebIngestRun<'a> {
     pub boundary_policy: &'a str,
     pub max_depth: i32,
     pub max_pages: i32,
-    pub ignore_patterns: Value,
+    pub url_filter_mode: &'a str,
+    pub url_patterns: Value,
     pub run_state: &'a str,
     pub requested_by_principal_id: Option<Uuid>,
     pub requested_at: Option<DateTime<Utc>>,
@@ -87,7 +89,8 @@ pub async fn create_web_ingest_run(
             boundary_policy,
             max_depth,
             max_pages,
-            ignore_patterns,
+            url_filter_mode,
+            url_patterns,
             run_state,
             requested_by_principal_id,
             requested_at,
@@ -107,13 +110,14 @@ pub async fn create_web_ingest_run(
             $9::web_boundary_policy,
             $10,
             $11,
-            $12,
-            $13::web_run_state,
-            $14,
-            coalesce($15, now()),
-            $16,
+            $12::web_url_filter_mode,
+            $13,
+            $14::web_run_state,
+            $15,
+            coalesce($16, now()),
             $17,
-            $18
+            $18,
+            $19
         )
         returning
             id,
@@ -127,7 +131,8 @@ pub async fn create_web_ingest_run(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
-            ignore_patterns,
+            url_filter_mode::text as url_filter_mode,
+            url_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -146,7 +151,8 @@ pub async fn create_web_ingest_run(
     .bind(input.boundary_policy)
     .bind(input.max_depth)
     .bind(input.max_pages)
-    .bind(&input.ignore_patterns)
+    .bind(input.url_filter_mode)
+    .bind(&input.url_patterns)
     .bind(input.run_state)
     .bind(input.requested_by_principal_id)
     .bind(input.requested_at)
@@ -174,7 +180,8 @@ pub async fn get_web_ingest_run_by_id(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
-            ignore_patterns,
+            url_filter_mode::text as url_filter_mode,
+            url_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -206,7 +213,8 @@ pub async fn get_web_ingest_run_by_mutation_id(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
-            ignore_patterns,
+            url_filter_mode::text as url_filter_mode,
+            url_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -239,7 +247,8 @@ pub async fn list_web_ingest_runs(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
-            ignore_patterns,
+            url_filter_mode::text as url_filter_mode,
+            url_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,
@@ -334,7 +343,8 @@ pub async fn update_web_ingest_run(
             boundary_policy::text as boundary_policy,
             max_depth,
             max_pages,
-            ignore_patterns,
+            url_filter_mode::text as url_filter_mode,
+            url_patterns,
             run_state::text as run_state,
             requested_by_principal_id,
             requested_at,

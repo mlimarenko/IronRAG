@@ -23,14 +23,13 @@
 //! - Provider output that fails JSON-schema validation also returns a
 //!   fallback IR with the parse error recorded in `fallback_reason`.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use redis::{AsyncCommands, Client as RedisClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::{
@@ -38,8 +37,8 @@ use crate::{
     domains::{
         ai::AiBindingPurpose,
         query_ir::{
-            QUERY_IR_SCHEMA_VERSION, QueryAct, QueryIR, QueryLanguage, QueryScope,
-            VerificationLevel, query_ir_json_schema,
+            ClarificationReason, QUERY_IR_SCHEMA_VERSION, QueryAct, QueryIR, QueryLanguage,
+            QueryScope, VerificationLevel, query_ir_json_schema,
         },
     },
     infra::repositories::query_ir_cache_repository::{get_query_ir_cache, upsert_query_ir_cache},
@@ -48,10 +47,8 @@ use crate::{
     services::ai_catalog_service::ResolvedRuntimeBinding,
 };
 
-/// Canonical Redis key prefix for the hot IR cache. The trailing `v1`
-/// distinguishes this cache namespace from unrelated Redis key families —
-/// it is NOT the IR `schema_version` (that travels in the value / hash).
-const REDIS_IR_CACHE_PREFIX: &str = "ir_cache:v1";
+/// Canonical Redis key prefix for the hot IR cache.
+const REDIS_IR_CACHE_PREFIX: &str = "ir_cache";
 
 /// Hot-tier TTL. Chosen so even low-traffic libraries see regular warm
 /// reads without pinning stale IR past a day.
@@ -264,10 +261,12 @@ impl<'a> QueryIrCache for PersistenceQueryIrCache<'a> {
     }
 }
 
-/// Compute the canonical cache key hash for one `(question, history,
-/// schema_version)` triple. The hash is content-addressed: equal inputs
-/// produce equal keys regardless of trailing whitespace or letter case so
-/// trivially-reworded repeats share a cache entry.
+/// Compute the canonical cache key hash for one compile request. The hash is
+/// content-addressed: equal inputs under the same compiler runtime produce
+/// equal keys regardless of trailing whitespace or letter case so
+/// trivially-reworded repeats share a cache entry. Compiler/runtime source
+/// files are part of the address, so semantic fixes never serve stale IR rows
+/// that were compiled under older routing rules.
 #[must_use]
 pub fn hash_question(
     question: &str,
@@ -275,8 +274,10 @@ pub fn hash_question(
     schema_version: u16,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"v");
+    hasher.update(b"schema|");
     hasher.update(schema_version.to_be_bytes());
+    hasher.update(b"|runtime|");
+    hasher.update(query_ir_runtime_fingerprint().as_bytes());
     hasher.update(b"|q|");
     hasher.update(normalize(question).as_bytes());
     for turn in history {
@@ -286,6 +287,17 @@ pub fn hash_question(
         hasher.update(normalize(&turn.content).as_bytes());
     }
     hex::encode(hasher.finalize())
+}
+
+#[must_use]
+pub fn query_ir_runtime_fingerprint() -> &'static str {
+    static FINGERPRINT: LazyLock<String> = LazyLock::new(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(include_str!("compiler.rs").as_bytes());
+        hasher.update(include_str!("../../domains/query_ir.rs").as_bytes());
+        hex::encode(hasher.finalize())
+    });
+    FINGERPRINT.as_str()
 }
 
 fn normalize(value: &str) -> String {
@@ -602,10 +614,11 @@ fn normalize_compiled_ir(
     history: &[CompileHistoryTurn],
     mut ir: QueryIR,
 ) -> QueryIR {
-    if history.is_empty()
-        && matches!(ir.act, QueryAct::FollowUp)
-        && stateless_ir_has_explicit_target(&ir)
-    {
+    repair_target_entity_labels(question, history, &mut ir);
+
+    let stateless_with_explicit_target =
+        history.is_empty() && stateless_ir_has_explicit_target(&ir);
+    if stateless_with_explicit_target && matches!(ir.act, QueryAct::FollowUp) {
         tracing::info!(
             target: "ironrag::query_compile",
             question_len = question.len(),
@@ -621,31 +634,306 @@ fn normalize_compiled_ir(
         ir.act = QueryAct::Describe;
         ir.conversation_refs.clear();
     }
+    if stateless_with_explicit_target && !ir.conversation_refs.is_empty() {
+        tracing::info!(
+            target: "ironrag::query_compile",
+            question_len = question.len(),
+            act = ir.act.as_str(),
+            target_entities_count = ir.target_entities.len(),
+            has_document_focus = ir.document_focus.is_some(),
+            literal_constraints_count = ir.literal_constraints.len(),
+            conversation_refs_count = ir.conversation_refs.len(),
+            "query compile repaired stateless explicit-target refs"
+        );
+        ir.conversation_refs.clear();
+        if ir.needs_clarification.as_ref().is_some_and(|clarification| {
+            matches!(clarification.reason, ClarificationReason::AnaphoraUnresolved)
+        }) {
+            ir.needs_clarification = None;
+        }
+    }
     ir
+}
+
+fn repair_target_entity_labels(question: &str, history: &[CompileHistoryTurn], ir: &mut QueryIR) {
+    if ir.target_entities.is_empty() {
+        return;
+    }
+
+    let sources = target_label_repair_sources(question, history);
+    if sources.is_empty() {
+        return;
+    }
+
+    for mention in &mut ir.target_entities {
+        let label = mention.label.trim();
+        if label.is_empty()
+            || sources.iter().any(|source| contains_label_token_sequence(source, label))
+        {
+            continue;
+        }
+
+        let Some(repaired) = closest_source_label_span(label, &sources) else {
+            continue;
+        };
+        if repaired == label {
+            continue;
+        }
+        tracing::info!(
+            target: "ironrag::query_compile",
+            original_label_len = label.chars().count(),
+            repaired_label_len = repaired.chars().count(),
+            "query compile repaired target entity label to user-visible span"
+        );
+        mention.label = repaired;
+    }
+}
+
+fn target_label_repair_sources(question: &str, history: &[CompileHistoryTurn]) -> Vec<String> {
+    let mut sources = Vec::new();
+    let question = question.trim();
+    if !question.is_empty() {
+        sources.push(question.to_string());
+    }
+    for turn in history.iter().rev() {
+        let content = turn.content.trim();
+        if !content.is_empty() {
+            sources.push(content.to_string());
+        }
+    }
+    sources
+}
+
+fn contains_label_token_sequence(haystack: &str, needle: &str) -> bool {
+    let needle_tokens = normalized_repair_tokens(needle);
+    if needle_tokens.is_empty() {
+        return false;
+    }
+    let haystack_tokens = normalized_repair_tokens(haystack);
+    if haystack_tokens.len() < needle_tokens.len() {
+        return false;
+    }
+    haystack_tokens.windows(needle_tokens.len()).any(|window| window == needle_tokens)
+}
+
+fn closest_source_label_span(label: &str, sources: &[String]) -> Option<String> {
+    let label_tokens = alnum_token_spans(label);
+    let token_count = label_tokens.len();
+    if token_count == 0 || token_count > 8 {
+        return None;
+    }
+
+    let normalized_label = normalize_label_candidate(label);
+    if normalized_label.is_empty() {
+        return None;
+    }
+    if token_count == 1
+        && let Some(expanded) = closest_containing_source_token(&normalized_label, sources)
+    {
+        return Some(expanded);
+    }
+    let allowed_distance = allowed_label_repair_distance(normalized_label.chars().count());
+    if allowed_distance == 0 {
+        return None;
+    }
+
+    let mut best: Option<LabelRepairCandidate> = None;
+    for (source_index, source) in sources.iter().enumerate() {
+        let spans = alnum_token_spans(source);
+        if spans.len() < token_count {
+            continue;
+        }
+
+        for window in spans.windows(token_count) {
+            let Some(first) = window.first() else {
+                continue;
+            };
+            let Some(last) = window.last() else {
+                continue;
+            };
+            let candidate = source[first.start..last.end].trim();
+            if candidate.is_empty() {
+                continue;
+            }
+            let normalized_candidate = normalize_label_candidate(candidate);
+            let Some(distance) =
+                bounded_edit_distance(&normalized_label, &normalized_candidate, allowed_distance)
+            else {
+                continue;
+            };
+            let candidate = LabelRepairCandidate {
+                text: candidate.to_string(),
+                distance,
+                source_index,
+                char_len: candidate.chars().count(),
+            };
+            if best.as_ref().is_none_or(|current| candidate.is_better_than(current)) {
+                best = Some(candidate);
+            }
+        }
+    }
+
+    best.map(|candidate| candidate.text)
+}
+
+fn closest_containing_source_token(label: &str, sources: &[String]) -> Option<String> {
+    if label.chars().count() < 3 {
+        return None;
+    }
+
+    let mut best: Option<LabelRepairCandidate> = None;
+    for (source_index, source) in sources.iter().enumerate() {
+        for span in alnum_token_spans(source) {
+            let candidate = source[span.start..span.end].trim();
+            if candidate.is_empty() {
+                continue;
+            }
+            let normalized_candidate = normalize_label_candidate(candidate);
+            if normalized_candidate == label || !normalized_candidate.contains(label) {
+                continue;
+            }
+            let candidate = LabelRepairCandidate {
+                text: candidate.to_string(),
+                distance: normalized_candidate
+                    .chars()
+                    .count()
+                    .saturating_sub(label.chars().count()),
+                source_index,
+                char_len: candidate.chars().count(),
+            };
+            if best.as_ref().is_none_or(|current| candidate.is_better_than(current)) {
+                best = Some(candidate);
+            }
+        }
+    }
+
+    best.map(|candidate| candidate.text)
+}
+
+#[derive(Debug)]
+struct LabelRepairCandidate {
+    text: String,
+    distance: usize,
+    source_index: usize,
+    char_len: usize,
+}
+
+impl LabelRepairCandidate {
+    fn is_better_than(&self, other: &Self) -> bool {
+        (self.distance, self.source_index, self.char_len)
+            < (other.distance, other.source_index, other.char_len)
+    }
+}
+
+#[derive(Debug)]
+struct AlnumTokenSpan {
+    start: usize,
+    end: usize,
+}
+
+fn alnum_token_spans(value: &str) -> Vec<AlnumTokenSpan> {
+    let mut spans = Vec::new();
+    let mut current_start = None;
+    let mut current_end = 0usize;
+
+    for (index, ch) in value.char_indices() {
+        if ch.is_alphanumeric() {
+            if current_start.is_none() {
+                current_start = Some(index);
+            }
+            current_end = index + ch.len_utf8();
+            continue;
+        }
+
+        if let Some(start) = current_start.take() {
+            spans.push(AlnumTokenSpan { start, end: current_end });
+        }
+    }
+
+    if let Some(start) = current_start {
+        spans.push(AlnumTokenSpan { start, end: current_end });
+    }
+
+    spans
+}
+
+fn normalize_label_candidate(value: &str) -> String {
+    normalized_repair_tokens(value).join(" ")
+}
+
+fn normalized_repair_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn allowed_label_repair_distance(char_count: usize) -> usize {
+    if char_count < 5 {
+        return 0;
+    }
+    (char_count / 8).clamp(1, 3)
+}
+
+fn bounded_edit_distance(left: &str, right: &str, max_distance: usize) -> Option<usize> {
+    let left_chars = left.chars().collect::<Vec<_>>();
+    let right_chars = right.chars().collect::<Vec<_>>();
+    if left_chars.len().abs_diff(right_chars.len()) > max_distance {
+        return None;
+    }
+
+    let mut previous = (0..=right_chars.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right_chars.len() + 1];
+    for (left_index, left_char) in left_chars.iter().enumerate() {
+        current[0] = left_index + 1;
+        let mut row_min = current[0];
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            let substitution_cost = usize::from(left_char != right_char);
+            let deletion = previous[right_index + 1] + 1;
+            let insertion = current[right_index] + 1;
+            let substitution = previous[right_index] + substitution_cost;
+            let distance = deletion.min(insertion).min(substitution);
+            current[right_index + 1] = distance;
+            row_min = row_min.min(distance);
+        }
+        if row_min > max_distance {
+            return None;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    let distance = previous[right_chars.len()];
+    (distance <= max_distance).then_some(distance)
 }
 
 fn stateless_ir_has_explicit_target(ir: &QueryIR) -> bool {
     !ir.target_entities.is_empty()
         || ir.document_focus.as_ref().is_some_and(|hint| !hint.hint.trim().is_empty())
         || !ir.literal_constraints.is_empty()
+        || !ir.temporal_constraints.is_empty()
+        || ir.source_slice.is_some()
 }
 
 /// Safe default when the compiler cannot run. Chosen so no downstream stage
-/// misroutes: `Describe` + `SingleDocument` is the "generic descriptive"
-/// path, verification is `Lenient`, and `confidence = 0.0` signals callers
-/// to prefer asking the user instead of building on the IR.
+/// narrows recall from an under-specified IR: `Describe` + `MultiDocument`
+/// keeps retrieval broad, verification is `Lenient`, and `confidence = 0.0`
+/// signals callers that the compile stage degraded.
 fn fallback_ir() -> QueryIR {
     QueryIR {
         act: QueryAct::Describe,
-        scope: QueryScope::SingleDocument,
+        scope: QueryScope::MultiDocument,
         language: QueryLanguage::Auto,
         target_types: Vec::new(),
         target_entities: Vec::new(),
         literal_constraints: Vec::new(),
+        temporal_constraints: Vec::new(),
         comparison: None,
         document_focus: None,
         conversation_refs: Vec::new(),
         needs_clarification: None,
+        source_slice: None,
         confidence: 0.0,
     }
 }
@@ -666,13 +954,46 @@ Default is `single_document`.\n\
 3. `literal_constraints` captures verbatim strings the user quoted — URLs, file paths, parameter \
 names, code identifiers, version numbers. If the user did not quote anything verbatim, the array \
 is empty.\n\
-4. `conversation_refs` lists unresolved anaphora / deixis / ellipsis you observe in the current \
-question. `act = follow_up` is typical when the question cannot stand on its own.\n\
-5. `target_types` are free-form ontology tags (examples: endpoint, port, parameter, procedure, \
-protocol, config_key, error_code, env_var, metric, table_row, document, concept). You may invent a \
-new tag if nothing fits — the system grows its ontology from your output.\n\
-6. `confidence` ∈ [0.0, 1.0]. Use < 0.6 only when you genuinely cannot pin the question.\n\
-7. `language` is `ru` / `en` / `auto`. Detect from the question text.\n\
+4. `temporal_constraints` captures date/time or date-range references when present. Preserve the \
+surface span exactly as visible to the user. Populate `start` and `end` with ISO-8601 UTC bounds \
+whenever the surface contains a self-contained absolute date or date-range (year, year+month, \
+year+month+day, quarter, year+week, ISO timestamp, decade). Treat `start` as inclusive and `end` as \
+exclusive. Use null bounds ONLY when the reference is genuinely under-determined and has no anchor \
+the runtime supplies (bare deixis like \"recently\" / \"lately\" / \"long ago\" without an \
+explicit period). Phrases like \"in March 2026\", \"27 марта 2026\", \"2026-Q1\", \
+\"on 2026-03-27\", \"3月2026\", \"first half of 2025\" are absolute and MUST resolve.\n\
+\n\
+Worked examples (cover ≥ 2 writing systems and one purely numeric form per CLAUDE.md \
+script-agnostic policy):\n\
+\n\
+- surface: \"March 2026\" → start: \"2026-03-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
+- surface: \"в марте 2026\" → start: \"2026-03-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
+- surface: \"27 марта 2026\" → start: \"2026-03-27T00:00:00Z\", end: \"2026-03-28T00:00:00Z\"\n\
+- surface: \"2026-03-27\" → start: \"2026-03-27T00:00:00Z\", end: \"2026-03-28T00:00:00Z\"\n\
+- surface: \"2026-Q1\" → start: \"2026-01-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
+- surface: \"в первой половине 2025\" → start: \"2025-01-01T00:00:00Z\", end: \"2025-07-01T00:00:00Z\"\n\
+- surface: \"recently\" / \"недавно\" (no anchor) → start: null, end: null\n\
+5. `conversation_refs` lists unresolved anaphora / deixis / ellipsis that point to prior \
+user-assistant turns, not to positions, ranges, neighboring units, or anchors inside the source \
+documents being searched. `act = follow_up` is typical when the question cannot stand on its own.\n\
+6. `target_types` are free-form ontology tags (examples: endpoint, port, parameter, procedure, \
+protocol, config_key, error_code, env_var, metric, table_row, table_summary, table_average, \
+table_frequency, document, concept) and may also use \
+runtime graph node-type tags when the user asks for graph inventory or graph facts: person, \
+organization, location, event, artifact, process, concept, attribute, entity. You may invent a new \
+tag if nothing fits — the system grows its ontology from your output.\n\
+7. `source_slice` is null for ordinary summaries, comparisons, procedures, and needle lookups. \
+Set it only when the user asks for a positional slice of a sequential source: earliest units \
+(`head`), latest units (`tail`), or a bounded representation of the whole sequence (`all`). \
+Populate `count` only when the user asks for a concrete number of units.\n\
+8. `target_entities[*].label`, `document_focus.hint`, and verbatim literal-like values must \
+preserve the exact writing system and spelling visible in the current question or prior turns. \
+When a named target appears in that user-visible text, emit that target as a verbatim substring; \
+do not translate, transliterate, normalize look-alike glyphs, or substitute visually similar \
+characters.\n\
+9. `confidence` ∈ [0.0, 1.0]. Use < 0.6 only when you genuinely cannot pin the question.\n\
+10. `language` must use one of the schema enum values; prefer `auto` when the signal is mixed or \
+unclear.\n\
 \n\
 Output nothing but the JSON object described by the schema.";
 
@@ -711,12 +1032,6 @@ fn preview(text: &str, max: usize) -> String {
         out
     }
 }
-
-/// Test-only alias exposed so downstream callers can depend on a single
-/// concrete type; `Arc` is used only because some call sites keep the
-/// service inside `AppState` alongside other canonical services.
-#[allow(dead_code)]
-pub type SharedQueryCompilerService = Arc<QueryCompilerService>;
 
 #[cfg(test)]
 mod tests {
@@ -797,12 +1112,14 @@ mod tests {
             "scope": "single_document",
             "language": "ru",
             "target_types": ["procedure"],
-            "target_entities": [{"label": "платежный модуль", "role": "subject"}],
+            "target_entities": [{"label": "payment module", "role": "subject"}],
             "literal_constraints": [],
+            "temporal_constraints": [],
             "comparison": null,
             "document_focus": null,
             "conversation_refs": [],
             "needs_clarification": null,
+            "source_slice": null,
             "confidence": 0.9
         })
         .to_string();
@@ -811,7 +1128,7 @@ mod tests {
         let binding = sample_binding();
 
         let outcome = service
-            .compile_with_gateway(&gateway, &binding, "как настроить платежный модуль?", &[])
+            .compile_with_gateway(&gateway, &binding, "how do I configure the payment module?", &[])
             .await
             .expect("compile ok");
 
@@ -824,7 +1141,7 @@ mod tests {
         assert_eq!(request.provider_kind, "openai");
         assert_eq!(request.model_name, "gpt-5.4-nano");
         assert!(request.response_format.is_some(), "structured response format must be attached");
-        assert!(request.prompt.contains("как настроить платежный модуль?"));
+        assert!(request.prompt.contains("how do I configure the payment module?"));
     }
 
     #[tokio::test]
@@ -836,10 +1153,12 @@ mod tests {
             "target_types": ["service"],
             "target_entities": [{"label": "TargetName", "role": "subject"}],
             "literal_constraints": [],
+            "temporal_constraints": [],
             "comparison": null,
             "document_focus": null,
             "conversation_refs": [{"surface": "how", "kind": "bare_interrogative"}],
             "needs_clarification": "ambiguous_too_short",
+            "source_slice": null,
             "confidence": 0.35
         })
         .to_string();
@@ -858,6 +1177,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repairs_target_entity_labels_to_verbatim_question_spans() {
+        let substituted_label = format!("Project Om{}ga", '\u{0435}');
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["artifact"],
+            "target_entities": [
+                {"label": substituted_label, "role": "subject"},
+                {"label": "Δelta Meridion", "role": "object"}
+            ],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.8
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(
+                &gateway,
+                &binding,
+                "Compare Project Omega and Δelta Meridian",
+                &[],
+            )
+            .await
+            .expect("compile ok");
+
+        let labels = outcome
+            .ir
+            .target_entities
+            .iter()
+            .map(|mention| mention.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["Project Omega", "Δelta Meridian"]);
+    }
+
+    #[tokio::test]
+    async fn expands_embedded_short_target_label_to_source_token() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "multi_document",
+            "language": "auto",
+            "target_types": ["person"],
+            "target_entities": [{"label": "OTO", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.8
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "Tell me about Alpha Otoya", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.target_entities[0].label, "Otoya");
+    }
+
+    #[tokio::test]
+    async fn repairs_stateless_explicit_target_refs_without_changing_act() {
+        let ir_json = json!({
+            "act": "retrieve_value",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["person", "conversation_turn"],
+            "target_entities": [{"label": "user name", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [
+                {"surface": "source beginning", "kind": "deictic"},
+                {"surface": "neighboring source units", "kind": "elliptic"}
+            ],
+            "needs_clarification": {
+                "reason": "anaphora_unresolved",
+                "suggestion": "clarify the prior turn"
+            },
+            "source_slice": null,
+            "confidence": 0.55
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "Who introduced themself by name?", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.act, QueryAct::RetrieveValue);
+        assert!(outcome.ir.conversation_refs.is_empty());
+        assert!(outcome.ir.needs_clarification.is_none());
+    }
+
+    #[tokio::test]
     async fn preserves_follow_up_when_history_exists() {
         let ir_json = json!({
             "act": "follow_up",
@@ -866,10 +1298,12 @@ mod tests {
             "target_types": ["service"],
             "target_entities": [{"label": "TargetName", "role": "subject"}],
             "literal_constraints": [],
+            "temporal_constraints": [],
             "comparison": null,
             "document_focus": null,
             "conversation_refs": [{"surface": "how", "kind": "bare_interrogative"}],
             "needs_clarification": null,
+            "source_slice": null,
             "confidence": 0.75
         })
         .to_string();
@@ -930,23 +1364,23 @@ mod tests {
         let history = vec![
             CompileHistoryTurn {
                 role: "user".to_string(),
-                content: "у нас есть модуль платежей?".to_string(),
+                content: "do we have a payment module?".to_string(),
             },
             CompileHistoryTurn {
                 role: "assistant".to_string(),
-                content: "Да, модуль платежей описан.".to_string(),
+                content: "Yes, the payment module is documented.".to_string(),
             },
         ];
 
         let _ = service
-            .compile_with_gateway(&gateway, &binding, "а как настроить?", &history)
+            .compile_with_gateway(&gateway, &binding, "how do I configure it?", &history)
             .await
             .expect("compile ok");
 
         let prompt = gateway.last_request.lock().unwrap().clone().unwrap().prompt;
         assert!(prompt.contains("Prior conversation"));
-        assert!(prompt.contains("модуль платежей"));
-        assert!(prompt.contains("а как настроить?"));
+        assert!(prompt.contains("payment module"));
+        assert!(prompt.contains("how do I configure it?"));
     }
 
     // -----------------------------------------------------------------
@@ -1004,10 +1438,12 @@ mod tests {
             target_types: vec!["procedure".to_string()],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: Vec::new(),
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.9,
         }
     }
@@ -1015,7 +1451,7 @@ mod tests {
     #[tokio::test]
     async fn cache_hit_short_circuits_llm() {
         let library_id = Uuid::now_v7();
-        let question = "как настроить платежный модуль?";
+        let question = "how do I configure the payment module?";
         let history: Vec<CompileHistoryTurn> = Vec::new();
         let hash = hash_question(question, &history, QUERY_IR_SCHEMA_VERSION);
         let cached = CachedIrEntry {
@@ -1059,10 +1495,12 @@ mod tests {
             "target_types": ["port"],
             "target_entities": [],
             "literal_constraints": [],
+            "temporal_constraints": [],
             "comparison": null,
             "document_focus": null,
             "conversation_refs": [],
             "needs_clarification": null,
+            "source_slice": null,
             "confidence": 0.85
         })
         .to_string();
@@ -1135,5 +1573,11 @@ mod tests {
 
         let bumped = hash_question("Hello World", &[], QUERY_IR_SCHEMA_VERSION.wrapping_add(1));
         assert_ne!(base, bumped, "schema_version must contribute to the hash");
+
+        assert_eq!(
+            query_ir_runtime_fingerprint().len(),
+            64,
+            "runtime fingerprint is a SHA-256 hex digest"
+        );
     }
 }

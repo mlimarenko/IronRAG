@@ -4,12 +4,10 @@ use self::table_markdown::parse_markdown_table_row;
 
 pub mod chunking;
 pub mod document_summary;
-pub mod docx;
 pub mod file_extract;
 pub mod html_main_content;
 pub mod image;
-pub mod pdf;
-pub mod pptx;
+pub mod record_jsonl;
 pub mod structured_document;
 pub mod table_graph;
 pub mod table_markdown;
@@ -17,6 +15,7 @@ pub mod table_summary;
 pub mod tabular;
 pub mod technical_facts;
 pub mod text_like;
+pub mod text_quality;
 pub mod text_render;
 
 /// An image extracted from a document (PDF, DOCX) during content parsing.
@@ -39,6 +38,8 @@ pub enum ExtractionLineSignal {
     TableRow,
     EndpointCandidate,
     MetadataCandidate,
+    SourceProfile,
+    SourceUnit,
     Quote,
 }
 

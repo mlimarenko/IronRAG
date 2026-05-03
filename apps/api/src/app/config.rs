@@ -2,9 +2,12 @@
 
 use serde::Deserialize;
 
-use crate::domains::deployment::{
-    ContentStorageProvider, DependencyKind, DependencyMode, DeploymentTopology, ServiceRole,
-    StartupAuthorityMode,
+use crate::domains::{
+    deployment::{
+        ContentStorageProvider, DependencyKind, DependencyMode, DeploymentTopology, ServiceRole,
+        StartupAuthorityMode,
+    },
+    recognition::{LibraryRecognitionPolicy, RecognitionEngine},
 };
 
 const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "ironrag.local";
@@ -128,6 +131,7 @@ pub struct Settings {
     pub ui_bootstrap_vision_model_name: Option<String>,
     pub ui_session_ttl_hours: u64,
     pub upload_max_size_mb: u64,
+    pub recognition_default_raster_image_engine: String,
     pub startup_authority_mode: String,
     pub dependency_postgres_mode: String,
     pub dependency_redis_mode: String,
@@ -163,11 +167,11 @@ pub struct Settings {
     /// long documents but may hit provider rate limits.
     pub ingestion_embedding_parallelism: usize,
     /// Max concurrent per-chunk graph-extract LLM calls *within* a single
-    /// document. Previously tied to `ingestion_max_parallel_jobs_per_library`
-    /// (clamped 1..=8), which coupled two unrelated tuning knobs and starved
-    /// long docs when the library limit was small. Now decoupled so heavy
-    /// docs get proper chunk-level parallelism without pushing the cross-doc
-    /// limit up. The worker is rarely CPU-bound here, so 8 default is safe.
+    /// document. Decoupled from the cross-doc job limit so heavy docs get
+    /// full chunk-level parallelism without raising the library cap.
+    /// Keep this conservative: provider calls are remote, but prompt
+    /// assembly, persistence and reconciliation still compete with worker
+    /// heartbeats on CPU-only hosts.
     pub ingestion_graph_extract_parallelism_per_doc: usize,
     pub web_ingest_http_timeout_seconds: u64,
     pub web_ingest_max_redirects: usize,
@@ -258,6 +262,7 @@ impl Settings {
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
         validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_ingestion_settings(&settings).map_err(config::ConfigError::Message)?;
+        validate_recognition_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_release_monitor_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
@@ -292,6 +297,17 @@ impl Settings {
                 .map(std::string::ToString::to_string)
                 .collect(),
         }
+    }
+
+    #[must_use]
+    pub fn default_recognition_policy(&self) -> LibraryRecognitionPolicy {
+        // validated at startup; parse failure here is a programming error.
+        #[allow(clippy::expect_used)]
+        let raster_image_engine = self
+            .recognition_default_raster_image_engine
+            .parse::<RecognitionEngine>()
+            .expect("recognition_default_raster_image_engine must be validated before use");
+        LibraryRecognitionPolicy { raster_image_engine }
     }
 
     #[must_use]
@@ -501,6 +517,7 @@ fn settings_config_builder()
         .set_default("ui_default_locale", "ru")?
         .set_default("ui_session_ttl_hours", 720)?
         .set_default("upload_max_size_mb", 50)?
+        .set_default("recognition_default_raster_image_engine", "docling")?
         .set_default("startup_authority_mode", "not_required")?
         .set_default("dependency_postgres_mode", "external")?
         .set_default("dependency_redis_mode", "external")?
@@ -512,14 +529,14 @@ fn settings_config_builder()
         .set_default("content_storage_root", "/var/lib/ironrag/content-storage")?
         .set_default("content_storage_s3_region", "us-east-1")?
         .set_default("content_storage_s3_force_path_style", true)?
-        .set_default("ingestion_max_parallel_jobs_global", 512)?
-        .set_default("ingestion_max_parallel_jobs_per_workspace", 128)?
-        .set_default("ingestion_max_parallel_jobs_per_library", 16)?
+        .set_default("ingestion_max_parallel_jobs_global", 64)?
+        .set_default("ingestion_max_parallel_jobs_per_workspace", 16)?
+        .set_default("ingestion_max_parallel_jobs_per_library", 4)?
         .set_default("ingestion_memory_soft_limit_mib", 0)?
         .set_default("ingestion_worker_lease_seconds", 300)?
         .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
-        .set_default("ingestion_embedding_parallelism", 4)?
-        .set_default("ingestion_graph_extract_parallelism_per_doc", 8)?
+        .set_default("ingestion_embedding_parallelism", 2)?
+        .set_default("ingestion_graph_extract_parallelism_per_doc", 2)?
         .set_default("web_ingest_http_timeout_seconds", 20)?
         .set_default("web_ingest_max_redirects", 10)?
         .set_default("web_ingest_user_agent", "IronRAG-WebIngest/0.1")?
@@ -763,6 +780,15 @@ fn validate_ingestion_settings(settings: &Settings) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn validate_recognition_settings(settings: &Settings) -> Result<(), String> {
+    let engine = settings
+        .recognition_default_raster_image_engine
+        .parse::<RecognitionEngine>()
+        .map_err(|error| format!("recognition_default_raster_image_engine: {error}"))?;
+    let policy = LibraryRecognitionPolicy { raster_image_engine: engine };
+    policy.validate().map_err(|error| format!("recognition_default_raster_image_engine: {error}"))
 }
 
 fn validate_runtime_agent_settings(settings: &Settings) -> Result<(), String> {

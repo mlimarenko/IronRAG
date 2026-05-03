@@ -74,12 +74,31 @@ async fn admitted_projection_queries_include_only_documents_and_connected_nodes(
 
     let result = async {
         let projection_version = 1_i64;
+        let source_document_id = sqlx::query_scalar::<_, Uuid>(
+            "insert into content_document (
+                workspace_id,
+                library_id,
+                external_key,
+                document_state,
+                created_at
+            )
+            values ($1, $2, $3, 'active', now())
+            returning id",
+        )
+        .bind(fixture.workspace.id)
+        .bind(fixture.library.id)
+        .bind("graph-projection-alpha")
+        .fetch_one(&pool)
+        .await
+        .context("failed to insert projection source document")?;
+        let document_key = format!("document:{source_document_id}");
         let document_node = repositories::upsert_runtime_graph_node(
             &pool,
             fixture.library.id,
-            "document:alpha",
+            &document_key,
             "alpha.txt",
             "document",
+            Some(source_document_id),
             serde_json::json!([]),
             Some("Document node"),
             serde_json::json!({}),
@@ -94,6 +113,7 @@ async fn admitted_projection_queries_include_only_documents_and_connected_nodes(
             "entity:connected",
             "Connected Entity",
             "entity",
+            None,
             serde_json::json!([]),
             Some("Connected entity"),
             serde_json::json!({}),
@@ -108,6 +128,7 @@ async fn admitted_projection_queries_include_only_documents_and_connected_nodes(
             "entity:isolated",
             "Isolated Entity",
             "entity",
+            None,
             serde_json::json!([]),
             Some("Isolated entity"),
             serde_json::json!({}),
@@ -169,11 +190,12 @@ async fn admitted_projection_queries_include_only_documents_and_connected_nodes(
             "entity:future",
             "Future Entity",
             "entity",
+            None,
             serde_json::json!([]),
             Some("Future projection entity"),
             serde_json::json!({}),
             1,
-            2,
+            2_i64,
         )
         .await
         .context("failed to create future projection entity")?;
@@ -219,7 +241,7 @@ async fn admitted_projection_queries_include_only_documents_and_connected_nodes(
         let admitted_keys =
             admitted_nodes.iter().map(|row| row.canonical_key.as_str()).collect::<Vec<_>>();
         assert_eq!(admitted_nodes.len(), 2);
-        assert!(admitted_keys.contains(&"document:alpha"));
+        assert!(admitted_keys.contains(&document_key.as_str()));
         assert!(admitted_keys.contains(&"entity:connected"));
         assert!(!admitted_keys.contains(&"entity:isolated"));
         assert!(!admitted_keys.contains(&"entity:future"));
@@ -227,7 +249,7 @@ async fn admitted_projection_queries_include_only_documents_and_connected_nodes(
         let admitted_id_keys =
             admitted_by_id.iter().map(|row| row.canonical_key.as_str()).collect::<Vec<_>>();
         assert_eq!(admitted_by_id.len(), 2);
-        assert!(admitted_id_keys.contains(&"document:alpha"));
+        assert!(admitted_id_keys.contains(&document_key.as_str()));
         assert!(admitted_id_keys.contains(&"entity:connected"));
         assert_eq!(counts.node_count, 2);
         assert_eq!(counts.edge_count, 1);

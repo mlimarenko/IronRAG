@@ -1,0 +1,9 @@
+ragas==0.2.10
+datasets==3.2.0
+pandas==2.2.3
+httpx==0.28.1
+pydantic==2.10.4
+python-dotenv==1.0.1
+anthropic==0.43.0
+openai==1.59.6
+tenacity==9.0.0

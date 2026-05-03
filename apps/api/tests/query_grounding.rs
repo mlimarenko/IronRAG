@@ -241,6 +241,7 @@ impl QueryGroundingFixture {
                 byte_size: i64::try_from(content_text.len()).unwrap_or(i64::MAX),
                 normalized_text: Some(content_text.to_string()),
                 text_checksum: Some(format!("text-checksum-{revision_id}")),
+                image_checksum: None,
                 text_state: "text_readable".to_string(),
                 vector_state: "pending".to_string(),
                 graph_state: "pending".to_string(),
@@ -278,6 +279,10 @@ impl QueryGroundingFixture {
                 text_generation: Some(1),
                 vector_generation: None,
                 quality_score: None,
+
+                window_text: None,
+
+                raptor_level: None,
             })
             .await
             .context("failed to insert grounding chunk")?;
@@ -604,6 +609,7 @@ impl QueryGroundingAppFixture {
                     byte_size: 128,
                     normalized_text: Some(query_text.to_string()),
                     text_checksum: Some(format!("text-checksum-{revision_id}")),
+                    image_checksum: None,
                     text_state: "text_readable".to_string(),
                     vector_state: "ready".to_string(),
                     graph_state: "graph_ready".to_string(),
@@ -1819,7 +1825,7 @@ async fn execution_detail_surfaces_noisy_layout_segments_and_technical_facts() -
 
         let detail = fixture
             .create_execution_detail_with_canonical_evidence(
-                "Перечисли параметры pageNumber, pageSize и withCards.",
+                "List the pageNumber, pageSize, and withCards parameters.",
                 "verified",
                 json!([]),
                 vec![chunk_id],
@@ -1917,7 +1923,7 @@ async fn execution_detail_surfaces_multihop_graph_and_multi_document_fact_suppor
 
         let detail = fixture
             .create_execution_detail_with_canonical_evidence(
-                "Если агенту нужен WSDL inventory api и список счетов rewards accounts, какие адреса ему нужны?",
+                "If the agent needs the WSDL inventory api and the rewards accounts list, what URLs does it require?",
                 "verified",
                 json!([]),
                 vec![inventory_chunk_id, rest_chunk_id],

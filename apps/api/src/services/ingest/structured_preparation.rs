@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::domains::catalog::ChunkingTemplate;
 use crate::shared::extraction::{
     ExtractionLineHint, ExtractionLineSignal, ExtractionStructureHints,
+    chunking::split_large_code_blocks,
     chunking::{StructuredChunkingProfile, build_structured_chunk_windows},
     structured_document::{
         StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
@@ -90,6 +92,13 @@ impl StructuredPreparationService {
         Self { chunking_profile: StructuredChunkingProfile { max_chars, overlap_chars } }
     }
 
+    /// Create a service whose chunking profile is driven by a `ChunkingTemplate`.
+    #[must_use]
+    pub fn with_template(template: ChunkingTemplate) -> Self {
+        let (max_chars, overlap_chars) = template.chunking_params();
+        Self { chunking_profile: StructuredChunkingProfile { max_chars, overlap_chars } }
+    }
+
     pub fn prepare_revision(
         &self,
         command: PrepareStructuredRevisionCommand,
@@ -98,6 +107,7 @@ impl StructuredPreparationService {
         // Filter out blocks with empty text — code files can produce empty lines/blocks
         ordered_blocks
             .retain(|b| !b.text.trim().is_empty() || !b.normalized_text.trim().is_empty());
+        ordered_blocks = split_large_code_blocks(&ordered_blocks, self.chunking_profile.max_chars);
         // Re-number ordinals after filtering
         for (i, block) in ordered_blocks.iter_mut().enumerate() {
             block.ordinal = i32::try_from(i).unwrap_or(i32::MAX);
@@ -391,6 +401,10 @@ fn classify_scalar_block_kind(line: &ExtractionLineHint) -> StructuredBlockKind 
         StructuredBlockKind::EndpointBlock
     } else if has_signal(line, ExtractionLineSignal::Quote) {
         StructuredBlockKind::QuoteBlock
+    } else if has_signal(line, ExtractionLineSignal::SourceProfile) {
+        StructuredBlockKind::SourceProfile
+    } else if has_signal(line, ExtractionLineSignal::SourceUnit) {
+        StructuredBlockKind::SourceUnit
     } else if has_signal(line, ExtractionLineSignal::MetadataCandidate)
         && !looks_like_compound_product_label(trimmed)
     {
@@ -533,12 +547,15 @@ fn looks_like_docs_navigation_link(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::Utc;
     use uuid::Uuid;
 
     use super::{PrepareStructuredRevisionCommand, StructuredPreparationService};
     use crate::shared::extraction::{
-        build_text_layout_from_content, structured_document::StructuredBlockKind,
+        build_text_layout_from_content, record_jsonl::extract_record_jsonl,
+        structured_document::StructuredBlockKind,
     };
 
     #[test]
@@ -620,6 +637,43 @@ mod tests {
                 .iter()
                 .any(|block| matches!(block.block_kind, StructuredBlockKind::EndpointBlock))
         );
+    }
+
+    #[test]
+    fn prepare_revision_preserves_record_source_profile_as_structural_chunk() {
+        let extracted = extract_record_jsonl(
+            br#"{"id":"unit-1","kind":"message","occurredAt":"2026-04-28T09:00:00Z","actor":{"role":"user","label":"User One"},"text":"First unit"}
+{"id":"unit-2","kind":"message","occurredAt":"2026-04-28T10:00:00Z","actor":{"role":"assistant","label":"Assistant"},"text":"Second unit"}"#,
+        )
+        .expect("record jsonl extraction");
+
+        let prepared = StructuredPreparationService::new()
+            .prepare_revision(PrepareStructuredRevisionCommand {
+                revision_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                preparation_state: "prepared".to_string(),
+                normalization_profile: "default".to_string(),
+                source_format: "record_jsonl".to_string(),
+                language_code: None,
+                source_text: extracted.content_text.clone(),
+                normalized_text: extracted.content_text,
+                structure_hints: extracted.structure_hints,
+                typed_fact_count: 0,
+                prepared_at: Utc::now(),
+            })
+            .expect("prepared revision");
+
+        assert_eq!(prepared.ordered_blocks[0].block_kind, StructuredBlockKind::SourceProfile);
+        assert_eq!(prepared.ordered_blocks[1].block_kind, StructuredBlockKind::SourceUnit);
+        assert_eq!(prepared.ordered_blocks[2].block_kind, StructuredBlockKind::SourceUnit);
+        assert_eq!(prepared.chunk_windows[0].chunk_kind, StructuredBlockKind::SourceProfile);
+        assert_eq!(prepared.chunk_windows[1].chunk_kind, StructuredBlockKind::SourceUnit);
+        assert_eq!(prepared.chunk_windows[2].chunk_kind, StructuredBlockKind::SourceUnit);
+        assert!(prepared.chunk_windows[0].content_text.contains("unit_count=2"));
+        assert!(prepared.chunk_windows[1].content_text.contains("First unit"));
+        assert!(prepared.chunk_windows[2].content_text.contains("Second unit"));
     }
 
     #[test]
@@ -735,6 +789,68 @@ mod tests {
                 && block.normalized_text.contains("Column: Employees")
                 && block.parent_block_id.is_some()
         }));
+    }
+
+    #[test]
+    fn prepare_revision_persists_split_code_blocks_before_chunking() {
+        let mut code = String::new();
+        for function_index in 0..8 {
+            code.push_str(&format!("fn func_{function_index}() {{\n"));
+            for line_index in 0..12 {
+                code.push_str(&format!(
+                    "    let value_{line_index} = \"synthetic segment {function_index}-{line_index}\";\n"
+                ));
+            }
+            code.push_str("}\n\n");
+        }
+        let text = format!("# Code\n\n```rust\n{code}```\n");
+        let prepared = StructuredPreparationService::with_chunking(220, 0)
+            .prepare_revision(PrepareStructuredRevisionCommand {
+                revision_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                preparation_state: "prepared".to_string(),
+                normalization_profile: "default".to_string(),
+                source_format: "md".to_string(),
+                language_code: Some("en".to_string()),
+                source_text: text.clone(),
+                normalized_text: text.clone(),
+                structure_hints: build_text_layout_from_content(&text).structure_hints,
+                typed_fact_count: 0,
+                prepared_at: Utc::now(),
+            })
+            .expect("prepared revision");
+
+        let known_block_ids =
+            prepared.ordered_blocks.iter().map(|block| block.block_id).collect::<HashSet<_>>();
+        let code_blocks = prepared
+            .ordered_blocks
+            .iter()
+            .filter(|block| block.block_kind == StructuredBlockKind::CodeBlock)
+            .collect::<Vec<_>>();
+
+        assert!(code_blocks.len() > 1, "large code block should be split before chunking");
+        assert!(
+            code_blocks.iter().all(|block| block.parent_block_id.is_none()),
+            "split code blocks must not point at a discarded parent block"
+        );
+        assert!(
+            prepared
+                .chunk_windows
+                .iter()
+                .flat_map(|chunk| chunk.support_block_ids.iter())
+                .all(|block_id| known_block_ids.contains(block_id)),
+            "chunk support ids must all reference persisted structured blocks"
+        );
+        assert_eq!(
+            prepared.prepared_revision.block_count,
+            i32::try_from(prepared.ordered_blocks.len()).unwrap_or(i32::MAX)
+        );
+        assert_eq!(
+            prepared.prepared_revision.chunk_count,
+            i32::try_from(prepared.chunk_windows.len()).unwrap_or(i32::MAX)
+        );
     }
 
     #[test]

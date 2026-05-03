@@ -8,3 +8,4 @@ pub mod knowledge;
 pub mod mcp;
 pub mod ops;
 pub mod query;
+pub mod webhook;

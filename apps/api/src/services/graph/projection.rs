@@ -16,29 +16,9 @@ use crate::{
         repositories::{self, RuntimeGraphSnapshotRow},
     },
     services::graph::summary::GraphSummaryRefreshRequest,
-    services::knowledge::graph_stream::{
-        invalidate_graph_topology_cache, prewarm_graph_topology_cache,
-    },
+    services::knowledge::graph_stream::prewarm_graph_topology_cache,
     shared::json_coercion::from_value_or_default,
 };
-
-/// Best-effort wipe of the compact graph topology cache for one library.
-/// Called after every `upsert_runtime_graph_snapshot` so the next topology
-/// request rebuilds against the freshly admitted projection. Cache failures
-/// must not block the projection pipeline — log and continue.
-async fn invalidate_topology_cache(state: &AppState, library_id: Uuid, projection_version: i64) {
-    if let Err(error) =
-        invalidate_graph_topology_cache(&state.persistence.redis, library_id, projection_version)
-            .await
-    {
-        tracing::warn!(
-            %library_id,
-            projection_version,
-            error = format!("{error:#}"),
-            "graph topology cache invalidation failed",
-        );
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct GraphProjectionScope {
@@ -141,7 +121,6 @@ pub async fn ensure_empty_graph_snapshot(
     )
     .await
     .context("failed to persist empty graph snapshot")?;
-    invalidate_topology_cache(state, library_id, projection_version).await;
 
     Ok(GraphProjectionOutcome {
         projection_version,
@@ -160,9 +139,7 @@ pub async fn project_canonical_graph(
     // prune zero-support nodes). On a mid-sized graph (27k edges / 10k
     // nodes / 37k canonical summaries) that sweep costs ~5s. Running
     // it after **every** chunk merge is O(chunks × graph-size) and
-    // dominates worker throughput — a 147-job queue that used to drain
-    // in ~15s per doc stretches to >10 min because each chunk redoes
-    // the full-library walk.
+    // dominates worker throughput on any non-trivial library.
     //
     // For a targeted refresh (one chunk's contribution) the incident
     // nodes/edges we just upserted cannot create new zero-support
@@ -288,7 +265,6 @@ pub async fn project_canonical_graph(
         )
         .await
         .context("failed to mark graph snapshot as failed after graph-store refresh error")?;
-        invalidate_topology_cache(state, scope.library_id, scope.projection_version).await;
         return Err(error).context("failed to refresh the canonical graph view");
     }
 
@@ -305,12 +281,11 @@ pub async fn project_canonical_graph(
     .await
     .context("failed to mark graph snapshot as ready")?;
     // No explicit invalidate: `schedule_topology_prewarm` rebuilds the
-    // NDJSON and writes it with `SET EX` under the same
-    // `graph:{library_id}:v{projection_version}` key, atomically
-    // overwriting any prior cached value. Calling `invalidate_topology_cache`
-    // first opened a window where every concurrent GET paid the full
-    // rebuild cost while the prewarm was still running — removing the
-    // DEL closes that window without affecting correctness.
+    // NDJSON and writes it with `SET EX` under the fresh
+    // `graph:{library_id}:v{projection_version}:g{topology_generation}`
+    // key. The generation is advanced by the snapshot upsert, so new
+    // readers naturally miss old bytes while in-flight readers can keep
+    // using the previous key until its TTL expires.
     schedule_topology_prewarm(state, scope.library_id);
     maybe_apply_summary_refresh(state, scope).await?;
 
@@ -323,7 +298,7 @@ pub async fn project_canonical_graph(
 }
 
 /// Dispatches a detached task that rebuilds the NDJSON topology under
-/// the newly published `(library_id, projection_version)` cache key so
+/// the newly published topology generation key so
 /// the next operator GET lands a cache hit. The projection pipeline
 /// returns without waiting: prewarm failure is a soft degradation
 /// (lazy rebuild still works), not a projection failure.
@@ -511,17 +486,11 @@ async fn project_targeted_canonical_graph(
     )
     .await
     .context("failed to persist targeted graph snapshot state")?;
-    // Intentionally DO NOT invalidate the topology cache on a targeted
-    // refresh. Targeted refreshes are per-chunk incremental updates
-    // that do NOT bump `projection_version` — the cache key shape is
-    // `graph:{library_id}:v{projection_version}`, so the cached bytes
-    // remain a consistent "graph as-of v{N}" snapshot. Invalidating
-    // here caused every chunk merge during a live ingest to DEL the
-    // topology key for a reference-sized 17 MB NDJSON blob,
-    // forcing every concurrent operator GET to rebuild from Postgres
-    // — observed on prod as the cache getting deleted within a
-    // minute of a boot prewarm. The next full `project_canonical_graph`
-    // pass bumps the version and refreshes cache canonically.
+    // Do not DEL the topology cache on targeted refreshes. The snapshot
+    // upsert advances `topology_generation`, so new reads move to a new
+    // `graph:{library_id}:v{projection_version}:g{generation}` key while
+    // any in-flight reads on the previous key finish normally and old
+    // bytes age out via TTL.
     maybe_apply_summary_refresh(state, scope).await?;
 
     Ok(GraphProjectionOutcome {
@@ -626,6 +595,7 @@ mod tests {
             library_id: Uuid::nil(),
             graph_status: "ready".to_string(),
             projection_version: 7,
+            topology_generation: 1,
             node_count: 3,
             edge_count: 2,
             provenance_coverage_percent: Some(100.0),
@@ -644,6 +614,7 @@ mod tests {
             library_id: Uuid::nil(),
             graph_status: "building".to_string(),
             projection_version: 0,
+            topology_generation: 0,
             node_count: 0,
             edge_count: 0,
             provenance_coverage_percent: Some(0.0),
@@ -662,6 +633,7 @@ mod tests {
             library_id: Uuid::nil(),
             graph_status: "ready".to_string(),
             projection_version: 3,
+            topology_generation: 1,
             node_count: 2,
             edge_count: 1,
             provenance_coverage_percent: Some(100.0),

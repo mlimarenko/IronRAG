@@ -3016,6 +3016,56 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+  /v1/billing/library-cost-summary:
+    get:
+      tags: [billing]
+      summary: Get canonical library cost rollup
+      operationId: getLibraryCostSummary
+      parameters:
+        - in: query
+          name: libraryId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Cost rollup for one library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryCostSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/billing/workspace-cost-summary:
+    get:
+      tags: [billing]
+      summary: Get canonical workspace cost rollup
+      operationId: getWorkspaceCostSummary
+      parameters:
+        - in: query
+          name: workspaceId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Cost rollup for one workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceCostSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /v1/ops/operations/{operationId}:
     get:
       tags: [ops]
@@ -3264,6 +3314,34 @@ components:
     BillingCharge: *genericObject
     BillingExecutionCost: *genericObject
     BillingProviderCall: *genericObject
+    LibraryCostSummary:
+      type: object
+      additionalProperties: false
+      required: [totalCost, currencyCode, documentCount, providerCallCount]
+      properties:
+        totalCost:
+          type: string
+        currencyCode:
+          type: string
+        documentCount:
+          type: integer
+        providerCallCount:
+          type: integer
+    WorkspaceCostSummary:
+      type: object
+      additionalProperties: false
+      required: [totalCost, currencyCode, libraryCount, documentCount, providerCallCount]
+      properties:
+        totalCost:
+          type: string
+        currencyCode:
+          type: string
+        libraryCount:
+          type: integer
+        documentCount:
+          type: integer
+        providerCallCount:
+          type: integer
     BindingValidationResponse: *genericObject
     BootstrapBindingPurpose:
       type: string
@@ -3634,7 +3712,7 @@ components:
     CreateWebIngestRunRequest:
       type: object
       additionalProperties: false
-      required: [libraryId, seedUrl, mode]
+      required: [libraryId, seedUrl, mode, urlFilter]
       properties:
         libraryId:
           type: string
@@ -3660,15 +3738,16 @@ components:
             - type: integer
               minimum: 1
             - type: "null"
-        extraIgnorePatterns:
-          type: array
-          items:
-            $ref: "#/components/schemas/WebIngestIgnorePattern"
+        urlFilter:
+          $ref: "#/components/schemas/WebIngestUrlFilter"
         idempotencyKey:
           oneOf:
             - type: string
             - type: "null"
-    WebIngestIgnorePattern:
+    WebIngestUrlFilterMode:
+      type: string
+      enum: [blocklist, allowlist]
+    WebIngestPattern:
       type: object
       additionalProperties: false
       required: [kind, value]
@@ -3681,17 +3760,26 @@ components:
         source:
           oneOf:
             - type: string
-              enum: [library, run]
+              enum: [run]
             - type: "null"
+    WebIngestUrlFilter:
+      type: object
+      additionalProperties: false
+      required: [mode, patterns]
+      properties:
+        mode:
+          $ref: "#/components/schemas/WebIngestUrlFilterMode"
+        patterns:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebIngestPattern"
     WebIngestPolicy:
       type: object
       additionalProperties: false
-      required: [ignorePatterns]
+      required: [urlFilter]
       properties:
-        ignorePatterns:
-          type: array
-          items:
-            $ref: "#/components/schemas/WebIngestIgnorePattern"
+        urlFilter:
+          $ref: "#/components/schemas/WebIngestUrlFilter"
     WebIngestRunReceipt:
       type: object
       additionalProperties: false
@@ -3755,7 +3843,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        [runId, libraryId, mode, boundaryPolicy, maxDepth, maxPages, ignorePatterns, runState, seedUrl, counts]
+        [runId, libraryId, mode, boundaryPolicy, maxDepth, maxPages, urlFilterMode, urlPatterns, runState, seedUrl, counts]
       properties:
         runId:
           type: string
@@ -3773,10 +3861,12 @@ components:
           type: integer
         maxPages:
           type: integer
-        ignorePatterns:
+        urlFilterMode:
+          $ref: "#/components/schemas/WebIngestUrlFilterMode"
+        urlPatterns:
           type: array
           items:
-            $ref: "#/components/schemas/WebIngestIgnorePattern"
+            $ref: "#/components/schemas/WebIngestPattern"
         runState:
           type: string
           enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
@@ -3794,7 +3884,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        [runId, mutationId, workspaceId, libraryId, mode, seedUrl, normalizedSeedUrl, boundaryPolicy, maxDepth, maxPages, ignorePatterns, runState, requestedAt, counts]
+        [runId, mutationId, workspaceId, libraryId, mode, seedUrl, normalizedSeedUrl, boundaryPolicy, maxDepth, maxPages, urlFilterMode, urlPatterns, runState, requestedAt, counts]
       properties:
         runId:
           type: string
@@ -3829,10 +3919,12 @@ components:
           type: integer
         maxPages:
           type: integer
-        ignorePatterns:
+        urlFilterMode:
+          $ref: "#/components/schemas/WebIngestUrlFilterMode"
+        urlPatterns:
           type: array
           items:
-            $ref: "#/components/schemas/WebIngestIgnorePattern"
+            $ref: "#/components/schemas/WebIngestPattern"
         runState:
           type: string
           enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]
@@ -3978,7 +4070,7 @@ components:
         - outside_boundary_policy
         - exceeded_max_depth
         - exceeded_max_pages
-        - ignore_pattern
+        - url_filter
         - unsupported_scheme
         - invalid_url
         - inaccessible
@@ -4208,7 +4300,7 @@ components:
           type: string
         surfaceKind:
           type: string
-          enum: [rest, stream, background, mcp, system]
+          enum: [ui, rest, mcp, worker, internal]
         contractName:
           type: string
         contractVersion:

@@ -4,8 +4,9 @@ use crate::shared::extraction;
 
 use super::{
     DOCX_EXTENSIONS, DOCX_MIME_TYPES, FileExtractError, GENERIC_BINARY_MIME_TYPES, HTML_EXTENSIONS,
-    HTML_MIME_TYPES, IMAGE_EXTENSIONS, PPTX_EXTENSIONS, PPTX_MIME_TYPES, SPREADSHEET_EXTENSIONS,
-    SPREADSHEET_MIME_TYPES, TEXT_LIKE_EXTENSIONS, TEXT_LIKE_MIME_TYPES, UploadFileKind,
+    HTML_MIME_TYPES, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, PPTX_EXTENSIONS, PPTX_MIME_TYPES,
+    SPREADSHEET_EXTENSIONS, SPREADSHEET_MIME_TYPES, TEXT_LIKE_EXTENSIONS, TEXT_LIKE_MIME_TYPES,
+    UploadFileKind,
 };
 
 pub(super) fn detect_declared_upload_file_kind(
@@ -19,7 +20,7 @@ pub(super) fn detect_declared_upload_file_kind(
     {
         return Some(UploadFileKind::Pdf);
     }
-    if normalized_mime.as_deref().is_some_and(|value| value.starts_with("image/"))
+    if normalized_mime.as_deref().is_some_and(|value| IMAGE_MIME_TYPES.contains(&value))
         || extension.as_deref().is_some_and(|value| IMAGE_EXTENSIONS.contains(&value))
     {
         return Some(UploadFileKind::Image);
@@ -70,7 +71,7 @@ fn normalized_upload_mime_essence(mime_type: Option<&str>) -> Option<String> {
 
 fn is_supported_upload_mime_type(mime_type: &str) -> bool {
     mime_type == "application/pdf"
-        || mime_type.starts_with("image/")
+        || IMAGE_MIME_TYPES.contains(&mime_type)
         || HTML_MIME_TYPES.contains(&mime_type)
         || TEXT_LIKE_MIME_TYPES.contains(&mime_type)
         || mime_type.starts_with("text/")

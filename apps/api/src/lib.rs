@@ -1,9 +1,8 @@
-// Async hot paths in the assistant agent loop (streaming tool-use +
-// bounded concurrent tool dispatch) produce deeply nested opaque
-// future types. The default 128-step evaluation budget on
-// Send/Sync resolution is not enough for them. 512 is the canonical
-// escape hatch — same value the tokio ecosystem uses for comparable
-// nested async builders.
+// Async hot paths in the query and ingest runtimes produce deeply
+// nested opaque future types. The default 128-step evaluation budget
+// on Send/Sync resolution is not enough for them. 512 is the
+// canonical escape hatch — same value the tokio ecosystem uses for
+// comparable nested async builders.
 #![recursion_limit = "512"]
 #![cfg_attr(
     test,

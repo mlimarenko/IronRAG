@@ -24,12 +24,9 @@ use crate::{
     domains::ingest::{
         WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt, WebIngestRunSummary, WebRunCounts,
     },
-    infra::repositories::{
-        catalog_repository,
-        ingest_repository::{
-            self, NewWebDiscoveredPage, NewWebIngestRun, UpdateWebIngestRun, WebDiscoveredPageRow,
-            WebIngestRunRow, WebRunCountsRow,
-        },
+    infra::repositories::ingest_repository::{
+        self, NewWebDiscoveredPage, NewWebIngestRun, UpdateWebIngestRun, WebDiscoveredPageRow,
+        WebIngestRunRow, WebRunCountsRow,
     },
     interfaces::http::router_support::ApiError,
     services::{
@@ -46,10 +43,10 @@ use crate::{
         telemetry,
         web::{
             ingest::{
-                WebCandidateState, WebClassificationReason, WebIngestIgnorePattern, WebIngestMode,
-                WebIngestPolicy, WebRunFailureCode, WebRunState,
-                build_web_ingest_run_ignore_patterns, derive_terminal_run_state,
-                match_web_ingest_ignore_pattern, now_if_terminal, validate_web_run_settings,
+                WebCandidateState, WebClassificationReason, WebIngestMode, WebIngestPattern,
+                WebIngestUrlFilter, WebIngestUrlFilterMode, WebRunFailureCode, WebRunState,
+                derive_terminal_run_state, now_if_terminal, validate_web_ingest_url_filter,
+                validate_web_run_settings,
             },
             url_identity::{HostClassification, normalize_seed_url},
         },
@@ -79,7 +76,7 @@ pub struct CreateWebIngestRunCommand {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
-    pub extra_ignore_patterns: Vec<WebIngestIgnorePattern>,
+    pub url_filter: WebIngestUrlFilter,
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub idempotency_key: Option<String>,
@@ -306,25 +303,18 @@ impl WebIngestService {
             command.max_pages,
         )
         .map_err(ApiError::BadRequest)?;
-        let library_row =
-            catalog_repository::get_library_by_id(&state.persistence.postgres, command.library_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
-        let library_policy: WebIngestPolicy = serde_json::from_value(library_row.web_ingest_policy)
-            .map_err(|_| ApiError::Internal)?;
-        let ignore_patterns =
-            build_web_ingest_run_ignore_patterns(&library_policy, command.extra_ignore_patterns)
-                .map_err(ApiError::BadRequest)?;
-        let ignore_patterns_json =
-            serde_json::to_value(&ignore_patterns).map_err(|_| ApiError::Internal)?;
+        let url_filter = validate_web_ingest_url_filter(command.url_filter, "urlFilter")
+            .map_err(ApiError::BadRequest)?;
+        let url_patterns_json =
+            serde_json::to_value(&url_filter.patterns).map_err(|_| ApiError::Internal)?;
         let source_identity = web_run_source_identity(
             &normalized_seed_url,
             &validated.mode,
             &validated.boundary_policy,
             validated.max_depth,
             validated.max_pages,
-            &ignore_patterns_json,
+            url_filter.mode.as_str(),
+            &url_patterns_json,
         );
 
         let mutation = state
@@ -390,7 +380,8 @@ impl WebIngestService {
                 boundary_policy: &validated.boundary_policy,
                 max_depth: validated.max_depth,
                 max_pages: validated.max_pages,
-                ignore_patterns: ignore_patterns_json,
+                url_filter_mode: url_filter.mode.as_str(),
+                url_patterns: url_patterns_json,
                 run_state: WebRunState::Accepted.as_str(),
                 requested_by_principal_id: command.requested_by_principal_id,
                 requested_at: None,
@@ -503,7 +494,8 @@ impl WebIngestService {
                     boundary_policy: row.boundary_policy,
                     max_depth: row.max_depth,
                     max_pages: row.max_pages,
-                    ignore_patterns: parse_run_ignore_patterns(row.ignore_patterns)?,
+                    url_filter_mode: row.url_filter_mode,
+                    url_patterns: parse_run_url_patterns(row.url_patterns)?,
                     run_state: row.run_state,
                     seed_url: row.seed_url,
                     counts: counts.counts,
@@ -915,7 +907,8 @@ impl WebIngestService {
             boundary_policy: row.boundary_policy,
             max_depth: row.max_depth,
             max_pages: row.max_pages,
-            ignore_patterns: parse_run_ignore_patterns(row.ignore_patterns)?,
+            url_filter_mode: row.url_filter_mode,
+            url_patterns: parse_run_url_patterns(row.url_patterns)?,
             run_state: row.run_state,
             requested_by_principal_id: row.requested_by_principal_id,
             requested_at: row.requested_at,
@@ -1138,7 +1131,8 @@ fn web_run_source_identity(
     boundary_policy: &str,
     max_depth: i32,
     max_pages: i32,
-    ignore_patterns_json: &serde_json::Value,
+    url_filter_mode: &str,
+    url_patterns_json: &serde_json::Value,
 ) -> String {
     let payload = serde_json::json!({
         "normalizedSeedUrl": normalized_seed_url,
@@ -1146,16 +1140,27 @@ fn web_run_source_identity(
         "boundaryPolicy": boundary_policy,
         "maxDepth": max_depth,
         "maxPages": max_pages,
-        "ignorePatterns": ignore_patterns_json,
+        "urlFilter": {
+            "mode": url_filter_mode,
+            "patterns": url_patterns_json,
+        },
     });
     let bytes = serde_json::to_vec(&payload).unwrap_or_default();
     format!("web_capture:sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
-fn parse_run_ignore_patterns(
+pub(super) fn parse_run_url_patterns(
     value: serde_json::Value,
-) -> Result<Vec<WebIngestIgnorePattern>, ApiError> {
+) -> Result<Vec<WebIngestPattern>, ApiError> {
     serde_json::from_value(value).map_err(|_| ApiError::Internal)
+}
+
+pub(super) fn parse_run_url_filter_mode(value: &str) -> Result<WebIngestUrlFilterMode, ApiError> {
+    match value {
+        "blocklist" => Ok(WebIngestUrlFilterMode::Blocklist),
+        "allowlist" => Ok(WebIngestUrlFilterMode::Allowlist),
+        _ => Err(ApiError::Internal),
+    }
 }
 
 fn map_web_page_row(row: WebDiscoveredPageRow) -> WebDiscoveredPage {

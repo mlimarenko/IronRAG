@@ -8,8 +8,9 @@ use crate::{
     domains::ai::AiBindingPurpose,
     domains::catalog::{
         CatalogLibrary, CatalogLibraryConnector, CatalogLibraryIngestionReadiness,
-        CatalogLifecycleState, CatalogWorkspace,
+        CatalogLifecycleState, CatalogWorkspace, ChunkingTemplate,
     },
+    domains::recognition::{LibraryRecognitionPolicy, RecognitionEngine},
     infra::repositories::{ai_repository, catalog_repository},
     interfaces::http::router_support::{
         ApiError, map_library_create_error, map_workspace_create_error,
@@ -59,6 +60,12 @@ pub struct UpdateLibraryCommand {
 pub struct UpdateLibraryWebIngestPolicyCommand {
     pub library_id: Uuid,
     pub web_ingest_policy: WebIngestPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateLibraryRecognitionPolicyCommand {
+    pub library_id: Uuid,
+    pub recognition_policy: LibraryRecognitionPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -265,12 +272,9 @@ impl CatalogService {
             catalog_repository::list_libraries(&state.persistence.postgres, Some(workspace_id))
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let readiness_by_library = self
-            .list_library_ingestion_readiness(
-                state,
-                &rows.iter().map(|row| row.id).collect::<Vec<_>>(),
-            )
-            .await?;
+        let policies_by_library = parse_library_policies(&rows)?;
+        let readiness_by_library =
+            self.list_library_ingestion_readiness(state, &policies_by_library).await?;
         rows.into_iter()
             .map(|row| {
                 let library_id = row.id;
@@ -300,7 +304,8 @@ impl CatalogService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        let policy = parse_library_policy(&row)?;
+        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
         map_library_row(row, readiness)
     }
 
@@ -318,17 +323,24 @@ impl CatalogService {
         let display_name = normalize_display_name(&command.display_name, "displayName")?;
         let slug = normalize_optional_slug(command.slug.as_deref(), &display_name);
         let description = normalize_optional_text(command.description.as_deref());
-        let row = catalog_repository::create_library(
+        let recognition_policy = state
+            .settings
+            .default_recognition_policy()
+            .to_json()
+            .map_err(|_| ApiError::Internal)?;
+        let row = catalog_repository::create_library_with_recognition_policy(
             &state.persistence.postgres,
             command.workspace_id,
             &slug,
             &display_name,
             description.as_deref(),
+            recognition_policy,
             command.created_by_principal_id,
         )
         .await
         .map_err(|error| map_library_create_error(error, command.workspace_id, &slug))?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        let policy = parse_library_policy(&row)?;
+        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
         map_library_row(row, readiness)
     }
 
@@ -361,7 +373,8 @@ impl CatalogService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        let policy = parse_library_policy(&row)?;
+        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
         map_library_row(row, readiness)
     }
 
@@ -388,7 +401,34 @@ impl CatalogService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id).await?;
+        let policy = parse_library_policy(&row)?;
+        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
+        map_library_row(row, readiness)
+    }
+
+    /// Updates the recognition policy owned by one library.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ApiError`] when validation fails, the repository update fails, readiness
+    /// derivation fails, or the library does not exist.
+    pub async fn update_library_recognition_policy(
+        &self,
+        state: &AppState,
+        command: UpdateLibraryRecognitionPolicyCommand,
+    ) -> Result<CatalogLibrary, ApiError> {
+        command.recognition_policy.validate().map_err(ApiError::BadRequest)?;
+        let policy_json = command.recognition_policy.to_json().map_err(|_| ApiError::Internal)?;
+        let row = catalog_repository::update_library_recognition_policy(
+            &state.persistence.postgres,
+            command.library_id,
+            policy_json,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
+        let policy = parse_library_policy(&row)?;
+        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
         map_library_row(row, readiness)
     }
 
@@ -451,9 +491,10 @@ impl CatalogService {
         &self,
         state: &AppState,
         library_id: Uuid,
+        recognition_policy: &LibraryRecognitionPolicy,
     ) -> Result<CatalogLibraryIngestionReadiness, ApiError> {
         Ok(self
-            .list_library_ingestion_readiness(state, &[library_id])
+            .list_library_ingestion_readiness(state, &[(library_id, recognition_policy.clone())])
             .await?
             .remove(&library_id)
             .unwrap_or_else(default_ingestion_readiness))
@@ -467,15 +508,17 @@ impl CatalogService {
     pub async fn list_library_ingestion_readiness(
         &self,
         state: &AppState,
-        library_ids: &[Uuid],
+        library_policies: &[(Uuid, LibraryRecognitionPolicy)],
     ) -> Result<HashMap<Uuid, CatalogLibraryIngestionReadiness>, ApiError> {
-        if library_ids.is_empty() {
+        if library_policies.is_empty() {
             return Ok(HashMap::new());
         }
+        let library_ids =
+            library_policies.iter().map(|(library_id, _)| *library_id).collect::<Vec<_>>();
 
         let rows = ai_repository::list_effective_binding_purposes_for_libraries(
             &state.persistence.postgres,
-            library_ids,
+            &library_ids,
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -485,16 +528,22 @@ impl CatalogService {
             purposes_by_library.entry(row.library_id).or_default().insert(row.binding_purpose);
         }
 
-        let mut readiness = HashMap::with_capacity(library_ids.len());
-        for library_id in library_ids {
+        let mut readiness = HashMap::with_capacity(library_policies.len());
+        for (library_id, recognition_policy) in library_policies {
             let present = purposes_by_library.get(library_id);
-            let missing_binding_purposes = INGEST_REQUIRED_BINDINGS
+            let mut missing_binding_purposes = INGEST_REQUIRED_BINDINGS
                 .iter()
                 .filter_map(|(purpose, key)| {
                     let has_binding = present.is_some_and(|bindings| bindings.contains(*key));
                     (!has_binding).then_some(*purpose)
                 })
                 .collect::<Vec<_>>();
+            if recognition_policy.raster_image_engine == RecognitionEngine::Vision
+                && !present
+                    .is_some_and(|bindings| bindings.contains(AiBindingPurpose::Vision.as_str()))
+            {
+                missing_binding_purposes.push(AiBindingPurpose::Vision);
+            }
             readiness.insert(
                 *library_id,
                 CatalogLibraryIngestionReadiness {
@@ -657,10 +706,26 @@ fn default_ingestion_readiness() -> CatalogLibraryIngestionReadiness {
     }
 }
 
+fn parse_library_policy(
+    row: &catalog_repository::CatalogLibraryRow,
+) -> Result<LibraryRecognitionPolicy, ApiError> {
+    LibraryRecognitionPolicy::from_json(row.recognition_policy.clone()).map_err(|error| {
+        ApiError::internal_with_log(anyhow::anyhow!(error), "invalid persisted recognition policy")
+    })
+}
+
+fn parse_library_policies(
+    rows: &[catalog_repository::CatalogLibraryRow],
+) -> Result<Vec<(Uuid, LibraryRecognitionPolicy)>, ApiError> {
+    rows.iter().map(|row| parse_library_policy(row).map(|policy| (row.id, policy))).collect()
+}
+
 fn map_library_row(
     row: catalog_repository::CatalogLibraryRow,
     ingestion_readiness: CatalogLibraryIngestionReadiness,
 ) -> Result<CatalogLibrary, ApiError> {
+    let recognition_policy = LibraryRecognitionPolicy::from_json(row.recognition_policy)
+        .map_err(|_| ApiError::Internal)?;
     Ok(CatalogLibrary {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -670,8 +735,10 @@ fn map_library_row(
         extraction_prompt: row.extraction_prompt,
         web_ingest_policy: serde_json::from_value(row.web_ingest_policy)
             .map_err(|_| ApiError::Internal)?,
+        recognition_policy,
         lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)
             .map_err(CatalogLifecycleError::into_persisted_error)?,
+        chunking_template: ChunkingTemplate::from_db_str(&row.chunking_template),
         ingestion_readiness,
         created_at: row.created_at,
         updated_at: row.updated_at,

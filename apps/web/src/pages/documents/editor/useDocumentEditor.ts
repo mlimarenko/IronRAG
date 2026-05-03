@@ -6,7 +6,7 @@ import { documentsApi } from '@/api';
 import type { DocumentItem } from '@/types';
 
 import { buildEditorBlocks, serializeEditorBlocks, serializeSourceTextForEditor } from './documentEditorBlocks';
-import { isCodeLikeSourceFormat } from './editorSurfaceMode';
+import { isCodeLikeSourceFormat, isPlainTextSourceFormat } from './editorSurfaceMode';
 
 type EditAvailability = {
   enabled: boolean;
@@ -76,8 +76,8 @@ export function useDocumentEditor({
       setEditorOpen(true);
 
       try {
-        const nextMarkdown = isCodeLikeSourceFormat(doc.fileType)
-          ? await loadCodeEditorMarkdown(doc)
+        const nextMarkdown = shouldLoadSourceTextForEditor(doc)
+          ? await loadSourceEditorMarkdown(doc)
           : await loadStructuredEditorMarkdown(doc);
         setEditorMarkdown(nextMarkdown);
       } catch (err: unknown) {
@@ -135,11 +135,11 @@ export function useDocumentEditor({
 }
 
 async function loadStructuredEditorMarkdown(doc: DocumentItem): Promise<string> {
-  const segments = await documentsApi.getPreparedSegments(doc.id);
+  const segments = await documentsApi.getAllPreparedSegments(doc.id);
   return serializeEditorBlocks(buildEditorBlocks(segments, doc.fileType));
 }
 
-async function loadCodeEditorMarkdown(doc: DocumentItem): Promise<string> {
+async function loadSourceEditorMarkdown(doc: DocumentItem): Promise<string> {
   const sourceHref = doc.sourceAccess?.href;
   if (!sourceHref) {
     throw new Error(`source text is unavailable for ${doc.fileName}`);
@@ -147,4 +147,10 @@ async function loadCodeEditorMarkdown(doc: DocumentItem): Promise<string> {
 
   const sourceText = await documentsApi.getSourceText(sourceHref);
   return serializeSourceTextForEditor(sourceText, doc.fileType);
+}
+
+function shouldLoadSourceTextForEditor(doc: DocumentItem): boolean {
+  return Boolean(doc.sourceAccess?.href) && (
+    isCodeLikeSourceFormat(doc.fileType) || isPlainTextSourceFormat(doc.fileType)
+  );
 }

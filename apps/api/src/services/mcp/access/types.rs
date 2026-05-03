@@ -118,8 +118,8 @@ impl McpDocumentAccumulator {
             excerpt: None,
             excerpt_start_offset: None,
             excerpt_end_offset: None,
-            suggested_start_offset: None,
-            suggested_start_offset_score: f64::MIN,
+            suggested_start_offset: Some(0),
+            suggested_start_offset_score: row.metadata_score,
             chunk_references: HashMap::new(),
         }
     }
@@ -196,7 +196,7 @@ impl McpDocumentAccumulator {
         if self.excerpt.is_some() {
             return;
         }
-        let query_lower = query.to_ascii_lowercase();
+        let query_lower = query.to_lowercase();
         if let Some((excerpt, start, end, _)) = preview_hit(text, &query_lower) {
             self.excerpt = Some(excerpt);
             self.excerpt_start_offset = Some(start);

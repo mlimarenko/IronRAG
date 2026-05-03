@@ -35,6 +35,16 @@ pub struct LibraryCostSummary {
     pub provider_call_count: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCostSummary {
+    pub total_cost: Decimal,
+    pub currency_code: String,
+    pub library_count: i64,
+    pub document_count: i64,
+    pub provider_call_count: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureQueryExecutionBillingCommand {
     pub workspace_id: Uuid,
@@ -245,6 +255,40 @@ impl BillingService {
             None => Ok(LibraryCostSummary {
                 total_cost: Decimal::ZERO,
                 currency_code: "USD".to_string(),
+                document_count: 0,
+                provider_call_count: 0,
+            }),
+        }
+    }
+
+    /// Loads the rolled-up cost summary for a workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Internal`] when the repository query fails.
+    pub async fn get_workspace_cost_summary(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceCostSummary, ApiError> {
+        let row = billing_repository::get_workspace_cost_summary(
+            &state.persistence.postgres,
+            workspace_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        match row {
+            Some(r) => Ok(WorkspaceCostSummary {
+                total_cost: r.total_cost,
+                currency_code: r.currency_code,
+                library_count: r.library_count,
+                document_count: r.document_count,
+                provider_call_count: r.provider_call_count,
+            }),
+            None => Ok(WorkspaceCostSummary {
+                total_cost: Decimal::ZERO,
+                currency_code: "USD".to_string(),
+                library_count: 0,
                 document_count: 0,
                 provider_call_count: 0,
             }),

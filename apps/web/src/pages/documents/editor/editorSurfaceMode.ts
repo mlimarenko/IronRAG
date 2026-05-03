@@ -1,4 +1,4 @@
-export type EditorSurfaceMode = 'prose' | 'table' | 'code';
+export type EditorSurfaceMode = 'prose' | 'table' | 'code' | 'raw_text';
 
 type ResolveEditorSurfaceModeOptions = {
   markdown: string;
@@ -6,6 +6,15 @@ type ResolveEditorSurfaceModeOptions = {
 };
 
 const TABLE_SOURCE_FORMATS = new Set(['csv', 'tsv', 'xls', 'xlsx', 'xlsb', 'ods']);
+const PLAIN_TEXT_SOURCE_FORMATS = new Set([
+  'txt',
+  'text',
+  'md',
+  'markdown',
+  'mdown',
+  'mkd',
+  'log',
+]);
 const CODE_SOURCE_FORMATS = new Set([
   'rs',
   'ts',
@@ -61,6 +70,11 @@ export function isTableLikeSourceFormat(sourceFormat?: string): boolean {
 export function isCodeLikeSourceFormat(sourceFormat?: string): boolean {
   const normalized = normalizeSourceFormat(sourceFormat);
   return normalized ? CODE_SOURCE_FORMATS.has(normalized) : false;
+}
+
+export function isPlainTextSourceFormat(sourceFormat?: string): boolean {
+  const normalized = normalizeSourceFormat(sourceFormat);
+  return normalized ? PLAIN_TEXT_SOURCE_FORMATS.has(normalized) : false;
 }
 
 export function isEditorEditableSourceFormat(sourceFormat?: string): boolean {

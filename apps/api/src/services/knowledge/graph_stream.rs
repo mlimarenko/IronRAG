@@ -10,7 +10,7 @@
 //! Wire format: NDJSON, one JSON object per line. Sections arrive in this
 //! strict order:
 //!
-//! 1. `meta`     — `{ s: "meta", v, library_id, projection_version, generated_at, node_count, edge_count, document_count }`
+//! 1. `meta`     — `{ s: "meta", v, library_id, projection_version, topology_generation, generated_at, node_count, edge_count, document_count }`
 //! 2. `id_map`   — `{ s: "id_map", m: { "019d..." : 1, "019d..." : 2, ... } }`
 //! 3. `docs`     — `{ s: "docs", d: [ { i, k, t, fn? }, ... ] }` (batched)
 //! 4. `nodes`    — `{ s: "nodes", d: [ { i, l, t, ts?, s?, c?, es?, a?, sm? }, ... ] }` (batched)
@@ -55,55 +55,18 @@ const EDGE_BATCH: usize = 1024;
 const DOC_LINK_BATCH: usize = 1024;
 const DOC_BATCH: usize = 512;
 const CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
+const MAX_CACHE_VALUE_BYTES: usize = 64 * 1024 * 1024;
 
-/// Builds the Redis cache key for one library + projection_version pair.
-fn cache_key(library_id: Uuid, projection_version: i64) -> String {
-    format!("graph:{library_id}:v{projection_version}")
+/// Builds the Redis cache key for one published graph topology generation.
+fn cache_key(library_id: Uuid, projection_version: i64, topology_generation: i64) -> String {
+    format!("graph:{library_id}:v{projection_version}:g{topology_generation}")
 }
 
-/// Drops the cached graph topology for one library at one specific
-/// `projection_version`. The cache key shape
-/// `graph:{library_id}:v{projection_version}` means each version has
-/// its own key — reads always look up the current version, so older
-/// orphaned keys simply age out via the 24 h TTL. Invalidation is
-/// therefore scoped: we delete the exact key we know is about to go
-/// stale (a newly published `ready` snapshot for this version), and
-/// leave any previous-version keys in place where they continue to
-/// serve any in-flight reads keyed on the old snapshot. This replaces
-/// an earlier wildcard `graph:{lib}:*` DELETE that wiped historical
-/// versions on every snapshot upsert and produced visible cache churn
-/// during high-throughput targeted refreshes.
-pub async fn invalidate_graph_topology_cache(
-    redis: &redis::Client,
-    library_id: Uuid,
-    projection_version: i64,
-) -> anyhow::Result<()> {
-    let mut conn = redis
-        .get_multiplexed_async_connection()
-        .await
-        .context("connect to redis for graph topology cache invalidation")?;
-    let key = cache_key(library_id, projection_version);
-    let _: i64 = conn.del(&key).await.context("delete graph topology cache key")?;
-    Ok(())
-}
-
-/// Per-library prewarm state — now tracks both "in-flight" and
+/// Per-library prewarm state — tracks both "in-flight" and
 /// "another publish arrived while in-flight, run again after" so a
-/// burst of publishes never leaves the cache stale.
-///
-/// Previous behaviour: if a prewarm was already running for a library,
-/// the next publish simply skipped — the in-flight task would be
-/// reading the projection state from Postgres at some point in the
-/// past, so its eventual SET could be older than the latest publish.
-/// On heavy-ingest libraries with `content_mutation` jobs firing
-/// `ready` 20–30 times a minute, the cache could trail the live
-/// graph by one whole debounce cycle.
-///
-/// New behaviour: if `pending` is already true when a publish arrives,
-/// the incoming prewarm still skips (only one task runs), but the
-/// running task notices `pending` on exit and re-runs itself. This
-/// coalesces bursts into "one run now + one final run at the end",
-/// which converges on the latest state without thrashing.
+/// burst of publishes never leaves the cache stale. When `pending` is
+/// set on exit, the task re-runs itself, coalescing bursts into
+/// "one run now + one final run at the end" without thrashing.
 static PREWARM_STATE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, PrewarmState>>,
 > = std::sync::OnceLock::new();
@@ -123,7 +86,7 @@ fn prewarm_state() -> &'static std::sync::Mutex<std::collections::HashMap<Uuid, 
 }
 
 /// Forces a fresh build of the NDJSON topology and writes it straight
-/// to Redis under the current `(library_id, projection_version)` key —
+/// to Redis under the current topology generation key —
 /// **bypassing** the `build_graph_topology_bytes` cache check so a
 /// prior cached value cannot short-circuit into returning stale bytes
 /// during the projection publish window.
@@ -133,13 +96,14 @@ fn prewarm_state() -> &'static std::sync::Mutex<std::collections::HashMap<Uuid, 
 /// so concurrent reads either see the old bytes or the new bytes,
 /// never an empty window.
 ///
-/// Debounced via [`PREWARM_IN_FLIGHT`] so a burst of publishes only
+/// Debounced via [`PREWARM_STATE`] so a burst of publishes only
 /// runs one rebuild at a time per library; the tail is dropped because
 /// any in-flight rebuild is already reading the latest projection
 /// state from Postgres anyway.
 pub async fn prewarm_graph_topology_cache(state: &AppState, library_id: Uuid) {
     {
-        let mut state_map = prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state_map =
+            prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = state_map.entry(library_id).or_default();
         if entry.running {
             // A task is already running: mark pending so the running task
@@ -162,7 +126,8 @@ pub async fn prewarm_graph_topology_cache(state: &AppState, library_id: Uuid) {
     loop {
         run_prewarm_once(state, library_id).await;
 
-        let mut state_map = prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state_map =
+            prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = state_map.entry(library_id).or_default();
         if entry.pending {
             entry.pending = false;
@@ -203,38 +168,54 @@ async fn run_prewarm_once(state: &AppState, library_id: Uuid) {
         };
 
     let projection_version = snapshot.projection_version;
-    let built = match build_compact_topology(state, library_id, projection_version).await {
-        Ok(topology) => topology,
+    let topology_generation = snapshot.topology_generation;
+    let built =
+        match build_compact_topology(state, library_id, projection_version, topology_generation)
+            .await
+        {
+            Ok(topology) => topology,
+            Err(error) => {
+                tracing::warn!(
+                    %library_id,
+                    projection_version,
+                    error = format!("{error:#}"),
+                    "graph topology cache prewarm: build failed",
+                );
+                return;
+            }
+        };
+    let mut buffer = Vec::<u8>::with_capacity(estimated_capacity(&built));
+    render_ndjson_into(&mut buffer, &built);
+    let cache_key = cache_key(library_id, projection_version, topology_generation);
+    match redis_set_bytes(&state.persistence.redis, &cache_key, &buffer, CACHE_TTL_SECONDS).await {
+        Ok(CacheWrite::Written) => {
+            tracing::info!(
+                %library_id,
+                projection_version,
+                topology_generation,
+                bytes = buffer.len(),
+                "graph topology cache prewarmed",
+            );
+        }
+        Ok(CacheWrite::SkippedTooLarge) => {
+            tracing::warn!(
+                %library_id,
+                projection_version,
+                topology_generation,
+                bytes = buffer.len(),
+                max_bytes = MAX_CACHE_VALUE_BYTES,
+                "graph topology cache prewarm skipped: payload exceeds cache value budget",
+            );
+        }
         Err(error) => {
             tracing::warn!(
                 %library_id,
                 projection_version,
                 error = format!("{error:#}"),
-                "graph topology cache prewarm: build failed",
+                "graph topology cache prewarm: SET failed",
             );
-            return;
         }
-    };
-    let mut buffer = Vec::<u8>::with_capacity(estimated_capacity(&built));
-    render_ndjson_into(&mut buffer, &built);
-    let cache_key = cache_key(library_id, projection_version);
-    if let Err(error) =
-        redis_set_bytes(&state.persistence.redis, &cache_key, &buffer, CACHE_TTL_SECONDS).await
-    {
-        tracing::warn!(
-            %library_id,
-            projection_version,
-            error = format!("{error:#}"),
-            "graph topology cache prewarm: SET failed",
-        );
-        return;
     }
-    tracing::info!(
-        %library_id,
-        projection_version,
-        bytes = buffer.len(),
-        "graph topology cache prewarmed",
-    );
 }
 
 /// Builds the full compact NDJSON graph topology for one library and
@@ -260,21 +241,27 @@ pub async fn build_graph_topology_bytes(
             .context("load runtime_graph_snapshot for graph topology")?;
 
     let Some(snapshot) = snapshot else {
-        return Ok(render_empty(library_id, 0));
+        return Ok(render_empty(library_id, 0, 0));
     };
 
     if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
-        return Ok(render_empty(library_id, snapshot.projection_version.max(0)));
+        return Ok(render_empty(
+            library_id,
+            snapshot.projection_version.max(0),
+            snapshot.topology_generation.max(0),
+        ));
     }
 
     let projection_version = snapshot.projection_version;
-    let cache_key = cache_key(library_id, projection_version);
+    let topology_generation = snapshot.topology_generation;
+    let cache_key = cache_key(library_id, projection_version, topology_generation);
 
     if let Some(cached) =
         redis_get_bytes(&state.persistence.redis, &cache_key).await.unwrap_or_else(|error| {
             tracing::warn!(
                 %library_id,
                 projection_version,
+                topology_generation,
                 error = format!("{error:#}"),
                 "graph topology cache GET failed; rebuilding",
             );
@@ -284,34 +271,49 @@ pub async fn build_graph_topology_bytes(
         tracing::debug!(
             %library_id,
             projection_version,
+            topology_generation,
             bytes = cached.len(),
             "graph topology cache hit",
         );
         return Ok(cached);
     }
 
-    let built = build_compact_topology(state, library_id, projection_version).await?;
+    let built =
+        build_compact_topology(state, library_id, projection_version, topology_generation).await?;
     let mut buffer = Vec::<u8>::with_capacity(estimated_capacity(&built));
     render_ndjson_into(&mut buffer, &built);
 
-    if let Err(error) =
-        redis_set_bytes(&state.persistence.redis, &cache_key, &buffer, CACHE_TTL_SECONDS).await
-    {
-        tracing::warn!(
-            %library_id,
-            projection_version,
-            error = format!("{error:#}"),
-            "graph topology cache SET failed",
-        );
+    match redis_set_bytes(&state.persistence.redis, &cache_key, &buffer, CACHE_TTL_SECONDS).await {
+        Ok(CacheWrite::Written) => {}
+        Ok(CacheWrite::SkippedTooLarge) => {
+            tracing::warn!(
+                %library_id,
+                projection_version,
+                topology_generation,
+                bytes = buffer.len(),
+                max_bytes = MAX_CACHE_VALUE_BYTES,
+                "graph topology cache backfill skipped: payload exceeds cache value budget",
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                %library_id,
+                projection_version,
+                topology_generation,
+                error = format!("{error:#}"),
+                "graph topology cache SET failed",
+            );
+        }
     }
 
     Ok(buffer)
 }
 
-fn render_empty(library_id: Uuid, projection_version: i64) -> Vec<u8> {
+fn render_empty(library_id: Uuid, projection_version: i64, topology_generation: i64) -> Vec<u8> {
     let built = CompactTopology {
         library_id,
         projection_version,
+        topology_generation,
         generated_at: Utc::now(),
         id_map: HashMap::new(),
         documents: Vec::new(),
@@ -331,6 +333,7 @@ fn render_empty(library_id: Uuid, projection_version: i64) -> Vec<u8> {
 struct CompactTopology {
     library_id: Uuid,
     projection_version: i64,
+    topology_generation: i64,
     generated_at: DateTime<Utc>,
     /// UUID → dense u32 id used in every downstream section.
     id_map: HashMap<Uuid, u32>,
@@ -378,6 +381,7 @@ async fn build_compact_topology(
     state: &AppState,
     library_id: Uuid,
     projection_version: i64,
+    topology_generation: i64,
 ) -> anyhow::Result<CompactTopology> {
     // Canonical topology load in 0.3.3:
     //   1. Load the compact edge list (slim columns) in parallel with
@@ -386,10 +390,9 @@ async fn build_compact_topology(
     //      in memory.
     //   3. Fetch only the node rows we need — `document`-type nodes
     //      (always surfaced as graph siloes) plus the admitted ids.
-    //   Steps 1+2 parallelise the two slowest queries, step 3 replaces
-    //   a query whose CTE previously re-scanned every edge in the
-    //   library (8 s on 80 k edges / 40 k nodes) with a single `id =
-    //   any($3) or node_type = 'document'` index probe.
+    //   Steps 1+2 parallelise the two slowest queries, step 3 uses
+    //   a single `id = any($3) or node_type = 'document'` index probe
+    //   instead of a full-library CTE edge scan.
     let edges_started_at = std::time::Instant::now();
     let (edge_rows_compact, document_link_rows) = tokio::try_join!(
         async {
@@ -582,6 +585,7 @@ async fn build_compact_topology(
     Ok(CompactTopology {
         library_id,
         projection_version,
+        topology_generation,
         generated_at: Utc::now(),
         id_map,
         documents: compact_documents,
@@ -653,6 +657,7 @@ fn render_ndjson_into(buffer: &mut Vec<u8>, topology: &CompactTopology) {
             "v": 1,
             "library_id": topology.library_id,
             "projection_version": topology.projection_version,
+            "topology_generation": topology.topology_generation,
             "generated_at": topology.generated_at.to_rfc3339(),
             "node_count": topology.entities.len() + topology.documents.len(),
             "edge_count": topology.edges.len() + topology.document_links.len(),
@@ -779,12 +784,20 @@ async fn redis_get_bytes(client: &redis::Client, key: &str) -> anyhow::Result<Op
     Ok(value)
 }
 
+enum CacheWrite {
+    Written,
+    SkippedTooLarge,
+}
+
 async fn redis_set_bytes(
     client: &redis::Client,
     key: &str,
     value: &[u8],
     ttl_seconds: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CacheWrite> {
+    if value.len() > MAX_CACHE_VALUE_BYTES {
+        return Ok(CacheWrite::SkippedTooLarge);
+    }
     let mut conn = client
         .get_multiplexed_async_connection_with_config(&topology_connection_config())
         .await
@@ -793,5 +806,21 @@ async fn redis_set_bytes(
         .set_ex(key, value, ttl_seconds.max(1) as u64)
         .await
         .context("redis SET EX graph topology cache")?;
-    Ok(())
+    Ok(CacheWrite::Written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_includes_topology_generation() {
+        let library_id =
+            Uuid::parse_str("019dcb4d-49f4-7cb1-a19b-f9ee0a10c509").expect("valid uuid");
+
+        assert_eq!(
+            cache_key(library_id, 7, 42),
+            "graph:019dcb4d-49f4-7cb1-a19b-f9ee0a10c509:v7:g42"
+        );
+    }
 }

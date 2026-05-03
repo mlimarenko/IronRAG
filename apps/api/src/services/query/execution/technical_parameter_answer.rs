@@ -8,8 +8,8 @@ use super::{
     CanonicalAnswerEvidence, RuntimeMatchedChunk,
     fact_lookup::{best_matching_fact, build_document_labels},
     focused_answer_document_id,
-    question_intent::{QuestionIntent, classify_question_intents, has_question_intent},
-    question_prefers_russian, question_requests_multi_document_scope,
+    question_intent::{QuestionIntent, classify_question_or_ir_intents, has_question_intent},
+    question_requests_multi_document_scope,
     technical_answer::document_focus_preference,
     technical_literals::{extract_parameter_literals, technical_literal_focus_keywords},
 };
@@ -20,13 +20,11 @@ pub(super) fn build_exact_parameter_answer(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_intents(question);
+    let intents = classify_question_or_ir_intents(question, query_ir);
     if !has_question_intent(&intents, QuestionIntent::Parameter) {
         return None;
     }
-    if question_requests_multi_document_scope(question, None)
-        || has_question_intent(&intents, QuestionIntent::Endpoint)
-    {
+    if question_requests_multi_document_scope(question, Some(query_ir)) {
         return None;
     }
 
@@ -40,39 +38,9 @@ pub(super) fn build_exact_parameter_answer(
     let parameter_meaning =
         extract_parameter_meaning(question, &target_parameter, evidence, chunks);
 
-    let is_existence_question = parameter_existence_question(question);
-    let is_name_question = parameter_name_question(question);
-
-    Some(if question_prefers_russian(question) {
-        match (is_existence_question, parameter_meaning) {
-            (true, Some(meaning)) => format!("Да, есть параметр `{target_parameter}` — {meaning}."),
-            (true, None) => format!("Да, есть параметр `{target_parameter}`."),
-            (false, Some(meaning)) if is_name_question => {
-                format!("Параметр называется `{target_parameter}` — {meaning}.")
-            }
-            (false, Some(meaning)) => format!("Параметр `{target_parameter}` — {meaning}."),
-            (false, None) if is_name_question => {
-                format!("Параметр называется `{target_parameter}`.")
-            }
-            (false, None) => format!("Параметр `{target_parameter}`."),
-        }
-    } else {
-        match (is_existence_question, parameter_meaning) {
-            (true, Some(meaning)) => {
-                format!("Yes. The parameter is `{target_parameter}` — {meaning}.")
-            }
-            (true, None) => format!("Yes, the parameter `{target_parameter}` is present."),
-            (false, Some(meaning)) if is_name_question => {
-                format!("The parameter is named `{target_parameter}` — {meaning}.")
-            }
-            (false, Some(meaning)) => {
-                format!("The parameter `{target_parameter}` means {meaning}.")
-            }
-            (false, None) if is_name_question => {
-                format!("The parameter is named `{target_parameter}`.")
-            }
-            (false, None) => format!("The parameter is `{target_parameter}`."),
-        }
+    Some(match parameter_meaning {
+        Some(meaning) => format!("Parameter `{target_parameter}`: {meaning}."),
+        None => format!("Parameter `{target_parameter}`."),
     })
 }
 
@@ -204,19 +172,4 @@ fn extract_parameter_meaning_from_text(parameter: &str, text: &str) -> Option<St
 
 fn clean_parameter_meaning(raw: &str) -> String {
     raw.trim().trim_matches('`').trim_end_matches('.').trim().to_string()
-}
-
-fn parameter_existence_question(question: &str) -> bool {
-    let lowered = question.to_lowercase();
-    lowered.contains("есть ли")
-        || lowered.contains("существует ли")
-        || lowered.contains("is there")
-        || lowered.contains("does ")
-}
-
-fn parameter_name_question(question: &str) -> bool {
-    let lowered = question.to_lowercase();
-    lowered.contains("как называется")
-        || lowered.contains("what is the name")
-        || lowered.contains("name of")
 }

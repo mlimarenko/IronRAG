@@ -12,6 +12,7 @@ use crate::{
     domains::{
         ai::AiBindingPurpose,
         catalog::{CatalogLibrary, CatalogLifecycleState, CatalogWorkspace},
+        recognition::LibraryRecognitionPolicy,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -25,7 +26,7 @@ use crate::{
     services::{
         catalog_service::{
             CreateLibraryCommand, CreateWorkspaceCommand, UpdateLibraryCommand,
-            UpdateLibraryWebIngestPolicyCommand,
+            UpdateLibraryRecognitionPolicyCommand, UpdateLibraryWebIngestPolicyCommand,
         },
         iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     },
@@ -58,6 +59,7 @@ pub struct CatalogLibraryResponse {
     pub description: Option<String>,
     pub extraction_prompt: Option<String>,
     pub web_ingest_policy: WebIngestPolicy,
+    pub recognition_policy: LibraryRecognitionPolicy,
     pub lifecycle_state: String,
     pub ingestion_readiness: CatalogLibraryIngestionReadinessResponse,
 }
@@ -90,7 +92,14 @@ pub struct UpdateCatalogLibraryRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateLibraryWebIngestPolicyRequest {
-    pub ignore_patterns: Vec<crate::shared::web::ingest::WebIngestIgnorePattern>,
+    pub url_filter: crate::shared::web::ingest::WebIngestUrlFilter,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct UpdateLibraryRecognitionPolicyRequest {
+    pub raster_image_engine: crate::domains::recognition::RecognitionEngine,
 }
 
 pub fn router() -> Router<AppState> {
@@ -106,6 +115,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/catalog/libraries/{library_id}/web-ingest-policy",
             put(update_library_web_ingest_policy),
+        )
+        .route(
+            "/catalog/libraries/{library_id}/recognition-policy",
+            put(update_library_recognition_policy),
         )
 }
 
@@ -472,7 +485,7 @@ async fn update_library_web_ingest_policy(
             &state,
             UpdateLibraryWebIngestPolicyCommand {
                 library_id,
-                web_ingest_policy: WebIngestPolicy { ignore_patterns: payload.ignore_patterns },
+                web_ingest_policy: WebIngestPolicy { url_filter: payload.url_filter },
             },
         )
         .await?;
@@ -486,6 +499,60 @@ async fn update_library_web_ingest_policy(
         Some(format!("library {} web ingest policy updated", library.display_name)),
         Some(format!(
             "principal {} updated web ingest policy for library {} in workspace {}",
+            auth.principal_id, library.id, library.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "library".to_string(),
+            subject_id: library.id,
+            workspace_id: Some(existing.workspace_id),
+            library_id: Some(library.id),
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(Json(map_library(library)))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_library_recognition_policy",
+    skip_all,
+    fields(library_id = %library_id)
+)]
+async fn update_library_recognition_policy(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(library_id): Path<Uuid>,
+    Json(payload): Json<UpdateLibraryRecognitionPolicyRequest>,
+) -> Result<Json<CatalogLibraryResponse>, ApiError> {
+    let existing =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
+
+    let library = state
+        .canonical_services
+        .catalog
+        .update_library_recognition_policy(
+            &state,
+            UpdateLibraryRecognitionPolicyCommand {
+                library_id,
+                recognition_policy: LibraryRecognitionPolicy {
+                    raster_image_engine: payload.raster_image_engine,
+                },
+            },
+        )
+        .await?;
+
+    record_catalog_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "catalog.library.recognition_policy.update",
+        "succeeded",
+        Some(format!("library {} recognition policy updated", library.display_name)),
+        Some(format!(
+            "principal {} updated recognition policy for library {} in workspace {}",
             auth.principal_id, library.id, library.workspace_id
         )),
         vec![AppendAuditEventSubjectCommand {
@@ -519,6 +586,7 @@ fn map_library(library: CatalogLibrary) -> CatalogLibraryResponse {
         description: library.description,
         extraction_prompt: library.extraction_prompt,
         web_ingest_policy: library.web_ingest_policy,
+        recognition_policy: library.recognition_policy,
         lifecycle_state: lifecycle_state_label(&library.lifecycle_state).to_string(),
         ingestion_readiness: CatalogLibraryIngestionReadinessResponse {
             ready: library.ingestion_readiness.ready,

@@ -1,32 +1,29 @@
-use sqlx::{PgPool, Postgres};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// Acquires a library-scoped PostgreSQL advisory lock for canonical graph serialization.
 ///
-/// The returned pooled connection keeps the session lock alive until
-/// `release_runtime_library_graph_lock` is called.
+/// The returned transaction keeps the lock alive until commit/rollback.
+/// Transaction-scoped locks are used deliberately so a cancelled future cannot
+/// leak a session lock back into the pool.
 pub async fn acquire_runtime_library_graph_lock(
     pool: &PgPool,
     library_id: Uuid,
-) -> Result<sqlx::pool::PoolConnection<Postgres>, sqlx::Error> {
-    let mut connection = pool.acquire().await?;
-    sqlx::query("select pg_advisory_lock(hashtextextended($1::text, 0))")
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
         .bind(library_id.to_string())
-        .execute(&mut *connection)
+        .execute(&mut *transaction)
         .await?;
-    Ok(connection)
+    Ok(transaction)
 }
 
 /// Releases a library-scoped PostgreSQL advisory lock for canonical graph serialization.
 pub async fn release_runtime_library_graph_lock(
-    mut connection: sqlx::pool::PoolConnection<Postgres>,
-    library_id: Uuid,
+    transaction: Transaction<'static, Postgres>,
+    _library_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
-        .bind(library_id.to_string())
-        .execute(&mut *connection)
-        .await?;
-    Ok(())
+    transaction.commit().await
 }
 
 /// Counts distinct filtered graph artifacts written for one ingestion attempt.

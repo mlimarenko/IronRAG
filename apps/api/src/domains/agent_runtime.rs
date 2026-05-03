@@ -111,8 +111,8 @@ impl std::str::FromStr for RuntimeTaskKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSurfaceKind {
+    Ui,
     Rest,
-    Stream,
     Mcp,
     Worker,
     Internal,
@@ -122,8 +122,8 @@ impl RuntimeSurfaceKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Ui => "ui",
             Self::Rest => "rest",
-            Self::Stream => "stream",
             Self::Mcp => "mcp",
             Self::Worker => "worker",
             Self::Internal => "internal",
@@ -136,8 +136,8 @@ impl std::str::FromStr for RuntimeSurfaceKind {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "ui" => Ok(Self::Ui),
             "rest" => Ok(Self::Rest),
-            "stream" => Ok(Self::Stream),
             "mcp" => Ok(Self::Mcp),
             "worker" => Ok(Self::Worker),
             "internal" => Ok(Self::Internal),

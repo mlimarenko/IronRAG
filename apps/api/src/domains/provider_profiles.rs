@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domains::{agent_runtime::RuntimeTaskKind, ai::AiBindingPurpose};
+use crate::domains::ai::AiBindingPurpose;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,15 +78,5 @@ impl EffectiveProviderProfile {
             AiBindingPurpose::QueryAnswer => Some(&self.answer),
             AiBindingPurpose::Vision => self.vision.as_ref(),
         }
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn selection_for_runtime_task_kind(
-        &self,
-        task_kind: RuntimeTaskKind,
-    ) -> Option<&ProviderModelSelection> {
-        AiBindingPurpose::for_runtime_task_kind(task_kind)
-            .and_then(|binding_purpose| self.selection_for_binding_purpose(binding_purpose))
     }
 }

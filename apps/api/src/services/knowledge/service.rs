@@ -96,6 +96,15 @@ pub struct CreateKnowledgeChunkCommand {
     pub text_generation: Option<i64>,
     pub vector_generation: Option<i64>,
     pub quality_score: Option<f32>,
+    pub window_text: Option<String>,
+    /// Earliest record timestamp aggregated into this chunk (JSONL ingest
+    /// only; None for non-temporal sources). Sourced from the canonical
+    /// `record_jsonl::extract_chunk_temporal_bounds` helper at ingest time.
+    pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Latest record timestamp aggregated into this chunk. Equals
+    /// `occurred_at` for single-record chunks; None when `occurred_at` is
+    /// None.
+    pub occurred_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +184,7 @@ impl KnowledgeService {
                 byte_size: command.byte_size,
                 normalized_text: command.normalized_text,
                 text_checksum: command.text_checksum,
+                image_checksum: None,
                 text_state: command.text_state,
                 vector_state: command.vector_state,
                 graph_state: command.graph_state,
@@ -357,6 +367,10 @@ impl KnowledgeService {
                 text_generation: command.text_generation,
                 vector_generation: command.vector_generation,
                 quality_score: command.quality_score,
+                window_text: command.window_text.clone(),
+                raptor_level: None,
+                occurred_at: command.occurred_at,
+                occurred_until: command.occurred_until,
             })
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -403,6 +417,10 @@ impl KnowledgeService {
                 text_generation: command.text_generation,
                 vector_generation: command.vector_generation,
                 quality_score: command.quality_score,
+                window_text: command.window_text.clone(),
+                raptor_level: None,
+                occurred_at: command.occurred_at,
+                occurred_until: command.occurred_until,
             })
             .collect::<Vec<_>>();
 

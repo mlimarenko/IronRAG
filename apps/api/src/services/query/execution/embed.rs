@@ -64,11 +64,12 @@ pub(super) async fn embed_question(
     let response = state
         .llm_gateway
         .embed(EmbeddingRequest {
-            provider_kind: embedding_binding.provider_kind,
-            model_name: embedding_binding.model_name,
+            provider_kind: embedding_binding.provider_kind.clone(),
+            model_name: embedding_binding.model_name.clone(),
             input: trimmed_input,
-            api_key_override: embedding_binding.api_key,
-            base_url_override: embedding_binding.provider_base_url,
+            api_key_override: embedding_binding.api_key.clone(),
+            base_url_override: embedding_binding.provider_base_url.clone(),
+            extra_parameters_json: embedding_binding.extra_parameters_json.clone(),
         })
         .await
         .context("failed to embed runtime query")?;

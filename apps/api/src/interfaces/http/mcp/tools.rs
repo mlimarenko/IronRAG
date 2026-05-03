@@ -16,6 +16,7 @@ use super::{
     McpJsonRpcResponse, McpToolCallParams, McpToolDescriptor, McpToolSurface,
     audit::record_canonical_mcp_audit, success_response, tool_error_result,
 };
+use documents::{READ_DOCUMENT_TOOL_NAME, SEARCH_DOCUMENTS_TOOL_NAME};
 
 pub(crate) mod catalog;
 pub(crate) mod documents;
@@ -43,9 +44,6 @@ fn visible_answer_tool_names(auth: &AuthContext) -> Vec<String> {
     if auth.can_read_any_library_memory(POLICY_QUERY_RUN) {
         tools.push("grounded_answer".to_string());
     }
-    if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
-        tools.push("list_documents".to_string());
-    }
     tools
 }
 
@@ -61,10 +59,10 @@ fn visible_diagnostics_tool_names(auth: &AuthContext) -> Vec<String> {
         tools.push("create_library".to_string());
     }
     if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
-        tools.push("search_documents".to_string());
+        tools.push(SEARCH_DOCUMENTS_TOOL_NAME.to_string());
     }
     if auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ) {
-        tools.push("read_document".to_string());
+        tools.push(READ_DOCUMENT_TOOL_NAME.to_string());
     }
     if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
         tools.push("list_documents".to_string());
@@ -209,7 +207,10 @@ mod tests {
         interfaces::http::{
             auth::{AuthContext, AuthGrant, AuthTokenKind},
             authorization::{POLICY_MCP_MEMORY_READ, POLICY_QUERY_RUN},
-            mcp::{McpToolSurface, tools::visible_tool_names},
+            mcp::{
+                McpToolSurface,
+                tools::{READ_DOCUMENT_TOOL_NAME, documents, visible_tool_names},
+            },
         },
     };
 
@@ -256,20 +257,30 @@ mod tests {
         let search_index =
             tools.iter().position(|name| name == "search_documents").expect("search_documents");
         let read_index =
-            tools.iter().position(|name| name == "read_document").expect("read_document");
+            tools.iter().position(|name| name == READ_DOCUMENT_TOOL_NAME).expect("read_document");
 
         assert!(grounded_index < search_index);
         assert!(grounded_index < read_index);
     }
 
     #[test]
-    fn answer_surface_hides_raw_search_and_read_tools() {
+    fn answer_surface_exposes_only_catalog_and_grounded_answer_tools() {
         let tools =
             visible_tool_names(&auth_with_query_and_memory_access(), McpToolSurface::Answer);
 
         assert!(tools.iter().any(|name| name == "grounded_answer"));
-        assert!(tools.iter().any(|name| name == "list_documents"));
+        assert!(tools.iter().any(|name| name == "list_workspaces"));
+        assert!(tools.iter().any(|name| name == "list_libraries"));
+        assert!(!tools.iter().any(|name| name == "list_documents"));
         assert!(!tools.iter().any(|name| name == "search_documents"));
-        assert!(!tools.iter().any(|name| name == "read_document"));
+        assert!(!tools.iter().any(|name| name == READ_DOCUMENT_TOOL_NAME));
+    }
+
+    #[test]
+    fn list_documents_descriptor_keeps_change_summaries_on_grounded_answer() {
+        let descriptor = documents::descriptor("list_documents").expect("list_documents");
+
+        assert!(descriptor.description.contains("versioned change-summary questions"));
+        assert!(descriptor.description.contains("call `grounded_answer` first"));
     }
 }

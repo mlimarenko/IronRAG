@@ -5,8 +5,10 @@ use super::{
     CanonicalAnswerEvidence, RuntimeMatchedChunk, concise_document_subject_label,
     fact_lookup::{best_matching_fact, build_document_labels},
     focused_answer_document_id,
-    question_intent::{ExactUrlLookupKind, classify_exact_url_lookup, classify_question_intents},
-    question_prefers_russian, question_requests_multi_document_scope,
+    question_intent::{
+        ExactUrlLookupKind, classify_exact_url_lookup, classify_question_or_ir_intents,
+    },
+    question_requests_multi_document_scope,
     technical_answer::document_focus_preference,
     technical_literals::technical_literal_focus_keywords,
 };
@@ -23,9 +25,9 @@ pub(super) fn build_exact_url_answer(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_intents(question);
-    let url_lookup_kind = classify_exact_url_lookup(question, &intents)?;
-    if question_requests_multi_document_scope(question, None) {
+    let intents = classify_question_or_ir_intents(question, query_ir);
+    let url_lookup_kind = classify_exact_url_lookup(query_ir, &intents)?;
+    if question_requests_multi_document_scope(question, Some(query_ir)) {
         return None;
     }
     let asks_wsdl = matches!(url_lookup_kind, ExactUrlLookupKind::Wsdl);
@@ -37,29 +39,10 @@ pub(super) fn build_exact_url_answer(
         .map(concise_document_subject_label)
         .filter(|value| !value.is_empty());
 
-    Some(if question_prefers_russian(question) {
-        if asks_wsdl {
-            subject.map_or_else(
-                || format!("WSDL: `{}`.", url_match.value),
-                |subject| format!("WSDL для {subject}: `{}`.", url_match.value),
-            )
-        } else {
-            subject.map_or_else(
-                || format!("Нужный URL: `{}`.", url_match.value),
-                |subject| format!("URL для {subject}: `{}`.", url_match.value),
-            )
-        }
-    } else if asks_wsdl {
-        subject.map_or_else(
-            || format!("The WSDL is `{}`.", url_match.value),
-            |subject| format!("The WSDL for {subject} is `{}`.", url_match.value),
-        )
-    } else {
-        subject.map_or_else(
-            || format!("The URL is `{}`.", url_match.value),
-            |subject| format!("The URL for {subject} is `{}`.", url_match.value),
-        )
-    })
+    Some(subject.map_or_else(
+        || format!("`{}`.", url_match.value),
+        |subject| format!("{subject}: `{}`.", url_match.value),
+    ))
 }
 
 fn select_exact_url_literal(

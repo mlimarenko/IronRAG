@@ -2,61 +2,18 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::QueryIR;
+use crate::domains::query_ir::{QueryAct, QueryIR};
 
 use super::concise_document_subject_label;
-use super::question_intent::{question_asks_transport_comparison, question_mentions_graphql};
-use super::question_prefers_russian;
 use super::technical_literals::technical_literal_focus_keywords;
 use super::types::RuntimeMatchedChunk;
-
-pub(super) fn build_graphql_absence_answer(
-    question: &str,
-    chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
-    if !question_mentions_graphql(question) {
-        return None;
-    }
-    let has_absence_evidence =
-        chunks.iter().any(|chunk| graphql_absence_supported(&chunk.source_text));
-    if !has_absence_evidence {
-        return None;
-    }
-    Some(if question_prefers_russian(question) {
-        "Нет, в этой библиотеке GraphQL API не публикуется.".to_string()
-    } else {
-        "No, this library does not publish a GraphQL API.".to_string()
-    })
-}
-
-fn graphql_absence_supported(text: &str) -> bool {
-    let lowered = text.to_lowercase();
-    if !lowered.contains("graphql") {
-        return false;
-    }
-    [
-        "does not publish",
-        "does not expose",
-        "no /graphql",
-        "no graphql schema",
-        "no graphql introspection",
-        "not graphql",
-        "не публикует",
-        "не поддерживает",
-        "нет graphql",
-        "без graphql",
-        "не graphql",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
-}
 
 pub(super) fn build_transport_contract_comparison_answer(
     question: &str,
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    if !question_asks_transport_comparison(question) {
+    if !query_ir_requests_transport_comparison(query_ir) {
         return None;
     }
     let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
@@ -155,42 +112,44 @@ pub(super) fn build_transport_contract_comparison_answer(
                 })
         })?;
 
-    Some(if question_prefers_russian(question) {
-        format!(
-            "{} использует REST поверх HTTP с JSON, а {} использует SOAP поверх HTTP и описан через WSDL.",
-            rest_document.subject, soap_document.subject
-        )
-    } else {
-        format!(
-            "{} uses REST over HTTP with JSON, while {} uses SOAP over HTTP and is described by WSDL.",
-            rest_document.subject, soap_document.subject
-        )
-    })
+    Some(format!(
+        "{} uses REST over HTTP with JSON, while {} uses SOAP over HTTP and is described by WSDL.",
+        rest_document.subject, soap_document.subject
+    ))
+}
+
+fn query_ir_requests_transport_comparison(query_ir: &QueryIR) -> bool {
+    matches!(query_ir.act, QueryAct::Compare)
+        && query_ir.target_types.iter().any(|tag| {
+            matches!(
+                tag.trim().to_ascii_lowercase().replace('-', "_").as_str(),
+                "transport" | "protocol"
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
 
-    use super::{
-        QueryIR, build_graphql_absence_answer, build_transport_contract_comparison_answer,
-        graphql_absence_supported,
-    };
+    use super::{QueryIR, build_transport_contract_comparison_answer};
     use crate::domains::query_ir::{QueryAct, QueryLanguage, QueryScope};
     use crate::services::query::execution::types::RuntimeMatchedChunk;
 
     fn lenient_query_ir() -> QueryIR {
         QueryIR {
-            act: QueryAct::Describe,
-            scope: QueryScope::SingleDocument,
+            act: QueryAct::Compare,
+            scope: QueryScope::MultiDocument,
             language: QueryLanguage::Auto,
-            target_types: Vec::new(),
+            target_types: vec!["transport".to_string(), "protocol".to_string()],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: Vec::new(),
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.0,
         }
     }
@@ -200,36 +159,14 @@ mod tests {
             chunk_id: Uuid::now_v7(),
             revision_id: Uuid::now_v7(),
             chunk_index: 0,
+            chunk_kind: None,
             document_id: Uuid::now_v7(),
             document_label: document_label.to_string(),
             excerpt: excerpt.to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(1.0),
             source_text: source_text.to_string(),
         }
-    }
-
-    #[test]
-    fn graphql_absence_support_detects_negative_graphql_evidence() {
-        assert!(graphql_absence_supported(
-            "The checkout server does not publish a GraphQL API. No /graphql endpoint is exposed."
-        ));
-        assert!(!graphql_absence_supported(
-            "This document explains a GraphQL schema and GraphQL endpoint."
-        ));
-    }
-
-    #[test]
-    fn build_graphql_absence_answer_returns_explicit_negative_answer() {
-        let chunks = vec![sample_chunk(
-            "checkout_runtime_contract.md",
-            "No /graphql endpoint is exposed.",
-            "The checkout server does not publish a GraphQL API. No /graphql endpoint is exposed.",
-        )];
-        let answer =
-            build_graphql_absence_answer("Есть ли в этой библиотеке GraphQL API?", &chunks)
-                .expect("graphql absence answer");
-        assert!(answer.starts_with("Нет"));
-        assert!(answer.contains("GraphQL API"));
     }
 
     #[test]
@@ -245,7 +182,7 @@ mod tests {
             "The inventory integration surface is SOAP over HTTP and described by WSDL.",
         );
         let answer = build_transport_contract_comparison_answer(
-            "Чем REST API rewards accounts отличается от inventory wsdl в транспортном контракте?",
+            "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?",
             &lenient_query_ir(),
             &[rewards, inventory],
         )
@@ -274,7 +211,7 @@ mod tests {
             "The inventory integration surface is SOAP over HTTP and described by WSDL.",
         );
         let answer = build_transport_contract_comparison_answer(
-            "Чем REST API rewards accounts отличается от inventory wsdl в транспортном контракте?",
+            "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?",
             &lenient_query_ir(),
             &[checkout, rewards, inventory],
         )

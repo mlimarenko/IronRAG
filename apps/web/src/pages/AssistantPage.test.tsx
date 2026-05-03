@@ -11,11 +11,9 @@ const { useAppMock, queryApiMock } = vi.hoisted(() => ({
     listSessions: vi.fn(),
     getSession: vi.fn(),
     createSession: vi.fn(),
-    createTurnWithFallback: vi.fn(),
+    createTurn: vi.fn(),
     getExecution: vi.fn(),
-    getRuntimeExecution: vi.fn(),
     getExecutionLlmContext: vi.fn(),
-    recoverTurnAfterStreamFailure: vi.fn(),
   },
 }));
 
@@ -29,7 +27,7 @@ vi.mock('@/api', () => ({
 
 // ReactMarkdown is heavy to import in a jsdom environment and its output is
 // not what these integration tests are validating — they check message plumbing,
-// streaming state, and evidence panel wiring. Replace it with a plain `<div>`.
+// turn completion, and evidence panel wiring. Replace it with a plain `<div>`.
 vi.mock('react-markdown', () => ({
   default: ({ children }: { children?: React.ReactNode }) => (
     <div data-testid="md">{children}</div>
@@ -60,11 +58,13 @@ describe('AssistantPage integration', () => {
       { id: 'session-1', libraryId: 'library-1', title: 'Deployment notes', updatedAt: '2026-04-10T10:00:00Z', turnCount: 2 },
     ]);
     queryApiMock.getSession.mockResolvedValue({
-      id: 'session-1',
-      libraryId: 'library-1',
-      title: 'Deployment notes',
-      updatedAt: '2026-04-10T10:00:00Z',
-      turnCount: 2,
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 2,
+      },
       messages: [],
     });
     queryApiMock.createSession.mockResolvedValue({
@@ -104,6 +104,18 @@ describe('AssistantPage integration', () => {
     await flushUi();
   }
 
+  async function rerenderPage() {
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={['/assistant']}>
+          <AssistantPage />
+        </MemoryRouter>,
+      );
+    });
+    await flushUi();
+    await flushUi();
+  }
+
   function findButton(text: string) {
     return Array.from(container.querySelectorAll('button')).find((b) =>
       b.textContent?.includes(text),
@@ -131,39 +143,34 @@ describe('AssistantPage integration', () => {
     expect(container.textContent).toContain('Deployment notes');
   });
 
-  it('streams a turn through onDelta and replaces the placeholder with the final answer + evidence', async () => {
-    queryApiMock.createTurnWithFallback.mockImplementation(async (_sessionId, _q, handlers) => {
-      handlers.onRuntime?.({ runtimeExecutionId: 'runtime-1' });
-      handlers.onDelta?.('Hello');
-      handlers.onDelta?.(' world');
-      return {
-        responseTurn: {
-          id: 'turn-1',
-          contentText: 'Hello world',
-          createdAt: '2026-04-10T11:00:05Z',
-          executionId: 'exec-1',
+  it('posts a turn and replaces the placeholder with the final answer + evidence', async () => {
+    queryApiMock.createTurn.mockResolvedValue({
+      responseTurn: {
+        id: 'turn-1',
+        contentText: 'Hello world',
+        createdAt: '2026-04-10T11:00:05Z',
+        executionId: 'exec-1',
+      },
+      preparedSegmentReferences: [
+        {
+          documentId: 'doc-1',
+          segmentId: 'seg-1',
+          documentTitle: 'Deployment Guide',
+          sourceUri: null,
+          sourceAccess: null,
+          headingTrail: ['Deployment', 'Production'],
+          sectionPath: [],
+          blockKind: 'heading',
+          rank: 1,
+          score: 0.91,
         },
-        preparedSegmentReferences: [
-          {
-            documentId: 'doc-1',
-            segmentId: 'seg-1',
-            documentTitle: 'Deployment Guide',
-            sourceUri: null,
-            sourceAccess: null,
-            headingTrail: ['Deployment', 'Production'],
-            sectionPath: [],
-            blockKind: 'heading',
-            rank: 1,
-            score: 0.91,
-          },
-        ],
-        technicalFactReferences: [],
-        entityReferences: [],
-        relationReferences: [],
-        verificationState: 'passed',
-        verificationWarnings: [],
-        runtimeStageSummaries: [],
-      };
+      ],
+      technicalFactReferences: [],
+      entityReferences: [],
+      relationReferences: [],
+      verificationState: 'passed',
+      verificationWarnings: [],
+      runtimeStageSummaries: [],
     });
 
     await renderPage();
@@ -194,51 +201,17 @@ describe('AssistantPage integration', () => {
     await flushUi();
 
     expect(queryApiMock.createSession).toHaveBeenCalledWith('ws-1', 'library-1');
-    expect(queryApiMock.createTurnWithFallback).toHaveBeenCalledTimes(1);
+    expect(queryApiMock.createTurn).toHaveBeenCalledWith(
+      'session-new',
+      'Where is the docs page?',
+    );
     expect(container.textContent).toContain('Hello world');
     // Evidence panel renders the verification badge + segment ref title.
     expect(container.textContent).toContain('Deployment Guide');
   });
 
-  it('recovers the persisted answer after a late stream interruption', async () => {
-    queryApiMock.createTurnWithFallback.mockImplementation(async (_sessionId, _q, handlers) => {
-      handlers.onRuntime?.({ runtimeExecutionId: 'runtime-1' });
-      throw new Error('Error in input stream');
-    });
-    queryApiMock.recoverTurnAfterStreamFailure.mockResolvedValue({
-      execution: {
-        id: 'exec-1',
-        runtimeExecutionId: 'runtime-1',
-        lifecycleState: 'completed',
-        completedAt: '2026-04-10T11:00:05Z',
-      },
-      responseTurn: {
-        id: 'turn-1',
-        contentText: 'Recovered answer',
-        createdAt: '2026-04-10T11:00:05Z',
-        executionId: 'exec-1',
-      },
-      preparedSegmentReferences: [
-        {
-          documentId: 'doc-1',
-          segmentId: 'seg-1',
-          documentTitle: 'Recovered Guide',
-          sourceUri: null,
-          sourceAccess: null,
-          headingTrail: ['Recovery', 'Guide'],
-          sectionPath: [],
-          blockKind: 'heading',
-          rank: 1,
-          score: 0.91,
-        },
-      ],
-      technicalFactReferences: [],
-      entityReferences: [],
-      relationReferences: [],
-      verificationState: 'passed',
-      verificationWarnings: [],
-      runtimeStageSummaries: [],
-    });
+  it('surfaces a failed direct turn without retrying the accepted request', async () => {
+    queryApiMock.createTurn.mockRejectedValue(new Error('Failed to fetch'));
 
     await renderPage();
 
@@ -256,12 +229,10 @@ describe('AssistantPage integration', () => {
     await flushUi();
     await flushUi();
 
-    expect(queryApiMock.recoverTurnAfterStreamFailure).toHaveBeenCalledWith(
-      'runtime-1',
-    );
-    expect(container.textContent).toContain('Recovered answer');
-    expect(container.textContent).toContain('Recovered Guide');
-    expect(container.textContent).not.toContain('Error in input stream');
+    expect(queryApiMock.createTurn).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Request didn\'t go through');
+    expect(container.textContent).toContain('browser blocked');
+    expect(container.textContent).not.toContain('Recovered answer');
   });
 
   it('shows the query-not-configured empty state when the active library lacks the binding', async () => {
@@ -285,11 +256,13 @@ describe('AssistantPage integration', () => {
 
   it('opens a selected session and hydrates its messages into the thread', async () => {
     queryApiMock.getSession.mockResolvedValue({
-      id: 'session-1',
-      libraryId: 'library-1',
-      title: 'Deployment notes',
-      updatedAt: '2026-04-10T10:00:00Z',
-      turnCount: 2,
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 2,
+      },
       messages: [
         {
           id: 'msg-user',
@@ -343,5 +316,125 @@ describe('AssistantPage integration', () => {
     expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1');
     expect(container.textContent).toContain('We moved to keyset pagination');
     expect(container.textContent).toContain('Pagination Design');
+  });
+
+  it('resets the selected thread and sends new turns to the current library after a library switch', async () => {
+    queryApiMock.listSessions.mockImplementation(async ({ libraryId }) => {
+      if (libraryId === 'library-2') {
+        return [
+          {
+            id: 'session-2',
+            libraryId: 'library-2',
+            title: 'Release notes',
+            updatedAt: '2026-04-11T10:00:00Z',
+            turnCount: 1,
+          },
+        ];
+      }
+      return [
+        {
+          id: 'session-1',
+          libraryId: 'library-1',
+          title: 'Deployment notes',
+          updatedAt: '2026-04-10T10:00:00Z',
+          turnCount: 2,
+        },
+      ];
+    });
+    queryApiMock.getSession.mockResolvedValue({
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 2,
+      },
+      messages: [
+        {
+          id: 'msg-assistant',
+          role: 'assistant',
+          content: 'Library one answer',
+          timestamp: '2026-04-10T10:00:02Z',
+        },
+      ],
+    });
+    queryApiMock.createSession.mockImplementation(async (_workspaceId, libraryId) => ({
+      id: `session-new-${libraryId}`,
+      libraryId,
+      title: '',
+      updatedAt: '2026-04-11T11:00:00Z',
+      turnCount: 0,
+    }));
+    queryApiMock.createTurn.mockResolvedValue({
+      responseTurn: {
+        id: 'turn-2',
+        contentText: 'Library two answer',
+        createdAt: '2026-04-11T11:00:05Z',
+        executionId: 'exec-2',
+      },
+      preparedSegmentReferences: [],
+      technicalFactReferences: [],
+      entityReferences: [],
+      relationReferences: [],
+      verificationState: 'passed',
+      verificationWarnings: [],
+      runtimeStageSummaries: [],
+    });
+
+    await renderPage();
+
+    const sessionButton = findButton('Deployment notes');
+    expect(sessionButton).toBeTruthy();
+    await act(async () => {
+      sessionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+    await flushUi();
+    expect(container.textContent).toContain('Library one answer');
+
+    useAppMock.mockReturnValue({
+      activeLibrary: {
+        id: 'library-2',
+        workspaceId: 'ws-1',
+        missingBindingPurposes: [],
+      },
+      activeWorkspace: { id: 'ws-1' },
+      locale: 'en',
+    });
+
+    await rerenderPage();
+
+    expect(queryApiMock.listSessions).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      libraryId: 'library-2',
+    });
+    expect(container.textContent).not.toContain('Deployment notes');
+    expect(container.textContent).not.toContain('Library one answer');
+    expect(container.textContent).toContain('Release notes');
+
+    setTextareaValue('What changed?');
+    await flushUi();
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(queryApiMock.createSession).toHaveBeenCalledWith('ws-1', 'library-2');
+    expect(queryApiMock.createTurn).toHaveBeenCalledWith(
+      'session-new-library-2',
+      'What changed?',
+    );
+    expect(queryApiMock.createTurn).not.toHaveBeenCalledWith(
+      'session-1',
+      expect.any(String),
+    );
+    expect(container.textContent).toContain('Library two answer');
   });
 });

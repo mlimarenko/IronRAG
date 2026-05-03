@@ -426,6 +426,29 @@
     padding: 1rem 1.25rem 1.25rem;
   }
 
+  .document-editor-raw-textarea {
+    min-height: 0;
+    width: 100%;
+    flex: 1 1 auto;
+    resize: none;
+    border: 0;
+    background: transparent;
+    padding: 1rem 1.25rem 1.25rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      "Courier New", monospace;
+    font-size: 0.94rem;
+    line-height: 1.7;
+    color: hsl(var(--foreground));
+    outline: none;
+    tab-size: 4;
+    white-space: pre;
+  }
+
+  .document-editor-raw-textarea:disabled {
+    cursor: progress;
+    opacity: 0.72;
+  }
+
   .document-editor-prosemirror blockquote {
     border-left: 3px solid hsl(var(--border));
     padding-left: 1rem;

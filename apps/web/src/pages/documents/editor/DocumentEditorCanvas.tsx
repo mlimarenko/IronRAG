@@ -14,6 +14,9 @@ type DocumentEditorCanvasProps = {
   editor: Editor | null;
   error: string | null;
   loading: boolean;
+  onRawTextChange: (markdown: string) => void;
+  rawTextEditor: boolean;
+  saving: boolean;
   sourceFormat?: string;
   statusLabel: string;
   surfaceMode: EditorSurfaceMode;
@@ -36,6 +39,9 @@ export function DocumentEditorCanvas({
   editor,
   error,
   loading,
+  onRawTextChange,
+  rawTextEditor,
+  saving,
   sourceFormat,
   statusLabel,
   surfaceMode,
@@ -142,6 +148,47 @@ export function DocumentEditorCanvas({
             {error}
           </div>
         </CanvasStateCard>
+      </div>
+    );
+  }
+
+  if (rawTextEditor) {
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col px-4 py-4 sm:px-6 sm:py-5">
+        <div className="mx-auto flex min-h-0 min-w-0 w-full max-w-[96rem] flex-1">
+          <div className="document-editor-code-shell">
+            {error ? (
+              <div className="border-b border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive sm:px-6">
+                {error}
+              </div>
+            ) : null}
+
+            <div className="document-editor-code-shell__header">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-foreground">{documentName}</span>
+                {sourceFormat ? (
+                  <span className="rounded-full border border-border/80 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                    {sourceFormat}
+                  </span>
+                ) : null}
+              </div>
+              <span>{statusLabel}</span>
+            </div>
+
+            <textarea
+              aria-label={documentName}
+              className="document-editor-raw-textarea"
+              disabled={saving}
+              onChange={(event) => onRawTextChange(event.target.value)}
+              spellCheck={false}
+              value={currentMarkdown}
+            />
+
+            <div className="document-editor-code-shell__footer">
+              <span>{statusLabel}</span>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }

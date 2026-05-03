@@ -4,7 +4,7 @@ use super::types::{
     GraphExtractionTechnicalFact,
 };
 
-pub(crate) const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v6";
+pub(crate) const GRAPH_EXTRACTION_VERSION: &str = "graph_extract_v8";
 pub(crate) const GRAPH_EXTRACTION_MAX_PROVIDER_ATTEMPTS: usize = 2;
 pub(crate) const GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES: usize = 8 * 1024;
 pub(crate) const GRAPH_EXTRACTION_MAX_SEGMENTS: usize = 3;
@@ -103,7 +103,12 @@ Extract ALL relationships between entities. Use the most specific relation type 
 - \"X contains Y\" → contains (not mentions)\n\
 - \"X is a type of Y\" → is_a (not mentions)\n\
 Only use \"mentions\" for truly tangential references where the text names something without describing any functional relationship.\n\n\
-Resolve coreferences: when the text says \"it\", \"this system\", \"the API\", \"the framework\", or uses abbreviations, resolve them to the full canonical entity name. Do not extract pronouns or abbreviations as separate entities.".to_string(),
+Resolve coreferences: when a pronoun or short anaphoric reference (e.g. an article-prefixed noun like \"the system\", \"the API\", \"the framework\") points back to a previously named entity, resolve it to that entity's full canonical name. Do not extract pronouns, articles, or abbreviations as separate entities.\n\n\
+SOURCE WRITING PRESERVATION (critical):\n\
+- Every `label`, `alias`, `source_label`, `target_label`, and textual `summary` MUST preserve the writing system and language used by the source chunk text.\n\
+- NEVER transliterate, translate, phonetically transcribe, or otherwise convert source text from one writing system to another.\n\
+- NEVER substitute visually similar glyphs across writing systems or replace digits with look-alike letters or letters with look-alike digits.\n\
+- Each `label`, `source_label`, and `target_label` value MUST appear as a verbatim, byte-for-byte substring of the prepared chunk text segments. If you cannot copy a name directly from the source, do not emit it.".to_string(),
     ));
     sections.push((
         "entity_types".to_string(),
@@ -232,7 +237,7 @@ Critical rules:\n\
         .join("\n\n");
     let request_size_bytes = prompt.len();
     let request_shape_key = format!(
-        "graph_extract_v6:{}:segments_{}:downgrade_{}:{}",
+        "graph_extract_v8:{}:segments_{}:downgrade_{}:{}",
         match variant {
             GraphExtractionPromptVariant::Initial => "initial",
             GraphExtractionPromptVariant::ProviderRetry => "provider_retry",
@@ -401,7 +406,7 @@ pub(crate) fn graph_extraction_response_format(provider_kind: &str) -> serde_jso
                                 "label": { "type": "string" },
                                 "node_type": {
                                     "type": "string",
-                                    "enum": ["person", "organization", "location", "event", "artifact", "natural_kind", "process", "concept", "topic", "metric", "regulation", "code_symbol", "entity"]
+                                    "enum": ["person", "organization", "location", "event", "artifact", "natural", "process", "concept", "attribute", "entity"]
                                 },
                                 "aliases": {
                                     "type": "array",

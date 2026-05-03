@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 
 use ironrag_backend::{
-    infra::repositories::iam_repository,
+    infra::repositories::{self, iam_repository},
     interfaces::http::router_support::ApiError,
     services::{
         content::service::{
@@ -557,7 +557,8 @@ async fn canonical_content_lifecycle_single_page_web_ingest_materializes_only_th
                     boundary_policy: None,
                     max_depth: None,
                     max_pages: None,
-                    extra_ignore_patterns: Vec::new(),
+                    url_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
+                        .url_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,
@@ -1299,6 +1300,438 @@ async fn canonical_content_delete_succeeds_when_post_commit_cleanup_fails() -> R
         assert!(
             active_documents.iter().all(|summary| summary.document.id != document.id),
             "deleted document must stay hidden even if post-commit cleanup fails"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// Regression: deleting the last document supporting a graph entity must drop
+/// the entity from the runtime graph projection — including stranded debris
+/// from earlier deletes whose graph cleanup never converged.
+///
+/// Reproduces the canonical-cleanup bug observed on the prod Wiki library:
+/// 27 nodes / 25 edges survived after every backing document was soft-deleted,
+/// because evidence rows for previously-deleted documents kept inflating
+/// `support_count` via the unfiltered recalculation. Asserts the canonical
+/// fix on three fronts:
+///
+/// 1. Library-wide orphan sweep: evidence rows pointing at any
+///    `document_state = 'deleted'` document are pruned during the next
+///    delete, not just rows for the explicit doc.
+/// 2. Active-document filter on `support_count`: orphan evidence does not
+///    keep a node alive even before the orphan sweep runs.
+/// 3. `runtime_graph_canonical_summary` rows for pruned targets are
+///    removed (no FK cascade exists on that table).
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn canonical_content_delete_drops_orphan_runtime_graph_state() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+
+    let result = async {
+        let principal = iam_repository::create_principal(
+            &fixture.state.persistence.postgres,
+            "user",
+            "Graph Cleanup Principal",
+            None,
+        )
+        .await
+        .context("failed to create graph cleanup principal")?;
+
+        // Two documents both supporting the same entity. `stranded` simulates
+        // the prod scenario: a document that was already soft-deleted by a
+        // prior cycle whose evidence sweep never ran. `current` is the doc
+        // we delete in this test — its delete must clean up both itself AND
+        // the stranded debris.
+        let stranded_document = fixture
+            .state
+            .canonical_services
+            .content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("graph-stranded-{}", Uuid::now_v7())),
+                    file_name: None,
+                    created_by_principal_id: None,
+                },
+            )
+            .await
+            .context("failed to create stranded graph cleanup document")?;
+        let stranded_revision = fixture
+            .state
+            .canonical_services
+            .content
+            .create_revision(
+                &fixture.state,
+                revision_command(
+                    stranded_document.id,
+                    "upload",
+                    "sha256:graph-stranded",
+                    "Stranded Doc",
+                    Some("file:///stranded.txt"),
+                ),
+            )
+            .await
+            .context("failed to create stranded revision")?;
+        fixture
+            .state
+            .canonical_services
+            .content
+            .promote_document_head(
+                &fixture.state,
+                PromoteHeadCommand {
+                    document_id: stranded_document.id,
+                    active_revision_id: Some(stranded_revision.id),
+                    readable_revision_id: Some(stranded_revision.id),
+                    latest_mutation_id: None,
+                    latest_successful_attempt_id: None,
+                },
+            )
+            .await
+            .context("failed to promote stranded head")?;
+
+        let current_document = fixture
+            .state
+            .canonical_services
+            .content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("graph-current-{}", Uuid::now_v7())),
+                    file_name: None,
+                    created_by_principal_id: None,
+                },
+            )
+            .await
+            .context("failed to create current graph cleanup document")?;
+        let current_revision = fixture
+            .state
+            .canonical_services
+            .content
+            .create_revision(
+                &fixture.state,
+                revision_command(
+                    current_document.id,
+                    "upload",
+                    "sha256:graph-current",
+                    "Current Doc",
+                    Some("file:///current.txt"),
+                ),
+            )
+            .await
+            .context("failed to create current revision")?;
+        fixture
+            .state
+            .canonical_services
+            .content
+            .promote_document_head(
+                &fixture.state,
+                PromoteHeadCommand {
+                    document_id: current_document.id,
+                    active_revision_id: Some(current_revision.id),
+                    readable_revision_id: Some(current_revision.id),
+                    latest_mutation_id: None,
+                    latest_successful_attempt_id: None,
+                },
+            )
+            .await
+            .context("failed to promote current head")?;
+
+        let pool = &fixture.state.persistence.postgres;
+        let projection_version = 1_i64;
+
+        // Seed an entity node supported by both documents. Mirrors what
+        // extract_graph would emit for "the same artifact appears in two
+        // sources".
+        let entity_node = repositories::upsert_runtime_graph_node(
+            pool,
+            fixture.library_id,
+            "entity:shared-artifact",
+            "Shared Artifact",
+            "artifact",
+            None,
+            serde_json::json!([]),
+            Some("Shared artifact across two documents"),
+            serde_json::json!({}),
+            2,
+            projection_version,
+        )
+        .await
+        .context("failed to seed entity node")?;
+        let stranded_doc_node = repositories::upsert_runtime_graph_node(
+            pool,
+            fixture.library_id,
+            &format!("document:{}", stranded_document.id),
+            "stranded.txt",
+            "document",
+            Some(stranded_document.id),
+            serde_json::json!([]),
+            Some("Stranded document node"),
+            serde_json::json!({}),
+            1,
+            projection_version,
+        )
+        .await
+        .context("failed to seed stranded document node")?;
+        let current_doc_node = repositories::upsert_runtime_graph_node(
+            pool,
+            fixture.library_id,
+            &format!("document:{}", current_document.id),
+            "current.txt",
+            "document",
+            Some(current_document.id),
+            serde_json::json!([]),
+            Some("Current document node"),
+            serde_json::json!({}),
+            1,
+            projection_version,
+        )
+        .await
+        .context("failed to seed current document node")?;
+
+        let stranded_edge = repositories::upsert_runtime_graph_edge(
+            pool,
+            fixture.library_id,
+            stranded_doc_node.id,
+            entity_node.id,
+            "mentions",
+            &format!("edge:document-{}:entity", stranded_document.id),
+            Some("Stranded mention"),
+            Some(1.0),
+            1,
+            serde_json::json!({}),
+            projection_version,
+        )
+        .await
+        .context("failed to seed stranded edge")?;
+        let current_edge = repositories::upsert_runtime_graph_edge(
+            pool,
+            fixture.library_id,
+            current_doc_node.id,
+            entity_node.id,
+            "mentions",
+            &format!("edge:document-{}:entity", current_document.id),
+            Some("Current mention"),
+            Some(1.0),
+            1,
+            serde_json::json!({}),
+            projection_version,
+        )
+        .await
+        .context("failed to seed current edge")?;
+
+        let _ = repositories::create_runtime_graph_evidence(
+            pool,
+            fixture.library_id,
+            "node",
+            entity_node.id,
+            Some(stranded_document.id),
+            Some(stranded_revision.id),
+            None,
+            None,
+            Some("stranded.txt"),
+            None,
+            "stranded mention text",
+            Some(0.9),
+            "stranded:entity",
+        )
+        .await
+        .context("failed to insert stranded entity evidence")?;
+        let _ = repositories::create_runtime_graph_evidence(
+            pool,
+            fixture.library_id,
+            "node",
+            entity_node.id,
+            Some(current_document.id),
+            Some(current_revision.id),
+            None,
+            None,
+            Some("current.txt"),
+            None,
+            "current mention text",
+            Some(0.9),
+            "current:entity",
+        )
+        .await
+        .context("failed to insert current entity evidence")?;
+        let _ = repositories::create_runtime_graph_evidence(
+            pool,
+            fixture.library_id,
+            "edge",
+            stranded_edge.id,
+            Some(stranded_document.id),
+            Some(stranded_revision.id),
+            None,
+            None,
+            Some("stranded.txt"),
+            None,
+            "stranded edge text",
+            Some(0.9),
+            "stranded:edge",
+        )
+        .await
+        .context("failed to insert stranded edge evidence")?;
+        let _ = repositories::create_runtime_graph_evidence(
+            pool,
+            fixture.library_id,
+            "edge",
+            current_edge.id,
+            Some(current_document.id),
+            Some(current_revision.id),
+            None,
+            None,
+            Some("current.txt"),
+            None,
+            "current edge text",
+            Some(0.9),
+            "current:edge",
+        )
+        .await
+        .context("failed to insert current edge evidence")?;
+
+        // Seed canonical summaries for the entity node and one of the edges.
+        // No FK cascade exists, so without the targeted cleanup these would
+        // outlive their target rows.
+        sqlx::query(
+            "insert into runtime_graph_canonical_summary (
+                workspace_id, library_id, target_kind, target_id,
+                summary_text, confidence_status, support_count, source_truth_version
+            ) values ($1, $2, 'node', $3, 'entity summary', 'confident', 2, 1)",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(entity_node.id)
+        .execute(pool)
+        .await
+        .context("failed to seed entity canonical summary")?;
+        sqlx::query(
+            "insert into runtime_graph_canonical_summary (
+                workspace_id, library_id, target_kind, target_id,
+                summary_text, confidence_status, support_count, source_truth_version
+            ) values ($1, $2, 'edge', $3, 'stranded edge summary', 'confident', 1, 1)",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(stranded_edge.id)
+        .execute(pool)
+        .await
+        .context("failed to seed stranded edge canonical summary")?;
+
+        // Mark the stranded document as already soft-deleted, simulating a
+        // failed prior cleanup. This leaves its evidence rows in place — the
+        // canonical fix must sweep them on the next delete in this library.
+        sqlx::query(
+            "update content_document
+             set document_state = 'deleted', deleted_at = now()
+             where id = $1",
+        )
+        .bind(stranded_document.id)
+        .execute(pool)
+        .await
+        .context("failed to mark stranded document deleted")?;
+
+        // Sanity: orphan rows currently survive against the deleted doc.
+        let stranded_evidence_before: i64 =
+            sqlx::query_scalar("select count(*) from runtime_graph_evidence where document_id = $1")
+                .bind(stranded_document.id)
+                .fetch_one(pool)
+                .await
+                .context("failed to count stranded evidence pre-delete")?;
+        assert_eq!(
+            stranded_evidence_before, 2,
+            "test setup must leave stranded evidence rows for the canonical fix to sweep"
+        );
+
+        // Delete the current document via the canonical service path.
+        let delete_admission = fixture
+            .state
+            .canonical_services
+            .content
+            .admit_mutation(
+                &fixture.state,
+                AdmitMutationCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: current_document.id,
+                    operation_kind: "delete".to_string(),
+                    idempotency_key: Some("graph-cleanup-current-doc".to_string()),
+                    requested_by_principal_id: Some(principal.id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    revision: None,
+                    parent_async_operation_id: None,
+                },
+            )
+            .await
+            .context("delete must succeed")?;
+        assert_eq!(delete_admission.mutation.mutation_state, "applied");
+
+        // Evidence for both docs is gone (current via the explicit branch,
+        // stranded via the library-wide orphan sweep).
+        let evidence_after: i64 = sqlx::query_scalar(
+            "select count(*) from runtime_graph_evidence where library_id = $1",
+        )
+        .bind(fixture.library_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to count evidence post-delete")?;
+        assert_eq!(
+            evidence_after, 0,
+            "library-wide sweep must remove evidence for every soft-deleted document, \
+             including ones whose previous cleanup failed"
+        );
+
+        // Entity node and both document-typed nodes are gone.
+        let surviving_node_ids: Vec<Uuid> = sqlx::query_scalar(
+            "select id from runtime_graph_node where library_id = $1",
+        )
+        .bind(fixture.library_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list surviving graph nodes")?;
+        assert!(
+            !surviving_node_ids.contains(&entity_node.id),
+            "entity node with zero active-document support must be pruned"
+        );
+        assert!(
+            !surviving_node_ids.contains(&stranded_doc_node.id),
+            "document-typed node for stranded doc must be pruned"
+        );
+        assert!(
+            !surviving_node_ids.contains(&current_doc_node.id),
+            "document-typed node for current doc must be pruned"
+        );
+
+        let surviving_edge_count: i64 =
+            sqlx::query_scalar("select count(*) from runtime_graph_edge where library_id = $1")
+                .bind(fixture.library_id)
+                .fetch_one(pool)
+                .await
+                .context("failed to count surviving edges")?;
+        assert_eq!(
+            surviving_edge_count, 0,
+            "every edge whose endpoints both lost support must be pruned"
+        );
+
+        // Canonical summary rows for pruned targets are gone too.
+        let summary_count: i64 = sqlx::query_scalar(
+            "select count(*) from runtime_graph_canonical_summary where library_id = $1",
+        )
+        .bind(fixture.library_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to count surviving canonical summaries")?;
+        assert_eq!(
+            summary_count, 0,
+            "canonical summaries for pruned nodes/edges must be removed since the table has no FK cascade"
         );
 
         Ok(())

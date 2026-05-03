@@ -2,11 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use uuid::Uuid;
 
-use crate::{
-    domains::query_ir::{EntityRole, QueryIR, QueryScope},
-    infra::arangodb::document_store::KnowledgeDocumentRow,
-    services::query::text_match::{near_token_overlap_count, normalized_alnum_tokens},
-};
+use crate::domains::query_ir::QueryIR;
 
 use super::{retrieve::score_value, types::RuntimeMatchedChunk};
 
@@ -20,10 +16,15 @@ const KNOWN_DOCUMENT_LABEL_EXTENSIONS: &[&str] = &[
     "md", "txt", "pdf", "docx", "csv", "tsv", "xls", "xlsx", "xlsb", "ods", "pptx", "png", "jpg",
     "jpeg",
 ];
-const DOCUMENT_LABEL_KEYWORD_MARKERS: &[&str] = &["runtime", "upload", "smoke", "fixture", "check"];
 const DOCUMENT_LABEL_ACRONYMS: &[&str] = &[
     "rag", "llm", "ocr", "pdf", "docx", "csv", "tsv", "xls", "xlsx", "xlsb", "ods", "pptx", "api",
 ];
+
+#[derive(Debug, Clone)]
+struct DocumentTargetCandidate {
+    text: String,
+    priority: usize,
+}
 
 pub(crate) fn explicit_target_document_ids_from_values<'a, I>(
     question: &str,
@@ -37,48 +38,112 @@ where
         return BTreeSet::new();
     }
 
-    let mut best_match_lengths = HashMap::<Uuid, usize>::new();
+    let explicit_literals = explicit_document_reference_literals(question);
+    if !explicit_literals.is_empty() {
+        return explicit_document_reference_matching_document_ids(&explicit_literals, values);
+    }
+
+    let mut best_match_scores = HashMap::<Uuid, (usize, usize)>::new();
     for (document_id, raw_value) in values {
-        for candidate in normalized_document_target_candidates([raw_value]) {
-            if candidate.len() < 4 || !normalized_question.contains(candidate.as_str()) {
-                continue;
+        for candidate in ranked_document_target_candidates([raw_value]) {
+            if candidate.text.len() >= 4 && normalized_question.contains(candidate.text.as_str()) {
+                let score = (candidate.text.len(), candidate.priority);
+                best_match_scores
+                    .entry(document_id)
+                    .and_modify(|best| *best = (*best).max(score))
+                    .or_insert(score);
             }
-            best_match_lengths
-                .entry(document_id)
-                .and_modify(|best| *best = (*best).max(candidate.len()))
-                .or_insert(candidate.len());
         }
     }
 
-    let Some(best_length) = best_match_lengths.values().copied().max() else {
-        return BTreeSet::new();
-    };
+    if let Some(best_score) = best_match_scores.values().copied().max() {
+        return best_match_scores
+            .into_iter()
+            .filter_map(|(document_id, score)| (score == best_score).then_some(document_id))
+            .collect();
+    }
 
-    best_match_lengths
+    BTreeSet::new()
+}
+
+pub(crate) fn explicit_document_reference_matching_document_ids<'a, I>(
+    explicit_literals: &[String],
+    values: I,
+) -> BTreeSet<Uuid>
+where
+    I: IntoIterator<Item = (Uuid, &'a str)>,
+{
+    let explicit_literals = explicit_literals.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if explicit_literals.is_empty() {
+        return BTreeSet::new();
+    }
+
+    values
         .into_iter()
-        .filter_map(|(document_id, candidate_length)| {
-            (candidate_length == best_length).then_some(document_id)
+        .filter_map(|(document_id, raw_value)| {
+            normalized_explicit_document_reference_candidates(raw_value)
+                .into_iter()
+                .any(|candidate| explicit_literals.contains(candidate.as_str()))
+                .then_some(document_id)
         })
         .collect()
+}
+
+pub(crate) fn explicit_document_reference_literal_is_present<'a, I>(
+    explicit_literal: &str,
+    values: I,
+) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    values.into_iter().any(|raw_value| {
+        normalized_explicit_document_reference_candidates(raw_value)
+            .into_iter()
+            .any(|candidate| candidate == explicit_literal)
+    })
 }
 
 pub(crate) fn normalized_document_target_candidates<'a, I>(values: I) -> Vec<String>
 where
     I: IntoIterator<Item = &'a str>,
 {
+    ranked_document_target_candidates(values).into_iter().map(|candidate| candidate.text).collect()
+}
+
+fn ranked_document_target_candidates<'a, I>(values: I) -> Vec<DocumentTargetCandidate>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
+    let mut push_candidate =
+        |value: String, priority: usize, candidates: &mut Vec<DocumentTargetCandidate>| {
+            let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                return;
+            }
+            candidates.push(DocumentTargetCandidate { text: normalized, priority });
+        };
 
     for raw in values {
         let normalized = normalize_document_target_text(raw);
-        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+        if normalized.is_empty() {
             continue;
         }
-        candidates.push(normalized.clone());
+        push_candidate(normalized.clone(), 4, &mut candidates);
+        if let Some(separator_variant) = separator_normalized_document_target_candidate(&normalized)
+        {
+            push_candidate(separator_variant, 2, &mut candidates);
+        }
         if let Some((stem, _)) = normalized.rsplit_once('.') {
             let stem = stem.trim().to_string();
-            if !stem.is_empty() && seen.insert(stem.clone()) {
-                candidates.push(stem);
+            if !stem.is_empty() {
+                push_candidate(stem.clone(), 3, &mut candidates);
+                if let Some(separator_variant) =
+                    separator_normalized_document_target_candidate(&stem)
+                {
+                    push_candidate(separator_variant, 1, &mut candidates);
+                }
             }
         }
     }
@@ -86,12 +151,38 @@ where
     candidates
 }
 
+fn separator_normalized_document_target_candidate(value: &str) -> Option<String> {
+    let normalized = value
+        .chars()
+        .map(|character| match character {
+            '_' | '-' | '.' => ' ',
+            _ => character,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (normalized != value).then_some(normalized).filter(|candidate| !candidate.is_empty())
+}
+
+fn normalized_explicit_document_reference_candidates(raw: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for value in [Some(raw), raw.rsplit(['/', '\\']).next()].into_iter().flatten() {
+        let normalized = normalize_document_target_text(value);
+        if !normalized.is_empty() && seen.insert(normalized.clone()) {
+            candidates.push(normalized);
+        }
+    }
+    candidates
+}
+
 pub(crate) fn normalize_document_target_text(value: &str) -> String {
     value
         .trim()
-        .to_ascii_lowercase()
+        .to_lowercase()
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' '))
+        .filter(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' '))
         .collect::<String>()
 }
 
@@ -111,172 +202,17 @@ pub(crate) fn explicit_document_reference_literals(question: &str) -> Vec<String
         .collect()
 }
 
-fn normalized_focus_tokens(value: &str) -> BTreeSet<String> {
-    normalized_alnum_tokens(value, 3)
-}
-
-fn query_ir_focus_reference_tokens(query_ir: &QueryIR) -> BTreeSet<String> {
-    if let Some(hint) = query_ir.document_focus.as_ref() {
-        let tokens = normalized_focus_tokens(&hint.hint);
-        if !tokens.is_empty() {
-            return tokens;
-        }
-    }
-
-    if !matches!(query_ir.scope, QueryScope::SingleDocument) {
-        return BTreeSet::new();
-    }
-
-    query_ir
-        .target_entities
-        .iter()
-        .filter(|entity| entity.role == EntityRole::Subject)
-        .flat_map(|entity| normalized_focus_tokens(&entity.label).into_iter())
-        .collect()
-}
-
-pub(crate) fn focused_target_document_ids_from_query_ir_values<'a, I>(
-    query_ir: &QueryIR,
-    values: I,
-) -> BTreeSet<Uuid>
-where
-    I: IntoIterator<Item = (Uuid, &'a str)>,
-{
-    let reference_tokens = query_ir_focus_reference_tokens(query_ir);
-    if reference_tokens.is_empty() {
-        return BTreeSet::new();
-    }
-
-    let mut best_overlap_by_document = HashMap::<Uuid, usize>::new();
-    for (document_id, raw_value) in values {
-        let overlap =
-            near_token_overlap_count(&reference_tokens, &normalized_focus_tokens(raw_value));
-        if overlap == 0 {
-            continue;
-        }
-        best_overlap_by_document
-            .entry(document_id)
-            .and_modify(|best| *best = (*best).max(overlap))
-            .or_insert(overlap);
-    }
-
-    let Some(best_overlap) = best_overlap_by_document.values().copied().max() else {
-        return BTreeSet::new();
-    };
-
-    let matched = best_overlap_by_document
-        .into_iter()
-        .filter_map(|(document_id, overlap)| (overlap == best_overlap).then_some(document_id))
-        .collect::<BTreeSet<_>>();
-    if matched.len() == 1 { matched } else { BTreeSet::new() }
-}
-
-pub(crate) fn focused_target_document_ids_from_query_ir(
-    query_ir: &QueryIR,
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-) -> BTreeSet<Uuid> {
-    focused_target_document_ids_from_query_ir_values(
-        query_ir,
-        document_index.values().flat_map(|document| {
-            [
-                document.title.as_deref(),
-                document.file_name.as_deref(),
-                Some(document.external_key.as_str()),
-            ]
-            .into_iter()
-            .flatten()
-            .map(move |value| (document.document_id, value))
-        }),
-    )
-}
-
 /// Does the user's question request retrieval to span multiple documents?
 ///
-/// With a compiled IR in scope the answer is direct: `ir.is_multi_document()`
-/// covers the `QueryScope::MultiDocument` case (compare / contrast /
-/// "across documents" / "which two" and so on) by construction. The three
-/// bilingual marker lists below are kept only as a transitional fallback
-/// for callers the IR plumbing hasn't reached yet; once every caller
-/// threads IR through, the fallback disappears.
-pub(crate) fn question_requests_multi_document_scope(question: &str, ir: Option<&QueryIR>) -> bool {
-    if let Some(ir) = ir {
-        return ir.is_multi_document();
-    }
-    let lowered = question.to_lowercase();
-    if [
-        "compare",
-        "contrast",
-        "difference between",
-        "different from",
-        "differ from",
-        "versus",
-        " vs ",
-        "between",
-        "across documents",
-        "across articles",
-        "combine documents",
-        "combine articles",
-        "multiple documents",
-        "multiple articles",
-        "several documents",
-        "several articles",
-        "both documents",
-        "both articles",
-        "different documents",
-        "different articles",
-        "сравни",
-        "сравните",
-        "отличается от",
-        "отличие между",
-        "разница между",
-        "между документ",
-        "между стать",
-        "нескольких документ",
-        "нескольких стать",
-        "разных документ",
-        "разных стать",
-        "оба документ",
-        "обе стать",
-        "обоих документ",
-        "обеих стать",
-        "отдельно",
-        "separately",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
-    {
-        return true;
-    }
-
-    let asks_multiple_items = [
-        "which two",
-        "which three",
-        "two technologies",
-        "three technologies",
-        "two items",
-        "three items",
-        "какие две",
-        "какие три",
-        "две технологии",
-        "три технологии",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker));
-    let asks_role_pairing = [
-        "fit those roles",
-        "should it combine",
-        "combine into that stack",
-        "fit those roles",
-        "and which one",
-        "эти роли",
-        "в этот стек",
-        "нужно сочетать",
-        "следует объединить",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker));
-
-    asks_multiple_items || asks_role_pairing
+/// Answered directly from the compiled IR — `ir.is_multi_document()` covers
+/// the `QueryScope::MultiDocument` case (compare / contrast / "across
+/// documents" / "which two" and so on) by construction. Without IR the
+/// caller has no canonical signal, so the answer is `false`.
+pub(crate) fn question_requests_multi_document_scope(
+    _question: &str,
+    ir: Option<&QueryIR>,
+) -> bool {
+    ir.is_some_and(QueryIR::is_multi_document)
 }
 
 pub(crate) fn focused_answer_document_id(
@@ -393,19 +329,6 @@ pub(crate) fn concise_document_subject_label(document_label: &str) -> String {
         return document_label.to_string();
     }
 
-    let normalized_lower = normalized.to_lowercase();
-    match normalized_lower.as_str() {
-        "large language model" => return "Large language model".to_string(),
-        "vector database" => return "Vector database".to_string(),
-        "knowledge graph" => return "Knowledge graph".to_string(),
-        "information retrieval" => return "Information retrieval".to_string(),
-        "graph database" => return "Graph database".to_string(),
-        "retrieval augmented generation" => return "Retrieval-augmented generation".to_string(),
-        "rust programming language" => return "Rust".to_string(),
-        "transformer deep learning" => return "Transformer".to_string(),
-        _ => {}
-    }
-
     if normalized
         .split_whitespace()
         .skip(1)
@@ -444,11 +367,6 @@ fn document_label_focus_markers(document_label: &str) -> Vec<&'static str> {
     if let Some(extension_marker) = document_label_extension_marker(&lowered_label) {
         markers.push(extension_marker);
     }
-    for marker in DOCUMENT_LABEL_KEYWORD_MARKERS {
-        if lowered_label.contains(marker) {
-            markers.push(*marker);
-        }
-    }
     markers
 }
 
@@ -472,10 +390,6 @@ fn document_label_extension_marker(lowered_label: &str) -> Option<&'static str> 
 }
 
 fn question_mentions_document_marker(lowered_question: &str, marker: &str) -> bool {
-    if DOCUMENT_LABEL_KEYWORD_MARKERS.contains(&marker) {
-        return lowered_question.contains(marker);
-    }
-
     let extension_marker = format!(".{marker}");
     let extension_match = lowered_question.match_indices(&extension_marker).any(|(start, _)| {
         let end = start + extension_marker.len();
@@ -491,24 +405,8 @@ fn question_mentions_document_marker(lowered_question: &str, marker: &str) -> bo
 }
 
 fn question_mentions_single_source_anchor(question: &str) -> bool {
-    let lowered = question.to_lowercase();
-    [
-        "according to",
-        "in the article",
-        "in this article",
-        "in the document",
-        "this article",
-        "this document",
-        "the article",
-        "the document",
-        "в статье",
-        "в этом документе",
-        "в документе",
-        "эта статья",
-        "этот документ",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
+    let _ = question;
+    false
 }
 
 fn title_case_document_word(word: &str) -> String {
@@ -531,13 +429,9 @@ fn title_case_document_word(word: &str) -> String {
 mod tests {
     use uuid::Uuid;
 
-    use crate::domains::query_ir::{
-        DocumentHint, EntityMention, QueryAct, QueryIR, QueryLanguage, QueryScope,
-    };
-
     use super::{
-        explicit_document_reference_literals, explicit_target_document_ids_from_values,
-        focused_target_document_ids_from_query_ir_values,
+        explicit_document_reference_literal_is_present, explicit_document_reference_literals,
+        explicit_target_document_ids_from_values,
     };
 
     #[test]
@@ -545,10 +439,20 @@ mod tests {
         let csv_id = Uuid::now_v7();
         let xlsx_id = Uuid::now_v7();
         let matched = explicit_target_document_ids_from_values(
-            "В people-100.csv какая должность у Shelby Terrell?",
+            "In people-100.csv what is Shelby Terrell's job title?",
             [(csv_id, "people-100.csv"), (xlsx_id, "people-100.xlsx")],
         );
         assert_eq!(matched, [csv_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_do_not_fuzzy_match_different_file_reference() {
+        let organizations_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "In people-100.csv what is Shelby Terrell's job title?",
+            [(organizations_id, "organizations-100.csv")],
+        );
+        assert!(matched.is_empty());
     }
 
     #[test]
@@ -556,20 +460,93 @@ mod tests {
         let csv_id = Uuid::now_v7();
         let xlsx_id = Uuid::now_v7();
         let matched = explicit_target_document_ids_from_values(
-            "Что есть в people-100?",
+            "What is in people-100?",
             [(csv_id, "people-100.csv"), (xlsx_id, "people-100.xlsx")],
         );
         assert_eq!(matched, [csv_id, xlsx_id].into_iter().collect());
     }
 
     #[test]
+    fn explicit_target_document_ids_match_unicode_title_phrase_inside_long_question() {
+        let return_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "How do I complete возврат тары and what matters for the empty container?",
+            [(return_id, "Возврат тары")],
+        );
+        assert_eq!(matched, [return_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_match_separator_normalized_document_stems() {
+        let monitoring_id = Uuid::now_v7();
+        let schema_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "What alert rules are defined in the monitoring dashboard documentation?",
+            [(monitoring_id, "monitoring_dashboard.pdf"), (schema_id, "database_schema.pdf")],
+        );
+        assert_eq!(matched, [monitoring_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_keep_longest_separator_match_canonical() {
+        let generic_id = Uuid::now_v7();
+        let specific_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "Summarize the monitoring dashboard guide.",
+            [
+                (generic_id, "monitoring_dashboard.pdf"),
+                (specific_id, "monitoring_dashboard_guide.pdf"),
+            ],
+        );
+        assert_eq!(matched, [specific_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_reject_partial_title_token_overlap() {
+        let time_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "How should operators register рабочего времени at store opening?",
+            [(time_id, "Регистрация рабочего времени")],
+        );
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_keep_ambiguous_exact_title_matches_tied() {
+        let return_container_id = Uuid::now_v7();
+        let return_product_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "Explain return process",
+            [(return_container_id, "Return process"), (return_product_id, "Return process")],
+        );
+        assert_eq!(matched, [return_container_id, return_product_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_reject_one_token_generic_overlap() {
+        let policy_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "What status should I use?",
+            [(policy_id, "Status Policy")],
+        );
+        assert!(matched.is_empty());
+    }
+
+    #[test]
     fn extracts_explicit_document_reference_literals_from_question() {
         assert_eq!(
             explicit_document_reference_literals(
-                "У Shelby Terrell в people-100.csv какой job title и что есть в sample-heavy-1.xls?"
+                "What is Shelby Terrell's job title in people-100.csv and what is in sample-heavy-1.xls?"
             ),
             vec!["people-100.csv".to_string(), "sample-heavy-1.xls".to_string()]
         );
     }
 
+    #[test]
+    fn explicit_document_reference_literal_matches_path_basename() {
+        assert!(explicit_document_reference_literal_is_present(
+            "people-100.csv",
+            ["exports/archive/people-100.csv"]
+        ));
+    }
 }

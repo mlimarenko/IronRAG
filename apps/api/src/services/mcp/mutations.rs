@@ -321,7 +321,7 @@ pub async fn submit_web_ingest_run(
                 boundary_policy: request.boundary_policy,
                 max_depth: request.max_depth,
                 max_pages: request.max_pages,
-                extra_ignore_patterns: request.extra_ignore_patterns,
+                url_filter: request.url_filter,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "mcp".to_string(),
                 idempotency_key: request.idempotency_key,

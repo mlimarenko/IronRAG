@@ -200,6 +200,58 @@ describe('DocumentEditorShell', () => {
     expect(container.textContent).toContain('Tabs preserved · Tab size 4');
   });
 
+  it('opens plain text source in the raw textarea instead of ProseMirror', async () => {
+    const onSave = vi.fn();
+
+    await renderShell({
+      documentName: 'chat.txt',
+      markdown: 'line 1\nline 2\n',
+      onSave,
+      sourceFormat: 'txt',
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    expect(textarea?.value).toBe('line 1\nline 2\n');
+    expect(getLatestEditorConfig()?.content).toBe('');
+    expect(container.textContent).toContain('Text');
+    expect(container.textContent).not.toContain('Code files keep a monospace workspace');
+
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      valueSetter?.call(textarea, 'line 1\nline 2\nline 3\n');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await flushUi();
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const saveButton = buttons.at(-1);
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onSave).toHaveBeenCalledWith('line 1\nline 2\nline 3\n');
+  });
+
+  it('does not pass large code source into ProseMirror', async () => {
+    const largeSource = `${'use uuid::Uuid;\n'.repeat(40000)}`;
+
+    await renderShell({
+      documentName: 'large.rs',
+      markdown: largeSource,
+      sourceFormat: 'rs',
+    });
+
+    expect(container.querySelector('textarea')?.value).toBe(largeSource);
+    expect(getLatestEditorConfig()?.content).toBe('');
+  });
+
   it('becomes dirty only after a real content update', async () => {
     editorState.markdown = '## Employees\n\n| Name | Team |\n| --- | --- |\n| Elena | AI |';
 

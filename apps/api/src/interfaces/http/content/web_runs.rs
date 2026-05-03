@@ -15,7 +15,7 @@ use crate::{
         router_support::ApiError,
     },
     services::ingest::web::CreateWebIngestRunCommand,
-    shared::web::ingest::WebIngestIgnorePattern,
+    shared::web::ingest::WebIngestUrlFilter,
 };
 
 #[derive(Debug, Deserialize)]
@@ -42,8 +42,7 @@ pub(super) struct CreateWebIngestRunRequest {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
-    #[serde(default)]
-    pub extra_ignore_patterns: Vec<WebIngestIgnorePattern>,
+    pub url_filter: WebIngestUrlFilter,
     pub idempotency_key: Option<String>,
 }
 
@@ -73,7 +72,7 @@ pub(super) async fn create_web_ingest_run(
                 boundary_policy: request.boundary_policy,
                 max_depth: request.max_depth,
                 max_pages: request.max_pages,
-                extra_ignore_patterns: request.extra_ignore_patterns,
+                url_filter: request.url_filter,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
                 idempotency_key: request.idempotency_key,

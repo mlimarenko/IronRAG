@@ -349,13 +349,9 @@ fn extract_entities_from_previous_answer(answer: &str) -> Vec<String> {
         }
     }
 
-    // Bare capitalised tokens — used to need a 46-word English COMMON_WORDS
-    // filter to strip "The", "This", etc. The IR compiler now consumes
-    // prior turns directly (see `CompileHistoryTurn`), so this path
-    // feeds only the coreference resolver and false positives there
-    // are acceptable: a spurious "Both" in the entity list can only
-    // ever cause a missed follow-up-sharpening, never a wrong answer.
-    // A language-agnostic length + capitalisation heuristic is enough.
+    // Bare capitalised tokens fed to the coreference resolver; false
+    // positives (spurious "Both" etc.) only cause a missed follow-up-
+    // sharpening, never a wrong answer.
     for word in answer.split_whitespace() {
         let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
         if clean.chars().count() >= 4 && clean.chars().next().is_some_and(char::is_uppercase) {
@@ -579,16 +575,9 @@ fn conversation_turn_speaker(turn_kind: &QueryTurnKind) -> &'static str {
 
 /// Length-based follow-up heuristic used **only** to decide whether the
 /// retrieval stage should sharpen the current query with entities from
-/// the previous answer. This used to be an explicit keyword list of
-/// follow-up markers and pronouns in Russian and English (78 entries
-/// total); those lists leaked a language-specific lexicon into routing.
-///
-/// The real follow-up signal now comes from the compiled `QueryIR`
-/// (`QueryAct::FollowUp` and non-empty `conversation_refs`). This short
-/// heuristic is retained because the retrieval stage runs **before**
-/// `QueryCompiler` for now: a tiny question with prior turns almost
-/// always benefits from entity expansion, a longer one rarely does.
-/// Length is language-agnostic and does not hardcode any lexicon.
+/// the previous answer. Runs before `QueryCompiler`, so a short question
+/// with prior turns almost always benefits from entity expansion.
+/// Length cutoff is language-agnostic.
 fn is_context_dependent_follow_up(value: &str) -> bool {
     let tokens = value
         .split(|ch: char| !ch.is_alphanumeric())

@@ -63,6 +63,7 @@ pub mod query;
 pub mod router_support;
 pub mod runtime;
 mod ui_support;
+pub mod webhook;
 
 use axum::{Router, routing::get};
 
@@ -90,4 +91,5 @@ pub fn router() -> Router<crate::app::state::AppState> {
         .merge(ops::router())
         .merge(audit::router())
         .merge(mcp::router())
+        .merge(webhook::router())
 }

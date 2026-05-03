@@ -109,6 +109,11 @@ function humanizePageState(state: string, t: TFunction): string {
   return translated === key ? state.replaceAll("_", " ") : translated;
 }
 
+function humanizeUrlFilterMode(mode: string | undefined, t: TFunction): string {
+  if (mode === "allowlist") return t("documents.urlFilterModeAllowlist");
+  return t("documents.urlFilterModeBlocklist");
+}
+
 function pagePrimaryUrl(page: WebIngestRunPageItem): string {
   return (
     page.finalUrl ??
@@ -327,13 +332,11 @@ export function WebRunsPanel({
       )}
 
       {/* Card + single ScrollArea is the whole scroll contract. The
-          previous revision wrapped the inner page-list in a SECOND
-          Radix ScrollArea with `max-h-[26rem]` — nested scroll areas
-          trap the wheel event on the inner one and make the outer run
-          list look "frozen" once a single run is expanded. Also
-          dropped: duplicate "Обновить запуски" button and
-          "Запуски веб-загрузки {count}" header that DocumentsPageHeader
-          already renders. */}
+          single ScrollArea wraps the whole list — nesting a second
+          ScrollArea around the page-list traps the wheel event on the
+          inner one and makes the outer run list look "frozen" once a
+          single run is expanded. Refresh button and run-count header
+          live in DocumentsPageHeader and are not duplicated here. */}
       <div className="m-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card">
         <ScrollArea className="min-h-0 flex-1">
           <div className="divide-y">
@@ -376,6 +379,11 @@ export function WebRunsPanel({
                             {t("documents.maxPages")}: {run.maxPages}
                           </span>
                         )}
+                        <span>
+                          {humanizeUrlFilterMode(run.urlFilterMode, t)} ·{" "}
+                          {t("documents.urlFilterPatterns")}:{" "}
+                          {(run.urlPatterns?.length ?? 0).toLocaleString()}
+                        </span>
                         <span>
                           {(run.counts?.processed ?? 0).toLocaleString()} /{" "}
                           {(run.counts?.discovered ?? 0).toLocaleString()}{" "}
@@ -477,12 +485,12 @@ export function WebRunsPanel({
                             />
                           </div>
                           <div className="flex min-w-0 flex-wrap gap-1">
-                            {/* Counts removed from the filter chips — the
-                                summary strip above (Обработано / Исключено /
-                                Подходит / Найдено) already carries the
-                                numbers, and having them twice pushed the
-                                filter row over multiple lines on narrow
-                                viewports. Chips are now labels-only. */}
+                            {/* Filter chips render as labels only —
+                                counts already live in the summary strip
+                                above (processed / excluded / matched /
+                                found), so duplicating them on the chips
+                                pushed the filter row across multiple
+                                lines on narrow viewports. */}
                             <button
                               type="button"
                               className={cn(

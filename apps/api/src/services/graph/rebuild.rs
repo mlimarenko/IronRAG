@@ -26,8 +26,8 @@ use crate::{
             RuntimeStageUsageSummary, embed_runtime_graph_edges, embed_runtime_graph_nodes,
             resolve_effective_provider_profile,
         },
-        knowledge::graph_stream::invalidate_graph_topology_cache,
     },
+    shared::extraction::text_quality::is_graph_extraction_text_eligible,
 };
 
 pub async fn rebuild_library_graph(
@@ -100,6 +100,9 @@ pub async fn rebuild_library_graph(
         else {
             continue;
         };
+        if !is_graph_reconcile_chunk_text_eligible(&chunk_row.normalized_text) {
+            continue;
+        }
         let document = DocumentRow {
             id: document_row.id,
             library_id,
@@ -336,36 +339,22 @@ pub async fn reconcile_revision_graph(
     let merge_scope = GraphMergeScope::new(library_id, projection_scope.projection_version)
         .with_lifecycle(Some(revision_id), activated_by_attempt_id);
 
-    // Parallelize the per-chunk merge fan-out so the document's graph
-    // contribution does not stall on a sequential N×(SELECT+UPSERT+INSERT)
-    // walk. Empirically this loop was the dominant CPU starvation on prod
-    // workers at 0.2.2: each chunk burns ~7 sequential DB round-trips per
-    // entity + ~6 per relation, all on the async runtime, blocking the
-    // tokio worker threads from making progress on heartbeat / cancel poll
-    // / dispatcher claims. By driving the chunk fan-out through
-    // `buffer_unordered(MERGE_PARALLELISM)` we let independent chunks
-    // overlap their DB waits and free the runtime to service other tasks.
-    //
     // Each per-chunk future captures only what it needs through `Arc`-ed
     // shared state to keep capture cost down (the postgres pool clones
     // cheaply, but `DocumentRow` and the GraphQualityGuardService get one
     // explicit `Arc` apiece). We also consume `latest_records_by_chunk` by
     // value via `into_values()` and `mem::take` the heavy
     // `normalized_output_json` `serde_json::Value` straight into the
-    // deserializer — eliminating the per-chunk deep clone that previously
-    // dominated allocator pressure on documents with many chunks.
-    // Lowered from 8 to 2 after a hot-stuck incident on the reference
-    // library: 16 concurrent documents × 8 parallel chunk merges each
-    // fan out into ~128 concurrent graph-merge operations, each of
-    // which does many small sequential DB round-trips plus non-trivial
-    // CPU work between them. Under load this was enough to saturate
-    // the tokio runtime hard enough that heartbeat and stage timeout
-    // tasks starved, and the worker pegged all cores for >15 minutes
-    // with no observable progress. Parallelism 2 keeps throughput
-    // reasonable while leaving the runtime responsive. Revisit once
-    // the per-chunk merge body is profiled and the CPU hot spot is
-    // explicitly offloaded into `spawn_blocking`.
-    const MERGE_PARALLELISM: usize = 2;
+    // deserializer — eliminating the per-chunk deep clone that dominates
+    // allocator pressure on documents with many chunks.
+    //
+    // Keep the database merge sequential inside one revision. Different
+    // chunks routinely emit the same canonical entity keys, and concurrent
+    // `ON CONFLICT DO UPDATE` batches can deadlock while taking row locks in
+    // different orders. Extraction still happens before this step; this
+    // serialization only covers the canonical graph merge. Revisit only with
+    // a single canonical lock-ordering or revision-wide aggregation design.
+    const MERGE_PARALLELISM: usize = 1;
     let pool = state.persistence.postgres.clone();
     let quality_guard = state.bulk_ingest_hardening_services.graph_quality_guard.clone();
     let document_arc = Arc::new(document.clone());
@@ -405,6 +394,15 @@ pub async fn reconcile_revision_graph(
                 );
                 return Ok::<ChunkMergeOutcome, anyhow::Error>(ChunkMergeOutcome::default());
             };
+            if !is_graph_reconcile_chunk_text_eligible(&chunk_row.content) {
+                tracing::info!(
+                    %doc_id,
+                    %chunk_id,
+                    elapsed_ms = merge_started.elapsed().as_millis() as u64,
+                    "graph merge chunk skipped — current chunk text is not graph-eligible"
+                );
+                return Ok::<ChunkMergeOutcome, anyhow::Error>(ChunkMergeOutcome::default());
+            }
             let mut record = record;
             let normalized = std::mem::take(&mut record.normalized_output_json);
             let recovery = extraction_recovery_summary_from_record(&record);
@@ -631,6 +629,10 @@ pub async fn reconcile_revision_graph(
     })
 }
 
+fn is_graph_reconcile_chunk_text_eligible(text: &str) -> bool {
+    is_graph_extraction_text_eligible(text)
+}
+
 #[cfg(test)]
 fn count_surviving_documents(records: &[repositories::RuntimeGraphExtractionRecordRow]) -> usize {
     records.iter().map(|record| record.document_id).collect::<BTreeSet<_>>().len()
@@ -664,21 +666,6 @@ async fn preserve_runtime_graph_snapshot(
         )
         .await
         .with_context(|| format!("failed to preserve ready graph snapshot during {context}"))?;
-        if let Err(error) = invalidate_graph_topology_cache(
-            &state.persistence.redis,
-            library_id,
-            projection_version,
-        )
-        .await
-        {
-            tracing::warn!(
-                %library_id,
-                projection_version,
-                error = format!("{error:#}"),
-                %context,
-                "graph topology cache invalidation failed while preserving graph snapshot",
-            );
-        }
         return Ok(GraphProjectionOutcome {
             projection_version,
             node_count: usize::try_from(snapshot.node_count).unwrap_or_default(),
@@ -815,5 +802,27 @@ mod tests {
         ];
 
         assert_eq!(count_surviving_documents(&records), 2);
+    }
+
+    #[test]
+    fn graph_reconcile_rejects_low_confidence_current_chunk_text() {
+        let text = concat!(
+            "overview status alpha beta gamma. ",
+            "<!-- formula-not-decoded --> ",
+            "abCD4efGH hiJKlmNO pQrST uvWXyZab. ",
+            "cdEFGh3Ij klMNOprs tuVWxyZq mnOPqRst."
+        );
+
+        assert!(!is_graph_reconcile_chunk_text_eligible(text));
+    }
+
+    #[test]
+    fn graph_reconcile_accepts_code_like_current_chunk_text() {
+        let text = concat!(
+            "POST /api/v1/projects getProjectById renderHTMLNode ",
+            "AUTH_TOKEN_TIMEOUT_MS status_code retry_count"
+        );
+
+        assert!(is_graph_reconcile_chunk_text_eligible(text));
     }
 }

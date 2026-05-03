@@ -292,12 +292,6 @@ fn node_aliases(node: &RuntimeGraphNodeRow) -> Vec<String> {
         .collect()
 }
 
-// `check_alias_match` removed in the tech-debt sweep — every caller
-// has migrated to `check_alias_match_precomputed` below which takes
-// pre-normalised label / alias vectors. The per-pair wrapper that
-// recomputed NFKC on every invocation was the O(N²) hot spot its
-// replacement was written to avoid.
-
 /// Pairwise alias match with the normalized label
 /// and normalized-aliases vectors provided by the caller. Used by the
 /// O(N²) pass in [`find_merge_candidates`] so the expensive NFKC pass
@@ -560,8 +554,8 @@ async fn execute_merge(
 ///
 /// For each duplicate group, the oldest row (by `created_at`, then `id`)
 /// survives. Every soft reference to a loser edge id is repointed at the
-/// survivor (`runtime_graph_evidence`) or deleted (`runtime_graph_canonical_summary`,
-/// `runtime_vector_target`), then the loser rows are dropped.
+/// survivor (`runtime_graph_evidence`) or deleted
+/// (`runtime_graph_canonical_summary`), then the loser rows are dropped.
 ///
 /// `support_count` is intentionally **not** summed onto the survivor here
 /// — it is denormalized from active evidence and any drift would be wrong.
@@ -570,10 +564,9 @@ async fn execute_merge(
 /// reflects the true count of active evidence after repointing.
 ///
 /// All mutations across `runtime_graph_edge`,
-/// `runtime_graph_evidence`, `runtime_graph_canonical_summary`, and
-/// `runtime_vector_target` run inside one SQL statement using Postgres
-/// data-modifying CTEs, which guarantees they execute exactly once against
-/// a single snapshot of `runtime_graph_edge`.
+/// `runtime_graph_evidence` and `runtime_graph_canonical_summary` run inside
+/// one SQL statement using Postgres data-modifying CTEs, which guarantees they
+/// execute exactly once against a single snapshot of `runtime_graph_edge`.
 ///
 /// Returns the surviving edge ids that absorbed at least one duplicate, so
 /// the caller can target the support-count recompute precisely.
@@ -621,14 +614,6 @@ async fn collapse_parallel_edges_for_node(
              where s.library_id = $1
                and s.target_kind = 'edge'
                and s.target_id = losers.loser_id
-            returning 1
-        ),
-        drop_vectors as (
-            delete from runtime_vector_target v
-             using losers
-             where v.library_id = $1
-               and v.target_kind = 'edge'
-               and v.target_id = losers.loser_id
             returning 1
         ),
         delete_losers as (

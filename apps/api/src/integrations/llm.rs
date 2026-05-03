@@ -103,7 +103,7 @@ pub struct ChatResponse {
 }
 
 // =============================================================================
-// Tool-use types (used by the in-app assistant agent loop and external agents)
+// Tool-use types (used by external MCP agents and tool-capable providers)
 // =============================================================================
 
 /// JSON-schema description of a single tool the LLM may call.
@@ -123,9 +123,10 @@ pub struct ChatToolCall {
     pub arguments_json: String,
 }
 
-/// Multi-turn conversation message used by the agent loop. Mirrors the
-/// OpenAI chat.completions message shape so the same wire format works for
-/// every OpenAI-compatible provider (OpenAI, Qwen, DeepSeek, Ollama, etc.).
+/// Multi-turn conversation message used by answer calls and external
+/// tool-capable agents. Mirrors the OpenAI chat.completions message shape
+/// so the same wire format works for every OpenAI-compatible provider
+/// (OpenAI, Qwen, DeepSeek, Ollama, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// One of: "system", "user", "assistant", "tool".
@@ -220,7 +221,7 @@ pub struct ToolUseResponse {
     pub model_name: String,
     /// Final text output. Populated when finish_reason is "stop".
     pub output_text: String,
-    /// Tool calls the model wants the agent loop to execute. Populated when
+    /// Tool calls the model wants the caller to execute. Populated when
     /// finish_reason is "tool_calls".
     pub tool_calls: Vec<ChatToolCall>,
     pub finish_reason: Option<String>,
@@ -234,6 +235,7 @@ pub struct EmbeddingRequest {
     pub input: String,
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +245,7 @@ pub struct EmbeddingBatchRequest {
     pub inputs: Vec<String>,
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -554,6 +557,27 @@ impl UnifiedGateway {
             .unwrap_or_default()
     }
 
+    fn embedding_request_body(
+        model_name: &str,
+        input: serde_json::Value,
+        extra_parameters_json: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut body = serde_json::Map::new();
+        body.insert("model".to_string(), serde_json::Value::String(model_name.to_string()));
+        body.insert("input".to_string(), input);
+
+        if let Some(extra) = extra_parameters_json.as_object() {
+            for (key, value) in extra {
+                if key == "model" || key == "input" {
+                    continue;
+                }
+                body.insert(key.clone(), value.clone());
+            }
+        }
+
+        serde_json::Value::Object(body)
+    }
+
     async fn embed_many_sequential(
         &self,
         request: EmbeddingBatchRequest,
@@ -574,6 +598,7 @@ impl UnifiedGateway {
                     input,
                     api_key_override: request.api_key_override.clone(),
                     base_url_override: request.base_url_override.clone(),
+                    extra_parameters_json: request.extra_parameters_json.clone(),
                 })
                 .await?;
             if let Some(value) =
@@ -1012,10 +1037,11 @@ impl LlmGateway for UnifiedGateway {
             request_builder
         };
         let response = request_builder
-            .json(&serde_json::json!({
-                "model": request.model_name,
-                "input": request.input,
-            }))
+            .json(&Self::embedding_request_body(
+                &request.model_name,
+                serde_json::Value::String(request.input),
+                &request.extra_parameters_json,
+            ))
             .send()
             .await?;
 
@@ -1067,6 +1093,7 @@ impl LlmGateway for UnifiedGateway {
                     input: request.inputs[0].clone(),
                     api_key_override: request.api_key_override.clone(),
                     base_url_override: request.base_url_override.clone(),
+                    extra_parameters_json: request.extra_parameters_json.clone(),
                 })
                 .await?;
             return Ok(EmbeddingBatchResponse {
@@ -1090,10 +1117,11 @@ impl LlmGateway for UnifiedGateway {
             request_builder
         };
         let response = request_builder
-            .json(&serde_json::json!({
-                "model": request.model_name,
-                "input": request.inputs,
-            }))
+            .json(&Self::embedding_request_body(
+                &request.model_name,
+                serde_json::json!(request.inputs),
+                &request.extra_parameters_json,
+            ))
             .send()
             .await?;
 
@@ -1344,6 +1372,28 @@ mod tests {
     }
 
     #[test]
+    fn embedding_request_body_includes_extra_parameters_without_overriding_core_fields() {
+        let body = UnifiedGateway::embedding_request_body(
+            "text-embedding-3-large",
+            serde_json::json!(["alpha", "beta"]),
+            &serde_json::json!({
+                "dimensions": 1024,
+                "encoding_format": "float",
+                "model": "ignored",
+                "input": "ignored"
+            }),
+        );
+
+        assert_eq!(
+            body.get("model").and_then(serde_json::Value::as_str),
+            Some("text-embedding-3-large")
+        );
+        assert_eq!(body.get("input"), Some(&serde_json::json!(["alpha", "beta"])));
+        assert_eq!(body.get("dimensions").and_then(serde_json::Value::as_i64), Some(1024));
+        assert_eq!(body.get("encoding_format").and_then(serde_json::Value::as_str), Some("float"));
+    }
+
+    #[test]
     fn retries_upstream_json_parse_failures_only_for_valid_local_json() {
         let body = serde_json::json!({
             "error": {
@@ -1400,15 +1450,15 @@ mod tests {
         let mut usage_json = serde_json::json!({});
         let mut emitted = String::new();
         let done = consume_openai_compatible_stream_frame(
-            r#"data: {"choices":[{"delta":{"content":"Привет"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
             &mut output_text,
             &mut usage_json,
             &mut |delta| emitted.push_str(&delta),
         )
         .expect("stream frame should parse");
         assert!(!done);
-        assert_eq!(output_text, "Привет");
-        assert_eq!(emitted, "Привет");
+        assert_eq!(output_text, "Hello");
+        assert_eq!(emitted, "Hello");
         assert_eq!(usage_json, serde_json::json!({}));
     }
 

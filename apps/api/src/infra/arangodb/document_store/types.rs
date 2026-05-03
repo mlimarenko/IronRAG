@@ -49,6 +49,8 @@ pub struct KnowledgeRevisionRow {
     pub byte_size: i64,
     pub normalized_text: Option<String>,
     pub text_checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_checksum: Option<String>,
     pub text_state: String,
     pub vector_state: String,
     pub graph_state: String,
@@ -101,6 +103,20 @@ pub struct KnowledgeChunkRow {
     pub vector_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raptor_level: Option<i32>,
+    /// Earliest record timestamp aggregated into this chunk (JSONL ingest
+    /// only; None for non-temporal sources). Mirrored from
+    /// `content_chunk.occurred_at` so AQL FILTER can hard-bound by time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Latest record timestamp aggregated into this chunk. Equals
+    /// `occurred_at` for single-record chunks; None when `occurred_at`
+    /// is None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

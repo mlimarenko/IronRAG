@@ -20,8 +20,8 @@ use crate::{
     },
     interfaces::http::router_support::ApiError,
     services::content::source_access::{derive_content_source_file_name, describe_content_source},
-    services::knowledge::graph_stream::invalidate_graph_topology_cache,
     services::knowledge::service::PromoteKnowledgeDocumentCommand,
+    services::ops::service::{DocumentKnowledgeSignals, classify_document_knowledge_signals},
 };
 
 use super::{
@@ -422,11 +422,9 @@ impl ContentService {
 
     /// Canonical paginated read for the inspector's prepared-segments
     /// tab. Returns `(page_items, total_across_all_pages)`. Pagination
-    /// is pushed into AQL (`LIMIT offset, limit`) and only the
-    /// requested window materializes full block rows — previously the
-    /// handler loaded every block into memory, built the full list,
-    /// then sliced with `paginate_items`, which cost ~1.2 s of wall
-    /// time and a multi-MB internal Arango payload on PDF docs. The
+    /// is pushed into AQL (`LIMIT offset, limit`) so only the
+    /// requested window materializes full block rows (loading all blocks
+    /// costs ~1.2 s and a multi-MB Arango payload on PDF docs). The
     /// accompanying chunk read is projected to `(chunk_id,
     /// support_block_ids)` only; we never need the chunk text here.
     pub async fn list_prepared_segments_page(
@@ -563,10 +561,9 @@ impl ContentService {
         };
         let effective_readiness_row =
             readable_revision_row.clone().or_else(|| active_revision_row.clone());
-        // Slim count-only projection. The inspector surface only reads
-        // `prepared_segment_count` and `technical_fact_count`; the full
-        // `outline_json` blob (~4 MB on PDF-ingested docs) used to be
-        // pulled here and thrown away.
+        // Slim count-only projection: inspector only needs
+        // `prepared_segment_count` and `technical_fact_count`, not the
+        // full `outline_json` blob (~4 MB on PDF-ingested docs).
         let prepared_revision_row = counts_res
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .and_then(|counts| {
@@ -976,6 +973,35 @@ impl ContentService {
             );
         }
 
+        // Fire-and-forget outbound webhook fanout for `document.deleted`.
+        // Only publish if this call performed the actual state transition from a
+        // non-deleted state — re-deleting an already-deleted document must not
+        // produce a spurious second event.
+        // Errors are logged at WARN level and do NOT fail the delete operation.
+        if current_document.document_state != "deleted" {
+            let event = crate::domains::webhook::WebhookEvent {
+                event_type: "document.deleted".to_string(),
+                event_id: format!("document.deleted:{}:{}", document_id, uuid::Uuid::now_v7()),
+                workspace_id: document.workspace_id,
+                library_id: Some(document.library_id),
+                payload_json: serde_json::json!({
+                    "document_id": document_id,
+                    "library_id": document.library_id,
+                }),
+            };
+            let pg = state.persistence.postgres.clone();
+            let errors =
+                crate::services::webhook::outbound::publish_webhook_event(&pg, &event).await;
+            for err in &errors {
+                tracing::warn!(
+                    %document_id,
+                    library_id = %document.library_id,
+                    error = %err,
+                    "outbound webhook publish error after delete_document_with_context"
+                );
+            }
+        }
+
         Ok(ContentDocument {
             id: document.id,
             workspace_id: document.workspace_id,
@@ -1376,6 +1402,16 @@ impl ContentService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let mut targets = targets;
+        targets.extend(
+            repositories::list_runtime_graph_document_node_targets_by_documents(
+                &state.persistence.postgres,
+                library_id,
+                &[document_id],
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
+        );
         Ok(DeletedDocumentGraphCleanup::from_targets(targets))
     }
 
@@ -1392,6 +1428,16 @@ impl ContentService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let mut targets = targets;
+        targets.extend(
+            repositories::list_runtime_graph_document_node_targets_by_documents(
+                &state.persistence.postgres,
+                library_id,
+                document_ids,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
+        );
         Ok(DeletedDocumentGraphCleanup::from_targets(targets))
     }
 
@@ -1446,6 +1492,18 @@ impl ContentService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        // Canonical summaries have no FK back to runtime_graph_node /
+        // runtime_graph_edge, so the prune above does not cascade. Drop any
+        // summary whose target was just deleted (or had been orphaned by an
+        // earlier failed cleanup that did not run this sweep).
+        let _ = repositories::delete_runtime_graph_canonical_summaries_for_orphan_targets(
+            &state.persistence.postgres,
+            library_id,
+            &cleanup.node_ids,
+            &cleanup.edge_ids,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         if !deleted_edge_keys.is_empty() {
             let _ = state
                 .arango_graph_store
@@ -1472,20 +1530,6 @@ impl ContentService {
                     "settlement refresh failed: document delete graph projection refresh failed: {error}"
                 ))
             })?;
-        if let Err(error) = invalidate_graph_topology_cache(
-            &state.persistence.redis,
-            library_id,
-            projection_scope.projection_version,
-        )
-        .await
-        {
-            tracing::warn!(
-                %library_id,
-                projection_version = projection_scope.projection_version,
-                error = format!("{error:#}"),
-                "graph topology cache invalidation failed after deleted-document graph convergence"
-            );
-        }
         Ok(())
     }
 }
@@ -1567,42 +1611,45 @@ fn build_document_list_entry(
 
     let deleted = row.document_state == "deleted" || row.deleted_at.is_some();
 
-    // readiness derivation — mirrors classify_document_knowledge_state on the
-    // Postgres+Arango signals we have on the list path. Graph-sparse is not
-    // distinguishable here from `readable` without the prepared revision, so
-    // we surface it as `readable` and let the inspector show the split.
-    let revision_failed = effective_revision.is_some_and(|revision| {
+    let revision_hard_failed = effective_revision.is_some_and(|revision| {
         matches!(revision.text_state.as_str(), "failed" | "unavailable")
             || revision.vector_state == "failed"
-            || revision.graph_state == "failed"
     });
     let revision_text_ready = effective_revision
         .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
     let revision_graph_ready = effective_revision
         .is_some_and(|revision| matches!(revision.graph_state.as_str(), "ready" | "graph_ready"));
+    let graph_failed = effective_revision.is_some_and(|revision| revision.graph_state == "failed");
 
-    let mutation_failed = row
-        .mutation_state
-        .as_deref()
-        .is_some_and(|state| matches!(state, "failed" | "conflicted" | "canceled"));
+    let mutation_failed =
+        row.mutation_state.as_deref().is_some_and(|state| matches!(state, "failed" | "conflicted"));
+    let mutation_canceled = row.mutation_state.as_deref().is_some_and(|state| state == "canceled");
     let mutation_inflight =
         row.mutation_state.as_deref().is_some_and(|state| matches!(state, "accepted" | "running"));
-    let job_failed =
-        row.job_queue_state.as_deref().is_some_and(|state| matches!(state, "failed" | "canceled"));
+    let job_failed = row.job_queue_state.as_deref().is_some_and(|state| state == "failed");
+    let job_canceled = row.job_queue_state.as_deref().is_some_and(|state| state == "canceled");
     let job_inflight =
         row.job_queue_state.as_deref().is_some_and(|state| matches!(state, "queued" | "leased"));
 
-    let readiness = if deleted {
-        "processing"
-    } else if revision_failed || mutation_failed || job_failed {
-        "failed"
-    } else if revision_graph_ready {
-        "graph_ready"
-    } else if revision_text_ready {
-        "readable"
+    let classification = if deleted {
+        None
     } else {
-        "processing"
+        Some(classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            processing_active: mutation_inflight || job_inflight,
+            hard_failure: revision_hard_failed || mutation_failed || job_failed,
+            canceled_terminal: mutation_canceled || job_canceled,
+            revision_text_ready,
+            revision_graph_ready,
+            preparation_ready: revision_graph_ready,
+            preparation_failed: false,
+            graph_failed,
+            observed_preparation_state: None,
+            block_count: None,
+            typed_fact_count: None,
+        }))
     };
+    let readiness =
+        classification.as_ref().map(|state| state.readiness_kind.as_str()).unwrap_or("processing");
 
     // Status derivation MUST mirror `DERIVED_STATUS_CASE_SQL` in
     // content_repository.rs — that CASE drives the status filter on the
@@ -1610,18 +1657,22 @@ fn build_document_list_entry(
     // classification and the row renders with another (observed as
     // "filter=ready shows queued rows" when a re-ingest job queues
     // against a still-readable head). Chain, SQL-aligned:
-    //   failed (mutation/revision/job) > leased → processing > readable
-    //   revision wins → ready > canceled > queued > inflight → processing
-    //   > zombie completed → failed > else queued.
-    let status = if readiness == "failed" || row.job_queue_state.as_deref() == Some("failed") {
+    //   hard failed (mutation/revision/job) > leased → processing >
+    //   readable revision wins → ready > canceled > queued > inflight →
+    //   processing > zombie completed → failed > else queued.
+    let status_hard_failed =
+        mutation_failed || job_failed || (revision_hard_failed && !revision_text_ready);
+    let status = if status_hard_failed {
         "failed"
     } else if row.job_queue_state.as_deref() == Some("leased") {
         // list path does not carry activity_status; surface as `processing`
         // and let the inspector refine the blocked/retrying/stalled split.
         "processing"
-    } else if matches!(readiness, "graph_ready" | "readable") {
+    } else if matches!(readiness, "graph_ready" | "graph_sparse" | "readable") {
         "ready"
-    } else if row.job_queue_state.as_deref() == Some("canceled") {
+    } else if row.job_queue_state.as_deref() == Some("canceled")
+        || row.mutation_state.as_deref() == Some("canceled")
+    {
         "canceled"
     } else if row.job_queue_state.as_deref() == Some("queued") {
         "queued"
@@ -1728,7 +1779,112 @@ fn revision_text_state_is_readable(state: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_document_display_name;
+    use super::{build_document_list_entry, resolve_document_display_name};
+    use crate::{
+        infra::arangodb::document_store::KnowledgeRevisionRow,
+        infra::repositories::content_repository::ContentDocumentListRow,
+    };
+    use chrono::Utc;
+    use rust_decimal::Decimal;
+    use uuid::Uuid;
+
+    fn list_row(
+        job_queue_state: Option<&str>,
+        mutation_state: Option<&str>,
+    ) -> ContentDocumentListRow {
+        let now = Utc::now();
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        ContentDocumentListRow {
+            id: document_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            external_key: "docs/sample.md".to_string(),
+            document_state: "active".to_string(),
+            created_at: now,
+            deleted_at: None,
+            active_revision_id: Some(revision_id),
+            readable_revision_id: Some(revision_id),
+            revision_title: Some("Sample document".to_string()),
+            revision_mime_type: Some("text/markdown".to_string()),
+            revision_byte_size: Some(128),
+            revision_source_uri: None,
+            revision_content_source_kind: Some("upload".to_string()),
+            revision_storage_key: None,
+            mutation_id: mutation_state.map(|_| Uuid::now_v7()),
+            mutation_state: mutation_state.map(str::to_string),
+            mutation_failure_code: None,
+            mutation_requested_at: mutation_state.map(|_| now),
+            job_id: job_queue_state.map(|_| Uuid::now_v7()),
+            job_queue_state: job_queue_state.map(str::to_string),
+            job_queued_at: job_queue_state.map(|_| now),
+            job_completed_at: job_queue_state.map(|_| now),
+            attempt_current_stage: None,
+            attempt_started_at: None,
+            attempt_finished_at: None,
+            attempt_failure_code: None,
+            attempt_retryable: None,
+            attempt_heartbeat_at: None,
+            cost_total: Decimal::ZERO,
+            cost_currency_code: "USD".to_string(),
+        }
+    }
+
+    fn revision(text_state: &str, vector_state: &str, graph_state: &str) -> KnowledgeRevisionRow {
+        let now = Utc::now();
+        let revision_id = Uuid::now_v7();
+        KnowledgeRevisionRow {
+            key: revision_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            revision_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_number: 1,
+            revision_state: "active".to_string(),
+            revision_kind: "upload".to_string(),
+            storage_ref: None,
+            source_uri: None,
+            mime_type: "text/markdown".to_string(),
+            checksum: "checksum".to_string(),
+            title: Some("Sample document".to_string()),
+            byte_size: 128,
+            normalized_text: Some("sample content".to_string()),
+            text_checksum: Some("text-checksum".to_string()),
+            image_checksum: None,
+            text_state: text_state.to_string(),
+            vector_state: vector_state.to_string(),
+            graph_state: graph_state.to_string(),
+            text_readable_at: Some(now),
+            vector_ready_at: None,
+            graph_ready_at: None,
+            superseded_by_revision_id: None,
+            created_at: now,
+        }
+    }
+
+    #[test]
+    fn list_entry_keeps_canceled_job_with_readable_revision_ready() {
+        let row = list_row(Some("canceled"), None);
+        let revision = revision("readable", "pending", "pending");
+
+        let entry = build_document_list_entry(&row, None, Some(&revision));
+
+        assert_eq!(entry.status, "ready");
+        assert_eq!(entry.readiness, "readable");
+    }
+
+    #[test]
+    fn list_entry_keeps_graph_failure_readable_for_search() {
+        let row = list_row(None, None);
+        let revision = revision("readable", "ready", "failed");
+
+        let entry = build_document_list_entry(&row, None, Some(&revision));
+
+        assert_eq!(entry.status, "ready");
+        assert_eq!(entry.readiness, "readable");
+    }
 
     #[test]
     fn relative_upload_external_key_becomes_visible_document_name() {

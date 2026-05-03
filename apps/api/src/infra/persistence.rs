@@ -125,8 +125,8 @@ pub async fn run_postgres_migrations(postgres: &PgPool) -> anyhow::Result<()> {
     // added without any Rust change, cargo may skip re-expanding the macro
     // and bake a stale migration list into the binary. If you ever see
     // `migration N was previously applied but is missing in the resolved
-    // migrations` at startup, nudge this function (e.g. touch a comment)
-    // before rebuilding so the proc macro re-scans `./migrations`.
+    // migrations` at startup, nudge this function before rebuilding so
+    // the proc macro re-scans `./migrations`.
     sqlx::migrate!("./migrations").run(postgres).await?;
     Ok(())
 }

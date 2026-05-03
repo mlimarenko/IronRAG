@@ -16,13 +16,14 @@ use crate::{
     },
     mcp_types::{
         McpChunkReference, McpContentSourceAccess, McpDocumentHit, McpEntityReference,
-        McpEvidenceReference, McpReadDocumentRequest, McpReadDocumentResponse, McpReadabilityState,
-        McpRelationReference, McpSearchDocumentsRequest, McpSearchDocumentsResponse,
-        McpTechnicalFactReference,
+        McpEvidenceReference, McpReadDocumentRequest, McpReadDocumentResponse, McpReadMode,
+        McpReadabilityState, McpRelationReference, McpSearchDocumentsRequest,
+        McpSearchDocumentsResponse, McpTechnicalFactReference,
     },
     services::mcp::support::{
         char_slice, encode_continuation_token, normalize_read_request, saturating_rank,
     },
+    shared::versioning::dotted_version_key,
 };
 
 use super::{
@@ -66,11 +67,9 @@ pub async fn search_documents(
         )
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let lexical_chunk_hits = state
-            .arango_search_store
-            .search_chunks(library.library.id, query, lexical_limit)
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        let lexical_chunk_hits =
+            search_chunks_with_query_variants(state, library.library.id, query, lexical_limit)
+                .await?;
         let embedding_context =
             resolve_search_embedding_context(state, library.library.id, query).await?;
         let vector_chunk_hits = if let Some(context) = embedding_context.as_ref() {
@@ -81,7 +80,9 @@ pub async fn search_documents(
                     &context.model_catalog_id.to_string(),
                     &context.query_vector,
                     lexical_limit.saturating_mul(2),
-                    Some(16),
+                    None,
+                    None,
+                    None,
                 )
                 .await
             {
@@ -125,12 +126,9 @@ pub async fn search_documents(
             let Some(chunk) = chunk_map.get(&hit.chunk_id) else {
                 continue;
             };
-            // Search index can legitimately hold chunks whose parent
-            // document or revision has been tombstoned / drifted out of
-            // the knowledge store (crashed ingest, manual cleanup). A
-            // drift like that used to fail the whole search call with
-            // `resource_not_found`; canonically it is just a stale hit
-            // we should drop and move on.
+            // Search index can hold stale chunks whose parent document
+            // has been tombstoned (crashed ingest, manual cleanup); skip
+            // them rather than failing the call.
             let Some(document) = state
                 .arango_document_store
                 .get_document(chunk.document_id)
@@ -296,6 +294,9 @@ fn search_document_hit_order(left: &McpDocumentHit, right: &McpDocumentHit) -> s
     search_readability_rank(&left.readability_state)
         .cmp(&search_readability_rank(&right.readability_state))
         .then_with(|| right.score.total_cmp(&left.score))
+        .then_with(|| {
+            dotted_version_key(&right.document_title).cmp(&dotted_version_key(&left.document_title))
+        })
         .then_with(|| left.document_id.cmp(&right.document_id))
 }
 
@@ -359,9 +360,15 @@ pub async fn read_document(
         visual_description.as_deref(),
     );
     let total_content_length = content.chars().count();
-    let slice = char_slice(&content, normalized.start_offset, normalized.window_chars);
+    let slice_start_offset = effective_read_start_offset(
+        &normalized.read_mode,
+        normalized.start_offset,
+        total_content_length,
+        normalized.window_chars,
+    );
+    let slice = char_slice(&content, slice_start_offset, normalized.window_chars);
     let slice_len = slice.chars().count();
-    let slice_end_offset = normalized.start_offset.saturating_add(slice_len);
+    let slice_end_offset = slice_start_offset.saturating_add(slice_len);
     let has_more = slice_end_offset < total_content_length;
     let continuation_token = has_more.then(|| {
         encode_continuation_token(
@@ -391,7 +398,7 @@ pub async fn read_document(
         source_access,
         visual_description,
         content: Some(slice),
-        slice_start_offset: normalized.start_offset.min(total_content_length),
+        slice_start_offset: slice_start_offset.min(total_content_length),
         slice_end_offset,
         total_content_length: Some(total_content_length),
         continuation_token,
@@ -418,6 +425,118 @@ pub async fn read_document(
             Vec::new()
         },
     })
+}
+
+async fn search_chunks_with_query_variants(
+    state: &AppState,
+    library_id: Uuid,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<crate::infra::arangodb::search_store::KnowledgeChunkSearchRow>, ApiError> {
+    let variants = chunk_search_query_variants(query);
+    let mut rows_by_chunk = std::collections::HashMap::<
+        Uuid,
+        crate::infra::arangodb::search_store::KnowledgeChunkSearchRow,
+    >::new();
+
+    for (variant_index, variant) in variants.iter().enumerate() {
+        let mut rows = state
+            .arango_search_store
+            .search_chunks(library_id, variant, limit, None, None)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        if variant_index > 0 {
+            for row in &mut rows {
+                row.score *= 0.82;
+            }
+        }
+        for row in rows {
+            match rows_by_chunk.get_mut(&row.chunk_id) {
+                Some(existing) if row.score > existing.score => {
+                    *existing = row;
+                }
+                Some(_) => {}
+                None => {
+                    rows_by_chunk.insert(row.chunk_id, row);
+                }
+            }
+        }
+        if rows_by_chunk.len() >= limit && variant_index == 0 {
+            break;
+        }
+    }
+
+    let mut rows = rows_by_chunk.into_values().collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right.score.total_cmp(&left.score).then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    rows.truncate(limit);
+    Ok(rows)
+}
+
+fn chunk_search_query_variants(query: &str) -> Vec<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut variants = vec![trimmed.to_string()];
+    let canonical_terms = suffix_trimmed_query_terms(trimmed);
+    if !canonical_terms.is_empty() {
+        let canonical_query = canonical_terms.join(" ");
+        if !canonical_query.eq_ignore_ascii_case(trimmed) {
+            variants.push(canonical_query);
+        }
+    }
+    variants
+}
+
+fn suffix_trimmed_query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for raw_token in query
+        .split(|character: char| {
+            !character.is_alphanumeric() && character != '_' && character != '/'
+        })
+        .map(str::trim)
+        .filter(|token| token.chars().count() >= 2)
+    {
+        let token = raw_token.to_lowercase();
+        let mut token_terms = vec![token.clone()];
+        if token.chars().count() >= 7 && token.chars().all(char::is_alphabetic) {
+            for trim_chars in 1..=2 {
+                let keep_chars = token.chars().count().saturating_sub(trim_chars);
+                if keep_chars >= 5 {
+                    token_terms.push(token.chars().take(keep_chars).collect());
+                }
+            }
+        }
+        for term in token_terms {
+            if seen.insert(term.clone()) {
+                terms.push(term);
+            }
+            if terms.len() >= 12 {
+                break;
+            }
+        }
+        if terms.len() >= 12 {
+            break;
+        }
+    }
+    terms
+}
+
+fn effective_read_start_offset(
+    read_mode: &McpReadMode,
+    requested_start_offset: usize,
+    total_content_length: usize,
+    window_chars: usize,
+) -> usize {
+    if matches!(read_mode, McpReadMode::Full) && total_content_length <= window_chars {
+        0
+    } else {
+        requested_start_offset.min(total_content_length)
+    }
 }
 
 pub async fn authorize_library_for_mcp(
@@ -881,8 +1000,9 @@ pub(crate) async fn resolve_search_embedding_context(
             provider_kind: binding.provider_kind.clone(),
             model_name: binding.model_name.clone(),
             input: query_text.to_string(),
-            api_key_override: binding.api_key,
-            base_url_override: binding.provider_base_url,
+            api_key_override: binding.api_key.clone(),
+            base_url_override: binding.provider_base_url.clone(),
+            extra_parameters_json: binding.extra_parameters_json.clone(),
         })
         .await
         .map_err(|error| {
@@ -1159,11 +1279,13 @@ fn technical_fact_support_score(
 mod tests {
     use crate::{
         domains::content::{DocumentReadinessSummary, RuntimeDocumentActivityStatus},
-        mcp_types::{McpDocumentHit, McpReadabilityState},
+        mcp_types::{McpDocumentHit, McpReadMode, McpReadabilityState},
         services::mcp::access::documents::{
+            chunk_search_query_variants, effective_read_start_offset,
             list_documents_matches_status_filter, merge_visual_description_into_content,
             readability_state_from_kind, search_document_hit_order,
         },
+        shared::versioning::dotted_version_key,
     };
     use chrono::Utc;
     use uuid::Uuid;
@@ -1300,5 +1422,33 @@ mod tests {
 
         assert_eq!(hits[0].document_title, "readable");
         assert_eq!(hits[1].document_title, "failed");
+    }
+
+    #[test]
+    fn full_read_starts_at_zero_when_document_fits_window() {
+        assert_eq!(effective_read_start_offset(&McpReadMode::Full, 900, 1000, 1200), 0);
+    }
+
+    #[test]
+    fn full_read_honors_offset_when_document_exceeds_window() {
+        assert_eq!(effective_read_start_offset(&McpReadMode::Full, 900, 3000, 1200), 900);
+    }
+
+    #[test]
+    fn excerpt_read_honors_offset_even_when_document_fits_window() {
+        assert_eq!(effective_read_start_offset(&McpReadMode::Excerpt, 900, 1000, 1200), 900);
+    }
+
+    #[test]
+    fn chunk_search_query_variants_add_suffix_trimmed_terms() {
+        let variants = chunk_search_query_variants("latest service releases");
+        assert_eq!(variants[0], "latest service releases");
+        assert!(variants.iter().skip(1).any(|variant| variant.contains("release")));
+        assert!(variants.iter().skip(1).any(|variant| variant.contains("releas")));
+    }
+
+    #[test]
+    fn search_hit_order_uses_dotted_version_key() {
+        assert_eq!(dotted_version_key("Alpha Suite Version 2.10.3 Notes"), Some([2, 10, 3, 0]));
     }
 }

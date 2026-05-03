@@ -8,9 +8,13 @@ use super::{
     WebClassificationReason, WebDiscoveredPageRow, WebIngestRunRow, WebIngestService,
     WebRunFailure, WebRunFailureCode, WebRunState, derive_terminal_run_state, extraction_title,
     fallback_title_from_url, ingest_repository, map_web_run_counts_row, now_if_terminal,
-    resolved_web_mime_type, source_file_name_from_url, telemetry,
+    parse_run_url_filter_mode, parse_run_url_patterns, resolved_web_mime_type,
+    source_file_name_from_url, telemetry,
 };
 use crate::services::content::service::MaterializedWebCapture;
+use crate::shared::web::ingest::{
+    WebIngestUrlFilter, classify_web_materialization_filter_exclusion,
+};
 
 pub(super) async fn execute_single_page_run(
     service: &WebIngestService,
@@ -101,6 +105,46 @@ pub(super) async fn execute_single_page_run(
             .await;
         }
     };
+    let url_filter = WebIngestUrlFilter {
+        mode: parse_run_url_filter_mode(&processing_row.url_filter_mode)?,
+        patterns: parse_run_url_patterns(processing_row.url_patterns.clone())?,
+    };
+    if let Some(filter_exclusion) =
+        classify_web_materialization_filter_exclusion(&resource.final_url, &url_filter)
+    {
+        let _ = ingest_repository::update_web_discovered_page(
+            &state.persistence.postgres,
+            seed_candidate.id,
+            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                final_url: Some(resource.final_url.as_str()),
+                canonical_url: Some(resource.final_url.as_str()),
+                host_classification: None,
+                candidate_state: WebCandidateState::Excluded.as_str(),
+                classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
+                classification_detail: Some(filter_exclusion.detail.as_str()),
+                content_type: resource.content_type.as_deref(),
+                http_status: Some(resource.http_status),
+                snapshot_storage_key: None,
+                updated_at: Some(Utc::now()),
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        telemetry::web_candidate_event(
+            "candidate_excluded_url_filter",
+            processing_row.id,
+            seed_candidate.id,
+            WebCandidateState::Excluded.as_str(),
+            &resource.final_url,
+            0,
+            Some(WebClassificationReason::UrlFilter.as_str()),
+            Some(filter_exclusion.detail.as_str()),
+        );
+        return complete_single_page_run(state, processing_row).await;
+    }
     let snapshot_storage_key =
         match persist_resource_snapshot(service, state, &processing_row, &resource).await {
             Ok(storage_key) => storage_key,
@@ -178,6 +222,13 @@ pub(super) async fn execute_single_page_run(
         None,
     );
 
+    complete_single_page_run(state, processing_row).await
+}
+
+async fn complete_single_page_run(
+    state: &AppState,
+    processing_row: WebIngestRunRow,
+) -> Result<WebIngestRunRow, ApiError> {
     let counts = map_web_run_counts_row(
         ingest_repository::get_web_run_counts(&state.persistence.postgres, processing_row.id)
             .await

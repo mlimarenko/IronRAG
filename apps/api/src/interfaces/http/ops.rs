@@ -441,15 +441,10 @@ fn build_dashboard_metrics(
     // `build_documents_overview_from_metrics`. Do NOT re-derive from
     // `ops_state.queue_depth + running_attempts` here: those come
     // from `ingest_job` / `ingest_attempt` rows and can legitimately
-    // disagree with the document-level bucketing (one document can
-    // have multiple jobs/attempts during retries; one queued job can
-    // represent a document that still counts as `processing` because
-    // a mutation is `running`). The two numbers used to appear on
-    // the same response as `metrics[in_flight] = 8756` and
-    // `overview.processingDocuments = 8484` for the same moment —
-    // that divergence is the drift bug the dashboard release killed
-    // for the overview but forgot here. The UI reads either field
-    // now without contradiction.
+    // disagree with the document-level bucketing: one document can have
+    // multiple jobs/attempts during retries, and a queued job can
+    // represent a document still counted as `processing` because a
+    // mutation is `running`.
     let in_flight = i64::from(overview.processing_documents);
     let attention = i64::try_from(attention_count).unwrap_or(i64::MAX);
 
@@ -655,10 +650,11 @@ fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSumm
         boundary_policy: summary.boundary_policy,
         max_depth: summary.max_depth,
         max_pages: summary.max_pages,
-        ignore_patterns: summary
-            .ignore_patterns
+        url_filter_mode: summary.url_filter_mode,
+        url_patterns: summary
+            .url_patterns
             .into_iter()
-            .map(|pattern| ironrag_contracts::documents::WebIngestIgnorePattern {
+            .map(|pattern| ironrag_contracts::documents::WebIngestPattern {
                 kind: pattern.kind,
                 value: pattern.value,
                 source: pattern.source,

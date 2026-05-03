@@ -155,8 +155,8 @@ impl TechnicalFactService {
                         candidates.extend(extract_config_key_candidates(block, line));
                         candidates.extend(extract_version_candidates(block, line));
                     }
-                    StructuredBlockKind::MetadataBlock => {
-                        // Metadata: config keys, env vars, branded identifiers.
+                    StructuredBlockKind::MetadataBlock | StructuredBlockKind::SourceUnit => {
+                        // Metadata-like source units: config keys, env vars, versioned identifiers.
                         candidates.extend(extract_config_key_candidates(block, line));
                         candidates.extend(extract_environment_variable_candidates(block, line));
                         // Branded identifier heuristics removed — they
@@ -448,7 +448,7 @@ fn extract_port_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactC
 
 fn extract_status_code_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
     let lower = line.to_ascii_lowercase();
-    if !matches_any_substring(&lower, &["status", "response", "http", "код", "статус"]) {
+    if !matches_any_substring(&lower, &["status", "response", "http"]) {
         return Vec::new();
     }
 
@@ -799,7 +799,9 @@ fn extraction_kind_prefix(block: &StructuredBlockData) -> &'static str {
         StructuredBlockKind::CodeBlock => "parser_code_block",
         StructuredBlockKind::Table | StructuredBlockKind::TableRow => "parser_table_block",
         StructuredBlockKind::ListItem => "parser_list_block",
-        StructuredBlockKind::MetadataBlock => "parser_metadata_block",
+        StructuredBlockKind::MetadataBlock
+        | StructuredBlockKind::SourceProfile
+        | StructuredBlockKind::SourceUnit => "parser_metadata_block",
         _ => "parser_text_block",
     }
 }
@@ -809,7 +811,9 @@ fn candidate_rank(block: &StructuredBlockData) -> u8 {
         StructuredBlockKind::EndpointBlock => 6,
         StructuredBlockKind::CodeBlock => 5,
         StructuredBlockKind::Table | StructuredBlockKind::TableRow => 4,
-        StructuredBlockKind::MetadataBlock => 3,
+        StructuredBlockKind::MetadataBlock
+        | StructuredBlockKind::SourceProfile
+        | StructuredBlockKind::SourceUnit => 3,
         StructuredBlockKind::ListItem => 2,
         _ => 1,
     }
@@ -836,7 +840,7 @@ fn confidence_for_extraction(block: &StructuredBlockData, extraction_suffix: &st
         StructuredBlockKind::EndpointBlock => 0.95,
         StructuredBlockKind::CodeBlock => 0.94,
         StructuredBlockKind::Table | StructuredBlockKind::TableRow => 0.93,
-        StructuredBlockKind::MetadataBlock => 0.91,
+        StructuredBlockKind::MetadataBlock | StructuredBlockKind::SourceUnit => 0.91,
         StructuredBlockKind::ListItem => 0.90,
         _ => 0.88,
     }
@@ -1026,16 +1030,13 @@ mod tests {
                     block_id: Uuid::now_v7(),
                     ordinal: 0,
                     block_kind: StructuredBlockKind::Heading,
-                    text: "Программные продукты Acme - Программные продукты Acme - Example"
+                    text: "Acme Software Products - Acme Software Products - Example".to_string(),
+                    normalized_text: "Acme Software Products - Acme Software Products - Example"
                         .to_string(),
-                    normalized_text:
-                        "Программные продукты Acme - Программные продукты Acme - Example"
-                            .to_string(),
                     heading_trail: vec![
-                        "Программные продукты Acme - Программные продукты Acme - Example"
-                            .to_string(),
+                        "Acme Software Products - Acme Software Products - Example".to_string(),
                     ],
-                    section_path: vec!["программные-продукты-acme".to_string()],
+                    section_path: vec!["acme-software-products".to_string()],
                     page_number: None,
                     source_span: None,
                     parent_block_id: None,
@@ -1052,10 +1053,9 @@ mod tests {
                     normalized_text: "- [Control Center](https://docs.example.test/control-center)"
                         .to_string(),
                     heading_trail: vec![
-                        "Программные продукты Acme - Программные продукты Acme - Example"
-                            .to_string(),
+                        "Acme Software Products - Acme Software Products - Example".to_string(),
                     ],
-                    section_path: vec!["программные-продукты-acme".to_string()],
+                    section_path: vec!["acme-software-products".to_string()],
                     page_number: None,
                     source_span: None,
                     parent_block_id: None,
@@ -1070,10 +1070,9 @@ mod tests {
                     text: "- [POS](https://docs.example.test/pos)".to_string(),
                     normalized_text: "- [POS](https://docs.example.test/pos)".to_string(),
                     heading_trail: vec![
-                        "Программные продукты Acme - Программные продукты Acme - Example"
-                            .to_string(),
+                        "Acme Software Products - Acme Software Products - Example".to_string(),
                     ],
-                    section_path: vec!["программные-продукты-acme".to_string()],
+                    section_path: vec!["acme-software-products".to_string()],
                     page_number: None,
                     source_span: None,
                     parent_block_id: None,

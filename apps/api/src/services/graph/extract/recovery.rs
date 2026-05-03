@@ -17,7 +17,7 @@ pub(crate) fn unconfigured_graph_extraction_failure(
     error_message: impl Into<String>,
 ) -> GraphExtractionFailureOutcome {
     GraphExtractionFailureOutcome {
-        request_shape_key: "graph_extract_v6:unconfigured".to_string(),
+        request_shape_key: "graph_extract_v8:unconfigured".to_string(),
         request_size_bytes: 0,
         error_message: error_message.into(),
         provider_failure: None,
@@ -69,7 +69,7 @@ pub(crate) fn graph_extraction_execution_error(
 ) -> GraphExtractionExecutionError {
     GraphExtractionExecutionError {
         message: message.into(),
-        request_shape_key: "graph_extract_v6:runtime".to_string(),
+        request_shape_key: "graph_extract_v8:runtime".to_string(),
         request_size_bytes: request.chunk.content.len(),
         provider_failure,
         recovery_summary,

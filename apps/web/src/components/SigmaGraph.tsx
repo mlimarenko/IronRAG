@@ -819,7 +819,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
         >
           <div className="font-semibold text-sm leading-tight mb-1 truncate">{tooltip.label}</div>
           <div className="text-muted-foreground text-[11px] mb-1">
-            {tooltip.neighborCount} {tooltip.neighborCount === 1 ? 'связь' : 'связей'}
+            {tooltip.neighborCount} {tooltip.neighborCount === 1 ? 'edge' : 'edges'}
           </div>
           {tooltip.neighborLabels.length > 0 && (
             <ul className="space-y-0.5 list-disc list-inside text-[11px] text-muted-foreground">
@@ -827,7 +827,7 @@ export default function SigmaGraph({ nodes, edges, selectedId, onSelect, layout,
                 <li key={i} className="truncate">{label}</li>
               ))}
               {tooltip.neighborCount > tooltip.neighborLabels.length && (
-                <li className="text-muted-foreground/70">…ещё {tooltip.neighborCount - tooltip.neighborLabels.length}</li>
+                <li className="text-muted-foreground/70">…{tooltip.neighborCount - tooltip.neighborLabels.length} more</li>
               )}
             </ul>
           )}

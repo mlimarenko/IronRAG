@@ -8,6 +8,7 @@ use crate::shared::extraction::structured_document::{
     StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
 };
 use crate::shared::extraction::table_summary::is_table_summary_text;
+use crate::shared::extraction::text_quality::text_quality_score;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StructuredChunkingProfile {
@@ -41,8 +42,6 @@ pub fn build_structured_chunk_windows(
         .cloned()
         .collect();
 
-    // Pre-split large code blocks at semantic boundaries
-    let filtered_blocks = presplit_code_blocks(&filtered_blocks, profile.max_chars);
     let blocks = &filtered_blocks;
 
     let mut chunks = Vec::<StructuredChunkWindow>::new();
@@ -51,6 +50,8 @@ pub fn build_structured_chunk_windows(
 
     for (index, block) in blocks.iter().enumerate() {
         if block.block_kind == StructuredBlockKind::TableRow
+            || block.block_kind == StructuredBlockKind::SourceProfile
+            || block.block_kind == StructuredBlockKind::SourceUnit
             || (block.block_kind == StructuredBlockKind::MetadataBlock
                 && is_table_summary_text(&block.normalized_text))
         {
@@ -115,6 +116,9 @@ pub fn build_structured_chunk_windows(
 
     // Near-duplicate detection pass
     mark_near_duplicates(&mut chunks);
+
+    // Sentence-window pass: compute ±2 sentence context for each chunk
+    compute_window_text_pass(&mut chunks);
 
     chunks
 }
@@ -200,7 +204,113 @@ fn push_structured_chunk_window(
         quality_score,
         simhash_fingerprint,
         is_near_duplicate: false,
+        window_text: None,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Sentence-window retrieval
+// ---------------------------------------------------------------------------
+
+/// Maximum token budget for window_text (approx. whitespace-split words).
+const WINDOW_TEXT_MAX_TOKENS: usize = 1_500;
+
+/// Number of sentence-radius neighbours to include on each side of a chunk.
+const WINDOW_SENTENCE_RADIUS: usize = 2;
+
+/// Post-pass: fills `window_text` on every chunk in `chunks` by extracting
+/// ±`WINDOW_SENTENCE_RADIUS` sentences from the neighbouring chunks' content.
+/// The result is capped at `WINDOW_TEXT_MAX_TOKENS` tokens.
+pub(crate) fn compute_window_text_pass(chunks: &mut [StructuredChunkWindow]) {
+    // Collect all sentences per chunk up front to avoid borrow issues.
+    let sentences_per_chunk: Vec<Vec<String>> =
+        chunks.iter().map(|c| split_into_sentences(&c.content_text)).collect();
+
+    for i in 0..chunks.len() {
+        // Gather preceding sentences from neighbouring chunks.
+        let mut before: Vec<&str> = Vec::new();
+        let mut remaining = WINDOW_SENTENCE_RADIUS;
+        let mut chunk_idx = i;
+        loop {
+            if chunk_idx == 0 {
+                break;
+            }
+            chunk_idx -= 1;
+            let sents = &sentences_per_chunk[chunk_idx];
+            let take = remaining.min(sents.len());
+            for s in sents[sents.len() - take..].iter() {
+                before.push(s.as_str());
+            }
+            remaining = remaining.saturating_sub(take);
+            if remaining == 0 {
+                break;
+            }
+        }
+        before.reverse();
+
+        // Gather following sentences from neighbouring chunks.
+        let mut after: Vec<&str> = Vec::new();
+        remaining = WINDOW_SENTENCE_RADIUS;
+        chunk_idx = i;
+        loop {
+            chunk_idx += 1;
+            if chunk_idx >= chunks.len() {
+                break;
+            }
+            let sents = &sentences_per_chunk[chunk_idx];
+            let take = remaining.min(sents.len());
+            for s in sents[..take].iter() {
+                after.push(s.as_str());
+            }
+            remaining = remaining.saturating_sub(take);
+            if remaining == 0 {
+                break;
+            }
+        }
+
+        let core = &chunks[i].content_text;
+        let window = format!(
+            "{}{}{}",
+            if before.is_empty() { String::new() } else { format!("{}\n\n", before.join(" ")) },
+            core,
+            if after.is_empty() { String::new() } else { format!("\n\n{}", after.join(" ")) },
+        );
+        let trimmed = trim_to_tokens(&window, WINDOW_TEXT_MAX_TOKENS);
+        // Only store when it actually extends beyond the core text.
+        if trimmed.len() > core.len() {
+            chunks[i].window_text = Some(trimmed);
+        }
+    }
+}
+
+/// Naively splits text into sentences at `.`, `!`, `?` boundaries.
+fn split_into_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        current.push(ch);
+        if matches!(ch, '.' | '!' | '?') {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                sentences.push(trimmed);
+            }
+            current.clear();
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        sentences.push(trimmed);
+    }
+    sentences
+}
+
+/// Truncates `text` to at most `max_tokens` whitespace-split words.
+fn trim_to_tokens(text: &str, max_tokens: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() <= max_tokens {
+        return text.to_string();
+    }
+    words[..max_tokens].join(" ")
 }
 
 fn dominant_chunk_kind(blocks: &[StructuredBlockData]) -> StructuredBlockKind {
@@ -210,7 +320,9 @@ fn dominant_chunk_kind(blocks: &[StructuredBlockData]) -> StructuredBlockKind {
             StructuredBlockKind::EndpointBlock
             | StructuredBlockKind::CodeBlock
             | StructuredBlockKind::Table
-            | StructuredBlockKind::TableRow => Some(block.block_kind),
+            | StructuredBlockKind::TableRow
+            | StructuredBlockKind::SourceProfile
+            | StructuredBlockKind::SourceUnit => Some(block.block_kind),
             _ => None,
         })
         .unwrap_or_else(|| blocks[0].block_kind)
@@ -553,11 +665,17 @@ fn is_code_boundary(
     }
 }
 
-/// Pre-splits large code blocks at language-aware boundaries.
-fn presplit_code_blocks(
+/// Splits large code blocks at language-aware boundaries before chunk windows are built.
+///
+/// The returned blocks are the canonical structured blocks that downstream chunk
+/// support ids may reference. Chunking must not mint hidden block ids because
+/// those ids cannot be persisted, cited, or used by graph evidence.
+#[must_use]
+pub fn split_large_code_blocks(
     blocks: &[StructuredBlockData],
     max_chars: usize,
 ) -> Vec<StructuredBlockData> {
+    let max_chars = max_chars.max(1);
     let mut result = Vec::new();
     for block in blocks {
         if block.block_kind != StructuredBlockKind::CodeBlock || chunk_block_len(block) <= max_chars
@@ -565,49 +683,34 @@ fn presplit_code_blocks(
             result.push(block.clone());
             continue;
         }
-        let boundaries = detect_code_boundaries(&block.text, block.code_language.as_deref());
-        if boundaries.len() < 2 {
+        let segments = split_code_block_segments(
+            &block.text,
+            &block.normalized_text,
+            block.code_language.as_deref(),
+            max_chars,
+        );
+        if segments.len() < 2 {
             result.push(block.clone());
             continue;
         }
-        let lines: Vec<&str> = block.text.lines().collect();
-        let norm_lines: Vec<&str> = block.normalized_text.lines().collect();
-
-        let mut split_points = vec![0];
-        split_points.extend(&boundaries);
-        split_points.push(lines.len());
-        split_points.dedup();
-
-        for window in split_points.windows(2) {
-            let start = window[0];
-            let end = window[1];
-            if start >= end || start >= lines.len() {
-                continue;
-            }
-            let end = end.min(lines.len());
-            let text = lines[start..end].join("\n");
-            let normalized_text = if start < norm_lines.len() {
-                norm_lines[start..end.min(norm_lines.len())].join("\n")
-            } else {
-                text.clone()
-            };
-            if text.trim().is_empty() {
+        for segment in segments {
+            if segment.text.trim().is_empty() && segment.normalized_text.trim().is_empty() {
                 continue;
             }
             result.push(StructuredBlockData {
                 block_id: uuid::Uuid::now_v7(),
                 ordinal: 0,
                 block_kind: StructuredBlockKind::CodeBlock,
-                text,
-                normalized_text,
+                text: segment.text,
+                normalized_text: segment.normalized_text,
                 heading_trail: block.heading_trail.clone(),
                 section_path: block.section_path.clone(),
                 page_number: block.page_number,
                 source_span: None,
-                parent_block_id: Some(block.block_id),
+                parent_block_id: block.parent_block_id,
                 table_coordinates: None,
                 code_language: block.code_language.clone(),
-                is_boilerplate: false,
+                is_boilerplate: block.is_boilerplate,
             });
         }
     }
@@ -615,6 +718,143 @@ fn presplit_code_blocks(
         block.ordinal = i32::try_from(i).unwrap_or(i32::MAX);
     }
     result
+}
+
+struct CodeBlockSegment {
+    text: String,
+    normalized_text: String,
+}
+
+fn split_code_block_segments(
+    text: &str,
+    normalized_text: &str,
+    language: Option<&str>,
+    max_chars: usize,
+) -> Vec<CodeBlockSegment> {
+    let text_lines = text.lines().collect::<Vec<_>>();
+    if text_lines.is_empty() {
+        return Vec::new();
+    }
+    let norm_lines = normalized_text.lines().collect::<Vec<_>>();
+    let mut ranges = Vec::<(usize, usize)>::new();
+    let boundaries = detect_code_boundaries(text, language);
+
+    if boundaries.len() >= 2 {
+        let mut split_points = vec![0];
+        split_points.extend(boundaries.into_iter().filter(|point| *point <= text_lines.len()));
+        split_points.push(text_lines.len());
+        split_points.sort_unstable();
+        split_points.dedup();
+        for window in split_points.windows(2) {
+            let start = window[0];
+            let end = window[1].min(text_lines.len());
+            if start < end {
+                ranges.push((start, end));
+            }
+        }
+    } else {
+        ranges.push((0, text_lines.len()));
+    }
+
+    let mut segments = Vec::new();
+    for (start, end) in ranges {
+        push_line_budgeted_segments(&mut segments, &text_lines, &norm_lines, start, end, max_chars);
+    }
+    segments
+}
+
+fn push_line_budgeted_segments(
+    out: &mut Vec<CodeBlockSegment>,
+    text_lines: &[&str],
+    norm_lines: &[&str],
+    start: usize,
+    end: usize,
+    max_chars: usize,
+) {
+    let mut current_text = Vec::<String>::new();
+    let mut current_norm = Vec::<String>::new();
+    let mut current_chars = 0_usize;
+
+    let capped_end = end.min(text_lines.len());
+    for (index, text_line) in
+        text_lines[start..capped_end].iter().enumerate().map(|(i, s)| (start + i, *s))
+    {
+        let norm_line = norm_lines.get(index).copied().unwrap_or(text_line);
+        let line_chars = char_count(norm_line);
+        if line_chars > max_chars {
+            flush_code_segment(out, &mut current_text, &mut current_norm, &mut current_chars);
+            push_long_line_segments(out, text_line, norm_line, max_chars);
+            continue;
+        }
+
+        let projected = if current_chars == 0 {
+            line_chars
+        } else {
+            current_chars.saturating_add(1).saturating_add(line_chars)
+        };
+        if !current_text.is_empty() && projected > max_chars {
+            flush_code_segment(out, &mut current_text, &mut current_norm, &mut current_chars);
+        }
+        current_text.push(text_line.to_string());
+        current_norm.push(norm_line.to_string());
+        current_chars = if current_chars == 0 {
+            line_chars
+        } else {
+            current_chars.saturating_add(1).saturating_add(line_chars)
+        };
+    }
+
+    flush_code_segment(out, &mut current_text, &mut current_norm, &mut current_chars);
+}
+
+fn flush_code_segment(
+    out: &mut Vec<CodeBlockSegment>,
+    text_lines: &mut Vec<String>,
+    norm_lines: &mut Vec<String>,
+    current_chars: &mut usize,
+) {
+    if text_lines.is_empty() && norm_lines.is_empty() {
+        return;
+    }
+    out.push(CodeBlockSegment {
+        text: std::mem::take(text_lines).join("\n"),
+        normalized_text: std::mem::take(norm_lines).join("\n"),
+    });
+    *current_chars = 0;
+}
+
+fn push_long_line_segments(
+    out: &mut Vec<CodeBlockSegment>,
+    text_line: &str,
+    norm_line: &str,
+    max_chars: usize,
+) {
+    let text_parts = split_text_by_char_budget(text_line, max_chars);
+    let norm_parts = split_text_by_char_budget(norm_line, max_chars);
+    let part_count = text_parts.len().max(norm_parts.len());
+    for index in 0..part_count {
+        let text = text_parts.get(index).cloned().unwrap_or_default();
+        let normalized_text = norm_parts.get(index).cloned().unwrap_or_else(|| text.clone());
+        out.push(CodeBlockSegment { text, normalized_text });
+    }
+}
+
+fn split_text_by_char_budget(text: &str, max_chars: usize) -> Vec<String> {
+    let mut parts = Vec::<String>::new();
+    let mut current = String::new();
+    let mut current_chars = 0_usize;
+    for character in text.chars() {
+        if current_chars >= max_chars {
+            parts.push(std::mem::take(&mut current));
+            current_chars = 0;
+        }
+        current.push(character);
+        current_chars = current_chars.saturating_add(1);
+    }
+    if !current.is_empty() || parts.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 /// Computes a quality score for a chunk window based on its constituent blocks.
@@ -665,6 +905,10 @@ fn compute_chunk_quality_score(blocks: &[StructuredBlockData]) -> f32 {
             score -= 0.1;
         }
     }
+
+    let combined_text =
+        blocks.iter().map(|b| b.normalized_text.as_str()).collect::<Vec<_>>().join("\n");
+    score *= text_quality_score(&combined_text);
 
     score.clamp(0.0, 1.0)
 }
@@ -731,7 +975,7 @@ mod tests {
 
     use super::{
         StructuredChunkingProfile, build_structured_chunk_windows, compute_simhash,
-        detect_code_boundaries, guess_language, mark_near_duplicates, presplit_code_blocks,
+        detect_code_boundaries, guess_language, mark_near_duplicates, split_large_code_blocks,
     };
     use crate::shared::extraction::structured_document::{
         StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
@@ -916,6 +1160,7 @@ mod tests {
                 quality_score: 1.0,
                 simhash_fingerprint: Some(fingerprint),
                 is_near_duplicate: false,
+                window_text: None,
             },
             StructuredChunkWindow {
                 chunk_index: 1,
@@ -930,6 +1175,7 @@ mod tests {
                 quality_score: 1.0,
                 simhash_fingerprint: Some(fingerprint),
                 is_near_duplicate: false,
+                window_text: None,
             },
         ];
 
@@ -992,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn presplits_large_code_block() {
+    fn splits_large_code_block_before_chunking() {
         let mut lines = Vec::new();
         for i in 0..10 {
             lines.push(format!("fn func_{i}() {{"));
@@ -1018,11 +1264,15 @@ mod tests {
             code_language: Some("rust".to_string()),
             is_boilerplate: false,
         };
-        let result = presplit_code_blocks(&[block], 500);
+        let result = split_large_code_blocks(&[block], 500);
         assert!(
             result.len() > 1,
             "should split large code block into multiple sub-blocks, got {}",
             result.len()
+        );
+        assert!(
+            result.iter().all(|split| split.parent_block_id.is_none()),
+            "split code blocks must not reference a discarded parent block"
         );
     }
 
@@ -1198,5 +1448,31 @@ mod tests {
         assert_eq!(chunks[2].chunk_kind, StructuredBlockKind::MetadataBlock);
         assert!(chunks[1].normalized_text.starts_with("Table Summary |"));
         assert!(chunks[2].normalized_text.starts_with("Table Summary |"));
+    }
+
+    #[test]
+    fn source_units_become_independent_chunks() {
+        let blocks = vec![
+            make_block(
+                0,
+                StructuredBlockKind::SourceProfile,
+                "[source_profile unit_count=2]",
+                false,
+            ),
+            make_block(1, StructuredBlockKind::SourceUnit, "[unit_id=one] first detail", false),
+            make_block(2, StructuredBlockKind::SourceUnit, "[unit_id=two] second detail", false),
+        ];
+
+        let chunks = build_structured_chunk_windows(
+            &blocks,
+            StructuredChunkingProfile { max_chars: 2800, overlap_chars: 280 },
+        );
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chunk_kind, StructuredBlockKind::SourceProfile);
+        assert_eq!(chunks[1].chunk_kind, StructuredBlockKind::SourceUnit);
+        assert_eq!(chunks[2].chunk_kind, StructuredBlockKind::SourceUnit);
+        assert_eq!(chunks[1].content_text, "[unit_id=one] first detail");
+        assert_eq!(chunks[2].content_text, "[unit_id=two] second detail");
     }
 }

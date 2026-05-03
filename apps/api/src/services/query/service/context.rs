@@ -4,12 +4,10 @@ use anyhow::Context;
 use chrono::Utc;
 use serde_json::json;
 use std::time::Instant;
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::ai::AiBindingPurpose,
     domains::query::RuntimeQueryMode,
     infra::{
         arangodb::{
@@ -29,15 +27,14 @@ use crate::{
         },
         repositories::query_repository,
     },
-    integrations::llm::EmbeddingRequest,
     interfaces::http::router_support::ApiError,
     services::query::assistant_grounding::AssistantGroundingDocumentReference,
+    services::query::execution::QueryChunkReferenceSnapshot,
 };
 
 use super::{
-    ExecutionPreparedReferenceContext, PreparedSegmentRevisionInfo, QueryEmbeddingContext,
-    RankedBundleReference, merge_ranked_reference, runtime_mode_label, saturating_rank,
-    top_ranked_ids,
+    ExecutionPreparedReferenceContext, PreparedSegmentRevisionInfo, RankedBundleReference,
+    merge_ranked_reference, runtime_mode_label, saturating_rank, top_ranked_ids,
 };
 
 pub(crate) async fn assemble_context_bundle(
@@ -51,99 +48,40 @@ pub(crate) async fn assemble_context_bundle(
     top_k: usize,
     include_debug: bool,
     resolved_mode: RuntimeQueryMode,
+    answer_chunk_references: &[QueryChunkReferenceSnapshot],
 ) -> anyhow::Result<()> {
     let started_at = Instant::now();
     let candidate_limit = top_k.saturating_mul(3).max(6);
 
-    // Phase 1 — lexical search + embedding lookup are fully independent
-    // (neither reads anything the other writes), so run them concurrently
-    // via `tokio::join!`. On reference libraries the lexical search
-    // (four parallel AQL queries inside) lands in ~600 ms and the
-    // embedding resolve (LLM / Arango catalog) lands in ~400–500 ms;
-    // doing both sequentially added ~400 ms to every turn's
-    // AssembleContext stage for no reason.
-    let (lexical_result, embedding_result) = tokio::join!(
-        state.canonical_services.search.search_query_evidence(
+    // AssembleContext is a reference/audit materialization step. The
+    // answer evidence has already been selected by `prepare_answer_query`,
+    // so this stage must not issue a second provider embedding request on
+    // the user-visible critical path.
+    let lexical_search = state
+        .canonical_services
+        .search
+        .search_query_evidence(
             state,
             conversation.library_id,
             query_text,
             query_ir,
             candidate_limit,
-        ),
-        resolve_query_embedding_context(state, conversation.library_id, query_text),
-    );
-    let lexical_search = lexical_result.context(
-        "failed canonical lexical evidence search while assembling query context bundle",
-    )?;
-    let lexical_chunk_hits = lexical_search.chunk_hits;
+        )
+        .await
+        .context(
+            "failed canonical lexical evidence search while assembling query context bundle",
+        )?;
     let lexical_entity_hits = lexical_search.entity_hits;
     let lexical_relation_hits = lexical_search.relation_hits;
     let lexical_fact_hits = lexical_search.technical_fact_hits;
     let exact_literal_bias = lexical_search.exact_literal_bias;
 
-    let embedding_context = match embedding_result {
-        Ok(context) => context,
-        Err(error) => {
-            warn!(
-                error = %error,
-                library_id = %conversation.library_id,
-                execution_id = %execution_id,
-                "canonical query bundle fell back to lexical retrieval"
-            );
-            None
-        }
-    };
-
-    // Phase 2 — vector chunk and vector entity searches both read the
-    // embedding produced in phase 1 but are independent of each other.
-    // Running them concurrently via `tokio::join!` pins the phase at
-    // max(chunk_vector_ms, entity_vector_ms) ≈ 200–400 ms instead of
-    // their sum ≈ 400–800 ms.
-    let vector_limit = candidate_limit.saturating_mul(2).max(8);
-    let (vector_chunk_hits, vector_entity_hits) = match embedding_context.as_ref() {
-        Some(context) => {
-            let model_id = context.model_catalog_id.to_string();
-            let query_vec = &context.query_vector;
-            let (chunk_result, entity_result) = tokio::join!(
-                state.arango_search_store.search_chunk_vectors_by_similarity(
-                    conversation.library_id,
-                    &model_id,
-                    query_vec,
-                    vector_limit,
-                    Some(16),
-                ),
-                state.arango_search_store.search_entity_vectors_by_similarity(
-                    conversation.library_id,
-                    &model_id,
-                    query_vec,
-                    vector_limit,
-                    Some(16),
-                ),
-            );
-            let chunks = chunk_result
-                .context("failed vector chunk search while assembling query context bundle")?;
-            let entities = entity_result
-                .context("failed vector entity search while assembling query context bundle")?;
-            (chunks, entities)
-        }
-        None => (Vec::new(), Vec::new()),
-    };
-
-    let mut chunk_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
+    let chunk_refs = seed_chunk_refs_from_answer_context(answer_chunk_references);
     let mut fact_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut entity_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut relation_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut evidence_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
 
-    for (index, hit) in lexical_chunk_hits.iter().enumerate() {
-        merge_ranked_reference(
-            &mut chunk_refs,
-            hit.chunk_id,
-            saturating_rank(index),
-            hit.score,
-            "lexical_chunk",
-        );
-    }
     for (index, hit) in lexical_fact_hits.iter().enumerate() {
         merge_ranked_reference(
             &mut fact_refs,
@@ -153,15 +91,6 @@ pub(crate) async fn assemble_context_bundle(
             if hit.exact_match { "lexical_fact_exact" } else { "lexical_fact" },
         );
     }
-    for (index, hit) in vector_chunk_hits.iter().enumerate() {
-        merge_ranked_reference(
-            &mut chunk_refs,
-            hit.chunk_id,
-            saturating_rank(index),
-            hit.score,
-            "vector_chunk",
-        );
-    }
     for (index, hit) in lexical_entity_hits.iter().enumerate() {
         merge_ranked_reference(
             &mut entity_refs,
@@ -169,15 +98,6 @@ pub(crate) async fn assemble_context_bundle(
             saturating_rank(index),
             hit.score,
             "lexical_entity",
-        );
-    }
-    for (index, hit) in vector_entity_hits.iter().enumerate() {
-        merge_ranked_reference(
-            &mut entity_refs,
-            hit.entity_id,
-            saturating_rank(index),
-            hit.score,
-            "vector_entity",
         );
     }
     for (index, hit) in lexical_relation_hits.iter().enumerate() {
@@ -225,7 +145,6 @@ pub(crate) async fn assemble_context_bundle(
         for row in neighborhood {
             absorb_traversal_row(
                 &row,
-                &mut chunk_refs,
                 &mut entity_refs,
                 &mut relation_refs,
                 &mut evidence_refs,
@@ -277,7 +196,6 @@ pub(crate) async fn assemble_context_bundle(
         for row in traversal {
             absorb_traversal_row(
                 &row,
-                &mut chunk_refs,
                 &mut entity_refs,
                 &mut relation_refs,
                 &mut evidence_refs,
@@ -300,15 +218,6 @@ pub(crate) async fn assemble_context_bundle(
                 row.support_edge_score.unwrap_or_default(),
                 "relation_evidence",
             );
-            if let Some(chunk) = row.source_chunk {
-                merge_ranked_reference(
-                    &mut chunk_refs,
-                    chunk.chunk_id,
-                    saturating_rank(index),
-                    row.support_edge_score.unwrap_or_default(),
-                    "evidence_source",
-                );
-            }
         }
     }
 
@@ -334,20 +243,6 @@ pub(crate) async fn assemble_context_bundle(
         .list_technical_facts_by_ids(&top_ranked_ids(&fact_refs, candidate_limit * 3))
         .await
         .context("failed to load technical facts while assembling query context bundle")?;
-    for fact in &fact_rows {
-        let rank = fact_rank_for_bundle(&fact_refs, fact.fact_id);
-        let score = fact_score_for_bundle(&fact_refs, fact.fact_id);
-        for chunk_id in &fact.support_chunk_ids {
-            merge_ranked_reference(
-                &mut chunk_refs,
-                *chunk_id,
-                rank,
-                score,
-                "technical_fact_support",
-            );
-        }
-    }
-
     let now = Utc::now();
     let generations = state
         .canonical_services
@@ -361,8 +256,7 @@ pub(crate) async fn assemble_context_bundle(
         })?;
     let generation = generations.first().cloned();
     let freshness_snapshot = generation.as_ref().map_or_else(|| json!({}), freshness_snapshot_json);
-    let retrieval_strategy =
-        if embedding_context.is_some() { "hybrid".to_string() } else { "lexical".to_string() };
+    let retrieval_strategy = "reference_lexical".to_string();
     let chunk_edges = build_chunk_bundle_edges(bundle_id, &chunk_refs, now);
     let entity_edges = build_entity_bundle_edges(bundle_id, &entity_refs, now);
     let relation_edges = build_relation_bundle_edges(bundle_id, &relation_refs, now);
@@ -484,11 +378,10 @@ pub(crate) async fn assemble_context_bundle(
     );
 
     let candidate_summary = json!({
-        "lexicalChunkHits": lexical_chunk_hits.len(),
+        "answerContextChunkReferences": answer_chunk_references.len(),
         "lexicalFactHits": lexical_fact_hits.len(),
-        "vectorChunkHits": vector_chunk_hits.len(),
         "lexicalEntityHits": lexical_entity_hits.len(),
-        "vectorEntityHits": vector_entity_hits.len(),
+        "vectorEntityHits": 0,
         "lexicalRelationHits": lexical_relation_hits.len(),
         "exactLiteralBias": exact_literal_bias,
         "entityNeighborhoodRows": entity_neighborhood_rows,
@@ -507,8 +400,8 @@ pub(crate) async fn assemble_context_bundle(
         "requestedMode": runtime_mode_label(requested_mode),
         "resolvedMode": runtime_mode_label(resolved_mode),
         "candidateLimit": candidate_limit,
-        "vectorCandidateLimit": vector_limit,
-        "vectorEnabled": embedding_context.is_some(),
+        "vectorCandidateLimit": 0,
+        "vectorEnabled": false,
         "exactLiteralBias": exact_literal_bias,
         "bundleId": bundle_id,
         "queryExecutionId": execution_id,
@@ -589,60 +482,40 @@ pub(crate) async fn assemble_context_bundle(
             .context("failed to upsert knowledge retrieval trace")?;
     }
 
+    tracing::info!(
+        stage = "query.context_bundle.assembled",
+        %execution_id,
+        %bundle_id,
+        library_id = %conversation.library_id,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        chunk_refs = chunk_edges.len(),
+        entity_refs = entity_edges.len(),
+        relation_refs = relation_edges.len(),
+        evidence_refs = evidence_edges.len(),
+        "assembled query context bundle"
+    );
+
     Ok(())
 }
 
-async fn resolve_query_embedding_context(
-    state: &AppState,
-    library_id: Uuid,
-    query_text: &str,
-) -> Result<Option<QueryEmbeddingContext>, ApiError> {
-    let binding = state
-        .canonical_services
-        .ai_catalog
-        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
-        .await?;
-    let Some(binding) = binding else {
-        return Ok(None);
-    };
-
-    let generations = state
-        .canonical_services
-        .knowledge
-        .derive_library_generation_rows(state, library_id)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    let Some(generation) = generations.first() else {
-        return Ok(None);
-    };
-    if generation.active_vector_generation <= 0 {
-        return Ok(None);
+pub(crate) fn seed_chunk_refs_from_answer_context(
+    answer_chunk_references: &[QueryChunkReferenceSnapshot],
+) -> HashMap<Uuid, RankedBundleReference> {
+    let mut chunk_refs = HashMap::new();
+    for reference in answer_chunk_references {
+        merge_ranked_reference(
+            &mut chunk_refs,
+            reference.chunk_id,
+            reference.rank,
+            reference.score,
+            "answer_context",
+        );
     }
-
-    let embedding = state
-        .llm_gateway
-        .embed(EmbeddingRequest {
-            provider_kind: binding.provider_kind.clone(),
-            model_name: binding.model_name.clone(),
-            input: query_text.to_string(),
-            api_key_override: binding.api_key.clone(),
-            base_url_override: binding.provider_base_url,
-        })
-        .await
-        .map_err(|error| {
-            ApiError::ProviderFailure(format!("failed to embed query bundle request: {error}"))
-        })?;
-
-    let _ = generation;
-    Ok(Some(QueryEmbeddingContext {
-        model_catalog_id: binding.model_catalog_id,
-        query_vector: embedding.embedding,
-    }))
+    chunk_refs
 }
 
 fn absorb_traversal_row(
     row: &KnowledgeGraphTraversalRow,
-    chunk_refs: &mut HashMap<Uuid, RankedBundleReference>,
     entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
     relation_refs: &mut HashMap<Uuid, RankedBundleReference>,
     evidence_refs: &mut HashMap<Uuid, RankedBundleReference>,
@@ -651,9 +524,7 @@ fn absorb_traversal_row(
     let rank = traversal_rank(row.path_length);
     let score = row.edge_score.unwrap_or_else(|| traversal_score(row.path_length));
     match row.vertex_kind.as_str() {
-        KNOWLEDGE_CHUNK_COLLECTION => {
-            merge_ranked_reference(chunk_refs, row.vertex_id, rank, score, reason);
-        }
+        KNOWLEDGE_CHUNK_COLLECTION => {}
         KNOWLEDGE_ENTITY_COLLECTION => {
             merge_ranked_reference(entity_refs, row.vertex_id, rank, score, reason);
         }
@@ -1065,8 +936,8 @@ pub(crate) async fn load_execution_prepared_reference_context(
     // already accepted and streamed before we reach this block, so an
     // intermittent Arango connection drop (memory-cap throttle, cursor
     // reset) must not turn a succeeded turn into a 500. Fail-soft to an
-    // empty vec and log, exactly like the legacy best-effort path —
-    // references degrade but the answer still reaches the user.
+    // empty vec and log so references degrade but the answer still
+    // reaches the user.
     let technical_fact_rows =
         if fact_rank_refs.is_empty() && bundle.bundle.selected_fact_ids.is_empty() {
             Vec::new()

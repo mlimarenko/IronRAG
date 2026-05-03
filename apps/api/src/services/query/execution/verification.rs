@@ -11,17 +11,10 @@ use crate::{
     services::query::planner::QueryIntentProfile,
 };
 
-use super::types::{CanonicalAnswerEvidence, RuntimeMatchedChunk};
-use super::{CanonicalTarget, extract_multi_document_role_clauses, role_clause_canonical_target};
-
-#[derive(Debug, Clone)]
-pub(crate) struct RuntimeAnswerVerification {
-    pub(crate) state: QueryVerificationState,
-    pub(crate) warnings: Vec<QueryVerificationWarning>,
-}
+use super::types::{CanonicalAnswerEvidence, RuntimeAnswerVerification, RuntimeMatchedChunk};
 
 pub(crate) fn verify_answer_against_canonical_evidence(
-    question: &str,
+    _question: &str,
     answer: &str,
     intent_profile: &QueryIntentProfile,
     evidence: &CanonicalAnswerEvidence,
@@ -38,6 +31,7 @@ pub(crate) fn verify_answer_against_canonical_evidence(
                 related_segment_id: None,
                 related_fact_id: None,
             }],
+            unsupported_literals: Vec::new(),
         };
     }
 
@@ -52,12 +46,14 @@ pub(crate) fn verify_answer_against_canonical_evidence(
         normalized_corpus.push(normalized_prompt_context);
     }
     let mut warnings = Vec::<QueryVerificationWarning>::new();
+    let mut unsupported_literals = Vec::<String>::new();
     for literal in inline_literals.iter().chain(fenced_line_literals.iter()) {
         let normalized_literal = normalize_verification_literal(literal);
         if normalized_literal.is_empty() {
             continue;
         }
         if !literal_is_supported_by_canonical_corpus(literal, &normalized_corpus) {
+            unsupported_literals.push(literal.clone());
             warnings.push(QueryVerificationWarning {
                 code: "unsupported_literal".to_string(),
                 message: format!("Literal `{literal}` is not grounded in selected evidence."),
@@ -71,9 +67,8 @@ pub(crate) fn verify_answer_against_canonical_evidence(
     let has_any_backticked_literals =
         !inline_literals.is_empty() || !fenced_line_literals.is_empty();
     let has_grounded_backticked_literals = has_any_backticked_literals && !has_unsupported_literals;
-    let should_check_conflicting_evidence = intent_profile.exact_literal_technical
-        && intent_profile.unsupported_capability.is_none()
-        && !has_grounded_backticked_literals;
+    let should_check_conflicting_evidence =
+        intent_profile.exact_literal_technical && !has_grounded_backticked_literals;
     let conflicting_groups = if should_check_conflicting_evidence {
         collect_conflicting_fact_groups(&evidence.technical_facts)
     } else {
@@ -92,42 +87,13 @@ pub(crate) fn verify_answer_against_canonical_evidence(
     }
 
     let lower_answer = answer.to_ascii_lowercase();
-    for expected_target in expected_cross_document_answer_targets(question) {
-        if !lower_answer.contains(&expected_target.subject_label().to_ascii_lowercase()) {
-            warnings.push(QueryVerificationWarning {
-                code: "wrong_canonical_target".to_string(),
-                message: format!(
-                    "Answer does not name the grounded target {} for this question.",
-                    expected_target.subject_label()
-                ),
-                related_segment_id: None,
-                related_fact_id: None,
-            });
-        }
-    }
-    // `question_specific_verification_warnings` used to pattern-match on
-    // the specific gremlin / sparql / cypher / 2019 benchmark question and
-    // add an `unsupported_canonical_claim` warning when the answer named a
-    // concept not grounded in corpus. That whole check was a hardcoded
-    // keyword workaround: the compiler-produced QueryIR (read via
-    // `answer_pipeline.rs`) now handles claim grounding through the
-    // general `unsupported_literal` path and strict verification level,
-    // so no question-specific branch is required here.
-
     let insufficient = lower_answer.contains("no grounded evidence")
-        || lower_answer.contains("exact value is not grounded")
-        || lower_answer.contains("не подтвержден в выбранных доказательствах");
+        || lower_answer.contains("exact value is not grounded");
     let has_conflicting_evidence =
         warnings.iter().any(|warning| warning.code == "conflicting_evidence");
-    let has_wrong_canonical_target =
-        warnings.iter().any(|warning| warning.code == "wrong_canonical_target");
     let has_unsupported_canonical_claim =
         warnings.iter().any(|warning| warning.code == "unsupported_canonical_claim");
-    let state = if insufficient
-        || has_unsupported_literals
-        || has_wrong_canonical_target
-        || has_unsupported_canonical_claim
-    {
+    let state = if insufficient || has_unsupported_literals || has_unsupported_canonical_claim {
         QueryVerificationState::InsufficientEvidence
     } else if has_conflicting_evidence {
         QueryVerificationState::Conflicting
@@ -135,35 +101,7 @@ pub(crate) fn verify_answer_against_canonical_evidence(
         QueryVerificationState::Verified
     };
 
-    RuntimeAnswerVerification { state, warnings }
-}
-
-fn expected_cross_document_answer_targets(question: &str) -> Vec<CanonicalTarget> {
-    // Cross-document role clauses ("which one of these handles X?") are
-    // still extracted syntactically — no keyword markers involved, just
-    // structural patterns — so this helper is kept. The old
-    // graph-database / gql hardcoded branch below was removed along with
-    // `question_specific_verification_warnings`; QueryIR now encodes
-    // cross-document scope via `ir.is_multi_document()` and the
-    // canonical target through ontology tags.
-    let clauses = extract_multi_document_role_clauses(question);
-    if !clauses.is_empty() {
-        return clauses
-            .into_iter()
-            .filter_map(|clause| role_clause_canonical_target(&clause))
-            .collect();
-    }
-
-    let lowered = question.to_lowercase();
-    if lowered.contains("gremlin")
-        && lowered.contains("sparql")
-        && lowered.contains("cypher")
-        && lowered.contains("2019")
-    {
-        return vec![CanonicalTarget::GraphDatabase];
-    }
-
-    Vec::new()
+    RuntimeAnswerVerification { state, warnings, unsupported_literals }
 }
 
 fn extract_answer_literals(answer: &str) -> (Vec<String>, Vec<String>) {
@@ -314,7 +252,76 @@ fn literal_is_supported_by_canonical_corpus(literal: &str, corpus: &[String]) ->
 }
 
 fn normalize_verification_literal(value: &str) -> String {
-    value.chars().filter(|ch| !ch.is_whitespace()).flat_map(char::to_lowercase).collect()
+    let mut normalized = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '&'
+            && let Some(decoded) = decode_html_entity(&mut chars)
+        {
+            normalized.extend(decoded.to_lowercase());
+            continue;
+        }
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '\\'
+            && let Some(next) = chars.peek().copied()
+            && is_markdown_escaped_literal_punctuation(next)
+        {
+            let escaped = chars.next().expect("peeked char must exist");
+            normalized.extend(escaped.to_lowercase());
+            continue;
+        }
+        normalized.extend(ch.to_lowercase());
+    }
+    normalized
+}
+
+fn decode_html_entity<I>(chars: &mut std::iter::Peekable<I>) -> Option<char>
+where
+    I: Iterator<Item = char> + Clone,
+{
+    let mut entity = String::new();
+    let mut probe = chars.clone();
+    let mut saw_semicolon = false;
+    while let Some(next) = probe.next() {
+        if next == ';' {
+            saw_semicolon = true;
+            break;
+        }
+        if entity.len() >= 16 || next.is_whitespace() {
+            return None;
+        }
+        entity.push(next);
+    }
+    if !saw_semicolon {
+        return None;
+    }
+    let decoded = match entity.as_str() {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" | "#39" => '\'',
+        value if value.starts_with("#x") || value.starts_with("#X") => {
+            let codepoint = u32::from_str_radix(&value[2..], 16).ok()?;
+            char::from_u32(codepoint)?
+        }
+        value if value.starts_with('#') => {
+            let codepoint = value[1..].parse::<u32>().ok()?;
+            char::from_u32(codepoint)?
+        }
+        _ => return None,
+    };
+    for _ in 0..entity.chars().count() {
+        chars.next();
+    }
+    chars.next();
+    Some(decoded)
+}
+
+fn is_markdown_escaped_literal_punctuation(ch: char) -> bool {
+    ch.is_ascii_punctuation() && ch != '/' && ch != '\\'
 }
 
 fn split_http_literal(literal: &str) -> Option<(&str, &str)> {

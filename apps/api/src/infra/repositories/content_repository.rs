@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use sqlx::{Executor, FromRow, PgPool, Postgres, QueryBuilder, pool::PoolConnection};
+use sqlx::{Executor, FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
+
+use crate::shared::versioning::dotted_version_terms;
 
 /// Canonical CASE expression that derives the five status buckets the
 /// documents surface exposes (`canceled` / `failed` / `processing` /
@@ -11,7 +13,7 @@ use uuid::Uuid;
 /// ad-hoc caller stay aligned.
 ///
 /// Priority (top row wins):
-/// 1. Mutation is terminally failed / conflicted / canceled → `failed`.
+/// 1. Mutation is terminally failed / conflicted → `failed`.
 ///    The head itself is broken; the operator must see this.
 /// 2. Latest ingest_job is `failed` → `failed`.
 /// 3. Latest ingest_job is `leased` → `processing`. A worker is
@@ -22,12 +24,11 @@ use uuid::Uuid;
 ///    The document has a usable revision the user can consume
 ///    right now. `ready` wins over `canceled` / `queued`:
 ///    a canceled or queued re-ingest over a still-readable
-///    document should not hide it from the "Готовые" bucket.
-///    That was the regression that produced "Готовые 1" on the
-///    reference library during bulk re-ingest — canceled
-///    fan-out jobs were dominating the pick.
-/// 5. Latest ingest_job is `canceled` → `canceled` (no readable,
-///    work was canceled before finishing).
+///    document should not hide it from the ready bucket. Otherwise
+///    canceled fan-out jobs can dominate the pick during bulk
+///    re-ingest.
+/// 5. Latest ingest_job or mutation is `canceled` → `canceled` (no
+///    readable, work was canceled before finishing).
 /// 6. Latest ingest_job is `queued` → `queued` (new document
 ///    waiting for its first ingest; no readable yet).
 /// 7. Mutation state is `accepted` / `running` → `processing`.
@@ -38,15 +39,16 @@ use uuid::Uuid;
 /// Requires the hosting query to expose `ij.queue_state`,
 /// `m.mutation_state`, and `h.readable_revision_id` under exactly
 /// those aliases (both current callers do). `ij.queue_state` must
-/// be picked with a state-priority LATERAL (leased > failed >
-/// canceled > queued > completed), per-document — see
+/// be picked from this document's newest mutation, with state
+/// priority only as a retry tie-breaker inside that mutation — see
 /// `list_document_page_rows` for the reference implementation.
 pub(crate) const DERIVED_STATUS_CASE_SQL: &str = "case
-    when m.mutation_state in ('failed','conflicted','canceled') then 'failed'
+    when m.mutation_state in ('failed','conflicted') then 'failed'
     when ij.queue_state = 'failed' then 'failed'
     when ij.queue_state = 'leased' then 'processing'
     when h.readable_revision_id is not null then 'ready'
     when ij.queue_state = 'canceled' then 'canceled'
+    when m.mutation_state = 'canceled' then 'canceled'
     when ij.queue_state = 'queued' then 'queued'
     when m.mutation_state in ('accepted','running') then 'processing'
     when ij.queue_state = 'completed' then 'failed'
@@ -106,6 +108,13 @@ pub struct ContentChunkRow {
     pub token_count: Option<i32>,
     pub normalized_text: String,
     pub text_checksum: String,
+    /// Earliest record timestamp aggregated into this chunk (JSONL ingest
+    /// only; NULL for non-temporal sources like PDF/image/markdown).
+    pub occurred_at: Option<DateTime<Utc>>,
+    /// Latest record timestamp aggregated into this chunk. For
+    /// single-record chunks `occurred_until == occurred_at`. NULL when
+    /// `occurred_at` is NULL.
+    pub occurred_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -181,6 +190,14 @@ pub struct NewContentChunk<'a> {
     pub token_count: Option<i32>,
     pub normalized_text: &'a str,
     pub text_checksum: &'a str,
+    /// Earliest record timestamp aggregated into this chunk (JSONL ingest
+    /// only; None for non-temporal sources). Computed via the canonical
+    /// `record_jsonl::extract_chunk_temporal_bounds` helper.
+    pub occurred_at: Option<DateTime<Utc>>,
+    /// Latest record timestamp aggregated into this chunk. Equals
+    /// `occurred_at` for single-record chunks; None when `occurred_at`
+    /// is None.
+    pub occurred_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -538,6 +555,88 @@ pub async fn update_document_summary(
     Ok(())
 }
 
+pub async fn get_library_readable_content_fingerprint(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "with readable_heads as (
+            select
+                document.id as document_id,
+                document.external_key,
+                coalesce(head.readable_revision_id, head.active_revision_id) as revision_id
+            from content_document as document
+            left join content_document_head as head
+              on head.document_id = document.id
+            where document.library_id = $1
+              and document.document_state = 'active'
+              and document.deleted_at is null
+        ),
+        chunk_fingerprints as (
+            select
+                chunk.revision_id,
+                count(*)::bigint as chunk_count,
+                md5(string_agg(
+                    array_to_string(
+                        array[
+                            chunk.chunk_index::text,
+                            chunk.text_checksum
+                        ],
+                        chr(31),
+                        ''
+                    ),
+                    chr(30)
+                    order by chunk.chunk_index, chunk.id
+                )) as chunk_fingerprint
+            from content_chunk as chunk
+            where chunk.revision_id in (
+                select revision_id
+                from readable_heads
+                where revision_id is not null
+            )
+            group by chunk.revision_id
+        ),
+        document_fingerprints as (
+            select
+                head.document_id,
+                array_to_string(
+                    array[
+                        head.document_id::text,
+                        head.external_key,
+                        coalesce(head.revision_id::text, ''),
+                        coalesce(revision.revision_number::text, ''),
+                        coalesce(revision.checksum, ''),
+                        coalesce(revision.mime_type, ''),
+                        coalesce(revision.byte_size::text, ''),
+                        coalesce(revision.title, ''),
+                        coalesce(revision.source_uri, ''),
+                        coalesce(chunks.chunk_count::text, '0'),
+                        coalesce(chunks.chunk_fingerprint, '')
+                    ],
+                    chr(31),
+                    ''
+                ) as fingerprint_part
+            from readable_heads as head
+            left join content_revision as revision
+              on revision.id = head.revision_id
+            left join chunk_fingerprints as chunks
+              on chunks.revision_id = head.revision_id
+        )
+        select coalesce(
+            md5(string_agg(
+                fingerprint_part,
+                chr(30)
+                order by document_id
+            )),
+            md5('empty')
+        )
+        from document_fingerprints",
+    )
+    .bind(library_id)
+    .fetch_one(postgres)
+    .await
+}
+
 pub async fn list_revisions_by_document(
     postgres: &PgPool,
     document_id: Uuid,
@@ -789,7 +888,9 @@ pub async fn list_chunks_by_revision(
             end_offset,
             token_count,
             normalized_text,
-            text_checksum
+            text_checksum,
+            occurred_at,
+            occurred_until
          from content_chunk
          where revision_id = $1
          order by chunk_index asc",
@@ -812,7 +913,9 @@ pub async fn get_chunk_by_id(
             end_offset,
             token_count,
             normalized_text,
-            text_checksum
+            text_checksum,
+            occurred_at,
+            occurred_until
          from content_chunk
          where id = $1",
     )
@@ -834,9 +937,11 @@ pub async fn create_chunk(
             end_offset,
             token_count,
             normalized_text,
-            text_checksum
+            text_checksum,
+            occurred_at,
+            occurred_until
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         returning
             id,
             revision_id,
@@ -845,7 +950,9 @@ pub async fn create_chunk(
             end_offset,
             token_count,
             normalized_text,
-            text_checksum",
+            text_checksum,
+            occurred_at,
+            occurred_until",
     )
     .bind(Uuid::now_v7())
     .bind(new_chunk.revision_id)
@@ -855,6 +962,8 @@ pub async fn create_chunk(
     .bind(new_chunk.token_count)
     .bind(new_chunk.normalized_text)
     .bind(new_chunk.text_checksum)
+    .bind(new_chunk.occurred_at)
+    .bind(new_chunk.occurred_until)
     .fetch_one(postgres)
     .await
 }
@@ -868,7 +977,7 @@ pub async fn create_chunks(
     }
 
     const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
-    const CONTENT_CHUNK_INSERT_BIND_COUNT: usize = 8;
+    const CONTENT_CHUNK_INSERT_BIND_COUNT: usize = 10;
     const CONTENT_CHUNK_INSERT_BATCH_SIZE: usize =
         POSTGRES_MAX_BIND_PARAMETERS / CONTENT_CHUNK_INSERT_BIND_COUNT;
 
@@ -894,7 +1003,9 @@ async fn create_chunk_batch(
             end_offset,
             token_count,
             normalized_text,
-            text_checksum
+            text_checksum,
+            occurred_at,
+            occurred_until
         ) ",
     );
 
@@ -906,7 +1017,9 @@ async fn create_chunk_batch(
             .push_bind(new_chunk.end_offset)
             .push_bind(new_chunk.token_count)
             .push_bind(new_chunk.normalized_text)
-            .push_bind(new_chunk.text_checksum);
+            .push_bind(new_chunk.text_checksum)
+            .push_bind(new_chunk.occurred_at)
+            .push_bind(new_chunk.occurred_until);
     });
 
     builder.push(
@@ -918,7 +1031,9 @@ async fn create_chunk_batch(
             end_offset,
             token_count,
             normalized_text,
-            text_checksum",
+            text_checksum,
+            occurred_at,
+            occurred_until",
     );
 
     builder.build_query_as::<ContentChunkRow>().fetch_all(postgres).await
@@ -1122,47 +1237,39 @@ pub async fn create_mutation(
 pub async fn acquire_content_mutation_lock(
     postgres: &PgPool,
     mutation_id: Uuid,
-) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    let mut connection = postgres.acquire().await?;
-    sqlx::query("select pg_advisory_lock(hashtextextended($1::text, 0))")
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
         .bind(format!("content.mutation:{mutation_id}"))
-        .execute(&mut *connection)
+        .execute(&mut *transaction)
         .await?;
-    Ok(connection)
+    Ok(transaction)
 }
 
 pub async fn acquire_content_document_lock(
     postgres: &PgPool,
     document_id: Uuid,
-) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    let mut connection = postgres.acquire().await?;
-    sqlx::query("select pg_advisory_lock(hashtextextended($1::text, 0))")
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
         .bind(format!("content.document:{document_id}"))
-        .execute(&mut *connection)
+        .execute(&mut *transaction)
         .await?;
-    Ok(connection)
+    Ok(transaction)
 }
 
 pub async fn release_content_mutation_lock(
-    mut connection: PoolConnection<Postgres>,
-    mutation_id: Uuid,
+    transaction: Transaction<'static, Postgres>,
+    _mutation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
-        .bind(format!("content.mutation:{mutation_id}"))
-        .execute(&mut *connection)
-        .await?;
-    Ok(())
+    transaction.commit().await
 }
 
 pub async fn release_content_document_lock(
-    mut connection: PoolConnection<Postgres>,
-    document_id: Uuid,
+    transaction: Transaction<'static, Postgres>,
+    _document_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("select pg_advisory_unlock(hashtextextended($1::text, 0))")
-        .bind(format!("content.document:{document_id}"))
-        .execute(&mut *connection)
-        .await?;
-    Ok(())
+    transaction.commit().await
 }
 
 pub async fn update_mutation_status(
@@ -1524,11 +1631,12 @@ pub async fn list_document_page_rows(
     // failure signal" — the inspector panel surfaces the finer split.
     // Same LATERAL protection as `aggregate_document_list_status_counts`:
     // a content_mutation can own many ingest_job rows (retry, requeue,
-    // one legacy bulk-import mutation on the reference library carries
-    // ~5k jobs), so the join must return at most one job per mutation
-    // to keep pagination and derived_status stable. The active revision
-    // is also joined in the inner CTE so `ORDER BY revision_mime_type`
-    // / `revision_byte_size` (the file-type / file-size column headers)
+    // one bulk-import mutation can carry many document jobs), so
+    // the join must return at most one job per document. The selected job
+    // is from the newest mutation for this document; state priority is a
+    // retry tie-breaker inside that mutation. The active revision is also
+    // joined in the inner CTE so `ORDER BY revision_mime_type` /
+    // `revision_byte_size` (the file-type / file-size column headers)
     // can push down into keyset sort.
     let sql = format!(
         "with joined as (
@@ -1565,27 +1673,22 @@ pub async fn list_document_page_rows(
             left join content_mutation m on m.id = h.latest_mutation_id
             left join lateral (
                 -- Filter by knowledge_document_id, NOT by mutation_id.
-                -- Legacy bulk-import mutations on production carry
-                -- thousands of ingest_job rows shared across many
-                -- documents, so filtering by mutation_id resolves
-                -- every document to the same state across the whole
-                -- library (observed: 9928 documents all classified
-                -- as processing because a single mutation happened
-                -- to contain one leased job). ingest_job has a
-                -- direct document pointer; using it guarantees the
-                -- lateral pick reflects this document only.
+                -- Bulk-import mutations can carry ingest_job rows
+                -- shared across many documents, so filtering by
+                -- mutation_id can resolve unrelated documents to the
+                -- same state. ingest_job has a direct document
+                -- pointer; using it guarantees the lateral pick
+                -- reflects this document only.
                 --
-                -- Within one document's jobs, state priority first
-                -- then queued_at desc: leased beats failed beats
-                -- canceled beats queued beats completed. This
-                -- surfaces the most informative row — a still-busy
-                -- lease is more useful than the newest of a
-                -- thousand dormant queued fan-out rows — while
-                -- keeping pagination deterministic inside a class.
+                -- Across one document's jobs, the newest mutation wins.
+                -- Within that mutation, state priority surfaces the
+                -- active retry over older terminal attempts.
                 select ij_inner.*
                 from ingest_job ij_inner
+                left join content_mutation m_inner on m_inner.id = ij_inner.mutation_id
                 where ij_inner.knowledge_document_id = d.id
-                order by case ij_inner.queue_state::text
+                order by coalesce(m_inner.requested_at, ij_inner.queued_at) desc,
+                    case ij_inner.queue_state::text
                         when 'leased' then 1
                         when 'failed' then 2
                         when 'canceled' then 3
@@ -1650,8 +1753,8 @@ pub async fn list_document_page_rows(
         ) a on true
         left join lateral (
             -- Per-document cost rollup. `billing_execution_cost` carries
-            -- library_id and knowledge_document_id directly (0006
-            -- migration), so this is a single indexed aggregate via
+            -- library_id and knowledge_document_id directly, so this is
+            -- a single indexed aggregate via
             -- `idx_billing_execution_cost_library_document`. Lateral
             -- keeps the cost column optional — documents with no
             -- billable execution just get 0.
@@ -1727,14 +1830,11 @@ pub async fn aggregate_document_list_status_counts(
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{}%", value.to_lowercase()));
     // The `ingest_job` join MUST be a LATERAL pick-one to prevent
-    // Cartesian fanout: historically a single mutation can own many
-    // ingest_job rows (retry, requeue, plus legacy bulk-import
-    // mutations that can carry thousands of jobs). A
-    // straight `left join ingest_job on mutation_id` multiplies every
-    // document row by the number of jobs on its latest mutation, which
-    // blows the counts into millions. The lateral subquery returns at
-    // most one row per mutation — the newest queued — which is what
-    // `derived_status` actually wants.
+    // Cartesian fanout: one mutation can own many ingest_job rows
+    // across retries and bulk imports. A straight `left join ingest_job`
+    // multiplies document rows and corrupts counts. The lateral subquery
+    // returns at most one job per document, from the newest mutation, with
+    // state priority as the retry tie-breaker inside that mutation.
     let sql = format!(
         "with joined as (
             select
@@ -1747,12 +1847,13 @@ pub async fn aggregate_document_list_status_counts(
                 -- Same per-document filter used in
                 -- list_document_page_rows — see the comment there
                 -- for why mutation_id cannot be trusted on
-                -- production stacks with legacy bulk-import
-                -- mutations.
+                -- stacks with bulk-import mutations.
                 select ij_inner.queue_state
                 from ingest_job ij_inner
+                left join content_mutation m_inner on m_inner.id = ij_inner.mutation_id
                 where ij_inner.knowledge_document_id = d.id
-                order by case ij_inner.queue_state::text
+                order by coalesce(m_inner.requested_at, ij_inner.queued_at) desc,
+                    case ij_inner.queue_state::text
                         when 'leased' then 1
                         when 'failed' then 2
                         when 'canceled' then 3
@@ -1861,14 +1962,18 @@ pub async fn search_document_metadata_rows(
     query: &str,
     limit: u32,
 ) -> Result<Vec<ContentDocumentMetadataSearchRow>, sqlx::Error> {
-    let exact_terms = metadata_search_terms(query);
-    if exact_terms.is_empty() || limit == 0 {
+    let search_terms = metadata_search_terms(query);
+    if search_terms.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    let like_patterns = exact_terms.iter().map(|term| format!("%{term}%")).collect::<Vec<_>>();
+    let like_patterns =
+        search_terms.generic.iter().map(|term| format!("%{term}%")).collect::<Vec<_>>();
+    let version_like_patterns =
+        search_terms.version.iter().map(|term| format!("%{term}%")).collect::<Vec<_>>();
 
     sqlx::query_as::<_, ContentDocumentMetadataSearchRow>(
-        "select
+        r#"with candidate as (
+         select
             d.id as document_id,
             d.workspace_id,
             d.library_id,
@@ -1876,17 +1981,31 @@ pub async fn search_document_metadata_rows(
             h.readable_revision_id,
             r.title as revision_title,
             case
-                when lower(d.external_key) = any($2) then 1200::double precision
-                when lower(coalesce(r.title, '')) = any($2) then 1150::double precision
-                when lower(d.external_key) like any($3) then 1100::double precision
+                when lower(coalesce(r.title, '')) = any($2) then 1400::double precision
+                when lower(d.external_key) = any($2) then 1380::double precision
+                when cardinality($4::text[]) > 0
+                    and lower(coalesce(r.title, '')) like any($4) then 1320::double precision
+                when cardinality($4::text[]) > 0
+                    and lower(d.external_key) like any($4) then 1280::double precision
+                when lower(coalesce(r.title, '')) like any($3) then 1120::double precision
+                when lower(d.external_key) like any($3) then 1080::double precision
                 else 1050::double precision
             end as metadata_score,
             case
-                when lower(d.external_key) = any($2) then d.external_key
                 when lower(coalesce(r.title, '')) = any($2) then coalesce(r.title, d.external_key)
+                when lower(d.external_key) = any($2) then d.external_key
+                when cardinality($4::text[]) > 0
+                    and lower(coalesce(r.title, '')) like any($4) then coalesce(r.title, d.external_key)
+                when cardinality($4::text[]) > 0
+                    and lower(d.external_key) like any($4) then d.external_key
+                when lower(coalesce(r.title, '')) like any($3) then coalesce(r.title, d.external_key)
                 when lower(d.external_key) like any($3) then d.external_key
                 else coalesce(r.title, d.external_key)
-            end as matched_text
+            end as matched_text,
+            regexp_match(
+                coalesce(r.title, d.external_key),
+                '([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?'
+            ) as version_parts
          from content_document d
          join content_document_head h on h.document_id = d.id
          join content_revision r on r.id = h.readable_revision_id
@@ -1897,26 +2016,66 @@ pub async fn search_document_metadata_rows(
                 or lower(coalesce(r.title, '')) = any($2)
                 or lower(d.external_key) like any($3)
                 or lower(coalesce(r.title, '')) like any($3)
+                or (
+                    cardinality($4::text[]) > 0
+                    and (
+                        lower(d.external_key) like any($4)
+                        or lower(coalesce(r.title, '')) like any($4)
+                    )
+                )
            )
-         order by metadata_score desc, d.created_at desc, d.id desc
-         limit $4",
+        )
+         select
+            document_id,
+            workspace_id,
+            library_id,
+            external_key,
+            readable_revision_id,
+            revision_title,
+            metadata_score,
+            matched_text
+         from candidate
+         order by
+            metadata_score desc,
+            coalesce((version_parts[1])::integer, -1) desc,
+            coalesce((version_parts[2])::integer, -1) desc,
+            coalesce((version_parts[3])::integer, -1) desc,
+            coalesce((version_parts[4])::integer, -1) desc,
+            document_id desc
+         limit $5"#,
     )
     .bind(library_id)
-    .bind(exact_terms)
+    .bind(search_terms.generic)
     .bind(like_patterns)
+    .bind(version_like_patterns)
     .bind(i64::from(limit))
     .fetch_all(postgres)
     .await
 }
 
-fn metadata_search_terms(query: &str) -> Vec<String> {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MetadataSearchTerms {
+    generic: Vec<String>,
+    version: Vec<String>,
+}
+
+impl MetadataSearchTerms {
+    fn is_empty(&self) -> bool {
+        self.generic.is_empty() && self.version.is_empty()
+    }
+}
+
+fn metadata_search_terms(query: &str) -> MetadataSearchTerms {
     let normalized_query = query.trim().to_lowercase();
     if normalized_query.is_empty() {
-        return Vec::new();
+        return MetadataSearchTerms::default();
     }
 
-    let mut terms = BTreeSet::new();
-    terms.insert(normalized_query.clone());
+    let mut seen = BTreeSet::new();
+    let mut generic = Vec::new();
+    if seen.insert(normalized_query.clone()) {
+        generic.push(normalized_query.clone());
+    }
     for token in normalized_query.split_whitespace() {
         let normalized_token = token
             .trim_matches(|character: char| {
@@ -1924,14 +2083,33 @@ fn metadata_search_terms(query: &str) -> Vec<String> {
             })
             .trim();
         if normalized_token.chars().count() >= 2 {
-            terms.insert(normalized_token.to_string());
+            push_metadata_search_term(&mut generic, &mut seen, normalized_token.to_string());
         }
-        if terms.len() >= 8 {
+        if generic.len() >= 8 {
             break;
         }
     }
 
-    terms.into_iter().collect()
+    MetadataSearchTerms { generic, version: metadata_version_terms(&normalized_query) }
+}
+
+fn push_metadata_search_term(terms: &mut Vec<String>, seen: &mut BTreeSet<String>, term: String) {
+    if seen.insert(term.clone()) {
+        terms.push(term);
+    }
+}
+
+fn metadata_version_terms(normalized_query: &str) -> Vec<String> {
+    let has_word_context = normalized_query
+        .split(|character: char| {
+            !character.is_alphanumeric() && character != '_' && character != '-' && character != '/'
+        })
+        .any(|token| token.chars().count() >= 2 && token.chars().any(char::is_alphabetic));
+
+    dotted_version_terms(normalized_query)
+        .into_iter()
+        .filter(|term| term.matches('.').count() >= 2 || has_word_context)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1940,29 +2118,30 @@ mod tests {
 
     #[test]
     fn metadata_search_terms_extracts_filename_token_from_mixed_query() {
-        let terms = metadata_search_terms("audit_repository.rs фильтры события");
-        assert!(terms.iter().any(|term| term == "audit_repository.rs"));
-        assert!(terms.iter().any(|term| term == "фильтры"));
-        assert!(terms.iter().any(|term| term == "события"));
+        let terms = metadata_search_terms("audit_repository.rs filters events");
+        assert!(terms.generic.iter().any(|term| term == "audit_repository.rs"));
+        assert!(terms.generic.iter().any(|term| term == "filters"));
+        assert!(terms.generic.iter().any(|term| term == "events"));
     }
 
     #[test]
     fn metadata_search_terms_normalizes_unicode_and_deduplicates() {
-        let terms = metadata_search_terms("AUDIT_REPOSITORY.RS ФИЛЬТРЫ фильтры");
-        assert!(terms.iter().any(|term| term == "audit_repository.rs"));
-        assert_eq!(terms.iter().filter(|term| term.as_str() == "фильтры").count(), 1);
+        let terms = metadata_search_terms("AUDIT_REPOSITORY.RS CAFÉ café");
+        assert!(terms.generic.iter().any(|term| term == "audit_repository.rs"));
+        assert_eq!(terms.generic.iter().filter(|term| term.as_str() == "café").count(), 1);
+    }
+
+    #[test]
+    fn metadata_search_terms_extracts_version_prefix_with_word_context() {
+        let terms = metadata_search_terms("\"Version 4.6.\" \"Alpha Suite Administrator Guide\"");
+        assert!(terms.version.iter().any(|term| term == "4.6"));
+    }
+
+    #[test]
+    fn metadata_search_terms_requires_context_for_two_part_numbers() {
+        let terms = metadata_search_terms("1.2");
+        assert!(terms.version.is_empty());
+        let terms = metadata_search_terms("Alpha 1.2");
+        assert_eq!(terms.version, vec!["1.2"]);
     }
 }
-
-// Previously here: `aggregate_library_document_readiness`,
-// `LibraryDocumentReadinessRow`, `LibraryDocumentReadinessAggregate`.
-// Retired in the metrics-consolidation release — all readiness
-// numbers now flow through `aggregate_library_document_metrics` /
-// `LibraryDocumentMetrics`, which exposes the same buckets plus the
-// canonical status-CASE bucketing and the graph_ready split. The old
-// readiness aggregator used a different predicate for "readable" that
-// silently hid documents in mutation_state drift, which was the root
-// cause of the dashboard showing `920 ready` while `graph_ready`
-// reported `1212` on production. Consumers migrated to the canonical
-// aggregator; no shim is needed because there are no out-of-tree
-// callers.

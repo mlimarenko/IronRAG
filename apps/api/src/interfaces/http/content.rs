@@ -105,7 +105,7 @@ async fn list_documents(
     const DEFAULT_LIMIT: u32 = 50;
     // Cap the page size at 1000 rows to match the largest option the
     // documents UI exposes. The previous 200 clamp silently truncated
-    // every larger request — `pageSize=1000` would render "1–200 из N"
+    // every larger request — `pageSize=1000` would render "1-200 of N"
     // and batch-cancel would only ever act on the first 200 matches,
     // which was surprising to operators running bulk ops on queued
     // libraries with thousands of pending docs. 1000 rows at ~1-2 KB
@@ -825,6 +825,7 @@ mod tests {
         ContentDocument, ContentDocumentPipelineState, ContentDocumentSummary, ContentRevision,
     };
     use crate::interfaces::http::router_support::ApiError;
+    use crate::services::content::service::ReprocessRevisionSource;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -849,7 +850,17 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let metadata = types::build_reprocess_revision_metadata(&revision, None);
+        let metadata = types::build_reprocess_revision_metadata(
+            &revision,
+            ReprocessRevisionSource {
+                checksum: revision.checksum.clone(),
+                mime_type: revision.mime_type.clone(),
+                byte_size: revision.byte_size,
+                title: revision.title.clone(),
+                source_uri: revision.source_uri.clone(),
+                storage_key: revision.storage_key.clone().expect("storage key"),
+            },
+        );
 
         assert_eq!(metadata.content_source_kind, "upload");
         assert_eq!(metadata.checksum, revision.checksum);
@@ -882,12 +893,65 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let metadata = types::build_reprocess_revision_metadata(&revision, None);
+        let metadata = types::build_reprocess_revision_metadata(
+            &revision,
+            ReprocessRevisionSource {
+                checksum: revision.checksum.clone(),
+                mime_type: revision.mime_type.clone(),
+                byte_size: revision.byte_size,
+                title: revision.title.clone(),
+                source_uri: revision.source_uri.clone(),
+                storage_key: revision.storage_key.clone().expect("storage key"),
+            },
+        );
 
         assert_eq!(metadata.content_source_kind, "edit");
         assert_eq!(metadata.mime_type, "text/markdown");
         assert_eq!(metadata.source_uri.as_deref(), Some("edit://Inventory.md"));
         assert_eq!(metadata.storage_key.as_deref(), Some("content/demo/Inventory.md"));
+    }
+
+    #[test]
+    fn reprocess_metadata_can_describe_derived_text_source() {
+        let revision = ContentRevision {
+            id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            revision_number: 2,
+            parent_revision_id: None,
+            content_source_kind: "upload".to_string(),
+            checksum: "sha256:original".to_string(),
+            mime_type: "application/pdf".to_string(),
+            byte_size: 4096,
+            title: Some("quarterly-report.pdf".to_string()),
+            language_code: None,
+            source_uri: Some("upload://quarterly-report.pdf".to_string()),
+            storage_key: None,
+            created_by_principal_id: None,
+            created_at: Utc::now(),
+        };
+
+        let derived_source_uri = format!("derived-text://{}", revision.id);
+        let metadata = types::build_reprocess_revision_metadata(
+            &revision,
+            ReprocessRevisionSource {
+                checksum: "sha256:derived".to_string(),
+                mime_type: "text/plain".to_string(),
+                byte_size: 128,
+                title: Some("quarterly-report.txt".to_string()),
+                source_uri: Some(derived_source_uri.clone()),
+                storage_key: "content/derived/quarterly-report.txt".to_string(),
+            },
+        );
+
+        assert_eq!(metadata.content_source_kind, "upload");
+        assert_eq!(metadata.checksum, "sha256:derived");
+        assert_eq!(metadata.mime_type, "text/plain");
+        assert_eq!(metadata.byte_size, 128);
+        assert_eq!(metadata.title.as_deref(), Some("quarterly-report.txt"));
+        assert_eq!(metadata.source_uri.as_deref(), Some(derived_source_uri.as_str()));
+        assert_eq!(metadata.storage_key.as_deref(), Some("content/derived/quarterly-report.txt"));
     }
 
     #[test]

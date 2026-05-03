@@ -25,6 +25,7 @@ import type { DocumentItem } from "@/types";
 
 import { formatSize } from "@/adapters/documents";
 import { DOCUMENT_FILE_INPUT_ACCEPT } from "./uploadAccept";
+import type { WebIngestUrlFilterMode } from "@/api";
 
 type DocumentsOverlaysProps = {
   activeTab: "documents" | "web";
@@ -39,8 +40,6 @@ type DocumentsOverlaysProps = {
   handleDelete: () => void;
   handleReplaceFile: () => void;
   handleStartWebIngest: () => void;
-  libraryIgnorePatternsLoading: boolean;
-  libraryIgnorePatternsText: string;
   maxDepth: string;
   maxPages: string;
   replaceFile: File | null;
@@ -54,7 +53,6 @@ type DocumentsOverlaysProps = {
   setBoundaryPolicy: (value: string) => void;
   setCrawlMode: (value: string) => void;
   setDeleteDocOpen: (open: boolean) => void;
-  setLibraryIgnorePatternsText: (value: string) => void;
   setMaxDepth: (value: string) => void;
   setMaxPages: (value: string) => void;
   setReplaceFile: (file: File | null) => void;
@@ -62,6 +60,11 @@ type DocumentsOverlaysProps = {
   setSeedUrl: (value: string) => void;
   t: TFunction;
   webIngestLoading: boolean;
+  urlFilterLoading: boolean;
+  urlFilterMode: WebIngestUrlFilterMode;
+  urlFilterPatternsText: string;
+  setUrlFilterMode: (value: WebIngestUrlFilterMode) => void;
+  setUrlFilterPatternsText: (value: string) => void;
 };
 
 export function DocumentsOverlays({
@@ -77,8 +80,6 @@ export function DocumentsOverlays({
   handleDelete,
   handleReplaceFile,
   handleStartWebIngest,
-  libraryIgnorePatternsLoading,
-  libraryIgnorePatternsText,
   maxDepth,
   maxPages,
   replaceFile,
@@ -92,7 +93,6 @@ export function DocumentsOverlays({
   setBoundaryPolicy,
   setCrawlMode,
   setDeleteDocOpen,
-  setLibraryIgnorePatternsText,
   setMaxDepth,
   setMaxPages,
   setReplaceFile,
@@ -100,6 +100,11 @@ export function DocumentsOverlays({
   setSeedUrl,
   t,
   webIngestLoading,
+  urlFilterLoading,
+  urlFilterMode,
+  urlFilterPatternsText,
+  setUrlFilterMode,
+  setUrlFilterPatternsText,
 }: DocumentsOverlaysProps) {
   return (
     <>
@@ -208,17 +213,46 @@ export function DocumentsOverlays({
                 </div>
               </div>
             )}
-            <div>
-              <Label>{t("documents.ignorePatterns")}</Label>
-              <Textarea
-                value={libraryIgnorePatternsText}
-                onChange={(event) =>
-                  setLibraryIgnorePatternsText(event.target.value)
-                }
-                placeholder={t("documents.ignorePatternsPlaceholder")}
-                className="mt-2 min-h-[118px] resize-y font-mono text-xs"
-              />
+            <div className="grid gap-3 sm:grid-cols-[12rem_minmax(0,1fr)]">
+              <div>
+                <Label>{t("documents.urlFilterMode")}</Label>
+                <Select
+                  value={urlFilterMode}
+                  onValueChange={(value) =>
+                    setUrlFilterMode(value as WebIngestUrlFilterMode)
+                  }
+                >
+                  <SelectTrigger className="mt-2">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="blocklist">
+                      {t("documents.urlFilterModeBlocklist")}
+                    </SelectItem>
+                    <SelectItem value="allowlist">
+                      {t("documents.urlFilterModeAllowlist")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>{t("documents.urlFilterPatterns")}</Label>
+                <Textarea
+                  value={urlFilterPatternsText}
+                  onChange={(event) =>
+                    setUrlFilterPatternsText(event.target.value)
+                  }
+                  placeholder={t("documents.urlFilterPatternsPlaceholder")}
+                  className="mt-2 min-h-[118px] resize-y font-mono text-xs"
+                />
+              </div>
             </div>
+            {urlFilterMode === "allowlist" &&
+              urlFilterPatternsText.trim().length === 0 && (
+                <p className="-mt-2 text-xs text-muted-foreground">
+                  {t("documents.urlFilterAllowlistHint")}
+                </p>
+              )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddLinkOpen(false)}>
@@ -228,11 +262,13 @@ export function DocumentsOverlays({
               disabled={
                 !seedUrl.trim() ||
                 webIngestLoading ||
-                libraryIgnorePatternsLoading
+                urlFilterLoading ||
+                (urlFilterMode === "allowlist" &&
+                  urlFilterPatternsText.trim().length === 0)
               }
               onClick={handleStartWebIngest}
             >
-              {webIngestLoading || libraryIgnorePatternsLoading ? (
+              {webIngestLoading || urlFilterLoading ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{" "}
                   {t("documents.starting")}

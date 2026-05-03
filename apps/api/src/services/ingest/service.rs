@@ -31,6 +31,7 @@ pub const INGEST_STAGE_VERIFY_QUERY_ANSWER: &str = "verify_query_answer";
 pub const INGEST_STAGE_FINALIZING: &str = "finalizing";
 pub const INGEST_STAGE_WEB_DISCOVERY: &str = "web_discovery";
 pub const INGEST_STAGE_WEB_MATERIALIZE_PAGE: &str = "web_materialize_page";
+pub const INGEST_STAGE_WEBHOOK_DELIVERY: &str = "webhook_delivery";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalIngestStageMetadata {

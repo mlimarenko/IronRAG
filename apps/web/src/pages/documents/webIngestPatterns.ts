@@ -1,12 +1,12 @@
-import type { WebIngestIgnorePattern } from "@/api/admin";
+import type { WebIngestPattern } from "@/api/admin";
 
-const PATTERN_KINDS = new Set<WebIngestIgnorePattern["kind"]>([
+const PATTERN_KINDS = new Set<WebIngestPattern["kind"]>([
   "url_prefix",
   "path_prefix",
   "glob",
 ]);
 
-function inferPatternKind(value: string): WebIngestIgnorePattern["kind"] {
+function inferPatternKind(value: string): WebIngestPattern["kind"] {
   if (/^https?:\/\//i.test(value)) {
     return "url_prefix";
   }
@@ -17,7 +17,7 @@ function inferPatternKind(value: string): WebIngestIgnorePattern["kind"] {
 }
 
 export function formatWebIngestPatterns(
-  patterns: WebIngestIgnorePattern[] | undefined,
+  patterns: WebIngestPattern[] | undefined,
 ): string {
   return (patterns ?? [])
     .map((pattern) => `${pattern.kind}:${pattern.value}`)
@@ -26,7 +26,7 @@ export function formatWebIngestPatterns(
 
 export function parseWebIngestPatternText(
   text: string,
-): WebIngestIgnorePattern[] {
+): WebIngestPattern[] {
   return text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -36,7 +36,7 @@ export function parseWebIngestPatternText(
       if (separator > 0) {
         const rawKind = line
           .slice(0, separator)
-          .trim() as WebIngestIgnorePattern["kind"];
+          .trim() as WebIngestPattern["kind"];
         const value = line.slice(separator + 1).trim();
         if (PATTERN_KINDS.has(rawKind)) {
           if (!value) {

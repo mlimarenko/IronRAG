@@ -116,8 +116,9 @@ fn extract_stream_delta_text(payload: &serde_json::Value) -> String {
 ///   * `finish_reason` — "stop" / "tool_calls" / "length".
 ///
 /// Tool-call arguments are assembled across frames before returning to
-/// the agent loop. Text tokens are pushed out immediately through
-/// `on_text_delta` so the UI can render partial answers.
+/// the caller. Text tokens are pushed out immediately through
+/// `on_text_delta` so a caller that streams text can render partial
+/// answers.
 #[derive(Default)]
 pub(super) struct ToolUseStreamState {
     pub(super) output_text: String,

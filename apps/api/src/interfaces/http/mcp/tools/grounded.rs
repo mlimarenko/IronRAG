@@ -20,6 +20,7 @@
 use serde_json::{Value, json};
 
 use crate::{
+    domains::agent_runtime::RuntimeSurfaceKind,
     domains::query::{QueryTurnKind, QueryVerificationState},
     interfaces::http::{authorization::POLICY_QUERY_RUN, router_support::ApiError},
     services::{
@@ -126,80 +127,6 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
         Err(error) => return tool_error_result(error),
     };
 
-    // Result-cache lookup. Canonical key factors in the library's
-    // graph projection_version and the active query_answer binding
-    // id, so fresh graphs and fresh bindings bump the key
-    // automatically — no manual flush dance on rebuild or model
-    // swap. Cache misses fall through to the full pipeline; cache
-    // hits bypass conversation creation, retrieval, rerank, answer
-    // generation, verifier, AND the ephemeral `[MCP]` conversation
-    // row, so the operator's audit history does not bloat with
-    // identical re-runs.
-    //
-    // Debug-flagged calls skip the cache on both the lookup and the
-    // store, because the debug payload carries trace/context data
-    // that's useless once the answer is frozen.
-    let cache_enabled = !parsed.include_debug.unwrap_or(false);
-    let (cache_key, cache_projection_version) = if cache_enabled {
-        let projection_version = crate::infra::repositories::get_runtime_graph_snapshot(
-            &context.state.persistence.postgres,
-            library.id,
-        )
-        .await
-        .ok()
-        .flatten()
-        .map(|snapshot| snapshot.projection_version)
-        .unwrap_or(0);
-        let binding_id =
-            crate::infra::repositories::ai_repository::get_effective_binding_assignment_by_purpose(
-                &context.state.persistence.postgres,
-                library.id,
-                "query_answer",
-            )
-            .await
-            .ok()
-            .flatten()
-            .map(|binding| binding.id);
-        let key = crate::services::mcp::grounded_answer_cache::cache_key(
-            library.id,
-            projection_version,
-            binding_id,
-            &parsed.query,
-            normalized_conversation_cache_input(&external_prior_turns).as_deref(),
-        );
-        (Some(key), projection_version)
-    } else {
-        (None, 0)
-    };
-    if let Some(cache_key_ref) = cache_key.as_deref() {
-        match crate::services::mcp::grounded_answer_cache::get_cached(
-            &context.state.persistence.redis,
-            cache_key_ref,
-        )
-        .await
-        {
-            Ok(Some(cached)) => {
-                tracing::info!(
-                    stage = "grounded_answer.cache_hit",
-                    library_id = %library.id,
-                    projection_version = cache_projection_version,
-                    cache_key = cache_key_ref,
-                    "grounded_answer result served from cache"
-                );
-                return ok_tool_result(&cached.human_text, cached.structured_json);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    stage = "grounded_answer.cache_get_error",
-                    library_id = %library.id,
-                    %error,
-                    "grounded_answer cache lookup failed — falling through to pipeline",
-                );
-            }
-        }
-    }
-
     // Ephemeral conversation: the canonical `execute_turn` API is
     // conversation-scoped because the UI tracks history and the LLM
     // loop consumes the last N turns for coreference resolution. For a
@@ -236,11 +163,11 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
             ExecuteConversationTurnCommand {
                 conversation_id: conversation.id,
                 author_principal_id: Some(context.auth.principal_id),
+                surface_kind: RuntimeSurfaceKind::Mcp,
                 content_text: parsed.query.clone(),
                 external_prior_turns,
-                top_k: parsed.top_k.unwrap_or(8),
+                top_k: parsed.top_k.unwrap_or(24),
                 include_debug: parsed.include_debug.unwrap_or(false),
-                auth: context.auth.clone(),
             },
         )
         .await
@@ -311,41 +238,6 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
     } else {
         answer_text
     };
-
-    // Persist into the result cache before constructing the final
-    // `McpToolResult`. Only ran when `include_debug=false` (see
-    // cache-enabled check above) AND when the verifier actually
-    // produced a real answer — we don't want to pin a "no answer
-    // text" stub for 5 min, since its backing execution was likely
-    // failure-adjacent (provider outage / timeout / degraded
-    // pipeline). `ok_tool_result` takes the `structured` JSON value
-    // by-move, so the cache entry is cloned from a stable snapshot
-    // before we hand it off.
-    if let Some(cache_key_ref) = cache_key.as_deref() {
-        if !human_text.is_empty()
-            && human_text
-                != "The grounded-answer pipeline returned no answer text (execution may have failed or degraded). Inspect runtimeExecutionId via get_runtime_execution_trace for details."
-        {
-            let entry = crate::services::mcp::grounded_answer_cache::CachedGroundedAnswer {
-                human_text: human_text.clone(),
-                structured_json: structured.clone(),
-            };
-            if let Err(error) = crate::services::mcp::grounded_answer_cache::put_cached(
-                &context.state.persistence.redis,
-                cache_key_ref,
-                &entry,
-            )
-            .await
-            {
-                tracing::warn!(
-                    stage = "grounded_answer.cache_set_error",
-                    cache_key = cache_key_ref,
-                    %error,
-                    "grounded_answer cache write failed — answer still returned to caller",
-                );
-            }
-        }
-    }
 
     ok_tool_result(&human_text, structured)
 }
@@ -459,25 +351,4 @@ fn normalize_external_prior_turns(
             Ok(ExternalConversationTurn { turn_kind, content_text })
         })
         .collect()
-}
-
-fn normalized_conversation_cache_input(turns: &[ExternalConversationTurn]) -> Option<String> {
-    if turns.is_empty() {
-        return None;
-    }
-    Some(
-        turns
-            .iter()
-            .map(|turn| {
-                let normalized = turn
-                    .content_text
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase();
-                format!("{}:{normalized}", turn.turn_kind.as_str())
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
 }

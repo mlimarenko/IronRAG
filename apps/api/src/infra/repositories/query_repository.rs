@@ -156,7 +156,7 @@ pub async fn list_conversations_by_library(
 ) -> Result<Vec<QueryConversationRow>, sqlx::Error> {
     // UI-only listing: MCP-born conversations are audit-visible but
     // must not surface in the web assistant session list. The surface
-    // is set at creation time on `request_surface` (migration 0007).
+    // is set at creation time on `request_surface`.
     sqlx::query_as::<_, QueryConversationRowRecord>(
         "select
             id,
@@ -215,9 +215,11 @@ pub async fn create_conversation(
         "select id
          from query_conversation
          where library_id = $1
+           and request_surface = $2::surface_kind
          order by created_at asc, id asc",
     )
     .bind(input.library_id)
+    .bind(input.request_surface)
     .fetch_all(&mut *transaction)
     .await?;
 

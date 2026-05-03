@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::{
     domains::{
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
-        query::RuntimeQueryMode,
+        query::{QueryVerificationState, QueryVerificationWarning, RuntimeQueryMode},
     },
     infra::arangodb::document_store::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow,
@@ -36,7 +36,61 @@ pub(crate) struct RuntimeMatchedRelationship {
     pub from_label: String,
     pub to_node_id: Uuid,
     pub to_label: String,
+    pub summary: Option<String>,
+    pub support_count: i32,
     pub score: Option<f32>,
+}
+
+impl RuntimeMatchedRelationship {
+    pub(crate) fn claim_text(&self) -> String {
+        format!("{} --{}--> {}", self.from_label, self.relation_type, self.to_label)
+    }
+
+    pub(crate) fn evidence_text(&self) -> Option<&str> {
+        self.summary.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn context_line(&self) -> String {
+        if let Some(summary) = self.evidence_text() {
+            let mut line = format!(
+                "[graph-edge evidence] evidence: {summary} | relation_hint: {}",
+                self.claim_text()
+            );
+            if self.support_count > 1 {
+                line.push_str(" | support_count: ");
+                line.push_str(&self.support_count.to_string());
+            }
+            return line;
+        }
+
+        let mut line = format!("[graph-edge relation_hint] {}", self.claim_text());
+        if self.support_count > 1 {
+            line.push_str(" | support_count: ");
+            line.push_str(&self.support_count.to_string());
+        }
+        line
+    }
+
+    pub(crate) fn reference_excerpt(&self) -> String {
+        match self.evidence_text() {
+            Some(summary) => {
+                format!("evidence: {} | relation_hint: {}", summary, self.claim_text())
+            }
+            None => self.claim_text(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RuntimeChunkScoreKind {
+    Relevance,
+    DocumentIdentity,
+    EntityBio,
+    GraphEvidence,
+    QueryIrFocus,
+    SourceContext,
+    FocusedDocument,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -53,8 +107,12 @@ pub(crate) struct RuntimeMatchedChunk {
     /// around already-retrieved chunks and to sort winner chunks back
     /// into reading order for the LLM prompt.
     pub chunk_index: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_kind: Option<String>,
     pub document_label: String,
     pub excerpt: String,
+    #[serde(skip_serializing)]
+    pub score_kind: RuntimeChunkScoreKind,
     pub score: Option<f32>,
     #[serde(skip_serializing)]
     pub source_text: String,
@@ -139,12 +197,31 @@ pub(crate) struct RuntimeStructuredQueryResult {
     pub(crate) technical_literal_chunks: Vec<RuntimeMatchedChunk>,
     pub(crate) diagnostics: RuntimeStructuredQueryDiagnostics,
     pub(crate) retrieved_documents: Vec<RuntimeRetrievedDocumentBrief>,
+    /// Distinct document titles represented by the final ranked chunk
+    /// bundle. Unlike `retrieved_documents`, this list does not depend
+    /// on preview loading and is the canonical title source for routing
+    /// decisions that only need to know which documents shaped context.
+    pub(crate) retrieved_context_document_titles: Vec<String>,
     /// Final ranked chunks that survived consolidation + truncation and
     /// actually shaped the answer context. Captured here so the turn
     /// layer can persist a chunk-to-execution audit trail in
     /// `query_chunk_reference` without having to reach back into the
     /// internal `RetrievalBundle`.
     pub(crate) chunk_references: Vec<QueryChunkReferenceSnapshot>,
+    /// Final ranked chunks with their runtime evidence overlays intact.
+    /// `query_chunk_reference` stores only stable row ids; answer preflight
+    /// still needs the selected runtime text, score lane, and excerpts.
+    pub(crate) context_chunks: Vec<RuntimeMatchedChunk>,
+    /// Ordered source-unit rows selected for a typed source-slice
+    /// request. These are structured blocks, not `knowledge_chunk`
+    /// rows, so they stay out of `query_chunk_reference` but remain
+    /// available for deterministic enumeration answers.
+    pub(crate) ordered_source_units: Vec<RuntimeMatchedChunk>,
+    /// Runtime graph evidence rows that did not necessarily hydrate to
+    /// `knowledge_chunk` rows. They are already selected and ranked by the
+    /// retrieval graph-evidence lane, so canonical answer assembly can render
+    /// them without parsing the old bounded context string.
+    pub(crate) graph_evidence_context_lines: Vec<String>,
 }
 
 /// Persisted chunk-to-execution reference snapshot. Mirrors the
@@ -188,6 +265,14 @@ pub(crate) struct AnswerGenerationStage {
 #[derive(Debug, Clone)]
 pub(crate) struct AnswerVerificationStage {
     pub(crate) generation: AnswerGenerationStage,
+    pub(crate) verification: RuntimeAnswerVerification,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeAnswerVerification {
+    pub(crate) state: QueryVerificationState,
+    pub(crate) warnings: Vec<QueryVerificationWarning>,
+    pub(crate) unsupported_literals: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +298,10 @@ pub(crate) struct PreparedAnswerQueryResult {
     pub(crate) structured: RuntimeStructuredQueryResult,
     pub(crate) answer_context: String,
     pub(crate) embedding_usage: Option<QuestionEmbeddingResult>,
+    /// Focused-document decision already applied to the retrieval bundle
+    /// before answer context assembly. Answer routing must consume this
+    /// instead of re-inferring focus from the retained tangential tail.
+    pub(crate) consolidation: super::consolidation::ConsolidationDiagnostics,
     /// Canonical typed representation of the user's question produced by
     /// `QueryCompilerService`. Downstream stages (verification, ranking,
     /// answer generation) should read routing signals from this instead
@@ -224,22 +313,6 @@ pub(crate) struct PreparedAnswerQueryResult {
     /// two hit different bindings (`QueryCompile` vs `ExtractText`),
     /// different models, and different per-call costs.
     pub(crate) query_compile_usage: Option<QueryCompileUsage>,
-    /// Outcome of the IR-aware focused-document consolidation stage
-    /// that runs between rerank and context assembly. Captured on the
-    /// prepared result (rather than inside
-    /// `RuntimeStructuredQueryDiagnostics`) because the structured
-    /// result is produced by `finalize_structured_query` AFTER
-    /// consolidation has already reshaped the bundle; surfacing it
-    /// here keeps both prod logs and tests able to assert on the
-    /// decision independently of the assembled context text.
-    ///
-    /// Currently consumed by the `stage = "answer.prepare"` tracing
-    /// log and test-level assertions; read consumers in `turn.rs`
-    /// will wire up once the operator dashboard takes a dependency
-    /// on the new diagnostic.
-    #[allow(dead_code)]
-    pub(crate) consolidation:
-        crate::services::query::execution::consolidation::ConsolidationDiagnostics,
 }
 
 #[derive(Debug, Clone)]
@@ -280,15 +353,11 @@ impl QueryGraphIndex {
     }
 
     pub(crate) fn nodes(&self) -> impl Iterator<Item = &RuntimeGraphNodeRow> + '_ {
-        self.node_positions
-            .values()
-            .filter_map(move |position| self.projection.nodes.get(*position))
+        self.projection.nodes.iter().filter(|node| self.node_positions.contains_key(&node.id))
     }
 
     pub(crate) fn edges(&self) -> impl Iterator<Item = &RuntimeGraphEdgeRow> + '_ {
-        self.edge_positions
-            .values()
-            .filter_map(move |position| self.projection.edges.get(*position))
+        self.projection.edges.iter().filter(|edge| self.edge_positions.contains_key(&edge.id))
     }
 
     #[must_use]
@@ -364,6 +433,7 @@ pub(crate) struct StructuredQueryPlanningStage {
 pub(crate) struct StructuredQueryRetrievalStage {
     pub(crate) planning: StructuredQueryPlanningStage,
     pub(crate) bundle: RetrievalBundle,
+    pub(crate) graph_evidence_context_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +483,12 @@ pub(crate) fn sample_chunk_row(
         text_generation: Some(1),
         vector_generation: Some(1),
         quality_score: None,
+
+        window_text: None,
+
+        raptor_level: None,
+        occurred_at: None,
+        occurred_until: None,
     }
 }
 

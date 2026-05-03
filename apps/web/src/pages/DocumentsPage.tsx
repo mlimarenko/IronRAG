@@ -17,6 +17,7 @@ import {
   type DocumentListSortKey,
   type DocumentListSortOrder,
   type DocumentListStatusFilter,
+  type WebIngestUrlFilterMode,
   type WebIngestRunListItem,
 } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -55,7 +56,6 @@ import {
 } from "lucide-react";
 
 import type { DocumentItem, DocumentLifecycle } from "@/types";
-import { compactText } from "@/lib/compactText";
 import {
   buildDocumentStatusBadgeConfig,
   formatDate,
@@ -172,7 +172,7 @@ function splitSortValue(sort: SortValue): {
 
 export default function DocumentsPage() {
   const { t } = useTranslation();
-  const { activeLibrary, locale } = useApp();
+  const { activeLibrary, activeWorkspace, locale } = useApp();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const searchQuery = searchParams.get("q") ?? "";
@@ -223,6 +223,9 @@ export default function DocumentsPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [libraryTotalCost, setLibraryTotalCost] = useState<number | null>(null);
+  const [workspaceTotalCost, setWorkspaceTotalCost] = useState<number | null>(
+    null,
+  );
 
   // Debounced search — the query string updates immediately for shareable
   // URLs, but the actual API fetch waits 300ms so keystrokes don't trigger
@@ -279,13 +282,17 @@ export default function DocumentsPage() {
   const [boundaryPolicy, setBoundaryPolicy] = useState("same_host");
   const [maxDepth, setMaxDepth] = useState("3");
   const [maxPages, setMaxPages] = useState("100");
-  const [libraryIgnorePatternsText, setLibraryIgnorePatternsText] =
+  const [urlFilterMode, setUrlFilterMode] =
+    useState<WebIngestUrlFilterMode>("blocklist");
+  const [urlFilterModeSaved, setUrlFilterModeSaved] =
+    useState<WebIngestUrlFilterMode>("blocklist");
+  const [urlFilterPatternsText, setUrlFilterPatternsText] =
     useState("");
-  const [libraryIgnorePatternsSavedText, setLibraryIgnorePatternsSavedText] =
+  const [urlFilterPatternsSavedText, setUrlFilterPatternsSavedText] =
     useState("");
-  const [libraryIgnorePatternsLoadedFor, setLibraryIgnorePatternsLoadedFor] =
+  const [urlFilterLoadedFor, setUrlFilterLoadedFor] =
     useState<string | null>(null);
-  const [libraryIgnorePatternsLoading, setLibraryIgnorePatternsLoading] =
+  const [urlFilterLoading, setUrlFilterLoading] =
     useState(false);
   const [webIngestLoading, setWebIngestLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"documents" | "web">("documents");
@@ -360,22 +367,28 @@ export default function DocumentsPage() {
 
   const loadLibraryWebIngestPolicy = useCallback(
     async (libraryId: string) => {
-      setLibraryIgnorePatternsLoading(true);
+      setUrlFilterLoading(true);
       try {
         const library = await adminApi.getLibrary(libraryId);
+        const policyFilter = library.webIngestPolicy?.urlFilter ?? {
+          mode: "blocklist" as WebIngestUrlFilterMode,
+          patterns: [],
+        };
         const formattedPolicy = formatWebIngestPatterns(
-          library.webIngestPolicy?.ignorePatterns,
+          policyFilter.patterns,
         );
-        setLibraryIgnorePatternsText(formattedPolicy);
-        setLibraryIgnorePatternsSavedText(formattedPolicy);
-        setLibraryIgnorePatternsLoadedFor(libraryId);
-        return formattedPolicy;
+        setUrlFilterMode(policyFilter.mode);
+        setUrlFilterModeSaved(policyFilter.mode);
+        setUrlFilterPatternsText(formattedPolicy);
+        setUrlFilterPatternsSavedText(formattedPolicy);
+        setUrlFilterLoadedFor(libraryId);
+        return { mode: policyFilter.mode, text: formattedPolicy };
       } catch (err) {
-        setLibraryIgnorePatternsLoadedFor(null);
-        toast.error(errorMessage(err, t("documents.ignorePatternsLoadFailed")));
+        setUrlFilterLoadedFor(null);
+        toast.error(errorMessage(err, t("documents.urlFilterLoadFailed")));
         return null;
       } finally {
-        setLibraryIgnorePatternsLoading(false);
+        setUrlFilterLoading(false);
       }
     },
     [errorMessage, t],
@@ -384,14 +397,18 @@ export default function DocumentsPage() {
   useEffect(() => {
     const libraryId = activeLibrary?.id;
     if (!libraryId) {
-      setLibraryIgnorePatternsText("");
-      setLibraryIgnorePatternsSavedText("");
-      setLibraryIgnorePatternsLoadedFor(null);
+      setUrlFilterMode("blocklist");
+      setUrlFilterModeSaved("blocklist");
+      setUrlFilterPatternsText("");
+      setUrlFilterPatternsSavedText("");
+      setUrlFilterLoadedFor(null);
       return;
     }
-    setLibraryIgnorePatternsText("");
-    setLibraryIgnorePatternsSavedText("");
-    setLibraryIgnorePatternsLoadedFor(null);
+    setUrlFilterMode("blocklist");
+    setUrlFilterModeSaved("blocklist");
+    setUrlFilterPatternsText("");
+    setUrlFilterPatternsSavedText("");
+    setUrlFilterLoadedFor(null);
     void loadLibraryWebIngestPolicy(libraryId);
   }, [activeLibrary?.id, loadLibraryWebIngestPolicy]);
 
@@ -501,15 +518,15 @@ export default function DocumentsPage() {
   );
 
   // Aggregates flow: status counts (expensive `COUNT(*) FILTER`) +
-  // library-wide cost summary. Fires ONLY when the filter set changes
-  // (library / search / status bucket), not on pagination or polling.
+  // cost summaries. Fires ONLY when the filter set changes (library /
+  // search / status bucket), not on pagination or polling.
   // Keeping this off the page fetch path means flipping to page 2 does
   // not re-run the O(documents) aggregate on the server.
   const fetchAggregates = useCallback(async () => {
     if (!activeLibrary) return;
     const { sortBy, sortOrder } = splitSortValue(sortValue);
     try {
-      const [totalsPage, librarySummary] = await Promise.all([
+      const [totalsPage, librarySummary, workspaceSummary] = await Promise.all([
         documentsApi.list({
           libraryId: activeLibrary.id,
           limit: 1,
@@ -522,6 +539,11 @@ export default function DocumentsPage() {
             statusBackendFilter.length > 0 ? statusBackendFilter : undefined,
         }),
         billingApi.getLibraryCostSummary(activeLibrary.id).catch(() => null),
+        activeWorkspace
+          ? billingApi
+              .getWorkspaceCostSummary(activeWorkspace.id)
+              .catch(() => null)
+          : Promise.resolve(null),
       ]);
       setTotalCount(totalsPage.totalCount ?? null);
       setStatusCounts(totalsPage.statusCounts ?? null);
@@ -531,12 +553,24 @@ export default function DocumentsPage() {
           setLibraryTotalCost(parsed);
         }
       }
+      if (workspaceSummary) {
+        const parsed = parseFloat(workspaceSummary.totalCost);
+        if (!Number.isNaN(parsed)) {
+          setWorkspaceTotalCost(parsed);
+        }
+      }
     } catch {
       // Aggregates are decorative (counts + banner total). A failure
       // here must not blank the list surface — fetchPage owns the
       // authoritative error path. Keep whatever stale counts we have.
     }
-  }, [activeLibrary, debouncedSearch, sortValue, statusBackendFilter]);
+  }, [
+    activeLibrary,
+    activeWorkspace,
+    debouncedSearch,
+    sortValue,
+    statusBackendFilter,
+  ]);
 
   // Whenever library, search, sort, status filter, or page size changes,
   // reset the cursor stack and fetch the first page. Aggregates are
@@ -719,11 +753,11 @@ export default function DocumentsPage() {
       // failure is non-fatal.
     }
     const [segments, facts] = await Promise.all([
-      documentsApi.getPreparedSegments(documentId).catch(() => []),
+      documentsApi.getPreparedSegmentsPage(documentId, { limit: 1 }).catch(() => null),
       documentsApi.getTechnicalFacts(documentId).catch(() => []),
     ]);
     if (selectedDocRef.current?.id !== documentId) return;
-    setInspectorSegments(segments.length);
+    setInspectorSegments(segments?.total ?? 0);
     setInspectorFacts(facts.length);
   }, []);
 
@@ -1033,30 +1067,51 @@ export default function DocumentsPage() {
     }
     setWebIngestLoading(true);
     try {
-      let ignorePatternText = libraryIgnorePatternsText;
-      if (libraryIgnorePatternsLoadedFor !== activeLibrary.id) {
-        const loadedPolicyText = await loadLibraryWebIngestPolicy(
+      let nextUrlFilterMode = urlFilterMode;
+      let nextUrlFilterPatternText = urlFilterPatternsText;
+      if (urlFilterLoadedFor !== activeLibrary.id) {
+        const loadedPolicy = await loadLibraryWebIngestPolicy(
           activeLibrary.id,
         );
-        if (loadedPolicyText == null) {
+        if (loadedPolicy == null) {
           return;
         }
-        ignorePatternText = loadedPolicyText;
+        nextUrlFilterMode = loadedPolicy.mode;
+        nextUrlFilterPatternText = loadedPolicy.text;
       }
-      const ignorePatterns = parseWebIngestPatternText(ignorePatternText);
-      let normalizedPolicyText = formatWebIngestPatterns(ignorePatterns);
-      if (normalizedPolicyText !== libraryIgnorePatternsSavedText) {
+      const urlPatterns = parseWebIngestPatternText(nextUrlFilterPatternText);
+      if (nextUrlFilterMode === "allowlist" && urlPatterns.length === 0) {
+        toast.error(t("documents.urlFilterAllowlistEmpty"));
+        return;
+      }
+      let normalizedPolicyText = formatWebIngestPatterns(urlPatterns);
+      if (
+        nextUrlFilterMode !== urlFilterModeSaved ||
+        normalizedPolicyText !== urlFilterPatternsSavedText
+      ) {
         const updatedLibrary = await adminApi.updateWebIngestPolicy(
           activeLibrary.id,
-          { ignorePatterns },
+          {
+            urlFilter: {
+              mode: nextUrlFilterMode,
+              patterns: urlPatterns,
+            },
+          },
         );
+        const updatedFilter = updatedLibrary.webIngestPolicy?.urlFilter ?? {
+          mode: nextUrlFilterMode,
+          patterns: urlPatterns,
+        };
+        nextUrlFilterMode = updatedFilter.mode;
         normalizedPolicyText = formatWebIngestPatterns(
-          updatedLibrary.webIngestPolicy?.ignorePatterns ?? ignorePatterns,
+          updatedFilter.patterns,
         );
-        setLibraryIgnorePatternsSavedText(normalizedPolicyText);
+        setUrlFilterModeSaved(nextUrlFilterMode);
+        setUrlFilterPatternsSavedText(normalizedPolicyText);
       }
-      setLibraryIgnorePatternsText(normalizedPolicyText);
-      setLibraryIgnorePatternsLoadedFor(activeLibrary.id);
+      setUrlFilterMode(nextUrlFilterMode);
+      setUrlFilterPatternsText(normalizedPolicyText);
+      setUrlFilterLoadedFor(activeLibrary.id);
       await documentsApi.createWebIngestRun({
         libraryId: activeLibrary.id,
         seedUrl: url,
@@ -1064,7 +1119,10 @@ export default function DocumentsPage() {
         boundaryPolicy,
         maxDepth: parseInt(maxDepth, 10),
         maxPages: parseInt(maxPages, 10),
-        extraIgnorePatterns: [],
+        urlFilter: {
+          mode: nextUrlFilterMode,
+          patterns: urlPatterns,
+        },
       });
       toast.success(t("documents.webIngestStarted"));
       setAddLinkOpen(false);
@@ -1085,9 +1143,6 @@ export default function DocumentsPage() {
     boundaryPolicy,
     crawlMode,
     errorMessage,
-    libraryIgnorePatternsLoadedFor,
-    libraryIgnorePatternsSavedText,
-    libraryIgnorePatternsText,
     loadLibraryWebIngestPolicy,
     loadFirstPage,
     maxDepth,
@@ -1095,6 +1150,11 @@ export default function DocumentsPage() {
     seedUrl,
     t,
     refreshWebRuns,
+    urlFilterLoadedFor,
+    urlFilterMode,
+    urlFilterModeSaved,
+    urlFilterPatternsSavedText,
+    urlFilterPatternsText,
   ]);
 
   const handleCancelWebRun = useCallback(
@@ -1391,7 +1451,9 @@ export default function DocumentsPage() {
     return () => window.clearInterval(id);
   }, [hasInFlightDocs]);
   const totalCountForHeader = totalCount ?? items.length;
-  const totalCost = libraryTotalCost ?? 0;
+  const libraryCost = libraryTotalCost ?? 0;
+  const workspaceCost = workspaceTotalCost ?? 0;
+  const showCostSummary = libraryCost > 0 || workspaceCost > 0;
 
   const { sortBy, sortOrder } = splitSortValue(sortValue);
   const sortIcon =
@@ -1621,18 +1683,30 @@ export default function DocumentsPage() {
                 </button>
               ))}
           </div>
-          {totalCost > 0 && (
-            <span className="text-xs text-muted-foreground ml-auto mr-2">
-              {t("documents.totalCost")}:{" "}
-              <span className="font-bold tabular-nums">
-                ${totalCost.toFixed(3)}
-              </span>
-            </span>
+          {showCostSummary && (
+            <div className="ml-auto mr-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {libraryCost > 0 && (
+                <span>
+                  {t("documents.libraryCost")}:{" "}
+                  <span className="font-bold tabular-nums">
+                    ${libraryCost.toFixed(3)}
+                  </span>
+                </span>
+              )}
+              {workspaceCost > 0 && (
+                <span>
+                  {t("documents.workspaceCost")}:{" "}
+                  <span className="font-bold tabular-nums">
+                    ${workspaceCost.toFixed(3)}
+                  </span>
+                </span>
+              )}
+            </div>
           )}
           <Button
             size="sm"
             variant={selectionMode ? "default" : "outline"}
-            className={`${totalCost > 0 ? "" : "ml-auto"} h-8 text-xs`}
+            className={`${showCostSummary ? "" : "ml-auto"} h-8 text-xs`}
             onClick={() =>
               selectionMode ? clearSelection() : setSelectionMode(true)
             }
@@ -1683,7 +1757,7 @@ export default function DocumentsPage() {
                   button walks every page of matching IDs and stuffs them
                   all into the selection set, so the next batch action
                   covers the whole filtered set — not just the 200-1000
-                  rows currently rendered. This fixes the "Выбрать все"
+                  rows currently rendered. This fixes the "select all"
                   surprise where cancel/delete would only hit the visible
                   page. */}
               {selectionMode &&
@@ -1776,7 +1850,18 @@ export default function DocumentsPage() {
               ) : (
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="min-h-0 flex-1 overflow-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full min-w-[1020px] table-fixed text-sm">
+                      <colgroup>
+                        {selectionMode && <col className="w-12" />}
+                        <col />
+                        <col className="w-28" />
+                        <col className="w-20" />
+                        <col className="w-36" />
+                        <col className="w-24" />
+                        <col className="w-24" />
+                        <col className="w-36" />
+                        <col className="w-36" />
+                      </colgroup>
                       <thead
                         className="sticky top-0 z-10"
                         style={{
@@ -1891,7 +1976,6 @@ export default function DocumentsPage() {
                       <tbody>
                         {pendingUploads.map((upload) => {
                           const isError = upload.state === "error";
-                          const fileNameLabel = compactText(upload.name, 28);
                           return (
                             <tr
                               key={`upload-${upload.name}`}
@@ -1901,16 +1985,16 @@ export default function DocumentsPage() {
                                 <td className="px-4 py-3.5 w-10" />
                               )}
                               <td className="px-4 py-3.5">
-                                <div className="flex items-center gap-3">
+                                <div className="flex min-w-0 items-center gap-3">
                                   <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-surface-sunken">
                                     <File className="h-3.5 w-3.5 text-muted-foreground" />
                                   </div>
-                                  <div className="min-w-0">
+                                  <div className="min-w-0 flex-1">
                                     <span
-                                      className="truncate block max-w-[240px] font-semibold"
-                                      title={fileNameLabel.fullText}
+                                      className="block truncate font-semibold"
+                                      title={upload.name}
                                     >
-                                      {fileNameLabel.text}
+                                      {upload.name}
                                     </span>
                                   </div>
                                 </div>
@@ -1958,8 +2042,6 @@ export default function DocumentsPage() {
                               fileName: doc.fileName,
                             },
                           );
-                          const fileNameLabel = compactText(doc.fileName, 28);
-                          const sourceUriLabel = compactText(doc.sourceUri, 36);
                           const processingDurationMs =
                             getDocumentProcessingDurationMs(
                               doc,
@@ -1996,7 +2078,7 @@ export default function DocumentsPage() {
                                 </td>
                               )}
                               <td className="px-4 py-3.5">
-                                <div className="flex items-center gap-3">
+                                <div className="flex min-w-0 items-center gap-3">
                                   <div
                                     className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
                                       isWebPage
@@ -2010,21 +2092,21 @@ export default function DocumentsPage() {
                                       <File className="h-3.5 w-3.5 text-muted-foreground" />
                                     )}
                                   </div>
-                                  <div className="min-w-0">
+                                  <div className="min-w-0 flex-1">
                                     <span
-                                      className="truncate block max-w-[240px] font-semibold"
-                                      title={fileNameLabel.fullText}
+                                      className="block truncate font-semibold"
+                                      title={doc.fileName}
                                     >
-                                      {fileNameLabel.text}
+                                      {doc.fileName}
                                     </span>
                                     {isWebPage &&
                                       doc.sourceUri &&
                                       doc.sourceUri !== doc.fileName && (
                                         <span
-                                          className="truncate block max-w-[240px] text-[10px] text-muted-foreground"
-                                          title={sourceUriLabel.fullText}
+                                          className="block truncate text-[10px] text-muted-foreground"
+                                          title={doc.sourceUri}
                                         >
-                                          {sourceUriLabel.text}
+                                          {doc.sourceUri}
                                         </span>
                                       )}
                                   </div>
@@ -2162,12 +2244,15 @@ export default function DocumentsPage() {
                   setBoundaryPolicy(run.boundaryPolicy || "same_host");
                   setMaxDepth(String(run.maxDepth ?? 3));
                   setMaxPages(String(run.maxPages ?? 100));
-                  if (run.ignorePatterns) {
-                    setLibraryIgnorePatternsText(
-                      formatWebIngestPatterns(run.ignorePatterns),
-                    );
-                    setLibraryIgnorePatternsLoadedFor(activeLibrary.id);
-                  }
+                  setUrlFilterMode(
+                    run.urlFilterMode === "allowlist"
+                      ? "allowlist"
+                      : "blocklist",
+                  );
+                  setUrlFilterPatternsText(
+                    formatWebIngestPatterns(run.urlPatterns),
+                  );
+                  setUrlFilterLoadedFor(activeLibrary.id);
                   setAddLinkOpen(true);
                 }}
                 webRuns={webRuns}
@@ -2209,8 +2294,9 @@ export default function DocumentsPage() {
         handleDelete={handleDelete}
         handleReplaceFile={handleReplaceFile}
         handleStartWebIngest={handleStartWebIngest}
-        libraryIgnorePatternsLoading={libraryIgnorePatternsLoading}
-        libraryIgnorePatternsText={libraryIgnorePatternsText}
+        urlFilterLoading={urlFilterLoading}
+        urlFilterMode={urlFilterMode}
+        urlFilterPatternsText={urlFilterPatternsText}
         maxDepth={maxDepth}
         maxPages={maxPages}
         replaceFile={replaceFile}
@@ -2224,7 +2310,8 @@ export default function DocumentsPage() {
         setBoundaryPolicy={setBoundaryPolicy}
         setCrawlMode={setCrawlMode}
         setDeleteDocOpen={setDeleteDocOpen}
-        setLibraryIgnorePatternsText={setLibraryIgnorePatternsText}
+        setUrlFilterMode={setUrlFilterMode}
+        setUrlFilterPatternsText={setUrlFilterPatternsText}
         setMaxDepth={setMaxDepth}
         setMaxPages={setMaxPages}
         setReplaceFile={setReplaceFile}

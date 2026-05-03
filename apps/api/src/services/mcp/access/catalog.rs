@@ -2,7 +2,10 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::{ai::AiBindingPurpose, catalog::CatalogLibraryIngestionReadiness},
+    domains::{
+        ai::AiBindingPurpose, catalog::CatalogLibraryIngestionReadiness,
+        recognition::LibraryRecognitionPolicy,
+    },
     infra::repositories::catalog_repository::{self, CatalogLibraryRow, CatalogWorkspaceRow},
     interfaces::http::{
         auth::AuthContext,
@@ -305,8 +308,12 @@ pub async fn create_library(
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", library.id))?;
-    let readiness =
-        state.canonical_services.catalog.get_library_ingestion_readiness(state, row.id).await?;
+    let recognition_policy = parse_library_recognition_policy(&row)?;
+    let readiness = state
+        .canonical_services
+        .catalog
+        .get_library_ingestion_readiness(state, row.id, &recognition_policy)
+        .await?;
     let context = describe_library(auth, state, row, &workspace.slug, readiness).await?;
     Ok(context.descriptor)
 }
@@ -366,10 +373,7 @@ pub(crate) async fn describe_libraries(
     let readiness_by_library = state
         .canonical_services
         .catalog
-        .list_library_ingestion_readiness(
-            state,
-            &libraries.iter().map(|library| library.id).collect::<Vec<_>>(),
-        )
+        .list_library_ingestion_readiness(state, &parse_library_recognition_policies(&libraries)?)
         .await?;
 
     let mut items = Vec::with_capacity(libraries.len());
@@ -387,6 +391,22 @@ pub(crate) async fn describe_libraries(
         items.push(describe_library(auth, state, library, &workspace_slug, readiness).await?);
     }
     Ok(items)
+}
+
+fn parse_library_recognition_policy(
+    row: &CatalogLibraryRow,
+) -> Result<LibraryRecognitionPolicy, ApiError> {
+    LibraryRecognitionPolicy::from_json(row.recognition_policy.clone()).map_err(|error| {
+        ApiError::internal_with_log(anyhow::anyhow!(error), "invalid persisted recognition policy")
+    })
+}
+
+fn parse_library_recognition_policies(
+    rows: &[CatalogLibraryRow],
+) -> Result<Vec<(Uuid, LibraryRecognitionPolicy)>, ApiError> {
+    rows.iter()
+        .map(|row| parse_library_recognition_policy(row).map(|policy| (row.id, policy)))
+        .collect()
 }
 
 pub(crate) async fn describe_library(
@@ -420,6 +440,7 @@ pub(crate) async fn describe_library(
         description: library.description.clone(),
         web_ingest_policy: serde_json::from_value(library.web_ingest_policy.clone())
             .map_err(|_| ApiError::Internal)?,
+        recognition_policy: parse_library_recognition_policy(&library)?,
         ingestion_readiness: map_ingestion_readiness(ingestion_readiness),
         document_count,
         readable_document_count,

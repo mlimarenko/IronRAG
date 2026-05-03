@@ -32,7 +32,7 @@ fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
     }
 
     assert!(
-        contract.contains("required: [libraryId, seedUrl, mode]"),
+        contract.contains("required: [libraryId, seedUrl, mode, urlFilter]"),
         "CreateWebIngestRunRequest must keep canonical required fields"
     );
     assert!(
@@ -111,6 +111,12 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
         "boundaryPolicy": "allow_external",
         "maxDepth": 4,
         "maxPages": 80,
+        "urlFilter": {
+            "mode": "allowlist",
+            "patterns": [
+                {"kind": "path_prefix", "value": "/docs"}
+            ]
+        },
         "idempotencyKey": "crawl-1"
     }))
     .expect("submit request should deserialize");
@@ -120,6 +126,8 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
     assert_eq!(submit_request.boundary_policy.as_deref(), Some("allow_external"));
     assert_eq!(submit_request.max_depth, Some(4));
     assert_eq!(submit_request.max_pages, Some(80));
+    assert_eq!(submit_request.url_filter.mode.as_str(), "allowlist");
+    assert_eq!(submit_request.url_filter.patterns.len(), 1);
     assert_eq!(submit_request.idempotency_key.as_deref(), Some("crawl-1"));
 
     let run_id = Uuid::now_v7();

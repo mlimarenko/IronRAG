@@ -63,17 +63,31 @@ export interface CatalogLibraryResponse {
   workspaceId: string;
   displayName?: string;
   webIngestPolicy?: WebIngestPolicy;
+  recognitionPolicy?: RecognitionPolicy;
   createdAt?: string;
 }
 
-export interface WebIngestIgnorePattern {
+export type RecognitionRasterImageEngine = "docling" | "vision";
+
+export interface RecognitionPolicy {
+  rasterImageEngine: RecognitionRasterImageEngine;
+}
+
+export type WebIngestUrlFilterMode = "blocklist" | "allowlist";
+
+export interface WebIngestPattern {
   kind: "url_prefix" | "path_prefix" | "glob";
   value: string;
-  source?: "library" | "run" | null;
+  source?: "run" | null;
+}
+
+export interface WebIngestUrlFilter {
+  mode: WebIngestUrlFilterMode;
+  patterns: WebIngestPattern[];
 }
 
 export interface WebIngestPolicy {
-  ignorePatterns: WebIngestIgnorePattern[];
+  urlFilter: WebIngestUrlFilter;
 }
 
 export interface BindingValidationResponse {
@@ -204,6 +218,14 @@ export const adminApi = {
   updateWebIngestPolicy: (libraryId: string, policy: WebIngestPolicy) =>
     apiFetch<CatalogLibraryResponse>(
       `/catalog/libraries/${libraryId}/web-ingest-policy`,
+      {
+        method: "PUT",
+        body: JSON.stringify(policy),
+      },
+    ),
+  updateRecognitionPolicy: (libraryId: string, policy: RecognitionPolicy) =>
+    apiFetch<CatalogLibraryResponse>(
+      `/catalog/libraries/${libraryId}/recognition-policy`,
       {
         method: "PUT",
         body: JSON.stringify(policy),

@@ -4,11 +4,20 @@ mod errors;
 mod mime_detection;
 mod normalization;
 
+use hex;
+use sha2::{Digest, Sha256};
+
 use crate::{
-    domains::provider_profiles::ProviderModelSelection,
-    integrations::llm::{LlmGateway, VisionRequest},
+    domains::{
+        provider_profiles::ProviderModelSelection,
+        recognition::{
+            LibraryRecognitionPolicy, RecognitionCapability, RecognitionEngine, RecognitionProfile,
+            RecognitionStructureTier,
+        },
+    },
+    integrations::{docling, llm::LlmGateway},
     shared::extraction::{
-        self, ExtractedImage, ExtractionOutput, ExtractionSourceMetadata, ExtractionStructureHints,
+        self, ExtractionOutput, ExtractionSourceMetadata, ExtractionStructureHints,
     },
 };
 
@@ -31,9 +40,12 @@ const TEXT_LIKE_EXTENSIONS: &[&str] = &[
     "md",
     "markdown",
     "json",
+    "jsonl",
+    "ndjson",
     "yaml",
     "yml",
     "xml",
+    "svg",
     "log",
     "rst",
     "toml",
@@ -127,13 +139,23 @@ const TEXT_LIKE_EXTENSIONS: &[&str] = &[
     "buck",
 ];
 const HTML_EXTENSIONS: &[&str] = &["html", "htm"];
-const IMAGE_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "tif", "tiff", "heic", "heif"];
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff"];
 const DOCX_EXTENSIONS: &[&str] = &["docx"];
 const SPREADSHEET_EXTENSIONS: &[&str] = &["csv", "tsv", "xls", "xlsx", "xlsb", "ods"];
 const PPTX_EXTENSIONS: &[&str] = &["pptx"];
 const HTML_MIME_TYPES: &[&str] = &["text/html", "application/xhtml+xml"];
-const TEXT_LIKE_MIME_TYPES: &[&str] = &["application/json", "application/xml", "text/xml"];
+const TEXT_LIKE_MIME_TYPES: &[&str] = &[
+    "application/json",
+    "application/jsonl",
+    "application/ndjson",
+    "application/x-jsonlines",
+    "application/x-ndjson",
+    "application/xml",
+    "text/xml",
+    "image/svg+xml",
+];
+const IMAGE_MIME_TYPES: &[&str] =
+    &["image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp", "image/tiff"];
 const DOCX_MIME_TYPES: &[&str] =
     &["application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
 const SPREADSHEET_MIME_TYPES: &[&str] = &[
@@ -261,6 +283,19 @@ pub struct FileExtractionPlan {
     pub normalization_profile: String,
     pub extraction_version: Option<String>,
     pub ingest_mode: String,
+    /// SHA-256 hex digest of all extracted image bytes (sorted). None when no images present.
+    pub image_checksum: Option<String>,
+}
+
+pub struct FileExtractionRequest<'a> {
+    pub gateway: &'a dyn LlmGateway,
+    pub vision_provider: Option<&'a ProviderModelSelection>,
+    pub vision_api_key: Option<&'a str>,
+    pub vision_base_url: Option<&'a str>,
+    pub file_name: Option<&'a str>,
+    pub mime_type: Option<&'a str>,
+    pub file_bytes: Vec<u8>,
+    pub recognition_policy: &'a LibraryRecognitionPolicy,
 }
 
 /// Builds a truncated preview of extracted content for operator-facing surfaces.
@@ -298,6 +333,12 @@ pub fn extraction_quality_from_source_map(
         .and_then(|item| item.get("ocr_source"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+        .or_else(|| {
+            quality
+                .and_then(|item| item.get("recognition_engine"))
+                .and_then(serde_json::Value::as_str)
+                .map(recognition_engine_ocr_source)
+        })
         .or_else(|| extraction_kind.starts_with("vision_").then_some("vision_llm".to_string()));
     let warning_count = quality
         .and_then(|item| item.get("warning_count"))
@@ -335,7 +376,11 @@ pub fn build_local_file_extraction_plan(
 
     match file_kind {
         UploadFileKind::TextLike => {
-            let output = if mime_detection::declared_payload_is_html(file_name, mime_type)
+            let output = if declared_payload_is_record_jsonl(file_name, mime_type) {
+                extraction::record_jsonl::extract_record_jsonl(file_bytes).map_err(|error| {
+                    FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
+                })?
+            } else if mime_detection::declared_payload_is_html(file_name, mime_type)
                 || mime_detection::payload_looks_like_html(file_bytes)
             {
                 extraction::html_main_content::extract_html_main_content(file_bytes, mime_type)
@@ -347,20 +392,24 @@ pub fn build_local_file_extraction_plan(
                 extraction::text_like::extract_text_like(file_bytes)
                     .map_err(|_| FileExtractError::InvalidUtf8)?
             };
-            Ok(build_plan_from_extraction(file_kind, output))
+            Ok(build_plan_from_extraction(
+                file_kind,
+                output,
+                deterministic_recognition_profile(file_kind),
+            ))
         }
-        UploadFileKind::Pdf => Ok(build_plan_from_extraction(
+        UploadFileKind::Pdf | UploadFileKind::Docx | UploadFileKind::Pptx => {
+            Err(runtime_docling_required_error(file_kind))
+        }
+        UploadFileKind::Image
+            if docling_source_format(file_kind, file_name, mime_type).is_some() =>
+        {
+            Err(runtime_docling_required_error(file_kind))
+        }
+        UploadFileKind::Image => Err(FileExtractError::ExtractionFailed {
             file_kind,
-            extraction::pdf::extract_pdf(file_bytes).map_err(|error| {
-                FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
-            })?,
-        )),
-        UploadFileKind::Docx => Ok(build_plan_from_extraction(
-            file_kind,
-            extraction::docx::extract_docx(file_bytes).map_err(|error| {
-                FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
-            })?,
-        )),
+            message: "image extraction requires a runtime provider context".to_string(),
+        }),
         UploadFileKind::Spreadsheet => Ok(build_plan_from_extraction(
             file_kind,
             extraction::tabular::extract_tabular(file_name, mime_type, file_bytes).map_err(
@@ -369,17 +418,8 @@ pub fn build_local_file_extraction_plan(
                     message: error.to_string(),
                 },
             )?,
+            deterministic_recognition_profile(file_kind),
         )),
-        UploadFileKind::Pptx => Ok(build_plan_from_extraction(
-            file_kind,
-            extraction::pptx::extract_pptx(file_bytes).map_err(|error| {
-                FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
-            })?,
-        )),
-        UploadFileKind::Image => Err(FileExtractError::ExtractionFailed {
-            file_kind,
-            message: "image extraction requires a runtime provider context".to_string(),
-        }),
         UploadFileKind::Binary => Err(FileExtractError::UnsupportedBinary),
     }
 }
@@ -391,115 +431,85 @@ pub fn build_local_file_extraction_plan(
 /// Returns a [`FileExtractError`] when the payload is binary-only, the image provider is
 /// missing, or the underlying parser/provider fails.
 pub async fn build_runtime_file_extraction_plan(
-    gateway: &dyn LlmGateway,
-    vision_provider: Option<&ProviderModelSelection>,
-    api_key: Option<&str>,
-    base_url: Option<&str>,
-    file_name: Option<&str>,
-    mime_type: Option<&str>,
-    file_bytes: Vec<u8>,
+    request: FileExtractionRequest<'_>,
 ) -> Result<FileExtractionPlan, FileExtractError> {
+    let FileExtractionRequest {
+        gateway,
+        vision_provider,
+        vision_api_key,
+        vision_base_url,
+        file_name,
+        mime_type,
+        file_bytes,
+        recognition_policy,
+    } = request;
     let file_kind = detect_upload_file_kind(file_name, mime_type, &file_bytes);
+
+    if let Some(source_format) = docling_source_format(file_kind, file_name, mime_type) {
+        let recognition_profile =
+            docling_owned_recognition_profile(file_kind, source_format, recognition_policy)?;
+        return match recognition_profile.engine {
+            RecognitionEngine::Docling => {
+                let output =
+                    docling::extract_document(file_name, mime_type, source_format, file_bytes)
+                        .await
+                        .map_err(|error| FileExtractError::ExtractionFailed {
+                            file_kind,
+                            message: error.to_string(),
+                        })?;
+                Ok(build_plan_from_extraction(file_kind, output, recognition_profile))
+            }
+            RecognitionEngine::Vision => {
+                extract_image_with_vision_provider(
+                    gateway,
+                    vision_provider,
+                    vision_api_key,
+                    vision_base_url,
+                    file_kind,
+                    mime_type,
+                    &file_bytes,
+                    recognition_profile,
+                )
+                .await
+            }
+            RecognitionEngine::Native => Err(unsupported_recognition_engine_error(
+                file_kind,
+                RecognitionEngine::Native,
+                RecognitionCapability::ImageOcr,
+            )),
+        };
+    }
 
     match file_kind {
         UploadFileKind::Image => {
-            let Some(vision_provider) = vision_provider else {
-                return Err(FileExtractError::ExtractionFailed {
-                    file_kind,
-                    message: "vision binding is not configured for image extraction".to_string(),
-                });
-            };
-            let detected_mime = mime_type.unwrap_or("image/png");
-            let output = extraction::image::extract_image_with_provider(
+            extract_image_with_vision_provider(
                 gateway,
-                vision_provider.provider_kind.as_str(),
-                &vision_provider.model_name,
-                api_key.unwrap_or_default(),
-                base_url,
-                detected_mime,
+                vision_provider,
+                vision_api_key,
+                vision_base_url,
+                file_kind,
+                mime_type,
                 &file_bytes,
+                RecognitionProfile {
+                    capability: RecognitionCapability::ImageOcr,
+                    engine: RecognitionEngine::Vision,
+                    structure_tier: RecognitionStructureTier::Flat,
+                },
             )
             .await
-            .map_err(|error| FileExtractError::ExtractionFailed {
-                file_kind,
-                message: error.to_string(),
-            })?;
-            Ok(build_plan_from_extraction(file_kind, output))
         }
-        UploadFileKind::Pdf | UploadFileKind::Docx => {
-            // Run the synchronous parser on the tokio blocking pool so the
-            // async runtime's worker threads stay free for I/O during what
-            // is otherwise a pure-CPU stall. `extract_pdf` walks the lopdf
-            // object graph and `extract_docx` runs zip + xml decoding —
-            // both can easily hold a worker thread for hundreds of ms on a
-            // large document, which previously blocked concurrent ingest
-            // futures from making progress on their own LLM calls.
-            let mut output =
-                tokio::task::spawn_blocking(
-                    move || -> Result<ExtractionOutput, FileExtractError> {
-                        match file_kind {
-                            UploadFileKind::Pdf => extraction::pdf::extract_pdf(&file_bytes)
-                                .map_err(|error| FileExtractError::ExtractionFailed {
-                                    file_kind,
-                                    message: error.to_string(),
-                                }),
-                            UploadFileKind::Docx => extraction::docx::extract_docx(&file_bytes)
-                                .map_err(|error| FileExtractError::ExtractionFailed {
-                                    file_kind,
-                                    message: error.to_string(),
-                                }),
-                            _ => unreachable!(),
-                        }
-                    },
-                )
-                .await
-                .map_err(|join_err| FileExtractError::ExtractionFailed {
-                    file_kind,
-                    message: format!("extraction task failed: {join_err}"),
-                })??;
-
-            if let Some(vision_provider) = vision_provider {
-                if !output.extracted_images.is_empty() {
-                    // Move ownership of `extracted_images` into the vision
-                    // describer so it can drop each image's bytes the
-                    // moment they have been base64-encoded into a request.
-                    // The previous `&output.extracted_images` borrow forced
-                    // a `.clone()` per image (147 MB held in flight per
-                    // 294-image PDF, ×12 docs in parallel = ~1.8 GB just on
-                    // the in-flight clones), and on top of that the entire
-                    // `Vec<ExtractedImage>` was kept alive on `output` for
-                    // the rest of the document lifecycle (chunking, embed,
-                    // graph extract, finalize), inflating the worker's
-                    // resident set well beyond the 2 GB cgroup limit and
-                    // causing repeated OOM kills. After the describer
-                    // returns, the vec is empty and the bytes are gone.
-                    let images = std::mem::take(&mut output.extracted_images);
-                    let result = describe_extracted_images(
-                        gateway,
-                        vision_provider.provider_kind.as_str(),
-                        &vision_provider.model_name,
-                        api_key.unwrap_or_default(),
-                        base_url,
-                        images,
-                    )
-                    .await;
-                    append_image_descriptions_to_output(&mut output, &result.descriptions);
-                    output.provider_kind = result.provider_kind;
-                    output.model_name = result.model_name;
-                    output.usage_json = result.usage_json;
-                }
-            }
-
-            Ok(build_plan_from_extraction(file_kind, output))
+        UploadFileKind::Pdf | UploadFileKind::Docx | UploadFileKind::Pptx => {
+            Err(runtime_docling_required_error(file_kind))
         }
         _ => {
-            // Text / HTML / spreadsheet / pptx parsers are all synchronous
-            // and CPU-heavy (scraper DOM build, calamine sheet scan, zip +
-            // xml decode). Run them on the blocking pool so the async
+            // Text / HTML / non-Docling spreadsheet parsers are synchronous
+            // and CPU-heavy (scraper DOM build, calamine sheet scan). Run
+            // them on the blocking pool so the async
             // runtime's worker threads stay available for concurrent jobs'
             // network I/O.
             let file_name_owned = file_name.map(str::to_string);
             let mime_type_owned = mime_type.map(str::to_string);
+            let recognition_profile = deterministic_recognition_profile(file_kind);
             tokio::task::spawn_blocking(move || {
                 build_local_file_extraction_plan(
                     file_name_owned.as_deref(),
@@ -512,6 +522,7 @@ pub async fn build_runtime_file_extraction_plan(
                 file_kind,
                 message: format!("extraction task failed: {join_err}"),
             })?
+            .map(|plan| with_plan_recognition_profile(plan, recognition_profile))
         }
     }
 }
@@ -537,161 +548,28 @@ pub fn build_inline_text_extraction_plan(text: &str) -> FileExtractionPlan {
         usage_json: serde_json::json!({}),
         extracted_images: Vec::new(),
     };
-    build_plan_from_extraction(UploadFileKind::TextLike, output)
+    build_plan_from_extraction(
+        UploadFileKind::TextLike,
+        output,
+        deterministic_recognition_profile(UploadFileKind::TextLike),
+    )
 }
 
-/// Description of an image extracted from a document, produced by Vision LLM.
-#[derive(Debug, Clone)]
-pub struct ImageDescriptionBlock {
-    pub page: usize,
-    pub description: String,
-}
-
-const IMAGE_DESCRIPTION_PROMPT: &str = "Describe this image in detail, including any text, data, tables, diagrams, charts, or formulas visible.";
-const MIN_IMAGE_DIMENSION: u32 = 50;
-
-/// Result of describing extracted images with vision LLM, including aggregated usage.
-pub struct ImageDescriptionResult {
-    pub descriptions: Vec<ImageDescriptionBlock>,
-    pub provider_kind: Option<String>,
-    pub model_name: Option<String>,
-    pub usage_json: serde_json::Value,
-}
-
-/// Sends extracted images to a Vision LLM for description. Takes the image
-/// vector by value and consumes it with `into_iter()` so that each image's
-/// `Vec<u8>` is dropped the moment its vision call returns, instead of being
-/// held in memory for the entire document lifecycle. Images smaller than
-/// 50x50 pixels are skipped (icons/bullets) without ever touching the LLM.
-pub async fn describe_extracted_images(
-    gateway: &dyn LlmGateway,
-    provider_kind: &str,
-    model_name: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-    images: Vec<ExtractedImage>,
-) -> ImageDescriptionResult {
-    let total_count = images.len();
-    let eligible: Vec<ExtractedImage> = images
-        .into_iter()
-        .filter(|img| img.width >= MIN_IMAGE_DIMENSION && img.height >= MIN_IMAGE_DIMENSION)
-        .collect();
-    let eligible_count = eligible.len();
-
-    if eligible.is_empty() {
-        return ImageDescriptionResult {
-            descriptions: Vec::new(),
-            provider_kind: None,
-            model_name: None,
-            usage_json: serde_json::json!({}),
-        };
-    }
-
-    tracing::info!(
-        total = total_count,
-        eligible = eligible.len(),
-        "describing extracted images with vision llm"
-    );
-
-    let mut results = Vec::new();
-    let mut prompt_tokens_sum: i64 = 0;
-    let mut completion_tokens_sum: i64 = 0;
-    let mut total_tokens_sum: i64 = 0;
-    // `into_iter()` lets us *move* each `ExtractedImage` out of the vector
-    // one at a time. The vector's backing buffer is held until the loop
-    // finishes, but the individual `image_bytes: Vec<u8>` allocations are
-    // dropped at the end of each iteration body — so resident image-byte
-    // memory shrinks linearly through the loop instead of staying at peak
-    // for the entire document.
-    for (idx, image) in eligible.into_iter().enumerate() {
-        let page = image.page;
-        let request = VisionRequest {
-            provider_kind: provider_kind.to_string(),
-            model_name: model_name.to_string(),
-            prompt: IMAGE_DESCRIPTION_PROMPT.to_string(),
-            image_bytes: image.image_bytes,
-            mime_type: image.mime_type,
-            api_key_override: Some(api_key.to_string()),
-            base_url_override: base_url.map(str::to_string),
-            system_prompt: None,
-            temperature: None,
-            top_p: None,
-            max_output_tokens_override: None,
-            extra_parameters_json: serde_json::json!({}),
-        };
-
-        match gateway.vision_extract(request).await {
-            Ok(response) => {
-                if let Some(v) = response.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()) {
-                    prompt_tokens_sum += v;
-                }
-                if let Some(v) =
-                    response.usage_json.get("completion_tokens").and_then(|v| v.as_i64())
-                {
-                    completion_tokens_sum += v;
-                }
-                if let Some(v) = response.usage_json.get("total_tokens").and_then(|v| v.as_i64()) {
-                    total_tokens_sum += v;
-                }
-                if !response.output_text.trim().is_empty() {
-                    results.push(ImageDescriptionBlock { page, description: response.output_text });
-                }
-            }
-            Err(error) => {
-                tracing::warn!(stage = "vision", image_index = idx, error = %error, "Vision LLM description failed, skipping image");
-            }
-        }
-    }
-
-    let described_count = results.len();
-    let failed_count = eligible_count - described_count;
-    tracing::info!(
-        stage = "vision",
-        images_described = described_count,
-        images_failed = failed_count,
-        "Vision LLM descriptions complete"
-    );
-
-    ImageDescriptionResult {
-        descriptions: results,
-        provider_kind: Some(provider_kind.to_string()),
-        model_name: Some(model_name.to_string()),
-        usage_json: serde_json::json!({
-            "prompt_tokens": prompt_tokens_sum,
-            "completion_tokens": completion_tokens_sum,
-            "total_tokens": total_tokens_sum,
-        }),
-    }
-}
-
-/// Appends image description blocks to the extraction content text.
-fn append_image_descriptions_to_output(
-    output: &mut ExtractionOutput,
-    descriptions: &[ImageDescriptionBlock],
-) {
-    if descriptions.is_empty() {
-        return;
-    }
-
-    let mut extra_text = String::new();
-    for desc in descriptions {
-        extra_text.push_str("\n\n---\n\n");
-        extra_text.push_str(&format!("[Image from page {}]\n", desc.page));
-        extra_text.push_str(&desc.description);
-    }
-
-    output.content_text.push_str(&extra_text);
-
-    // Rebuild structure hints to include the new content
-    let updated_layout = extraction::build_text_layout_from_content(&output.content_text);
-    output.structure_hints = updated_layout.structure_hints;
-    output.source_metadata.line_count =
-        i32::try_from(output.structure_hints.lines.len()).unwrap_or(i32::MAX);
+/// Builds an extraction plan for inline text when the caller knows the logical
+/// file name or MIME type. This keeps append/edit materialization on the same
+/// deterministic adapter path as uploads.
+pub fn build_inline_text_extraction_plan_for_source(
+    text: &str,
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+) -> Result<FileExtractionPlan, FileExtractError> {
+    build_local_file_extraction_plan(file_name, mime_type, text.as_bytes())
 }
 
 fn build_plan_from_extraction(
     file_kind: UploadFileKind,
     output: ExtractionOutput,
+    recognition_profile: RecognitionProfile,
 ) -> FileExtractionPlan {
     let ExtractionOutput {
         extraction_kind,
@@ -704,8 +582,25 @@ fn build_plan_from_extraction(
         provider_kind,
         model_name,
         usage_json,
-        extracted_images: _,
+        extracted_images,
     } = output;
+    // Compute image_checksum before dropping the image bytes. Sort by bytes
+    // for determinism (order from extractor may vary across runs).
+    let image_checksum = if extracted_images.is_empty() {
+        None
+    } else {
+        let mut refs: Vec<&[u8]> =
+            extracted_images.iter().map(|i| i.image_bytes.as_slice()).collect();
+        refs.sort();
+        let mut hasher = Sha256::new();
+        for bytes in &refs {
+            hasher.update(bytes);
+        }
+        Some(hex::encode(hasher.finalize()))
+    };
+    // extracted_images dropped here — image bytes no longer needed.
+    drop(extracted_images);
+
     let normalized = normalize_extracted_content(file_kind, &content_text, &structure_hints);
     let has_source_text = !normalized.source_text.trim().is_empty();
     let has_normalized_text = !normalized.normalized_text.trim().is_empty();
@@ -719,6 +614,7 @@ fn build_plan_from_extraction(
         &normalized,
         warnings.len(),
         provider_kind.as_deref(),
+        recognition_profile,
     );
 
     FileExtractionPlan {
@@ -739,7 +635,220 @@ fn build_plan_from_extraction(
         normalization_profile: normalized.normalization_profile,
         extraction_version: Some("runtime_extraction_v1".to_string()),
         ingest_mode: MULTIPART_UPLOAD_MODE.to_string(),
+        image_checksum,
     }
+}
+
+async fn extract_image_with_vision_provider(
+    gateway: &dyn LlmGateway,
+    vision_provider: Option<&ProviderModelSelection>,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+    file_kind: UploadFileKind,
+    mime_type: Option<&str>,
+    file_bytes: &[u8],
+    recognition_profile: RecognitionProfile,
+) -> Result<FileExtractionPlan, FileExtractError> {
+    let Some(vision_provider) = vision_provider else {
+        return Err(FileExtractError::ExtractionFailed {
+            file_kind,
+            message: "vision binding is not configured for image recognition".to_string(),
+        });
+    };
+    let detected_mime = mime_type.unwrap_or("image/png");
+    let output = extraction::image::extract_image_with_provider(
+        gateway,
+        vision_provider.provider_kind.as_str(),
+        &vision_provider.model_name,
+        api_key.unwrap_or_default(),
+        base_url,
+        detected_mime,
+        file_bytes,
+    )
+    .await
+    .map_err(|error| FileExtractError::ExtractionFailed {
+        file_kind,
+        message: error.to_string(),
+    })?;
+    Ok(build_plan_from_extraction(file_kind, output, recognition_profile))
+}
+
+fn deterministic_recognition_profile(file_kind: UploadFileKind) -> RecognitionProfile {
+    match file_kind {
+        UploadFileKind::Spreadsheet => RecognitionProfile {
+            capability: RecognitionCapability::TabularParse,
+            engine: RecognitionEngine::Native,
+            structure_tier: RecognitionStructureTier::Layout,
+        },
+        _ => RecognitionProfile {
+            capability: RecognitionCapability::TextDecode,
+            engine: RecognitionEngine::Native,
+            structure_tier: RecognitionStructureTier::Paragraph,
+        },
+    }
+}
+
+fn docling_owned_recognition_profile(
+    file_kind: UploadFileKind,
+    source_format: &str,
+    recognition_policy: &LibraryRecognitionPolicy,
+) -> Result<RecognitionProfile, FileExtractError> {
+    match file_kind {
+        UploadFileKind::Pdf | UploadFileKind::Docx | UploadFileKind::Pptx => {
+            Ok(RecognitionProfile {
+                capability: RecognitionCapability::DocumentLayout,
+                engine: RecognitionEngine::Docling,
+                structure_tier: RecognitionStructureTier::Layout,
+            })
+        }
+        UploadFileKind::Image => match recognition_policy.raster_image_engine {
+            RecognitionEngine::Docling => Ok(RecognitionProfile {
+                capability: RecognitionCapability::ImageOcr,
+                engine: RecognitionEngine::Docling,
+                structure_tier: RecognitionStructureTier::Layout,
+            }),
+            RecognitionEngine::Vision => Ok(RecognitionProfile {
+                capability: RecognitionCapability::ImageOcr,
+                engine: RecognitionEngine::Vision,
+                structure_tier: RecognitionStructureTier::Flat,
+            }),
+            engine => Err(unsupported_recognition_engine_error(
+                file_kind,
+                engine,
+                RecognitionCapability::ImageOcr,
+            )),
+        },
+        UploadFileKind::TextLike | UploadFileKind::Spreadsheet | UploadFileKind::Binary => {
+            Err(FileExtractError::ExtractionFailed {
+                file_kind,
+                message: format!(
+                    "docling source format {source_format} is not valid for {file_kind:?}"
+                ),
+            })
+        }
+    }
+}
+
+fn with_plan_recognition_profile(
+    mut plan: FileExtractionPlan,
+    recognition_profile: RecognitionProfile,
+) -> FileExtractionPlan {
+    plan.source_map = with_recognition_source_map(plan.source_map, recognition_profile);
+    plan
+}
+
+fn with_recognition_source_map(
+    source_map: serde_json::Value,
+    recognition_profile: RecognitionProfile,
+) -> serde_json::Value {
+    let mut source_map = match source_map {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    source_map.insert(
+        "recognition".to_string(),
+        serde_json::json!({
+            "engine": recognition_profile.engine.as_str(),
+            "capability": recognition_profile.capability.as_str(),
+            "structure_tier": recognition_profile.structure_tier.as_str(),
+        }),
+    );
+    serde_json::Value::Object(source_map)
+}
+
+fn recognition_engine_ocr_source(engine: &str) -> String {
+    match engine {
+        "docling" => "docling".to_string(),
+        "vision" => "vision_llm".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn unsupported_recognition_engine_error(
+    file_kind: UploadFileKind,
+    engine: RecognitionEngine,
+    capability: RecognitionCapability,
+) -> FileExtractError {
+    FileExtractError::ExtractionFailed {
+        file_kind,
+        message: format!(
+            "recognition engine {engine} does not support {} for {} uploads",
+            capability.as_str(),
+            file_kind.display_name()
+        ),
+    }
+}
+
+fn runtime_docling_required_error(file_kind: UploadFileKind) -> FileExtractError {
+    FileExtractError::ExtractionFailed {
+        file_kind,
+        message: format!(
+            "docling runtime extraction is required for {} uploads",
+            file_kind.display_name()
+        ),
+    }
+}
+
+fn docling_source_format(
+    file_kind: UploadFileKind,
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+) -> Option<&'static str> {
+    match file_kind {
+        UploadFileKind::Pdf => Some("pdf"),
+        UploadFileKind::Docx => Some("docx"),
+        UploadFileKind::Pptx => Some("pptx"),
+        UploadFileKind::Image => docling_image_source_format(file_name, mime_type),
+        UploadFileKind::Spreadsheet => None,
+        UploadFileKind::TextLike | UploadFileKind::Binary => None,
+    }
+}
+
+fn declared_payload_is_record_jsonl(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
+    matches!(lower_file_extension(file_name).as_deref(), Some("jsonl" | "ndjson"))
+        || matches!(
+            mime_type
+                .and_then(|value| value.split(';').next())
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some(
+                "application/jsonl"
+                    | "application/ndjson"
+                    | "application/x-jsonlines"
+                    | "application/x-ndjson",
+            )
+        )
+}
+
+fn docling_image_source_format(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+) -> Option<&'static str> {
+    match lower_file_extension(file_name).as_deref() {
+        Some("png") => return Some("png"),
+        Some("jpg" | "jpeg") => return Some("jpg"),
+        Some("tif" | "tiff") => return Some("tiff"),
+        Some("bmp") => return Some("bmp"),
+        Some("webp") => return Some("webp"),
+        _ => {}
+    }
+
+    match mime_type.map(str::to_ascii_lowercase).as_deref() {
+        Some("image/png") => Some("png"),
+        Some("image/jpeg") => Some("jpg"),
+        Some("image/tiff") => Some("tiff"),
+        Some("image/bmp") => Some("bmp"),
+        Some("image/webp") => Some("webp"),
+        _ => None,
+    }
+}
+
+fn lower_file_extension(file_name: Option<&str>) -> Option<String> {
+    file_name
+        .and_then(|value| std::path::Path::new(value).extension())
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
 }
 
 #[cfg(test)]
@@ -749,12 +858,7 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use image::{DynamicImage, ImageFormat};
-    use lopdf::{
-        Document, Object, Stream,
-        content::{Content, Operation},
-        dictionary,
-    };
-    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+    use zip::write::SimpleFileOptions;
 
     use super::*;
     use crate::integrations::llm::{
@@ -768,6 +872,78 @@ mod tests {
         if let Err(error) = image.write_to(&mut cursor, ImageFormat::Png) {
             panic!("encode generated png fixture: {error}");
         }
+        cursor.into_inner()
+    }
+
+    fn valid_xlsx_bytes() -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("[Content_Types].xml", options).expect("content types");
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+            )
+            .expect("write content types");
+
+        writer.start_file("_rels/.rels", options).expect("root rels");
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+            )
+            .expect("write root rels");
+
+        writer.start_file("xl/workbook.xml", options).expect("workbook");
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#,
+            )
+            .expect("write workbook");
+
+        writer.start_file("xl/_rels/workbook.xml.rels", options).expect("workbook rels");
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#,
+            )
+            .expect("write workbook rels");
+
+        writer.start_file("xl/worksheets/sheet1.xml", options).expect("sheet1");
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>Name</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>Value</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t>Acme</t></is></c>
+      <c r="B2"><v>42</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#,
+            )
+            .expect("write sheet1");
+
+        writer.finish().expect("finish xlsx");
         cursor.into_inner()
     }
 
@@ -798,146 +974,6 @@ mod tests {
                 usage_json: serde_json::json!({}),
             })
         }
-    }
-
-    fn build_minimal_pdf_bytes() -> Vec<u8> {
-        let mut document = Document::with_version("1.5");
-        let pages_id = document.new_object_id();
-        let single_page_id = document.new_object_id();
-        let font_id = document.add_object(dictionary! {
-            "Type" => "Font",
-            "Subtype" => "Type1",
-            "BaseFont" => "Helvetica",
-        });
-        let resources_id = document.add_object(dictionary! {
-            "Font" => dictionary! {
-                "F1" => font_id,
-            },
-        });
-        let content = Content {
-            operations: vec![
-                Operation::new("BT", vec![]),
-                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Integer(14)]),
-                Operation::new("Td", vec![Object::Integer(72), Object::Integer(720)]),
-                Operation::new("Tj", vec![Object::string_literal("Quarterly graph report")]),
-                Operation::new("ET", vec![]),
-            ],
-        };
-        let content_id = document.add_object(Stream::new(
-            dictionary! {},
-            match content.encode() {
-                Ok(bytes) => bytes,
-                Err(error) => panic!("encode pdf stream: {error}"),
-            },
-        ));
-        document.objects.insert(
-            single_page_id,
-            Object::Dictionary(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "Contents" => content_id,
-                "Resources" => resources_id,
-                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
-            }),
-        );
-        document.objects.insert(
-            pages_id,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages",
-                "Kids" => vec![single_page_id.into()],
-                "Count" => 1,
-            }),
-        );
-        let catalog_id = document.add_object(dictionary! {
-            "Type" => "Catalog",
-            "Pages" => pages_id,
-        });
-        document.trailer.set("Root", catalog_id);
-        let mut bytes = Vec::new();
-        if let Err(error) = document.save_to(&mut bytes) {
-            panic!("save pdf: {error}");
-        }
-        bytes
-    }
-
-    fn build_minimal_xlsx_bytes() -> Vec<u8> {
-        let cursor = Cursor::new(Vec::new());
-        let mut writer = ZipWriter::new(cursor);
-        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-
-        write_xlsx_fixture(
-            &mut writer,
-            "[Content_Types].xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-              <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-              <Default Extension="xml" ContentType="application/xml"/>
-              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-              <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-            </Types>"#,
-            options,
-        );
-        write_xlsx_fixture(
-            &mut writer,
-            "_rels/.rels",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-            </Relationships>"#,
-            options,
-        );
-        write_xlsx_fixture(
-            &mut writer,
-            "xl/workbook.xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-              <sheets>
-                <sheet name="Inventory" sheetId="1" r:id="rId1"/>
-              </sheets>
-            </workbook>"#,
-            options,
-        );
-        write_xlsx_fixture(
-            &mut writer,
-            "xl/_rels/workbook.xml.rels",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-            </Relationships>"#,
-            options,
-        );
-        write_xlsx_fixture(
-            &mut writer,
-            "xl/worksheets/sheet1.xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-              <dimension ref="A1:B2"/>
-              <sheetData>
-                <row r="1">
-                  <c r="A1" t="inlineStr"><is><t>Name</t></is></c>
-                  <c r="B1" t="inlineStr"><is><t>Value</t></is></c>
-                </row>
-                <row r="2">
-                  <c r="A2" t="inlineStr"><is><t>Alpha</t></is></c>
-                  <c r="B2"><v>42</v></c>
-                </row>
-              </sheetData>
-            </worksheet>"#,
-            options,
-        );
-
-        writer.finish().expect("finish xlsx").into_inner()
-    }
-
-    fn write_xlsx_fixture(
-        writer: &mut ZipWriter<Cursor<Vec<u8>>>,
-        path: &str,
-        body: &str,
-        options: SimpleFileOptions,
-    ) {
-        writer.start_file(path, options).expect("start xlsx fixture file");
-        writer.write_all(body.as_bytes()).expect("write xlsx fixture file");
     }
 
     #[test]
@@ -1005,6 +1041,27 @@ mod tests {
     }
 
     #[test]
+    fn treats_svg_as_text_like_xml_not_raster_image() {
+        assert_eq!(
+            detect_upload_file_kind(
+                Some("diagram.svg"),
+                Some("image/svg+xml"),
+                br#"<svg xmlns="http://www.w3.org/2000/svg"><text>Acme</text></svg>"#,
+            ),
+            UploadFileKind::TextLike
+        );
+    }
+
+    #[test]
+    fn rejects_declared_heic_as_unsupported_binary() {
+        assert_eq!(
+            validate_upload_file_admission(Some("photo.heic"), Some("image/heic"), b"binary")
+                .unwrap_err(),
+            FileExtractError::UnsupportedBinary
+        );
+    }
+
+    #[test]
     fn accepts_extensionless_utf8_text() {
         assert_eq!(
             detect_upload_file_kind(Some("Dockerfile"), None, b"FROM rust:1.86"),
@@ -1050,6 +1107,37 @@ mod tests {
             ),
             UploadFileKind::TextLike
         );
+    }
+
+    #[test]
+    fn extracts_record_jsonl_by_extension() {
+        let plan = build_file_extraction_plan(
+            Some("events.jsonl"),
+            Some("application/x-ndjson"),
+            br#"{"id":"event-1","kind":"event","occurredAt":"2026-04-28T09:00:00Z","text":"created item"}"#.to_vec(),
+        )
+        .expect("record jsonl extraction");
+
+        assert_eq!(plan.source_format_metadata.source_format, "record_jsonl");
+        assert_eq!(plan.extraction_kind, "record_jsonl");
+        let source_text = plan.source_text.as_deref().expect("source text");
+        assert!(source_text.contains("[source_profile source_format=record_jsonl"));
+        assert!(source_text.contains("unit_count=1"));
+        assert!(source_text.contains(
+            "[unit_id=event-1 unit_kind=event occurred_at=2026-04-28T09:00:00+00:00] created item"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_record_jsonl_by_explicit_format() {
+        let error = build_file_extraction_plan(
+            Some("events.ndjson"),
+            Some("application/x-ndjson"),
+            b"not-json".to_vec(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, FileExtractError::ExtractionFailed { .. }));
     }
 
     #[test]
@@ -1165,45 +1253,39 @@ mod tests {
     }
 
     #[test]
-    fn builds_pdf_extraction_plan_for_minimal_pdf_upload() {
-        let plan = match build_file_extraction_plan(
+    fn local_plan_rejects_docling_owned_pdf_upload() {
+        let error = match build_file_extraction_plan(
             Some("manual.pdf"),
             Some("application/pdf"),
-            build_minimal_pdf_bytes(),
+            b"%PDF-1.7\n".to_vec(),
         ) {
-            Ok(plan) => plan,
-            Err(error) => panic!("pdf extraction plan: {error}"),
+            Ok(plan) => panic!("pdf upload should require runtime docling: {:?}", plan.file_kind),
+            Err(error) => error,
         };
 
-        assert_eq!(plan.file_kind, UploadFileKind::Pdf);
-        assert_eq!(plan.extraction_kind, "pdf_text");
-        assert_eq!(plan.source_format_metadata.page_count, Some(1));
-        assert!(
-            plan.normalized_text
-                .as_deref()
-                .is_some_and(|text| text.contains("Quarterly graph report"))
-        );
-        assert!(plan.structure_hints.lines.iter().any(|line| line.page_number == Some(1)));
+        assert!(matches!(
+            error,
+            FileExtractError::ExtractionFailed { file_kind: UploadFileKind::Pdf, .. }
+        ));
+        assert!(error.to_string().contains("docling runtime extraction is required"));
     }
 
     #[test]
-    fn builds_spreadsheet_extraction_plan_for_minimal_xlsx_upload() {
+    fn builds_tabular_extraction_plan_for_xlsx_upload() {
         let plan = match build_file_extraction_plan(
             Some("inventory.xlsx"),
             Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            build_minimal_xlsx_bytes(),
+            valid_xlsx_bytes(),
         ) {
             Ok(plan) => plan,
-            Err(error) => panic!("spreadsheet extraction plan: {error}"),
+            Err(error) => panic!("xlsx extraction plan: {error}"),
         };
 
         assert_eq!(plan.file_kind, UploadFileKind::Spreadsheet);
         assert_eq!(plan.extraction_kind, "tabular_text");
         assert_eq!(plan.source_format_metadata.source_format, "xlsx");
-        assert!(plan.normalized_text.as_deref().is_some_and(|text| text.contains("# Inventory")));
-        assert!(
-            plan.normalized_text.as_deref().is_some_and(|text| text.contains("| Alpha | 42 |"))
-        );
+        assert_eq!(plan.source_map["recognition"]["engine"], serde_json::json!("native"));
+        assert!(plan.normalized_text.as_deref().is_some_and(|text| text.contains("| Acme | 42 |")));
     }
 
     #[test]
@@ -1224,6 +1306,57 @@ mod tests {
             plan.normalized_text
                 .as_deref()
                 .is_some_and(|text| text.contains("| Alice | alice@example.com |"))
+        );
+    }
+
+    #[test]
+    fn builds_tabular_extraction_plan_for_tsv_upload() {
+        let plan = match build_file_extraction_plan(
+            Some("people.tsv"),
+            Some("text/tab-separated-values"),
+            b"Name\tEmail\nAlice\talice@example.com\n".to_vec(),
+        ) {
+            Ok(plan) => plan,
+            Err(error) => panic!("tsv extraction plan: {error}"),
+        };
+
+        assert_eq!(plan.file_kind, UploadFileKind::Spreadsheet);
+        assert_eq!(plan.extraction_kind, "tabular_text");
+        assert_eq!(plan.source_format_metadata.source_format, "tsv");
+        assert!(
+            plan.normalized_text
+                .as_deref()
+                .is_some_and(|text| text.contains("| Alice | alice@example.com |"))
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_plan_uses_native_tabular_parser_for_xlsx_upload() {
+        let policy = LibraryRecognitionPolicy::default();
+        let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+            gateway: &FakeGateway,
+            vision_provider: None,
+            vision_api_key: None,
+            vision_base_url: None,
+            file_name: Some("inventory.xlsx"),
+            mime_type: Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            file_bytes: valid_xlsx_bytes(),
+            recognition_policy: &policy,
+        })
+        .await
+        .expect("runtime xlsx extraction");
+
+        assert_eq!(result.file_kind, UploadFileKind::Spreadsheet);
+        assert_eq!(result.extraction_kind, "tabular_text");
+        assert_eq!(result.source_format_metadata.source_format, "xlsx");
+        assert_eq!(result.source_map["recognition"]["engine"], serde_json::json!("native"));
+        assert_eq!(
+            result.source_map["recognition"]["capability"],
+            serde_json::json!("tabular_parse")
+        );
+        assert!(result.provider_kind.is_none());
+        assert!(
+            result.normalized_text.as_deref().is_some_and(|text| text.contains("| Name | Value |"))
         );
     }
 
@@ -1254,7 +1387,7 @@ mod tests {
         let result = validate_upload_file_admission(
             Some("sheet.xlsx"),
             Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            &build_minimal_xlsx_bytes(),
+            b"binary xlsx payload",
         );
 
         assert_eq!(
@@ -1264,21 +1397,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_plan_uses_vision_provider_for_images() {
+    async fn runtime_plan_uses_vision_provider_for_non_docling_images() {
         let provider = ProviderModelSelection {
             provider_kind: crate::domains::provider_profiles::SupportedProviderKind::OpenAi,
             model_name: "gpt-5.4-mini".to_string(),
         };
 
-        let result = build_runtime_file_extraction_plan(
-            &FakeGateway,
-            Some(&provider),
-            Some("test-key"),
-            None,
-            Some("diagram.png"),
-            Some("image/png"),
-            valid_png_bytes(),
-        )
+        let policy = LibraryRecognitionPolicy::default();
+        let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+            gateway: &FakeGateway,
+            vision_provider: Some(&provider),
+            vision_api_key: Some("test-key"),
+            vision_base_url: None,
+            file_name: Some("diagram.gif"),
+            mime_type: Some("image/gif"),
+            file_bytes: valid_png_bytes(),
+            recognition_policy: &policy,
+        })
         .await;
         let result = match result {
             Ok(plan) => plan,
@@ -1298,6 +1433,69 @@ mod tests {
         );
         assert_eq!(quality.normalization_status, ExtractionNormalizationStatus::Verbatim);
         assert_eq!(quality.ocr_source.as_deref(), Some("vision_llm"));
+        assert_eq!(result.source_map["recognition"]["engine"], serde_json::json!("vision"));
+        assert_eq!(result.source_map["recognition"]["capability"], serde_json::json!("image_ocr"));
+        assert_eq!(result.source_map["recognition"]["structure_tier"], serde_json::json!("flat"));
+    }
+
+    #[tokio::test]
+    async fn runtime_plan_uses_vision_policy_for_static_raster_images() {
+        let provider = ProviderModelSelection {
+            provider_kind: crate::domains::provider_profiles::SupportedProviderKind::OpenAi,
+            model_name: "gpt-5.4-mini".to_string(),
+        };
+        let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+
+        let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+            gateway: &FakeGateway,
+            vision_provider: Some(&provider),
+            vision_api_key: Some("test-key"),
+            vision_base_url: None,
+            file_name: Some("scan.png"),
+            mime_type: Some("image/png"),
+            file_bytes: valid_png_bytes(),
+            recognition_policy: &policy,
+        })
+        .await
+        .expect("vision policy should route static raster image to vision binding");
+
+        assert_eq!(result.extraction_kind, "vision_image");
+        assert_eq!(result.provider_kind.as_deref(), Some("openai"));
+        assert_eq!(result.source_map["recognition"]["engine"], serde_json::json!("vision"));
+    }
+
+    #[tokio::test]
+    async fn runtime_plan_requires_vision_binding_for_vision_image_policy() {
+        let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+
+        let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+            gateway: &FakeGateway,
+            vision_provider: None,
+            vision_api_key: None,
+            vision_base_url: None,
+            file_name: Some("scan.png"),
+            mime_type: Some("image/png"),
+            file_bytes: valid_png_bytes(),
+            recognition_policy: &policy,
+        })
+        .await
+        .expect_err("vision policy must fail loudly when binding is missing");
+
+        assert!(error.to_string().contains("vision binding is not configured"));
+    }
+
+    #[test]
+    fn docling_policy_keeps_static_raster_images_on_docling() {
+        let profile = docling_owned_recognition_profile(
+            UploadFileKind::Image,
+            "png",
+            &LibraryRecognitionPolicy::default(),
+        )
+        .expect("docling policy should support static raster image");
+
+        assert_eq!(profile.engine, RecognitionEngine::Docling);
+        assert_eq!(profile.capability, RecognitionCapability::ImageOcr);
+        assert_eq!(profile.structure_tier, RecognitionStructureTier::Layout);
     }
 
     #[test]
@@ -1306,5 +1504,38 @@ mod tests {
 
         assert_eq!(preview.text.as_deref(), Some("Alpha"));
         assert!(preview.truncated);
+    }
+
+    #[test]
+    fn resolves_docling_owned_formats() {
+        assert_eq!(
+            docling_source_format(UploadFileKind::Pdf, Some("manual.pdf"), None),
+            Some("pdf")
+        );
+        assert_eq!(
+            docling_source_format(UploadFileKind::Image, Some("scan.webp"), None),
+            Some("webp")
+        );
+    }
+
+    #[test]
+    fn leaves_non_docling_formats_on_their_canonical_paths() {
+        assert_eq!(
+            docling_source_format(UploadFileKind::Spreadsheet, Some("sheet.csv"), None),
+            None
+        );
+        assert_eq!(
+            docling_source_format(UploadFileKind::Spreadsheet, Some("sheet.tsv"), None),
+            None
+        );
+        assert_eq!(
+            docling_source_format(
+                UploadFileKind::Spreadsheet,
+                Some("sheet.xlsx"),
+                Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            ),
+            None
+        );
+        assert_eq!(docling_source_format(UploadFileKind::Image, Some("scan.gif"), None), None);
     }
 }

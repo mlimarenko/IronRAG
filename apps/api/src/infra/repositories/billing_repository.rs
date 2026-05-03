@@ -533,12 +533,21 @@ pub struct LibraryCostSummaryRow {
     pub provider_call_count: i64,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct WorkspaceCostSummaryRow {
+    pub total_cost: Decimal,
+    pub currency_code: String,
+    pub library_count: i64,
+    pub document_count: i64,
+    pub provider_call_count: i64,
+}
+
 pub async fn list_document_costs_by_library(
     postgres: &PgPool,
     library_id: Uuid,
 ) -> Result<Vec<DocumentCostRow>, sqlx::Error> {
     // Canonical shape: billing_execution_cost carries library_id +
-    // knowledge_document_id directly (migration 0006), so per-document
+    // knowledge_document_id directly, so per-document
     // rollup is a single indexed aggregate without the old 5-way LEFT
     // JOIN through provider_call / ingest_attempt / ingest_job /
     // runtime_graph_extraction. The old CTE also re-fanned rows through
@@ -588,6 +597,26 @@ pub async fn get_library_cost_summary(
          where bec.library_id = $1",
     )
     .bind(library_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn get_workspace_cost_summary(
+    postgres: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Option<WorkspaceCostSummaryRow>, sqlx::Error> {
+    sqlx::query_as::<_, WorkspaceCostSummaryRow>(
+        "select
+            coalesce(sum(bec.total_cost), 0) as total_cost,
+            coalesce(max(bec.currency_code), 'USD') as currency_code,
+            count(distinct bec.library_id)::bigint as library_count,
+            count(distinct bec.knowledge_document_id)
+                filter (where bec.knowledge_document_id is not null)::bigint as document_count,
+            coalesce(sum(bec.provider_call_count), 0)::bigint as provider_call_count
+         from billing_execution_cost bec
+         where bec.workspace_id = $1",
+    )
+    .bind(workspace_id)
     .fetch_optional(postgres)
     .await
 }

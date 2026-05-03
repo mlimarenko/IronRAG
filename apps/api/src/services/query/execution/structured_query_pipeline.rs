@@ -1,8 +1,3 @@
-// Structured-query pipeline with CRAG rewrite retry. Call sites are
-// gated out of the v0.3.2 retrieval default path; file stays as the
-// canonical home for when we re-enable it.
-#![allow(dead_code)]
-
 use anyhow::Context;
 use uuid::Uuid;
 
@@ -21,172 +16,6 @@ use crate::{
 };
 
 use super::*;
-
-/// Runs planning, retrieval, optional CRAG retry, and rerank — the
-/// portion of the structured-query pipeline that must happen BEFORE
-/// the compiled `QueryIR` is consumed. Returns the reranked bundle so
-/// the caller (`answer_pipeline::prepare_answer_query`) can slot an
-/// IR-aware consolidation stage between rerank and assembly without
-/// duplicating context-assembly logic.
-///
-/// The entry point is split (rather than `execute_structured_query`
-/// monolithic) because context assembly (`truncate_bundle`, grouped
-/// references, `assemble_bounded_context`) consumes the bundle —
-/// running consolidation AFTER would be a no-op on a dropped bundle.
-pub(crate) async fn retrieve_and_rerank_structured_query(
-    state: &AppState,
-    library_id: Uuid,
-    question: &str,
-    mode: RuntimeQueryMode,
-    top_k: usize,
-) -> anyhow::Result<StructuredQueryRerankStage> {
-    let plan_started = std::time::Instant::now();
-    let planning_stage =
-        run_async_try_op((), |_| plan_structured_query(state, library_id, question, mode, top_k))
-            .await?;
-    let plan_elapsed_ms = plan_started.elapsed().as_millis();
-    let retrieve_started = std::time::Instant::now();
-    let retrieval_stage = run_async_try_op(planning_stage, |planning_stage| {
-        retrieve_structured_query(state, library_id, question, planning_stage, None)
-    })
-    .await?;
-    let retrieve_elapsed_ms = retrieve_started.elapsed().as_millis();
-    tracing::info!(
-        stage = "retrieval.plan_and_retrieve",
-        plan_ms = plan_elapsed_ms,
-        retrieve_ms = retrieve_elapsed_ms,
-        chunk_count = retrieval_stage.bundle.chunks.len(),
-        entity_count = retrieval_stage.bundle.entities.len(),
-        relationship_count = retrieval_stage.bundle.relationships.len(),
-        "structured retrieval inner stages"
-    );
-
-    let retrieval_stage = {
-        // Fix C: zero-chunk retrievals don't benefit from a CRAG
-        // rewrite+retry — the library simply has nothing matching
-        // the query's semantic neighbourhood. Rewriting with the LLM
-        // and re-embedding+re-searching costs 10-30 s per attempt
-        // and almost always comes back empty a second time, which
-        // is what produced the `-32001 Request timed out` storm on
-        // the MCP grounded_answer surface. The CRAG paper assumes a
-        // non-empty but low-relevance retrieval; empty retrievals
-        // should fall through to the verifier, which marks the
-        // answer `insufficient_evidence` and lets the caller decide.
-        if retrieval_stage.bundle.chunks.is_empty() {
-            tracing::info!(
-                stage = "crag",
-                chunk_count = 0,
-                "CRAG retry skipped: retrieval returned zero chunks (empty library or scope mismatch)"
-            );
-            retrieval_stage
-        } else if should_skip_crag_retry(
-            &retrieval_stage.planning.plan,
-            &retrieval_stage.bundle.chunks,
-        ) {
-            tracing::info!(
-                stage = "crag",
-                exact_literal_technical = true,
-                chunk_count = retrieval_stage.bundle.chunks.len(),
-                "CRAG retry skipped for exact technical literal query with grounded lexical hits"
-            );
-            retrieval_stage
-        } else {
-            let confidence = evaluate_retrieval_quality(
-                &retrieval_stage.bundle.chunks,
-                &retrieval_stage.planning.plan.keywords,
-            );
-            tracing::info!(
-                stage = "crag",
-                avg_score = confidence.score,
-                is_sufficient = confidence.is_sufficient,
-                threshold = %CRAG_CONFIDENCE_THRESHOLD,
-                "retrieval quality evaluated"
-            );
-            if confidence.is_sufficient {
-                retrieval_stage
-            } else {
-                tracing::info!(stage = "crag", original_score = %confidence.score, "retrieval quality below threshold, triggering CRAG retry");
-                let mut stage = retrieval_stage;
-                let explicit_target_document_ids = explicit_target_document_ids_from_values(
-                    question,
-                    stage.planning.document_index.values().flat_map(|document| {
-                        [
-                            document.file_name.as_deref(),
-                            document.title.as_deref(),
-                            Some(document.external_key.as_str()),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .map(move |value| (document.document_id, value))
-                    }),
-                );
-                let locked_target_document_ids = (!explicit_target_document_ids.is_empty())
-                    .then_some(&explicit_target_document_ids);
-                if let Some(rewritten) = rewrite_query_for_retry(state, library_id, question).await
-                {
-                    tracing::debug!(stage = "crag_rewrite", rewritten_query = %rewritten, "CRAG query rewritten");
-                    let retry_limit = stage.planning.candidate_limit;
-                    let retry_ok = async {
-                        let retry_embed = embed_question(
-                            state,
-                            library_id,
-                            &stage.planning.provider_profile,
-                            &rewritten,
-                        )
-                        .await?;
-                        retrieve_document_chunks(
-                            state,
-                            library_id,
-                            &stage.planning.provider_profile,
-                            &rewritten,
-                            locked_target_document_ids,
-                            &stage.planning.plan,
-                            retry_limit,
-                            &retry_embed.embedding,
-                            &stage.planning.document_index,
-                            None,
-                        )
-                        .await
-                    }
-                    .await;
-                    match retry_ok {
-                        Ok(retry_chunks) => {
-                            let original_chunks = std::mem::take(&mut stage.bundle.chunks);
-                            let original_len = original_chunks.len();
-                            let retry_len = retry_chunks.len();
-                            stage.bundle.chunks =
-                                merge_chunks(original_chunks, retry_chunks, retry_limit);
-                            tracing::debug!(
-                                stage = "crag_merge",
-                                original_len,
-                                retry_len,
-                                merged_len = stage.bundle.chunks.len(),
-                                "CRAG retry chunks merged"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(stage = "crag_retry", error = %error, "CRAG retry failed, keeping original chunks");
-                        }
-                    }
-                }
-                stage
-            }
-        }
-    };
-
-    let rerank_started = std::time::Instant::now();
-    let rerank_stage = run_async_try_op(retrieval_stage, |retrieval_stage| {
-        rerank_structured_query(state, question, retrieval_stage)
-    })
-    .await?;
-    let rerank_elapsed_ms = rerank_started.elapsed().as_millis();
-    tracing::info!(
-        stage = "retrieval.rerank",
-        rerank_ms = rerank_elapsed_ms,
-        "structured retrieval rerank stage"
-    );
-    Ok(rerank_stage)
-}
 
 /// Finalize a reranked bundle into a `RuntimeStructuredQueryResult`
 /// (context assembly + diagnostics). Runs AFTER the caller has had a
@@ -239,19 +68,15 @@ pub(crate) async fn finalize_structured_query(
     // `query_chunk_reference` audit rows keyed by the execution_id.
     // Rank is 1-based, score is f64 (f32 retrieval score widened) to
     // match the table definition.
-    let chunk_references: Vec<_> = assembly_stage
-        .rerank
-        .retrieval
-        .bundle
-        .chunks
-        .iter()
-        .enumerate()
-        .map(|(index, chunk)| super::types::QueryChunkReferenceSnapshot {
-            chunk_id: chunk.chunk_id,
-            rank: (index as i32) + 1,
-            score: chunk.score.unwrap_or(0.0) as f64,
-        })
-        .collect();
+    let retrieved_context_document_titles =
+        distinct_context_document_titles(&assembly_stage.rerank.retrieval.bundle.chunks);
+    let chunk_references =
+        build_query_chunk_reference_snapshots(&assembly_stage.rerank.retrieval.bundle.chunks);
+    let context_chunks = assembly_stage.rerank.retrieval.bundle.chunks.clone();
+    let ordered_source_units =
+        collect_ordered_source_units(&assembly_stage.rerank.retrieval.bundle.chunks);
+    let graph_evidence_context_lines =
+        assembly_stage.rerank.retrieval.graph_evidence_context_lines.clone();
 
     Ok(RuntimeStructuredQueryResult {
         planned_mode: assembly_stage.rerank.retrieval.planning.plan.planned_mode,
@@ -262,8 +87,53 @@ pub(crate) async fn finalize_structured_query(
         technical_literal_chunks: assembly_stage.technical_literal_chunks,
         diagnostics,
         retrieved_documents: assembly_stage.retrieved_documents,
+        retrieved_context_document_titles,
         chunk_references,
+        context_chunks,
+        ordered_source_units,
+        graph_evidence_context_lines,
     })
+}
+
+fn distinct_context_document_titles(chunks: &[RuntimeMatchedChunk]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut titles = Vec::new();
+    for chunk in chunks {
+        let title = chunk.document_label.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let key = title.to_lowercase();
+        if seen.insert(key) {
+            titles.push(title.to_string());
+        }
+    }
+    titles
+}
+
+fn build_query_chunk_reference_snapshots(
+    chunks: &[RuntimeMatchedChunk],
+) -> Vec<QueryChunkReferenceSnapshot> {
+    chunks
+        .iter()
+        .filter(|chunk| !is_source_unit_runtime_chunk(chunk))
+        .enumerate()
+        .map(|(index, chunk)| QueryChunkReferenceSnapshot {
+            chunk_id: chunk.chunk_id,
+            rank: (index as i32) + 1,
+            score: chunk.score.unwrap_or(0.0) as f64,
+        })
+        .collect()
+}
+
+fn collect_ordered_source_units(chunks: &[RuntimeMatchedChunk]) -> Vec<RuntimeMatchedChunk> {
+    let mut units = chunks
+        .iter()
+        .filter(|chunk| is_source_unit_runtime_chunk(chunk))
+        .cloned()
+        .collect::<Vec<_>>();
+    units.sort_by_key(|chunk| (chunk.document_label.clone(), chunk.chunk_index, chunk.chunk_id));
+    units
 }
 
 pub(crate) async fn plan_structured_query(
@@ -291,11 +161,7 @@ pub(crate) async fn plan_structured_query(
         metadata: Some(planning.clone()),
     })
     .map_err(|failure| anyhow::anyhow!(failure.summary))?;
-    let technical_literal_intent = if plan.intent_profile.exact_literal_technical {
-        detect_technical_literal_intent(question)
-    } else {
-        TechnicalLiteralIntent::default()
-    };
+    let technical_literal_intent = TechnicalLiteralIntent::default();
     let skip_vector_search = should_skip_vector_search(&plan);
     let (question_embedding, hyde_embedding, embedding_usage) = if skip_vector_search {
         tracing::info!(
@@ -384,9 +250,16 @@ pub(crate) async fn retrieve_structured_query(
     state: &AppState,
     library_id: Uuid,
     question: &str,
-    planning: StructuredQueryPlanningStage,
+    mut planning: StructuredQueryPlanningStage,
     query_ir: Option<&crate::domains::query_ir::QueryIR>,
 ) -> anyhow::Result<StructuredQueryRetrievalStage> {
+    let technical_literal_intent =
+        effective_technical_literal_intent(question, query_ir, planning.technical_literal_intent);
+    planning.technical_literal_intent = technical_literal_intent;
+    planning.candidate_limit = planning
+        .candidate_limit
+        .max(technical_literal_candidate_limit(technical_literal_intent, planning.plan.top_k));
+
     let plan = &planning.plan;
     let provider_profile = &planning.provider_profile;
     let vector_search_embedding =
@@ -395,7 +268,7 @@ pub(crate) async fn retrieve_structured_query(
     let graph_index = &planning.graph_index;
     let document_index = &planning.document_index;
     let candidate_limit = planning.candidate_limit;
-    let explicit_target_document_ids = explicit_target_document_ids_from_values(
+    let document_filter_ids = explicit_target_document_ids_from_values(
         question,
         document_index.values().flat_map(|document| {
             [
@@ -408,14 +281,10 @@ pub(crate) async fn retrieve_structured_query(
             .map(move |value| (document.document_id, value))
         }),
     );
-    let mut targeted_document_ids = explicit_target_document_ids;
-    if let Some(ir) = query_ir {
-        targeted_document_ids.extend(focused_target_document_ids_from_query_ir(ir, document_index));
-    }
     let locked_target_document_ids =
-        (!targeted_document_ids.is_empty()).then_some(&targeted_document_ids);
+        (!document_filter_ids.is_empty()).then_some(&document_filter_ids);
 
-    let bundle = match plan.planned_mode {
+    let mut bundle = match plan.planned_mode {
         RuntimeQueryMode::Document => {
             let chunks = retrieve_document_chunks(
                 state,
@@ -438,6 +307,7 @@ pub(crate) async fn retrieve_structured_query(
                 library_id,
                 provider_profile,
                 plan,
+                query_ir,
                 candidate_limit,
                 question_embedding,
                 graph_index,
@@ -450,6 +320,7 @@ pub(crate) async fn retrieve_structured_query(
                 library_id,
                 provider_profile,
                 plan,
+                query_ir,
                 candidate_limit,
                 question_embedding,
                 graph_index,
@@ -462,6 +333,7 @@ pub(crate) async fn retrieve_structured_query(
                 library_id,
                 provider_profile,
                 plan,
+                query_ir,
                 candidate_limit,
                 question_embedding,
                 graph_index,
@@ -488,6 +360,7 @@ pub(crate) async fn retrieve_structured_query(
                 library_id,
                 provider_profile,
                 plan,
+                query_ir,
                 candidate_limit,
                 question_embedding,
                 graph_index,
@@ -498,6 +371,7 @@ pub(crate) async fn retrieve_structured_query(
                 library_id,
                 provider_profile,
                 plan,
+                query_ir,
                 candidate_limit,
                 question_embedding,
                 graph_index,
@@ -523,7 +397,42 @@ pub(crate) async fn retrieve_structured_query(
         }
     };
 
-    Ok(StructuredQueryRetrievalStage { planning, bundle })
+    let graph_evidence = load_graph_evidence_chunks_for_bundle(
+        state,
+        library_id,
+        question,
+        &bundle.entities,
+        &bundle.relationships,
+        plan,
+        query_ir,
+        graph_index,
+        document_index,
+        &plan.keywords,
+    )
+    .await?;
+    if !graph_evidence.chunks.is_empty() {
+        bundle.chunks = merge_graph_evidence_chunks(
+            std::mem::take(&mut bundle.chunks),
+            graph_evidence.chunks,
+            graph_evidence_context_top_k(candidate_limit),
+        );
+    }
+    let stale_chunk_count =
+        retain_canonical_document_head_chunks(&mut bundle.chunks, document_index);
+    if stale_chunk_count > 0 {
+        tracing::info!(
+            stage = "retrieval.canonical_head_filter",
+            library_id = %library_id,
+            stale_chunk_count,
+            "removed non-head revision chunks from retrieval bundle"
+        );
+    }
+
+    Ok(StructuredQueryRetrievalStage {
+        planning,
+        bundle,
+        graph_evidence_context_lines: graph_evidence.context_lines,
+    })
 }
 
 pub(crate) async fn rerank_structured_query(
@@ -559,13 +468,20 @@ async fn assemble_structured_query(
     _include_debug: bool,
     focused_document_id: Option<Uuid>,
 ) -> anyhow::Result<StructuredQueryAssemblyStage> {
+    let technical_literal_intent = effective_technical_literal_intent(
+        question,
+        Some(query_ir),
+        rerank.retrieval.planning.technical_literal_intent,
+    );
+    rerank.retrieval.planning.technical_literal_intent = technical_literal_intent;
     let plan = &rerank.retrieval.planning.plan;
     let bundle = &mut rerank.retrieval.bundle;
+    let effective_top_k = source_slice_context_top_k(query_ir, plan.top_k);
     let retrieved_documents = load_retrieved_document_briefs(
         state,
         &bundle.chunks,
         &rerank.retrieval.planning.document_index,
-        plan.top_k,
+        effective_top_k,
         focused_document_id,
     )
     .await;
@@ -575,8 +491,8 @@ async fn assemble_structured_query(
         question,
         query_ir,
         &bundle.chunks,
-        rerank.retrieval.planning.technical_literal_intent,
-        plan.top_k,
+        technical_literal_intent,
+        effective_top_k,
         &literal_focus_keywords,
         pagination_requested,
     );
@@ -584,24 +500,31 @@ async fn assemble_structured_query(
         collect_technical_literal_groups(question, query_ir, &technical_literal_chunks);
     let technical_literals_text =
         render_exact_technical_literals_section(&technical_literal_groups);
-    truncate_bundle(bundle, plan.top_k);
+    truncate_bundle(bundle, effective_top_k);
 
     let grouped_references = group_visible_references_for_query(
         &build_grouped_reference_candidates(
             &bundle.entities,
             &bundle.relationships,
             &bundle.chunks,
-            plan.top_k,
+            effective_top_k,
         ),
-        plan.top_k,
+        effective_top_k,
     );
-    let context_text = assemble_bounded_context(
+    let effective_context_budget =
+        source_slice_context_budget_chars(query_ir, plan.context_budget_chars);
+    let graph_evidence_lines = rerank.retrieval.graph_evidence_context_lines.clone();
+    let context_text = assemble_bounded_context_for_query(
+        query_ir,
+        question,
         &bundle.entities,
         &bundle.relationships,
         &bundle.chunks,
-        plan.context_budget_chars,
+        &graph_evidence_lines,
+        effective_context_budget,
     );
-    let graph_support_count = bundle.entities.len() + bundle.relationships.len();
+    let graph_support_count =
+        bundle.entities.len() + bundle.relationships.len() + graph_evidence_lines.len();
     let context_assembly = assemble_context_metadata_for_query(
         plan.planned_mode,
         graph_support_count,
@@ -619,9 +542,210 @@ async fn assemble_structured_query(
     })
 }
 
-pub(crate) fn should_skip_crag_retry(
-    plan: &crate::services::query::planner::RuntimeQueryPlan,
-    chunks: &[RuntimeMatchedChunk],
-) -> bool {
-    plan.intent_profile.exact_literal_technical && !chunks.is_empty()
+fn effective_technical_literal_intent(
+    question: &str,
+    query_ir: Option<&crate::domains::query_ir::QueryIR>,
+    fallback: TechnicalLiteralIntent,
+) -> TechnicalLiteralIntent {
+    let query_ir_intent = query_ir
+        .map(|ir| {
+            super::technical_literals::detect_technical_literal_intent_from_query_ir(question, ir)
+        })
+        .unwrap_or_default();
+    merge_technical_literal_intent(fallback, query_ir_intent)
+}
+
+fn merge_technical_literal_intent(
+    left: TechnicalLiteralIntent,
+    right: TechnicalLiteralIntent,
+) -> TechnicalLiteralIntent {
+    TechnicalLiteralIntent {
+        wants_urls: left.wants_urls || right.wants_urls,
+        wants_prefixes: left.wants_prefixes || right.wants_prefixes,
+        wants_paths: left.wants_paths || right.wants_paths,
+        wants_methods: left.wants_methods || right.wants_methods,
+        wants_parameters: left.wants_parameters || right.wants_parameters,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn runtime_chunk(kind: Option<&str>, score: f32) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 1,
+            chunk_kind: kind.map(str::to_string),
+            document_label: "records.jsonl".to_string(),
+            excerpt: "record".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(score),
+            source_text: "record".to_string(),
+        }
+    }
+
+    #[test]
+    fn chunk_reference_snapshots_exclude_source_units() {
+        let profile = runtime_chunk(Some("source_profile"), 4.0);
+        let source_unit = runtime_chunk(Some(SOURCE_UNIT_CHUNK_KIND), 3.0);
+        let ordinary = runtime_chunk(Some("text"), 2.0);
+
+        let snapshots = build_query_chunk_reference_snapshots(&[
+            profile.clone(),
+            source_unit,
+            ordinary.clone(),
+        ]);
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].chunk_id, profile.chunk_id);
+        assert_eq!(snapshots[0].rank, 1);
+        assert_eq!(snapshots[1].chunk_id, ordinary.chunk_id);
+        assert_eq!(snapshots[1].rank, 2);
+    }
+
+    #[test]
+    fn ordered_source_units_preserve_source_order() {
+        let later = RuntimeMatchedChunk {
+            chunk_index: 7,
+            ..runtime_chunk(Some(SOURCE_UNIT_CHUNK_KIND), 3.0)
+        };
+        let earlier = RuntimeMatchedChunk {
+            chunk_index: 3,
+            ..runtime_chunk(Some(SOURCE_UNIT_CHUNK_KIND), 3.0)
+        };
+        let ordinary = runtime_chunk(Some("text"), 2.0);
+
+        let units = collect_ordered_source_units(&[later.clone(), ordinary, earlier.clone()]);
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].chunk_id, earlier.chunk_id);
+        assert_eq!(units[1].chunk_id, later.chunk_id);
+    }
+
+    #[test]
+    fn query_ir_target_types_expand_technical_literal_selection() {
+        let question = "Which commands and settings configure scanning through RareProtocol?";
+        let query_ir = QueryIR {
+            act: QueryAct::ConfigureHow,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![
+                "protocol".to_string(),
+                "path".to_string(),
+                "config_key".to_string(),
+            ],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.82,
+        };
+        let target_document_id = Uuid::now_v7();
+        let target_chunk_id = Uuid::now_v7();
+        let mut chunks = (0..14)
+            .map(|index| RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                document_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: index,
+                chunk_kind: None,
+                document_label: format!("noisy-{index}.md"),
+                excerpt: "General operations memo without command literals.".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(1.0 - (index as f32 * 0.01)),
+                source_text: "General operations memo without command literals.".to_string(),
+            })
+            .collect::<Vec<_>>();
+        chunks.push(RuntimeMatchedChunk {
+            chunk_id: target_chunk_id,
+            document_id: target_document_id,
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_label: "rare-protocol-scan-folder.md".to_string(),
+            excerpt: "RareProtocol setup: create /srv/scans and set scan_share = writable."
+                .to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.42),
+            source_text: "RareProtocol setup: create /srv/scans and set scan_share = writable."
+                .to_string(),
+        });
+        let focus_keywords = technical_literal_focus_keywords(question, Some(&query_ir));
+
+        let default_selected = select_technical_literal_chunks(
+            question,
+            &query_ir,
+            &chunks,
+            TechnicalLiteralIntent::default(),
+            8,
+            &focus_keywords,
+            false,
+        );
+        assert!(
+            !default_selected.iter().any(|chunk| chunk.chunk_id == target_chunk_id),
+            "default selection is capped before the later needle chunk"
+        );
+
+        let technical_intent = effective_technical_literal_intent(
+            question,
+            Some(&query_ir),
+            TechnicalLiteralIntent::default(),
+        );
+        assert!(technical_intent.any());
+
+        let expanded_selected = select_technical_literal_chunks(
+            question,
+            &query_ir,
+            &chunks,
+            technical_intent,
+            8,
+            &focus_keywords,
+            false,
+        );
+
+        assert!(
+            expanded_selected.iter().any(|chunk| chunk.chunk_id == target_chunk_id),
+            "QueryIR technical target types must keep later exact-literal evidence candidates"
+        );
+    }
+
+    #[test]
+    fn effective_technical_literal_intent_unions_planner_and_query_ir_signals() {
+        let query_ir = QueryIR {
+            act: QueryAct::ConfigureHow,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec!["config_key".to_string(), "path".to_string()],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.8,
+        };
+
+        let intent = effective_technical_literal_intent(
+            "Which settings should the client use?",
+            Some(&query_ir),
+            TechnicalLiteralIntent { wants_urls: true, ..TechnicalLiteralIntent::default() },
+        );
+
+        assert!(intent.wants_urls);
+        assert!(intent.wants_paths);
+        assert!(intent.wants_methods);
+        assert!(intent.wants_parameters);
+    }
 }

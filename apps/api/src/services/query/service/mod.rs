@@ -19,11 +19,10 @@ mod tests;
 
 use std::collections::{BTreeSet, HashMap};
 
-use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::{
-    domains::agent_runtime::RuntimeExecutionSummary,
+    domains::agent_runtime::{RuntimeExecutionSummary, RuntimeSurfaceKind},
     domains::query::{
         PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryExecution,
         QueryGraphEdgeReference, QueryGraphNodeReference, QueryRuntimeStageSummary, QueryTurn,
@@ -44,9 +43,8 @@ pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES: usize = 48;
 pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION: usize = 8;
 pub(crate) const MAX_ANSWER_SOURCE_LINKS: usize = 5;
 /// Minimum characters a token must have to count as a focus signal for
-/// prepared-segment ranking. Replaces the 22-word EN+RU stop-word list
-/// that used to live here — a length cutoff is language-agnostic and
-/// mirrors the same approach taken in `planner.rs::TOKEN_MIN_LEN`.
+/// prepared-segment ranking. Length cutoff is language-agnostic; mirrors
+/// `planner.rs::TOKEN_MIN_LEN`.
 pub(crate) const PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,14 +98,11 @@ pub struct ExternalConversationTurn {
 pub struct ExecuteConversationTurnCommand {
     pub conversation_id: Uuid,
     pub author_principal_id: Option<Uuid>,
+    pub surface_kind: RuntimeSurfaceKind,
     pub content_text: String,
     pub external_prior_turns: Vec<ExternalConversationTurn>,
     pub top_k: usize,
     pub include_debug: bool,
-    /// Auth context of the user issuing the turn — used by the in-app
-    /// assistant agent loop to filter the MCP tool catalog and dispatch
-    /// tool calls under the user's own scope.
-    pub auth: crate::interfaces::http::auth::AuthContext,
 }
 
 #[derive(Debug, Clone)]
@@ -128,32 +123,6 @@ pub struct QueryTurnExecutionResult {
     pub verification_warnings: Vec<crate::domains::query::QueryVerificationWarning>,
 }
 
-#[derive(Debug, Clone)]
-pub enum QueryTurnProgressEvent {
-    Runtime(RuntimeExecutionSummary),
-    AnswerDelta(String),
-    /// The assistant agent started a tool call. Emitted immediately
-    /// before dispatch so the UI can render "searching documents..." /
-    /// "reading Frontol 6 manual..." live while the LLM iterates, instead
-    /// of sitting under keep-alive frames for 100 s.
-    AssistantToolCallStarted {
-        iteration: usize,
-        call_id: String,
-        name: String,
-        arguments_preview: String,
-    },
-    /// The assistant agent finished a tool call. Carries a short preview
-    /// of the result (truncated) plus the error flag so the UI can show a
-    /// checkmark / warning per step.
-    AssistantToolCallCompleted {
-        iteration: usize,
-        call_id: String,
-        name: String,
-        is_error: bool,
-        result_preview: String,
-    },
-}
-
 #[derive(Clone, Default)]
 pub struct QueryService;
 
@@ -164,26 +133,11 @@ impl QueryService {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct QueryEmbeddingContext {
-    pub(crate) model_catalog_id: Uuid,
-    pub(crate) query_vector: Vec<f32>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RankedBundleReference {
     pub(crate) rank: i32,
     pub(crate) score: f64,
     pub(crate) reasons: BTreeSet<String>,
-}
-
-pub(crate) fn emit_query_runtime_summary(
-    progress: Option<&UnboundedSender<QueryTurnProgressEvent>>,
-    runtime: RuntimeExecutionSummary,
-) {
-    if let Some(progress) = progress {
-        let _ = progress.send(QueryTurnProgressEvent::Runtime(runtime));
-    }
 }
 
 pub(crate) fn runtime_mode_label(mode: RuntimeQueryMode) -> &'static str {

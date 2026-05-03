@@ -8,6 +8,9 @@ use std::time::Duration;
 use tokio::{sync::broadcast, time};
 
 use ironrag_backend::services::ingest::worker;
+use ironrag_backend::shared::web::ingest::{
+    WebIngestPattern, WebIngestUrlFilter, WebIngestUrlFilterMode,
+};
 
 use web_ingest_fixture::WebIngestFixture;
 
@@ -130,6 +133,77 @@ async fn recursive_crawl_allow_external_materializes_reachable_external_pages() 
     .await;
 
     external_server.shutdown().await?;
+    server.shutdown().await?;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn recursive_crawl_allowlist_traverses_to_matching_urls() -> Result<()> {
+    let fixture = WebIngestFixture::create("web_ingest_recursive_allowlist_traversal").await?;
+    let server = web_ingest_support::WebTestServer::start().await?;
+
+    let result = async {
+        let submitted_run = fixture
+            .submit_recursive_run_with_url_filter(
+                server.url("/recursive/seed"),
+                "same_host",
+                Some(2),
+                Some(20),
+                WebIngestUrlFilter {
+                    mode: WebIngestUrlFilterMode::Allowlist,
+                    patterns: vec![WebIngestPattern {
+                        kind: "path_prefix".to_string(),
+                        value: "/recursive/depth-two".to_string(),
+                        source: None,
+                    }],
+                },
+            )
+            .await?;
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let worker_handle = worker::spawn_ingestion_worker(fixture.state.clone(), shutdown_rx);
+        let run =
+            fixture.wait_for_run_terminal(submitted_run.run_id, Duration::from_secs(20)).await?;
+        let pages = fixture
+            .state
+            .canonical_services
+            .web_ingest
+            .list_pages(&fixture.state, run.run_id)
+            .await
+            .context("failed to list allowlist traversal pages")?;
+        let documents = fixture
+            .state
+            .canonical_services
+            .content
+            .list_documents(&fixture.state, fixture.library_id)
+            .await
+            .context("failed to list allowlist traversal documents")?;
+
+        let _ = shutdown_tx.send(());
+        let _ = time::timeout(Duration::from_secs(5), worker_handle).await;
+
+        assert_eq!(run.run_state, "completed_partial");
+        assert_eq!(documents.len(), 1);
+        assert!(pages.iter().any(|page| {
+            page.normalized_url == server.url("/recursive/seed")
+                && page.candidate_state == "excluded"
+                && page.classification_reason.as_deref() == Some("url_filter")
+        }));
+        assert!(pages.iter().any(|page| {
+            page.normalized_url == server.url("/recursive/first")
+                && page.candidate_state == "excluded"
+                && page.classification_reason.as_deref() == Some("url_filter")
+        }));
+        assert!(pages.iter().any(|page| {
+            page.normalized_url == server.url("/recursive/depth-two")
+                && page.candidate_state == "processed"
+        }));
+
+        Ok(())
+    }
+    .await;
+
     server.shutdown().await?;
     fixture.cleanup().await?;
     result

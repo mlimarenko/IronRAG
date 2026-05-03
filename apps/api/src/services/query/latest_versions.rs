@@ -1,49 +1,36 @@
+use crate::domains::query_ir::{LiteralKind, QueryAct, QueryIR};
+
 const LATEST_VERSION_DEFAULT_COUNT: usize = 5;
 const LATEST_VERSION_MAX_COUNT: usize = 10;
 pub(crate) const LATEST_VERSION_CHUNKS_PER_DOCUMENT: usize = 4;
 
-pub(crate) fn question_requests_latest_versions(question: &str) -> bool {
-    let lower = question.to_lowercase();
-    let asks_latest =
-        lower.contains("послед") || lower.contains("latest") || lower.contains("recent");
-    let asks_version = lower.contains("верс")
-        || lower.contains("релиз")
-        || lower.contains("version")
-        || lower.contains("release");
-    asks_latest && asks_version
+pub(crate) fn query_requests_latest_versions(ir: &QueryIR) -> bool {
+    matches!(ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
+        && ir_target_types_include(ir, &["release", "version", "changelog", "change_log"])
 }
 
-pub(crate) fn requested_latest_version_count(question: &str) -> usize {
-    let tokens = lexical_tokens(question);
-    for (index, token) in tokens.iter().enumerate() {
-        if !token.chars().all(|ch| ch.is_ascii_digit()) {
+pub(crate) fn requested_latest_version_count(ir: &QueryIR) -> usize {
+    for literal in &ir.literal_constraints {
+        if !matches!(literal.kind, LiteralKind::NumericCode) {
             continue;
-        }
-        let Ok(value) = token.parse::<usize>() else {
+        };
+        let Ok(value) = literal.text.parse::<usize>() else {
             continue;
         };
         if value == 0 || (1900..=2100).contains(&value) {
             continue;
         }
-        let start = index.saturating_sub(2);
-        let end = (index + 3).min(tokens.len());
-        let nearby = &tokens[start..end];
-        if nearby.iter().any(|item| is_latest_word(item))
-            && nearby.iter().any(|item| is_version_release_word(item))
-        {
-            return value.clamp(1, LATEST_VERSION_MAX_COUNT);
-        }
+        return value.clamp(1, LATEST_VERSION_MAX_COUNT);
     }
     LATEST_VERSION_DEFAULT_COUNT
 }
 
-pub(crate) fn latest_version_context_top_k(question: &str, base_limit: usize) -> usize {
-    if !question_requests_latest_versions(question) {
+pub(crate) fn latest_version_context_top_k(ir: &QueryIR, base_limit: usize) -> usize {
+    if !query_requests_latest_versions(ir) {
         return base_limit;
     }
-    base_limit.max(
-        requested_latest_version_count(question).saturating_mul(LATEST_VERSION_CHUNKS_PER_DOCUMENT),
-    )
+    base_limit
+        .max(requested_latest_version_count(ir).saturating_mul(LATEST_VERSION_CHUNKS_PER_DOCUMENT))
 }
 
 pub(crate) fn latest_version_chunk_score(
@@ -57,12 +44,26 @@ pub(crate) fn latest_version_chunk_score(
     score_floor + offset as f32
 }
 
-pub(crate) fn latest_version_scope_terms(question: &str) -> Vec<String> {
-    lexical_tokens(question)
+pub(crate) fn latest_version_scope_terms(ir: &QueryIR) -> Vec<String> {
+    let mut terms = Vec::new();
+    for entity in &ir.target_entities {
+        terms.extend(lexical_tokens(&entity.label));
+    }
+    if let Some(document_focus) = &ir.document_focus {
+        terms.extend(lexical_tokens(&document_focus.hint));
+    }
+    terms.extend(
+        ir.literal_constraints
+            .iter()
+            .filter(|literal| {
+                !matches!(literal.kind, LiteralKind::Version | LiteralKind::NumericCode)
+            })
+            .flat_map(|literal| lexical_tokens(&literal.text)),
+    );
+    terms
         .into_iter()
         .filter(|token| token.chars().count() >= 3)
         .filter(|token| !token.chars().any(|ch| ch.is_ascii_digit()))
-        .filter(|token| !is_latest_version_generic_word(token))
         .collect()
 }
 
@@ -99,9 +100,7 @@ pub(crate) fn latest_version_family_key(text: &str) -> String {
 }
 
 pub(crate) fn text_has_release_version_marker(text: &str) -> bool {
-    lexical_tokens(text)
-        .iter()
-        .any(|token| is_version_release_word(token) || is_change_log_word(token))
+    extract_semver_like_version(text).is_some()
 }
 
 fn lexical_tokens(query: &str) -> Vec<String> {
@@ -114,32 +113,11 @@ fn lexical_tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn is_latest_word(token: &str) -> bool {
-    token.contains("послед") || matches!(token, "latest" | "recent" | "last")
-}
-
-fn is_version_release_word(token: &str) -> bool {
-    token.contains("верс")
-        || token.contains("релиз")
-        || matches!(token, "version" | "versions" | "release" | "releases")
-}
-
-fn is_change_log_word(token: &str) -> bool {
-    token.contains("измен")
-        || matches!(token, "changelog" | "changes" | "change" | "whatsnew" | "whatnew")
-}
-
-fn is_latest_version_generic_word(token: &str) -> bool {
-    is_latest_word(token)
-        || is_version_release_word(token)
-        || is_change_log_word(token)
-        || token.contains("кажд")
-        || token.contains("спис")
-        || token.contains("нов")
-        || matches!(
-            token,
-            "что" | "нового" | "new" | "what" | "whats" | "what's" | "per" | "each" | "list"
-        )
+fn ir_target_types_include(ir: &QueryIR, tags: &[&str]) -> bool {
+    ir.target_types.iter().any(|target_type| {
+        let normalized = target_type.trim().to_ascii_lowercase().replace('-', "_");
+        tags.iter().any(|tag| normalized == *tag)
+    })
 }
 
 pub(crate) fn extract_semver_like_version(text: &str) -> Option<Vec<u32>> {

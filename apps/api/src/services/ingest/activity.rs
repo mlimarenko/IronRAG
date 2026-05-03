@@ -192,7 +192,9 @@ fn document_activity_signal<'a>(
     if let Some(mutation) = latest_mutation {
         let run_status = match mutation.mutation_state.as_str() {
             "accepted" | "running" => RuntimeIngestionStatus::Processing,
-            "failed" | "conflicted" | "canceled" => RuntimeIngestionStatus::Failed,
+            "failed" | "conflicted" => RuntimeIngestionStatus::Failed,
+            "canceled" => ready_ingestion_status(text_ready, graph_ready)
+                .unwrap_or(RuntimeIngestionStatus::Failed),
             _ if graph_ready => RuntimeIngestionStatus::Ready,
             _ if text_ready => RuntimeIngestionStatus::ReadyNoGraph,
             _ => RuntimeIngestionStatus::Queued,
@@ -230,8 +232,20 @@ fn map_job_queue_state(
         "completed" if graph_ready => RuntimeIngestionStatus::Ready,
         "completed" if text_ready => RuntimeIngestionStatus::ReadyNoGraph,
         "completed" => RuntimeIngestionStatus::Processing,
-        "failed" | "canceled" => RuntimeIngestionStatus::Failed,
+        "failed" => RuntimeIngestionStatus::Failed,
+        "canceled" => ready_ingestion_status(text_ready, graph_ready)
+            .unwrap_or(RuntimeIngestionStatus::Failed),
         _ => RuntimeIngestionStatus::Processing,
+    }
+}
+
+fn ready_ingestion_status(text_ready: bool, graph_ready: bool) -> Option<RuntimeIngestionStatus> {
+    if graph_ready {
+        Some(RuntimeIngestionStatus::Ready)
+    } else if text_ready {
+        Some(RuntimeIngestionStatus::ReadyNoGraph)
+    } else {
+        None
     }
 }
 
@@ -413,5 +427,89 @@ mod tests {
             RuntimeDocumentActivityStatus::Ready
         );
         assert_eq!(service.document_stalled_reason(Some(&mutation), None, true, false, now), None);
+    }
+
+    #[test]
+    fn canceled_job_is_ready_when_text_is_already_readable() {
+        let service = IngestActivityService::default();
+        let now = Utc::now();
+        let job = ContentDocumentPipelineJob {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            mutation_id: Some(Uuid::now_v7()),
+            async_operation_id: None,
+            job_kind: "content_mutation".to_string(),
+            queue_state: "canceled".to_string(),
+            queued_at: now - Duration::seconds(600),
+            available_at: now - Duration::seconds(600),
+            completed_at: Some(now - Duration::seconds(300)),
+            claimed_at: Some(now - Duration::seconds(500)),
+            last_activity_at: Some(now - Duration::seconds(400)),
+            current_stage: Some("extract_content".to_string()),
+            failure_code: None,
+            retryable: false,
+        };
+
+        assert_eq!(
+            service.derive_document_activity(None, Some(&job), true, false, now),
+            RuntimeDocumentActivityStatus::Ready
+        );
+        assert_eq!(service.document_stalled_reason(None, Some(&job), true, false, now), None);
+    }
+
+    #[test]
+    fn canceled_mutation_is_ready_when_text_is_already_readable() {
+        let service = IngestActivityService::default();
+        let now = Utc::now();
+        let mutation = ContentMutation {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            operation_kind: "upload".to_string(),
+            mutation_state: "canceled".to_string(),
+            requested_at: now - Duration::seconds(600),
+            completed_at: Some(now - Duration::seconds(300)),
+            requested_by_principal_id: None,
+            request_surface: "test".to_string(),
+            idempotency_key: None,
+            source_identity: None,
+            failure_code: None,
+            conflict_code: None,
+        };
+
+        assert_eq!(
+            service.derive_document_activity(Some(&mutation), None, true, false, now),
+            RuntimeDocumentActivityStatus::Ready
+        );
+        assert_eq!(service.document_stalled_reason(Some(&mutation), None, true, false, now), None);
+    }
+
+    #[test]
+    fn canceled_job_without_readable_artifact_is_failed() {
+        let service = IngestActivityService::default();
+        let now = Utc::now();
+        let job = ContentDocumentPipelineJob {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            mutation_id: Some(Uuid::now_v7()),
+            async_operation_id: None,
+            job_kind: "content_mutation".to_string(),
+            queue_state: "canceled".to_string(),
+            queued_at: now - Duration::seconds(600),
+            available_at: now - Duration::seconds(600),
+            completed_at: Some(now - Duration::seconds(300)),
+            claimed_at: Some(now - Duration::seconds(500)),
+            last_activity_at: Some(now - Duration::seconds(400)),
+            current_stage: Some("extract_content".to_string()),
+            failure_code: None,
+            retryable: false,
+        };
+
+        assert_eq!(
+            service.derive_document_activity(None, Some(&job), false, false, now),
+            RuntimeDocumentActivityStatus::Failed
+        );
     }
 }

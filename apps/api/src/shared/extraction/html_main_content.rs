@@ -685,7 +685,7 @@ mod tests {
             <!DOCTYPE html>
             <html>
               <head>
-                <title>Программные продукты Acme</title>
+                <title>Acme Software Products</title>
               </head>
               <body>
                 <div id="content">
@@ -715,7 +715,7 @@ mod tests {
         let output =
             extract_html_main_content(html.as_bytes(), Some("text/html")).expect("confluence html");
 
-        assert!(output.content_text.contains("# Программные продукты Acme"));
+        assert!(output.content_text.contains("# Acme Software Products"));
         assert!(output.content_text.contains("POS"));
         assert!(output.content_text.contains("Hybrid Pos"));
         assert!(!output.content_text.contains("Created by Alice"));

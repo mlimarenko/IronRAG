@@ -305,16 +305,6 @@ export interface AssistantSession {
 
 export type AssistantStage = "planning" | "grounding" | "response";
 
-export interface AssistantToolCallStep {
-  iteration: number;
-  callId: string;
-  name: string;
-  argumentsPreview: string;
-  resultPreview?: string;
-  isError?: boolean;
-  status: "running" | "done" | "error";
-}
-
 export interface AssistantMessage {
   id: string;
   role: "user" | "assistant";
@@ -325,7 +315,6 @@ export interface AssistantMessage {
   stage?: AssistantStage;
   isStreaming?: boolean;
   evidence?: EvidenceBundle;
-  toolSteps?: AssistantToolCallStep[];
 }
 
 export interface FileAttachment {

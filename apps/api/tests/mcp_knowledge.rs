@@ -356,7 +356,7 @@ impl McpKnowledgeFixture {
     }
 
     async fn seed_graph_quality_fixture(&self) -> Result<SeededGraphFixture> {
-        let projection_version = 7;
+        let projection_version = 7_i64;
         let visible_document = self
             .insert_graph_document("mcp-graph-topology-visible", "Visible topology evidence")
             .await?;
@@ -376,6 +376,7 @@ impl McpKnowledgeFixture {
             "entity:orion",
             "Orion",
             "entity",
+            None,
             json!(["Orion Signal"]),
             Some("Primary supported entity."),
             json!({}),
@@ -390,6 +391,7 @@ impl McpKnowledgeFixture {
             "entity:atlas",
             "Atlas",
             "entity",
+            None,
             json!([]),
             Some("Secondary supported entity."),
             json!({}),
@@ -404,6 +406,7 @@ impl McpKnowledgeFixture {
             "entity:zephyr",
             "Zephyr",
             "entity",
+            None,
             json!([]),
             Some("Tertiary supported entity."),
             json!({}),
@@ -418,6 +421,7 @@ impl McpKnowledgeFixture {
             "entity:noise",
             "Noise",
             "entity",
+            None,
             json!([]),
             Some("Low-value entity."),
             json!({}),

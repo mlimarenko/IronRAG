@@ -16,7 +16,8 @@ const { useAppMock, documentsApiMock, billingApiMock, apiFetchMock } = vi.hoiste
     reprocess: vi.fn(),
     edit: vi.fn(),
     replace: vi.fn(),
-    getPreparedSegments: vi.fn(),
+    getPreparedSegmentsPage: vi.fn(),
+    getAllPreparedSegments: vi.fn(),
     getTechnicalFacts: vi.fn(),
     listWebRuns: vi.fn(),
     listWebRunPages: vi.fn(),
@@ -24,6 +25,7 @@ const { useAppMock, documentsApiMock, billingApiMock, apiFetchMock } = vi.hoiste
   billingApiMock: {
     getLibraryDocumentCosts: vi.fn(),
     getLibraryCostSummary: vi.fn(),
+    getWorkspaceCostSummary: vi.fn(),
   },
   apiFetchMock: vi.fn(),
 }));
@@ -130,6 +132,7 @@ describe('DocumentsPage', () => {
     root = null;
 
     useAppMock.mockReturnValue({
+      activeWorkspace: { id: 'ws-1', name: 'Workspace' },
       activeLibrary: { id: 'library-1', name: 'Docs' },
       locale: 'en',
     });
@@ -138,7 +141,13 @@ describe('DocumentsPage', () => {
       listPage([{ id: 'doc-1', fileName: 'inventory.xlsx', sourceKind: 'upload' }]),
     );
     documentsApiMock.get.mockResolvedValue({ id: 'doc-1', lifecycle: null });
-    documentsApiMock.getPreparedSegments.mockResolvedValue([
+    documentsApiMock.getPreparedSegmentsPage.mockResolvedValue({
+      total: 2,
+      offset: 0,
+      limit: 1,
+      items: [],
+    });
+    documentsApiMock.getAllPreparedSegments.mockResolvedValue([
       {
         segment: { ordinal: 0, blockKind: 'heading', headingTrail: ['Sheet1'] },
         text: '## Sheet1',
@@ -157,6 +166,13 @@ describe('DocumentsPage', () => {
     billingApiMock.getLibraryCostSummary.mockResolvedValue({
       totalCost: '0',
       currencyCode: 'USD',
+      documentCount: 0,
+      providerCallCount: 0,
+    });
+    billingApiMock.getWorkspaceCostSummary.mockResolvedValue({
+      totalCost: '0',
+      currencyCode: 'USD',
+      libraryCount: 0,
       documentCount: 0,
       providerCallCount: 0,
     });
@@ -217,7 +233,7 @@ describe('DocumentsPage', () => {
 
     await flushUi();
 
-    expect(documentsApiMock.getPreparedSegments).toHaveBeenCalledWith('doc-1');
+    expect(documentsApiMock.getAllPreparedSegments).toHaveBeenCalledWith('doc-1');
     expect(container.querySelector('[data-testid="document-editor-shell"]')).toBeTruthy();
   });
 
@@ -292,7 +308,7 @@ describe('DocumentsPage', () => {
     // The library-wide total cost banner still uses the separate
     // `/billing/library-cost-summary` endpoint; with a zero summary
     // the banner stays hidden (rendered only when `totalCost > 0`).
-    expect(container.textContent).not.toContain('Total cost');
+    expect(container.textContent).not.toContain('Library cost');
   });
 
   it('shows the library-wide total cost banner alongside the per-row cost from the list payload', async () => {
@@ -312,7 +328,7 @@ describe('DocumentsPage', () => {
 
     // The list payload is the canonical source for per-row `cost`;
     // the library-wide cost-summary endpoint feeds only the banner.
-    expect(container.textContent).toContain('Total cost');
+    expect(container.textContent).toContain('Library cost');
     expect(container.textContent).toContain('$3.500');
     expect(container.textContent).toContain('$1.000');
     // Frontend no longer calls `/billing/library-document-costs` at all.
@@ -363,6 +379,91 @@ describe('DocumentsPage', () => {
     expect(documentsApiMock.getSourceText).toHaveBeenCalledWith('/v1/content/documents/doc-code/source');
   });
 
+  it('loads plain text documents from raw source text instead of one prepared-segments page', async () => {
+    documentsApiMock.list.mockResolvedValue(
+      listPage([
+        {
+          id: 'doc-chat',
+          fileName: 'chat.txt',
+          fileType: 'text/plain',
+          sourceKind: 'upload',
+          sourceAccess: {
+            kind: 'stored_document',
+            href: '/v1/content/documents/doc-chat/source',
+          },
+        },
+      ]),
+    );
+    documentsApiMock.getSourceText.mockResolvedValue('line 1\nline 2\nline 3\n');
+
+    await renderPage();
+
+    const documentRow = Array.from(container.querySelectorAll('tr')).find((row) =>
+      row.textContent?.includes('chat.txt'),
+    );
+    expect(documentRow).toBeTruthy();
+
+    await act(async () => {
+      documentRow?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await flushUi();
+
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Edit chat.txt'),
+    );
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await flushUi();
+
+    expect(documentsApiMock.getSourceText).toHaveBeenCalledWith('/v1/content/documents/doc-chat/source');
+    expect(documentsApiMock.getAllPreparedSegments).not.toHaveBeenCalled();
+  });
+
+  it('falls back to all prepared pages for plain text documents without stored source access', async () => {
+    documentsApiMock.list.mockResolvedValue(
+      listPage([
+        {
+          id: 'doc-chat',
+          fileName: 'chat.txt',
+          fileType: 'text/plain',
+          sourceKind: 'upload',
+        },
+      ]),
+    );
+
+    await renderPage();
+
+    const documentRow = Array.from(container.querySelectorAll('tr')).find((row) =>
+      row.textContent?.includes('chat.txt'),
+    );
+    expect(documentRow).toBeTruthy();
+
+    await act(async () => {
+      documentRow?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await flushUi();
+
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Edit chat.txt'),
+    );
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await flushUi();
+
+    expect(documentsApiMock.getSourceText).not.toHaveBeenCalled();
+    expect(documentsApiMock.getAllPreparedSegments).toHaveBeenCalledWith('doc-chat');
+  });
+
   it('shows web page as the document type for web-ingested documents', async () => {
     documentsApiMock.list.mockResolvedValue(
       listPage([
@@ -379,5 +480,20 @@ describe('DocumentsPage', () => {
     await renderPage();
 
     expect(container.textContent).toContain('Web page');
+  });
+
+  it('renders full table filenames and leaves truncation to the cell width', async () => {
+    const fileName = 'weather-climate-gates-foundation.pptx';
+    documentsApiMock.list.mockResolvedValue(
+      listPage([{ id: 'doc-long-name', fileName, sourceKind: 'upload' }]),
+    );
+
+    await renderPage();
+
+    const nameSpan = Array.from(container.querySelectorAll('tbody span')).find(
+      (span) => span.getAttribute('title') === fileName,
+    );
+    expect(nameSpan).toBeTruthy();
+    expect(nameSpan).toHaveTextContent(fileName);
   });
 });

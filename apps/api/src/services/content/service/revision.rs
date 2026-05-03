@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::{StreamExt, TryStreamExt, stream};
 use tracing::warn;
 use uuid::Uuid;
@@ -9,11 +9,15 @@ use crate::{
     agent_runtime::{task::RuntimeTask, tasks::graph_extract::GraphExtractTask},
     app::state::AppState,
     domains::ai::AiBindingPurpose,
+    domains::catalog::ChunkingTemplate,
     domains::content::{ContentDocument, ContentDocumentHead, ContentRevision},
+    domains::knowledge::TypedTechnicalFact,
     domains::ops::ASYNC_OP_STATUS_READY,
     domains::provider_profiles::ProviderModelSelection,
+    domains::recognition::LibraryRecognitionPolicy,
     infra::arangodb::document_store::{
-        KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
+        KnowledgeChunkRow, KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow,
+        KnowledgeTechnicalFactRow,
     },
     infra::repositories::{
         self as repositories, catalog_repository,
@@ -23,16 +27,22 @@ use crate::{
     },
     interfaces::http::router_support::ApiError,
     services::{
-        content::source_access::derive_storage_backed_content_file_name,
+        ai_catalog_service::ResolvedRuntimeBinding,
+        content::source_access::{
+            derive_content_source_file_name, derive_storage_backed_content_file_name,
+        },
         content::storage::ContentStorageService,
         graph::extract::{
             GraphExtractionSubTypeHintEntry, GraphExtractionSubTypeHintGroup,
-            GraphExtractionSubTypeHints, extract_chunk_graph_candidates,
+            GraphExtractionSubTypeHints, build_graph_extraction_cache_fingerprint,
+            extract_chunk_graph_candidates, extraction_lifecycle_from_record,
         },
         graph::projection::resolve_projection_scope,
         ingest::runtime::resolve_effective_runtime_task_context,
         ingest::service::{INGEST_STAGE_EXTRACT_CONTENT, LeaseAttemptCommand},
-        ingest::structured_preparation::PrepareStructuredRevisionCommand,
+        ingest::structured_preparation::{
+            PrepareStructuredRevisionCommand, StructuredPreparationService,
+        },
         ingest::technical_facts::ExtractTechnicalFactsCommand,
         knowledge::service::{
             CreateKnowledgeChunkCommand, CreateKnowledgeDocumentCommand,
@@ -41,28 +51,29 @@ use crate::{
         ops::billing::CaptureGraphExtractionBillingCommand,
     },
     shared::extraction::file_extract::{
-        FileExtractError, FileExtractionPlan, UploadAdmissionError, UploadFileKind,
-        build_runtime_file_extraction_plan, validate_upload_file_admission,
+        FileExtractError, FileExtractionPlan, FileExtractionRequest, UploadAdmissionError,
+        UploadFileKind, build_runtime_file_extraction_plan, validate_upload_file_admission,
     },
     shared::extraction::{
+        record_jsonl::RECORD_JSONL_SOURCE_FORMAT,
+        structured_document::StructuredBlockKind,
         table_graph::{TableGraphProfile, build_table_graph_profile},
         table_summary::{is_table_summary_text, parse_table_column_summary},
     },
 };
 
 use super::pipeline::{
-    build_canonical_graph_extraction_request, build_graph_chunk_content, typed_fact_supports_chunk,
+    GraphExtractionChunkPolicy, build_canonical_graph_extraction_request,
+    build_graph_chunk_content, typed_fact_supports_chunk,
 };
 
-/// Locally cached copy of the canonical graph extraction prompt version.
-/// Diff-aware reuse only fires when the parent revision used the same version.
-const GRAPH_EXTRACTION_VERSION_FOR_REUSE: &str = "graph_extract_v6";
+const RECORD_STREAM_REPRESENTATIVE_SOURCE_UNIT_LIMIT: usize = 12;
 use super::{
     ContentMutationAdmission, ContentService, CreateDocumentCommand, CreateRevisionCommand,
     EditableDocumentContext, InlineMutationContext, MaterializeRevisionGraphCandidatesCommand,
     PendingChunkInsert, PreparedRevisionPersistenceSummary, PromoteHeadCommand,
-    RevisionAdmissionMetadata, RevisionGraphCandidateMaterialization, locate_chunk_offsets,
-    map_revision_row, map_structured_revision_data, sha256_hex_text,
+    ReprocessRevisionSource, RevisionAdmissionMetadata, RevisionGraphCandidateMaterialization,
+    locate_chunk_offsets, map_revision_row, map_structured_revision_data, sha256_hex_text,
 };
 
 fn validate_extraction_plan(
@@ -88,6 +99,46 @@ fn validate_extraction_plan(
     Ok(())
 }
 
+async fn resolve_library_recognition_policy(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<LibraryRecognitionPolicy, String> {
+    let row = catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
+        .await
+        .map_err(|error| format!("failed to load library recognition policy: {error}"))?
+        .ok_or_else(|| format!("library {library_id} was not found"))?;
+    LibraryRecognitionPolicy::from_json(row.recognition_policy)
+}
+
+fn rendered_revision_text_source_file_name(revision: &ContentRevision) -> String {
+    let fallback = format!("revision-{}.txt", revision.id);
+    let base = derive_content_source_file_name(
+        revision.source_uri.as_deref(),
+        revision.title.as_deref(),
+        &fallback,
+    );
+    let stem = base.rsplit_once('.').map_or(base.as_str(), |(stem, _)| stem).trim();
+    let normalized_stem = if stem.is_empty() { "revision" } else { stem };
+    format!("{normalized_stem}.txt")
+}
+
+fn record_stream_reprocess_file_name(revision: &ContentRevision) -> String {
+    let fallback = format!("revision-{}.jsonl", revision.id);
+    let base = derive_content_source_file_name(
+        revision.source_uri.as_deref(),
+        revision.title.as_deref(),
+        &fallback,
+    );
+    let trimmed = base.trim();
+    let extension = trimmed.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase());
+    if matches!(extension.as_deref(), Some("jsonl" | "ndjson")) {
+        return trimmed.to_string();
+    }
+    let stem = trimmed.rsplit_once('.').map_or(trimmed, |(stem, _)| stem).trim();
+    let normalized_stem = if stem.is_empty() { "revision" } else { stem };
+    format!("{normalized_stem}.jsonl")
+}
+
 impl ContentService {
     pub async fn build_runtime_extraction_plan(
         &self,
@@ -98,10 +149,9 @@ impl ContentService {
         file_bytes: &[u8],
     ) -> Result<FileExtractionPlan, UploadAdmissionError> {
         let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
-        // Vision binding is only needed for image/PDF files that might
-        // contain images. For text/markdown/CSV/code files, the absence
-        // of a vision binding should NOT block extraction — the pipeline
-        // just skips the image description step.
+        // Vision binding is only needed for image files routed to the vision engine.
+        // Text, markup, code, CSV, and Docling-owned document formats must not be
+        // blocked by the absence of a vision binding.
         let vision_binding = state
             .canonical_services
             .ai_catalog
@@ -114,15 +164,35 @@ impl ContentService {
                 model_name: binding.model_name.clone(),
             })
         });
-        let plan = build_runtime_file_extraction_plan(
-            state.llm_gateway.as_ref(),
-            vision_provider.as_ref(),
-            vision_binding.as_ref().and_then(|binding| binding.api_key.as_deref()),
-            vision_binding.as_ref().and_then(|binding| binding.provider_base_url.as_deref()),
-            Some(file_name),
+        let recognition_policy =
+            resolve_library_recognition_policy(state, library_id).await.map_err(|error| {
+                UploadAdmissionError::from_file_extract_error(
+                    file_name,
+                    mime_type,
+                    file_size_bytes,
+                    &FileExtractError::ExtractionFailed {
+                        file_kind: validate_upload_file_admission(
+                            Some(file_name),
+                            mime_type,
+                            file_bytes,
+                        )
+                        .unwrap_or(UploadFileKind::Binary),
+                        message: error,
+                    },
+                )
+            })?;
+        let plan = build_runtime_file_extraction_plan(FileExtractionRequest {
+            gateway: state.llm_gateway.as_ref(),
+            vision_provider: vision_provider.as_ref(),
+            vision_api_key: vision_binding.as_ref().and_then(|binding| binding.api_key.as_deref()),
+            vision_base_url: vision_binding
+                .as_ref()
+                .and_then(|binding| binding.provider_base_url.as_deref()),
+            file_name: Some(file_name),
             mime_type,
-            file_bytes.to_vec(),
-        )
+            file_bytes: file_bytes.to_vec(),
+            recognition_policy: &recognition_policy,
+        })
         .await
         .map_err(|error| {
             UploadAdmissionError::from_file_extract_error(
@@ -218,6 +288,150 @@ impl ContentService {
             );
         }
         Ok(Some(storage_key))
+    }
+
+    pub async fn render_revision_text_source(
+        &self,
+        state: &AppState,
+        revision_id: Uuid,
+    ) -> Result<Option<String>, ApiError> {
+        let revision = state
+            .arango_document_store
+            .get_revision(revision_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        Ok(revision.and_then(|row| {
+            row.normalized_text
+                .map(|text| text.trim_end().to_string())
+                .filter(|text| !text.is_empty())
+        }))
+    }
+
+    pub async fn resolve_reprocess_revision_source(
+        &self,
+        state: &AppState,
+        revision: &ContentRevision,
+    ) -> Result<Option<ReprocessRevisionSource>, ApiError> {
+        let storage_key = if let Some(storage_key) = revision
+            .storage_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+        {
+            Some(storage_key)
+        } else {
+            self.resolve_revision_storage_key(state, revision.id).await?
+        };
+        if let Some(storage_key) = storage_key {
+            return Ok(Some(ReprocessRevisionSource {
+                checksum: revision.checksum.clone(),
+                mime_type: revision.mime_type.clone(),
+                byte_size: revision.byte_size,
+                title: revision.title.clone(),
+                source_uri: revision.source_uri.clone(),
+                storage_key,
+            }));
+        }
+
+        if let Some(source) = self.resolve_record_stream_reprocess_source(state, revision).await? {
+            return Ok(Some(source));
+        }
+
+        let Some(text_source) = self.render_revision_text_source(state, revision.id).await? else {
+            return Ok(None);
+        };
+        let checksum = format!("sha256:{}", sha256_hex_text(&text_source));
+        let file_name = rendered_revision_text_source_file_name(revision);
+        let storage_key = self
+            .persist_inline_file_source(
+                state,
+                revision.workspace_id,
+                revision.library_id,
+                &file_name,
+                &checksum,
+                text_source.as_bytes(),
+            )
+            .await?;
+
+        Ok(Some(ReprocessRevisionSource {
+            checksum,
+            mime_type: "text/plain".to_string(),
+            byte_size: i64::try_from(text_source.len()).unwrap_or(i64::MAX),
+            title: Some(file_name),
+            source_uri: Some(format!("derived-text://{}", revision.id)),
+            storage_key,
+        }))
+    }
+
+    async fn resolve_record_stream_reprocess_source(
+        &self,
+        state: &AppState,
+        revision: &ContentRevision,
+    ) -> Result<Option<ReprocessRevisionSource>, ApiError> {
+        let Some(structured_revision) = state
+            .arango_document_store
+            .get_structured_revision(revision.id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        else {
+            return Ok(None);
+        };
+        if structured_revision.source_format != RECORD_JSONL_SOURCE_FORMAT {
+            return Ok(None);
+        }
+
+        let blocks = state
+            .arango_document_store
+            .list_structured_blocks_by_revision(revision.id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let mut lines = Vec::<String>::new();
+        for block in blocks {
+            if block.block_kind != StructuredBlockKind::SourceUnit.as_str() {
+                continue;
+            }
+            let text = block.normalized_text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let payload = serde_json::json!({
+                "id": block.block_id.to_string(),
+                "kind": StructuredBlockKind::SourceUnit.as_str(),
+                "ordinal": block.ordinal,
+                "text": text,
+            });
+            let line = serde_json::to_string(&payload)
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            return Ok(None);
+        }
+
+        let payload = format!("{}\n", lines.join("\n"));
+        let bytes = payload.as_bytes();
+        let checksum = format!("sha256:{}", sha256_hex_text(&payload));
+        let file_name = record_stream_reprocess_file_name(revision);
+        let storage_key = self
+            .persist_inline_file_source(
+                state,
+                revision.workspace_id,
+                revision.library_id,
+                &file_name,
+                &checksum,
+                bytes,
+            )
+            .await?;
+
+        Ok(Some(ReprocessRevisionSource {
+            checksum,
+            mime_type: "application/x-ndjson".to_string(),
+            byte_size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+            title: Some(file_name),
+            source_uri: Some(format!("derived-record-stream://{}", revision.id)),
+            storage_key,
+        }))
     }
 
     pub async fn create_document(
@@ -640,7 +854,6 @@ impl ContentService {
         .ok_or_else(|| ApiError::resource_not_found("revision", readable_revision_id))?;
         Ok(EditableDocumentContext {
             current_content,
-            mime_type: base_revision.mime_type,
             title: base_revision.title.or_else(|| Some(document_id.to_string())),
             language_code: None,
         })
@@ -662,9 +875,17 @@ impl ContentService {
             extraction_plan.normalized_text.clone().unwrap_or_else(|| source_text.clone());
 
         let prepare_structure_start = std::time::Instant::now();
-        let mut prepared = state
-            .canonical_services
-            .structured_preparation
+        // Resolve the library's chunking template so we apply the correct profile.
+        let library_row =
+            catalog_repository::get_library_by_id(&state.persistence.postgres, revision.library_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let chunking_template = library_row
+            .as_ref()
+            .map(|lib| ChunkingTemplate::from_db_str(&lib.chunking_template))
+            .unwrap_or(ChunkingTemplate::Naive);
+        let preparation_service = StructuredPreparationService::with_template(chunking_template);
+        let mut prepared = preparation_service
             .prepare_revision(PrepareStructuredRevisionCommand {
                 revision_id,
                 document_id: revision.document_id,
@@ -777,6 +998,19 @@ impl ContentService {
             let (start_offset, end_offset) =
                 locate_chunk_offsets(&normalized_text, &chunk.content_text, next_search_char);
             next_search_char = end_offset;
+            // Canonical temporal bounds extraction. JSONL chats stamp every
+            // record with `occurred_at=ISO`; the helper aggregates MIN/MAX
+            // across all records that landed in this chunk so retrieval
+            // can hard-filter by `[t_start, t_end)` without parsing chunk
+            // text at query time. Non-temporal sources (PDF/image/markdown)
+            // return None and the columns stay NULL.
+            let (occurred_at, occurred_until): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+                match crate::shared::extraction::record_jsonl::extract_chunk_temporal_bounds(
+                    &chunk.normalized_text,
+                ) {
+                    Some((min, max)) => (Some(min), Some(max)),
+                    None => (None, None),
+                };
             pending_chunks.push(PendingChunkInsert {
                 chunk_index: chunk.chunk_index,
                 start_offset: i32::try_from(start_offset).unwrap_or(i32::MAX),
@@ -791,6 +1025,9 @@ impl ContentService {
                 heading_trail: chunk.heading_trail.clone(),
                 literal_digest: chunk.literal_digest.clone(),
                 quality_score: Some(chunk.quality_score),
+                window_text: chunk.window_text.clone(),
+                occurred_at,
+                occurred_until,
             });
         }
         let postgres_chunks = pending_chunks
@@ -803,6 +1040,8 @@ impl ContentService {
                 token_count: chunk.token_count,
                 normalized_text: &chunk.normalized_text,
                 text_checksum: &chunk.text_checksum,
+                occurred_at: chunk.occurred_at,
+                occurred_until: chunk.occurred_until,
             })
             .collect::<Vec<_>>();
         let created_chunks =
@@ -835,6 +1074,9 @@ impl ContentService {
                 text_generation: Some(i64::from(revision.revision_number)),
                 vector_generation: None,
                 quality_score: pending_chunk.quality_score,
+                window_text: pending_chunk.window_text.clone(),
+                occurred_at: pending_chunk.occurred_at,
+                occurred_until: pending_chunk.occurred_until,
             });
         }
         let _ = state.canonical_services.knowledge.write_chunks(state, knowledge_chunks).await?;
@@ -941,6 +1183,11 @@ impl ContentService {
             .list_chunks_by_revision(command.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let structured_revision = state
+            .arango_document_store
+            .get_structured_revision(command.revision_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let revision_facts = state
             .canonical_services
             .knowledge
@@ -962,6 +1209,34 @@ impl ContentService {
         let chunk_count = all_chunks.len();
         let graph_extract_parallelism =
             state.settings.ingestion_graph_extract_parallelism_per_doc.max(1);
+        let graph_chunk_policy = build_graph_extraction_chunk_policy(
+            structured_revision.as_ref(),
+            all_chunks.as_slice(),
+            revision_facts.as_slice(),
+        );
+        let record_stream_source_units_skipped =
+            record_stream_source_units_skipped(all_chunks.as_slice(), &graph_chunk_policy);
+        let selected_graph_chunk_count = all_chunks
+            .iter()
+            .filter(|chunk| {
+                build_graph_chunk_content(
+                    chunk,
+                    table_graph_context.profile_for_chunk(chunk),
+                    table_graph_context.requires_row_only_graph(),
+                    &graph_chunk_policy,
+                )
+                .is_some()
+            })
+            .count();
+        if graph_chunk_policy.is_record_stream() {
+            tracing::info!(
+                revision_id = %command.revision_id,
+                selected_graph_chunks = selected_graph_chunk_count,
+                selected_source_units = graph_chunk_policy.selected_source_unit_count(),
+                skipped_source_units = record_stream_source_units_skipped,
+                "record-stream graph extraction chunk policy selected representative source units",
+            );
+        }
 
         let chunks = all_chunks;
 
@@ -976,115 +1251,78 @@ impl ContentService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
-        // ----------------------------------------------------------------
-        // Diff-aware ingest: reuse extraction output from a parent revision
-        // when a chunk's text checksum is unchanged.
-        //
-        // The reconcile step downstream (services/graph/rebuild.rs) reads
-        // `runtime_graph_extraction` records by document and merges them into
-        // the canonical graph. If we synthesize records for the new revision
-        // by copying the parent's normalized output (re-keyed to the new
-        // chunk_id), the reconcile flow treats them identically and we skip
-        // the LLM call for unchanged chunks entirely.
-        // ----------------------------------------------------------------
-        let reuse_plan = self.build_chunk_reuse_plan(state, &command, chunks.as_slice()).await?;
-        let reused_chunk_ids: std::collections::BTreeSet<Uuid> =
-            reuse_plan.records_by_new_chunk.keys().copied().collect();
-        let mut reused_entity_count = 0usize;
-        let mut reused_relation_count = 0usize;
-
-        for (new_chunk_id, old_record) in &reuse_plan.records_by_new_chunk {
-            // Count what we are about to reuse — pulled from the old normalized
-            // output to surface in the lifecycle summary.
-            if let Some(entities) = old_record.normalized_output_json.get("entities")
-                && let Some(arr) = entities.as_array()
-            {
-                reused_entity_count = reused_entity_count.saturating_add(arr.len());
-            }
-            if let Some(relations) = old_record.normalized_output_json.get("relations")
-                && let Some(arr) = relations.as_array()
-            {
-                reused_relation_count = reused_relation_count.saturating_add(arr.len());
-            }
-
-            // The downstream reconcile step filters extraction records by
-            // lifecycle.revision_id. Cloning the parent's raw_output_json
-            // verbatim would carry the OLD revision_id and cause every reused
-            // chunk to be silently dropped during merge. Rewrite lifecycle to
-            // point at the current revision before persisting.
-            let mut raw_output_json = old_record.raw_output_json.clone();
-            if let Some(obj) = raw_output_json.as_object_mut() {
-                let lifecycle = obj.entry("lifecycle").or_insert_with(|| serde_json::json!({}));
-                if let Some(lifecycle_obj) = lifecycle.as_object_mut() {
-                    lifecycle_obj.insert(
-                        "revision_id".to_string(),
-                        serde_json::Value::String(command.revision_id.to_string()),
-                    );
-                }
-            }
-
-            let synthetic_id = Uuid::now_v7();
-            crate::infra::repositories::create_runtime_graph_extraction_record(
-                &state.persistence.postgres,
-                &crate::infra::repositories::CreateRuntimeGraphExtractionRecordInput {
-                    id: synthetic_id,
-                    runtime_execution_id: old_record.runtime_execution_id,
-                    library_id: command.library_id,
-                    document_id: revision.document_id,
-                    chunk_id: *new_chunk_id,
-                    provider_kind: format!("{}+reuse", old_record.provider_kind),
-                    model_name: old_record.model_name.clone(),
-                    extraction_version: old_record.extraction_version.clone(),
-                    prompt_hash: old_record.prompt_hash.clone(),
-                    status: "ready".to_string(),
-                    raw_output_json,
-                    normalized_output_json: old_record.normalized_output_json.clone(),
-                    glean_pass_count: 0,
-                    error_message: None,
-                },
+        let graph_runtime_binding = state
+            .canonical_services
+            .ai_catalog
+            .resolve_active_runtime_binding(
+                state,
+                command.library_id,
+                AiBindingPurpose::ExtractGraph,
             )
-            .await
-            .map_err(|e| {
-                ApiError::internal_with_log(
-                    e,
-                    "create_runtime_graph_extraction_record (diff reuse)",
+            .await?
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "active extract_graph binding is required for graph extraction".to_string(),
                 )
             })?;
-        }
+        let provider_kind = graph_runtime_binding.provider_kind.clone();
+        let model_name = graph_runtime_binding.model_name.clone();
+        let request_size_soft_limit_bytes = state
+            .resolve_settle_blockers_services
+            .provider_failure_classification
+            .request_size_soft_limit_bytes();
+        let cache_plan = self
+            .materialize_cached_graph_extractions(
+                state,
+                &command,
+                &document,
+                &revision,
+                chunks.as_slice(),
+                revision_facts.as_slice(),
+                &library_extraction_prompt,
+                &sub_type_hints,
+                &table_graph_context,
+                &graph_chunk_policy,
+                &provider_kind,
+                &model_name,
+                &graph_runtime_binding,
+                request_size_soft_limit_bytes,
+            )
+            .await?;
+        let reused_chunk_ids = cache_plan.reused_chunk_ids;
+        let reused_entity_count = cache_plan.reused_entity_count;
+        let reused_relation_count = cache_plan.reused_relation_count;
 
-        if !reuse_plan.records_by_new_chunk.is_empty() {
+        if !reused_chunk_ids.is_empty() {
             tracing::info!(
                 revision_id = %command.revision_id,
                 total_chunks = chunk_count,
-                reused = reuse_plan.records_by_new_chunk.len(),
+                selected_graph_chunks = selected_graph_chunk_count,
+                reused = reused_chunk_ids.len(),
                 reused_entities = reused_entity_count,
                 reused_relations = reused_relation_count,
-                "diff-aware ingest: reusing graph extraction output for unchanged chunks",
+                "graph extraction cache: reusing ready extraction output",
             );
         }
 
-        // Filter out reused chunks from the extraction loop — they are already
-        // covered by the synthetic records we just inserted.
+        // Filter out cache-covered chunks from the extraction loop — they are
+        // already represented by ready runtime_graph_extraction records for
+        // the current revision.
         let chunks: Vec<_> = chunks
             .into_iter()
             .filter(|chunk| !reused_chunk_ids.contains(&chunk.chunk_id))
             .collect();
 
-        // Per-chunk graph extraction shares immutable state. The previous
-        // version `.clone()`-d every captured value once *per chunk* — for
-        // a 100-chunk document with thousands of typed facts, hundreds of
-        // sub_type hints and a populated table-graph context, that
-        // amounted to ~50–200 MB of redundant copies floating in memory
-        // alongside the in-flight LLM futures. Wrapping the heavy shared
-        // structures in `Arc` once turns each per-chunk capture into a
-        // refcount bump (8 bytes), so the hot loop only allocates the
-        // small per-chunk content/facts views.
+        // Per-chunk graph extraction shares immutable state across the
+        // in-flight futures. Wrapping the heavy structures in `Arc` keeps the
+        // hot loop limited to the small per-chunk content and fact views.
         let document = std::sync::Arc::new(document);
         let revision = std::sync::Arc::new(revision);
         let revision_facts = std::sync::Arc::new(revision_facts);
         let library_extraction_prompt = std::sync::Arc::new(library_extraction_prompt);
         let sub_type_hints = std::sync::Arc::new(sub_type_hints);
         let table_graph_context = std::sync::Arc::new(table_graph_context);
+        let graph_chunk_policy = std::sync::Arc::new(graph_chunk_policy);
 
         let per_chunk_stream = stream::iter(chunks.into_iter().map(|chunk| {
             let state = state.clone();
@@ -1096,6 +1334,7 @@ impl ContentService {
             let library_extraction_prompt = std::sync::Arc::clone(&library_extraction_prompt);
             let sub_type_hints = std::sync::Arc::clone(&sub_type_hints);
             let table_graph_context = std::sync::Arc::clone(&table_graph_context);
+            let graph_chunk_policy = std::sync::Arc::clone(&graph_chunk_policy);
 
             async move {
                 let table_graph_profile = table_graph_context.profile_for_chunk(&chunk);
@@ -1104,6 +1343,7 @@ impl ContentService {
                         &chunk,
                         table_graph_profile,
                         table_graph_context.requires_row_only_graph(),
+                        &graph_chunk_policy,
                     )
                 else {
                     return Ok::<ChunkExtractAggregate, ApiError>(
@@ -1211,14 +1451,9 @@ impl ContentService {
             }
         }));
 
-        // Stream-fold the per-chunk results into a single aggregate. The
-        // previous version did `.try_collect::<Vec<_>>()` + a follow-up
-        // `for (entities, ...)` loop, which kept *every* chunk's tuple
-        // (including its `serde_json::Value` usage payload) resident until
-        // the entire document was done. For a 100-chunk document with
-        // mid-sized usage payloads that was ~5 MB just on `Value` objects,
-        // multiplied by `library_limit=12` parallel docs = 60 MB sitting
-        // around for nothing. Fold consumes each result inline and drops it.
+        // Stream-fold the per-chunk results into one aggregate so each chunk's
+        // small counters are consumed and dropped as soon as the future
+        // completes.
         let aggregate = per_chunk_stream
             .buffer_unordered(graph_extract_parallelism)
             .try_fold(ChunkExtractAggregate::default(), |mut acc, item| async move {
@@ -1235,13 +1470,6 @@ impl ContentService {
 
         let extracted_entities = aggregate.extracted_entities;
         let extracted_relations = aggregate.extracted_relations;
-        // The active extract_graph binding is the single source of truth for
-        // provider/model on this stage. Per-chunk responses always echo the
-        // same binding, so we read it directly from the runtime context
-        // instead of carrying it through the per-chunk aggregate.
-        let provider_kind =
-            graph_runtime_context.provider_profile.indexing.provider_kind.as_str().to_string();
-        let model_name = graph_runtime_context.provider_profile.indexing.model_name.clone();
         let agg_prompt = aggregate.prompt_tokens;
         let agg_completion = aggregate.completion_tokens;
         let agg_total = aggregate.total_tokens;
@@ -1254,6 +1482,7 @@ impl ContentService {
 
         Ok(RevisionGraphCandidateMaterialization {
             chunk_count,
+            selected_graph_chunks: selected_graph_chunk_count,
             extracted_entities: extracted_entities.saturating_add(reused_entity_count),
             extracted_relations: extracted_relations.saturating_add(reused_relation_count),
             provider_kind: Some(provider_kind),
@@ -1262,148 +1491,281 @@ impl ContentService {
             reused_chunks: reused_chunk_ids.len(),
             reused_entities: reused_entity_count,
             reused_relations: reused_relation_count,
+            record_stream_source_units_skipped,
         })
     }
 
-    /// Diff-aware reuse plan: maps each new chunk_id whose text is unchanged
-    /// against the parent revision to the latest "ready" extraction record
-    /// for the matching old chunk. Skips records whose extraction version no
-    /// longer matches the current prompt to avoid reusing stale outputs.
-    async fn build_chunk_reuse_plan(
+    async fn materialize_cached_graph_extractions(
         &self,
         state: &AppState,
         command: &MaterializeRevisionGraphCandidatesCommand,
-        new_chunks: &[crate::infra::arangodb::document_store::KnowledgeChunkRow],
-    ) -> Result<ChunkReusePlan, ApiError> {
-        use std::collections::HashMap;
-
-        // Step 1: load the new revision row to find its parent_revision_id.
-        let new_revision_row = content_repository::get_revision_by_id(
-            &state.persistence.postgres,
-            command.revision_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "diff_reuse: get_revision_by_id new"))?;
-        let Some(new_revision_row) = new_revision_row else {
-            return Ok(ChunkReusePlan::default());
-        };
-        let Some(parent_revision_id) = new_revision_row.parent_revision_id else {
-            return Ok(ChunkReusePlan::default());
-        };
-
-        // Step 2: load parent chunks (Postgres has the text_checksum column).
-        let parent_chunks = content_repository::list_chunks_by_revision(
-            &state.persistence.postgres,
-            parent_revision_id,
-        )
-        .await
-        .map_err(|e| {
-            ApiError::internal_with_log(e, "diff_reuse: list_chunks_by_revision parent")
-        })?;
-        if parent_chunks.is_empty() {
-            return Ok(ChunkReusePlan::default());
-        }
-        let parent_chunk_ids: std::collections::BTreeSet<Uuid> =
-            parent_chunks.iter().map(|c| c.id).collect();
-
-        // Step 3: load all extraction records for this document and pick the
-        // latest "ready" record per parent chunk.
-        let all_records =
-            crate::infra::repositories::list_runtime_graph_extraction_records_by_document(
-                &state.persistence.postgres,
-                new_revision_row.document_id,
-            )
-            .await
-            .map_err(|e| {
-                ApiError::internal_with_log(
-                    e,
-                    "diff_reuse: list_runtime_graph_extraction_records_by_document",
+        document: &crate::infra::arangodb::document_store::KnowledgeDocumentRow,
+        revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+        chunks: &[crate::infra::arangodb::document_store::KnowledgeChunkRow],
+        revision_facts: &[TypedTechnicalFact],
+        library_extraction_prompt: &Option<String>,
+        sub_type_hints: &GraphExtractionSubTypeHints,
+        table_graph_context: &RevisionTableGraphContext,
+        graph_chunk_policy: &GraphExtractionChunkPolicy,
+        provider_kind: &str,
+        model_name: &str,
+        runtime_binding: &ResolvedRuntimeBinding,
+        request_size_soft_limit_bytes: usize,
+    ) -> Result<GraphExtractionCachePlan, ApiError> {
+        let mut plan = GraphExtractionCachePlan::default();
+        for chunk in chunks {
+            let Some(chunk_content) = build_graph_chunk_content(
+                chunk,
+                table_graph_context.profile_for_chunk(chunk),
+                table_graph_context.requires_row_only_graph(),
+                graph_chunk_policy,
+            ) else {
+                continue;
+            };
+            let chunk_facts = revision_facts
+                .iter()
+                .filter(|fact| typed_fact_supports_chunk(fact, chunk))
+                .cloned()
+                .collect::<Vec<_>>();
+            let request = build_canonical_graph_extraction_request(
+                document,
+                revision,
+                chunk,
+                chunk_content,
+                &chunk_facts,
+                command.attempt_id,
+                library_extraction_prompt.clone(),
+                sub_type_hints.clone(),
+            );
+            let fingerprint = build_graph_extraction_cache_fingerprint(
+                &request,
+                runtime_binding,
+                request_size_soft_limit_bytes,
+            );
+            let text_checksum = sha256_hex_text(&chunk.normalized_text);
+            let Some(record) =
+                crate::infra::repositories::find_ready_runtime_graph_extraction_record_by_cache_key(
+                    &state.persistence.postgres,
+                    command.library_id,
+                    &text_checksum,
+                    &fingerprint.extraction_version,
+                    provider_kind,
+                    model_name,
+                    &fingerprint.prompt_hash,
                 )
-            })?;
-        // Wrap each record in Arc so the subsequent text_checksum and
-        // new_chunk HashMaps only clone the refcount instead of the full
-        // `raw_output_json` + `normalized_output_json` `serde_json::Value`
-        // payloads, which for documents with hundreds of chunks across
-        // multiple revisions can be 200+ MB each map level (previously
-        // cloned three times through this function).
-        let mut latest_records_by_parent_chunk: HashMap<
-            Uuid,
-            std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
-        > = HashMap::new();
-        for record in all_records {
-            if record.status != ASYNC_OP_STATUS_READY {
+                .await
+                .map_err(|e| {
+                    ApiError::internal_with_log(
+                        e,
+                        "graph_cache: find_ready_runtime_graph_extraction_record_by_cache_key",
+                    )
+                })?
+            else {
                 continue;
-            }
-            if !parent_chunk_ids.contains(&record.chunk_id) {
-                continue;
-            }
-            if record.extraction_version != GRAPH_EXTRACTION_VERSION_FOR_REUSE {
-                continue;
-            }
-            match latest_records_by_parent_chunk.get(&record.chunk_id) {
-                Some(existing) if existing.created_at >= record.created_at => {}
-                _ => {
-                    latest_records_by_parent_chunk
-                        .insert(record.chunk_id, std::sync::Arc::new(record));
+            };
+
+            if record.chunk_id != chunk.chunk_id {
+                let raw_output_json =
+                    graph_cache_reuse_raw_output(&record, command.revision_id, command.attempt_id);
+                crate::infra::repositories::create_runtime_graph_extraction_record(
+                    &state.persistence.postgres,
+                    &crate::infra::repositories::CreateRuntimeGraphExtractionRecordInput {
+                        id: Uuid::now_v7(),
+                        runtime_execution_id: record.runtime_execution_id,
+                        library_id: command.library_id,
+                        document_id: revision.document_id,
+                        chunk_id: chunk.chunk_id,
+                        provider_kind: record.provider_kind.clone(),
+                        model_name: record.model_name.clone(),
+                        extraction_version: record.extraction_version.clone(),
+                        prompt_hash: record.prompt_hash.clone(),
+                        status: ASYNC_OP_STATUS_READY.to_string(),
+                        raw_output_json,
+                        normalized_output_json: record.normalized_output_json.clone(),
+                        glean_pass_count: 0,
+                        error_message: None,
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    ApiError::internal_with_log(
+                        e,
+                        "graph_cache: create_runtime_graph_extraction_record",
+                    )
+                })?;
+            } else {
+                let lifecycle = extraction_lifecycle_from_record(&record);
+                if lifecycle.revision_id.is_some()
+                    && lifecycle.revision_id != Some(command.revision_id)
+                {
+                    continue;
                 }
             }
-        }
-        if latest_records_by_parent_chunk.is_empty() {
-            return Ok(ChunkReusePlan::default());
-        }
 
-        let mut record_by_checksum: HashMap<
-            String,
-            std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
-        > = HashMap::new();
-        for chunk in &parent_chunks {
-            if let Some(record) = latest_records_by_parent_chunk.get(&chunk.id) {
-                record_by_checksum
-                    .entry(chunk.text_checksum.clone())
-                    .or_insert_with(|| std::sync::Arc::clone(record));
-            }
+            let (entity_count, relation_count) =
+                graph_candidate_counts(&record.normalized_output_json);
+            plan.reused_entity_count = plan.reused_entity_count.saturating_add(entity_count);
+            plan.reused_relation_count = plan.reused_relation_count.saturating_add(relation_count);
+            plan.reused_chunk_ids.insert(chunk.chunk_id);
         }
-        if record_by_checksum.is_empty() {
-            return Ok(ChunkReusePlan::default());
-        }
-
-        let new_chunks_pg = content_repository::list_chunks_by_revision(
-            &state.persistence.postgres,
-            command.revision_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "diff_reuse: list_chunks_by_revision new"))?;
-        let new_chunk_id_set: std::collections::BTreeSet<Uuid> =
-            new_chunks.iter().map(|c| c.chunk_id).collect();
-        let mut records_by_new_chunk: HashMap<
-            Uuid,
-            std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
-        > = HashMap::new();
-        for chunk in new_chunks_pg {
-            if !new_chunk_id_set.contains(&chunk.id) {
-                continue;
-            }
-            if let Some(record) = record_by_checksum.get(&chunk.text_checksum) {
-                records_by_new_chunk.insert(chunk.id, std::sync::Arc::clone(record));
-            }
-        }
-        Ok(ChunkReusePlan { records_by_new_chunk })
+        Ok(plan)
     }
 }
 
 #[derive(Debug, Default)]
-struct ChunkReusePlan {
-    records_by_new_chunk: std::collections::HashMap<
-        Uuid,
-        std::sync::Arc<crate::infra::repositories::RuntimeGraphExtractionRecordRow>,
-    >,
+struct GraphExtractionCachePlan {
+    reused_chunk_ids: BTreeSet<Uuid>,
+    reused_entity_count: usize,
+    reused_relation_count: usize,
 }
 
-/// Per-chunk graph extraction outcome reduced to just the small fields the
-/// caller actually aggregates. Replaces the old 5-tuple `(usize, usize,
-/// Option<String>, Option<String>, serde_json::Value)` so the stream-fold
-/// path holds only ~96 bytes per chunk in flight instead of the full
-/// `serde_json::Value` usage payload.
+fn graph_cache_reuse_raw_output(
+    record: &crate::infra::repositories::RuntimeGraphExtractionRecordRow,
+    revision_id: Uuid,
+    activated_by_attempt_id: Option<Uuid>,
+) -> serde_json::Value {
+    let mut raw_output_json = record.raw_output_json.clone();
+    if let Some(obj) = raw_output_json.as_object_mut() {
+        obj.insert(
+            "lifecycle".to_string(),
+            serde_json::json!({
+                "revision_id": revision_id,
+                "activated_by_attempt_id": activated_by_attempt_id,
+            }),
+        );
+        obj.insert(
+            "reuse".to_string(),
+            serde_json::json!({
+                "source": "graph_extraction_cache",
+                "source_extraction_id": record.id,
+                "source_chunk_id": record.chunk_id,
+            }),
+        );
+    }
+    raw_output_json
+}
+
+fn graph_candidate_counts(normalized_output_json: &serde_json::Value) -> (usize, usize) {
+    let entity_count = normalized_output_json
+        .get("entities")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let relation_count = normalized_output_json
+        .get("relations")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    (entity_count, relation_count)
+}
+
+fn build_graph_extraction_chunk_policy(
+    structured_revision: Option<&KnowledgeStructuredRevisionRow>,
+    chunks: &[KnowledgeChunkRow],
+    revision_facts: &[TypedTechnicalFact],
+) -> GraphExtractionChunkPolicy {
+    if !revision_is_record_stream(structured_revision) {
+        return GraphExtractionChunkPolicy::standard();
+    }
+    GraphExtractionChunkPolicy::record_stream(select_record_stream_source_units(
+        chunks,
+        revision_facts,
+    ))
+}
+
+fn revision_is_record_stream(structured_revision: Option<&KnowledgeStructuredRevisionRow>) -> bool {
+    structured_revision.is_some_and(|revision| revision.source_format == RECORD_JSONL_SOURCE_FORMAT)
+}
+
+fn select_record_stream_source_units(
+    chunks: &[KnowledgeChunkRow],
+    revision_facts: &[TypedTechnicalFact],
+) -> BTreeSet<Uuid> {
+    let mut source_units = chunks
+        .iter()
+        .filter(|chunk| chunk.chunk_kind.as_deref() == Some("source_unit"))
+        .collect::<Vec<_>>();
+    source_units.sort_by_key(|chunk| chunk.chunk_index);
+    if source_units.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let mut selected_indices = BTreeSet::<usize>::new();
+    selected_indices.insert(0);
+    selected_indices.insert(source_units.len() - 1);
+
+    for (index, chunk) in source_units.iter().enumerate() {
+        if selected_indices.len() >= RECORD_STREAM_REPRESENTATIVE_SOURCE_UNIT_LIMIT {
+            break;
+        }
+        if revision_facts.iter().any(|fact| typed_fact_supports_chunk(fact, chunk)) {
+            selected_indices.insert(index);
+        }
+    }
+
+    for index in evenly_spaced_source_unit_indices(
+        source_units.len(),
+        RECORD_STREAM_REPRESENTATIVE_SOURCE_UNIT_LIMIT,
+    ) {
+        if selected_indices.len() >= RECORD_STREAM_REPRESENTATIVE_SOURCE_UNIT_LIMIT {
+            break;
+        }
+        selected_indices.insert(index);
+    }
+
+    selected_indices
+        .into_iter()
+        .filter_map(|index| source_units.get(index).map(|chunk| chunk.chunk_id))
+        .collect()
+}
+
+fn evenly_spaced_source_unit_indices(source_unit_count: usize, limit: usize) -> Vec<usize> {
+    if source_unit_count == 0 || limit == 0 {
+        return Vec::new();
+    }
+    if source_unit_count <= limit {
+        return (0..source_unit_count).collect();
+    }
+    if limit == 1 {
+        return vec![0];
+    }
+    (0..limit).map(|slot| slot * (source_unit_count - 1) / (limit - 1)).collect()
+}
+
+fn record_stream_source_units_skipped(
+    chunks: &[KnowledgeChunkRow],
+    policy: &GraphExtractionChunkPolicy,
+) -> usize {
+    if !policy.is_record_stream() {
+        return 0;
+    }
+    chunks
+        .iter()
+        .filter(|chunk| chunk.chunk_kind.as_deref() == Some("source_unit"))
+        .count()
+        .saturating_sub(policy.selected_source_unit_count())
+}
+
+#[cfg(test)]
+fn test_graph_input_hashes_by_chunk(
+    chunks: &[KnowledgeChunkRow],
+    table_graph_context: &RevisionTableGraphContext,
+) -> HashMap<Uuid, String> {
+    let policy = GraphExtractionChunkPolicy::standard();
+    chunks
+        .iter()
+        .filter_map(|chunk| {
+            let graph_input = build_graph_chunk_content(
+                chunk,
+                table_graph_context.profile_for_chunk(chunk),
+                table_graph_context.requires_row_only_graph(),
+                &policy,
+            )?;
+            Some((chunk.chunk_id, sha256_hex_text(&graph_input)))
+        })
+        .collect()
+}
+
+/// Per-chunk graph extraction outcome: only the small fields the caller
+/// aggregates, keeping ~96 bytes per chunk in flight.
 #[derive(Debug, Default)]
 struct ChunkExtractAggregate {
     extracted_entities: usize,
@@ -1545,7 +1907,7 @@ async fn load_sub_type_hints_for_extraction(
             (library_id, projection_scope.projection_version),
             SubTypeHintsCacheEntry { hints: hints.clone(), fetched_at: std::time::Instant::now() },
         );
-        // Опtimistic housekeeping: drop stale entries when the cache
+        // Optimistic housekeeping: drop stale entries when the cache
         // accumulates across many libraries.
         if guard.len() > 64 {
             guard.retain(|_, entry| entry.fetched_at.elapsed() < SUB_TYPE_HINTS_CACHE_TTL);
@@ -1618,7 +1980,10 @@ fn block_supports_row_only_table_graph(block: &KnowledgeStructuredBlockRow) -> b
 mod tests {
     use uuid::Uuid;
 
-    use super::build_revision_table_graph_context;
+    use super::{
+        RevisionTableGraphContext, build_revision_table_graph_context,
+        test_graph_input_hashes_by_chunk,
+    };
     use crate::{
         infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeStructuredBlockRow},
         shared::extraction::table_graph::build_graph_table_row_text,
@@ -1649,7 +2014,26 @@ mod tests {
             text_generation: None,
             vector_generation: None,
             quality_score: None,
+
+            window_text: None,
+
+            raptor_level: None,
+            occurred_at: None,
+            occurred_until: None,
         }
+    }
+
+    fn make_text_chunk(normalized_text: &str) -> KnowledgeChunkRow {
+        let mut chunk = make_chunk(normalized_text);
+        chunk.chunk_kind = Some("paragraph".to_string());
+        chunk
+    }
+
+    fn make_kind_chunk(chunk_kind: &str, chunk_index: i32) -> KnowledgeChunkRow {
+        let mut chunk = make_text_chunk(&format!("record ordinal={chunk_index} field=value"));
+        chunk.chunk_kind = Some(chunk_kind.to_string());
+        chunk.chunk_index = chunk_index;
+        chunk
     }
 
     fn make_block(
@@ -1680,6 +2064,31 @@ mod tests {
             table_coordinates_json: None,
             code_language: None,
             created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn make_structured_revision(
+        source_format: &str,
+    ) -> crate::infra::arangodb::document_store::KnowledgeStructuredRevisionRow {
+        let revision_id = Uuid::now_v7();
+        crate::infra::arangodb::document_store::KnowledgeStructuredRevisionRow {
+            key: revision_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            revision_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            preparation_state: "ready".to_string(),
+            normalization_profile: "canonical".to_string(),
+            source_format: source_format.to_string(),
+            language_code: None,
+            block_count: 0,
+            chunk_count: 0,
+            typed_fact_count: 0,
+            outline_json: serde_json::json!({}),
+            prepared_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
     }
@@ -1766,5 +2175,129 @@ mod tests {
         ]);
 
         assert!(!graph_context.requires_row_only_graph());
+    }
+
+    #[test]
+    fn graph_input_eligibility_uses_current_chunk_policy() {
+        let clean = make_text_chunk(
+            "Alpha service stores project settings and renders a concise operational summary.",
+        );
+        let noisy = make_text_chunk(concat!(
+            "abCDEfgH ijKLMnOp qRStuVWx yzABcDef gHIjKLmn ",
+            "opQRS7tu vwXYZabC deFGhIJk lmNOPqRs tuVWxyZa ",
+            "bcDEFgHi jkLMNopQ rsTUVwxy zaBCDefG"
+        ));
+
+        let graph_inputs = test_graph_input_hashes_by_chunk(
+            &[clean.clone(), noisy.clone()],
+            &RevisionTableGraphContext::default(),
+        );
+
+        assert!(graph_inputs.contains_key(&clean.chunk_id));
+        assert!(!graph_inputs.contains_key(&noisy.chunk_id));
+    }
+
+    #[test]
+    fn graph_input_hash_changes_when_table_rendering_changes() {
+        let table_block_id = Uuid::now_v7();
+        let row_block_id = Uuid::now_v7();
+        let mut row_chunk = make_chunk(
+            "Sheet: products | Row 1 | Name: Alpha Suite | Owner: Platform | Internal Note: ignore",
+        );
+        row_chunk.support_block_ids = vec![row_block_id];
+
+        let plain_input = test_graph_input_hashes_by_chunk(
+            &[row_chunk.clone()],
+            &RevisionTableGraphContext::default(),
+        );
+        let table_input = test_graph_input_hashes_by_chunk(
+            &[row_chunk.clone()],
+            &build_revision_table_graph_context(&[
+                make_block(
+                    row_block_id,
+                    "table_row",
+                    &row_chunk.normalized_text,
+                    Some(table_block_id),
+                ),
+                make_block(
+                    Uuid::now_v7(),
+                    "metadata_block",
+                    "Table Summary | Sheet: products | Column: Name | Value Kind: categorical | Value Shape: label | Aggregation Priority: 2 | Row Count: 1 | Non-empty Count: 1 | Distinct Count: 1 | Most Frequent Count: 1 | Most Frequent Tie Count: 1 | Most Frequent Values: Alpha Suite",
+                    Some(table_block_id),
+                ),
+            ]),
+        );
+
+        assert_ne!(plain_input.get(&row_chunk.chunk_id), table_input.get(&row_chunk.chunk_id));
+    }
+
+    #[test]
+    fn record_stream_policy_keeps_retrieval_chunks_but_bounds_graph_source_units() {
+        let mut chunks = vec![make_kind_chunk("source_profile", 0)];
+        chunks.extend((1..=20).map(|index| make_kind_chunk("source_unit", index)));
+        let structured_revision = make_structured_revision(
+            crate::shared::extraction::record_jsonl::RECORD_JSONL_SOURCE_FORMAT,
+        );
+
+        let policy =
+            super::build_graph_extraction_chunk_policy(Some(&structured_revision), &chunks, &[]);
+
+        assert!(policy.is_record_stream());
+        assert_eq!(policy.selected_source_unit_count(), 12);
+        assert_eq!(super::record_stream_source_units_skipped(&chunks, &policy), 8);
+    }
+
+    #[test]
+    fn record_stream_policy_requires_structured_revision_format() {
+        let mut chunks = vec![make_kind_chunk("source_profile", 0)];
+        chunks.extend((1..=20).map(|index| make_kind_chunk("source_unit", index)));
+
+        let policy = super::build_graph_extraction_chunk_policy(None, &chunks, &[]);
+
+        assert!(!policy.is_record_stream());
+        assert_eq!(policy.selected_source_unit_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod image_checksum_tests {
+    #[test]
+    fn image_checksum_sha256_hex_format() {
+        use hex;
+        use sha2::{Digest, Sha256};
+        let bytes: &[&[u8]] = &[b"image1", b"image2"];
+        let mut sorted = bytes.to_vec();
+        sorted.sort();
+        let mut hasher = Sha256::new();
+        for b in &sorted {
+            hasher.update(b);
+        }
+        let result = hex::encode(hasher.finalize());
+        assert_eq!(result.len(), 64);
+        assert!(result.chars().all(|c| c.is_ascii_hexdigit()));
+        let mut hasher2 = Sha256::new();
+        for b in &sorted {
+            hasher2.update(b);
+        }
+        let result2 = hex::encode(hasher2.finalize());
+        assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn image_checksum_sort_is_deterministic() {
+        use hex;
+        use sha2::{Digest, Sha256};
+        let order_a: &[&[u8]] = &[b"alpha", b"beta"];
+        let order_b: &[&[u8]] = &[b"beta", b"alpha"];
+        let hash = |slices: &[&[u8]]| {
+            let mut v = slices.to_vec();
+            v.sort();
+            let mut h = Sha256::new();
+            for b in &v {
+                h.update(b);
+            }
+            hex::encode(h.finalize())
+        };
+        assert_eq!(hash(order_a), hash(order_b));
     }
 }

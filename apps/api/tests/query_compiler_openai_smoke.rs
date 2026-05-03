@@ -26,9 +26,7 @@ struct SmokeCase {
 
 fn cases() -> Vec<SmokeCase> {
     vec![
-        SmokeCase {
-            question: "как настроить платежный модуль?", history: &[]
-        },
+        SmokeCase { question: "How do I configure the payment module?", history: &[] },
         SmokeCase {
             question: "What endpoints does /health expose and what does it return?",
             history: &[],
@@ -38,15 +36,13 @@ fn cases() -> Vec<SmokeCase> {
             history: &[],
         },
         SmokeCase {
-            question: "а как настроить?",
+            question: "How do I configure it?",
             history: &[
-                ("user", "у нас есть модуль платежей?"),
-                ("assistant", "Да, модуль платежей описан в библиотеке."),
+                ("user", "do we have a payment module?"),
+                ("assistant", "Yes, the payment module is documented in the library."),
             ],
         },
-        SmokeCase {
-            question: "Какие документы есть в этой библиотеке?", history: &[]
-        },
+        SmokeCase { question: "What documents are in this library?", history: &[] },
     ]
 }
 

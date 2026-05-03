@@ -1,13 +1,11 @@
-//! In-memory capture of the exact LLM request sent on each agent
+//! In-memory capture of the exact LLM request sent on each answer
 //! iteration, used by the assistant's debug panel to show the user
 //! what actually reached the provider.
 //!
-//! The agent loop builds a Vec<ChatMessage> incrementally — system
-//! prompt, user question, tool-call assistant message, tool-result
-//! messages — and hands the whole vec to the LLM on every iteration.
-//! Observability into that vec is normally "you have to trust us";
-//! this module lets the operator flip a switch and see the exact wire
-//! payload after the fact.
+//! The grounded-answer path hands a Vec<ChatMessage> to the LLM for
+//! the initial fixed-evidence answer and, when needed, a literal-
+//! fidelity revision over the same evidence. This module lets the
+//! operator inspect those exact wire payloads after the fact.
 //!
 //! Storage is a bounded FIFO cache keyed by `execution_id`. Volatile
 //! on purpose: debug snapshots are large (kilobytes to a few hundred
@@ -23,9 +21,10 @@ use uuid::Uuid;
 
 use crate::integrations::llm::ChatMessage;
 
-/// Snapshot of a single agent iteration: the messages vector handed to
-/// the provider, the provider's raw response (tool calls + text), and
-/// the usage block if the provider returned one.
+/// Snapshot of a single answer iteration: the messages vector handed
+/// to the provider, the provider's raw response text, optional raw
+/// tool-call metadata for external compatibility, and the usage block
+/// if the provider returned one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmIterationDebug {
@@ -61,7 +60,7 @@ pub struct LlmContextSnapshot {
     pub final_answer: Option<String>,
     pub captured_at: chrono::DateTime<chrono::Utc>,
     /// Canonical `QueryIR` produced by `QueryCompilerService` before the
-    /// assistant loop ran. Surfaced to the debug panel as a JSON tree so
+    /// answer stage ran. Surfaced to the debug panel as a JSON tree so
     /// operators see act / scope / target_types / literal_constraints /
     /// confidence that actually drove routing and verification. `None`
     /// on records written by older code paths.

@@ -18,10 +18,13 @@ use super::super::{
 };
 use super::ToolCallContext;
 
+pub(crate) const SEARCH_DOCUMENTS_TOOL_NAME: &str = "search_documents";
+pub(crate) const READ_DOCUMENT_TOOL_NAME: &str = "read_document";
+
 pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     match name {
-        "search_documents" => Some(McpToolDescriptor {
-            name: "search_documents",
+        SEARCH_DOCUMENTS_TOOL_NAME => Some(McpToolDescriptor {
+            name: SEARCH_DOCUMENTS_TOOL_NAME,
             description: "Search authorized library memory and return document-level candidates. Usually follow relevant hits with `read_document` before answering a content question — the search response alone is NOT enough to ground an answer, it only tells you where to look. By default this tool returns only documents whose content is readable enough to inspect; unreadable/failed documents are hidden unless you explicitly opt in for diagnostics. Each hit carries `suggestedStartOffset` — the character offset of the best-matching chunk inside the full document; ALWAYS pass this value as `startOffset` to `read_document` on the first call for that document so your very first read window lands on the relevant paragraph instead of the PDF's table of contents. Rules: (1) NEVER rerun this tool with the same `query`+`libraries`+`limit` payload in one turn; if the first call returned nothing useful, narrow or broaden the query, do not try a synonym on the same scope. (2) If the top hit is clearly the right document, prefer one `read_document` call (with `startOffset=suggestedStartOffset`) on it over issuing more searches. (3) Keep `limit` small (3-10) — larger limits just bloat the context without finding new answers. (4) Use `includeUnreadable=true` only for diagnostics or ops investigation, not for normal user-facing answers.",
             input_schema: json!({
                 "type": "object",
@@ -52,9 +55,9 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 }
             }),
         }),
-        "read_document" => Some(McpToolDescriptor {
-            name: "read_document",
-            description: "Read one document's text content. Use this after `search_documents` or when you already know the `documentId`. The response includes a `hasMore` flag and a `continuationToken` when the document does not fit in a single window — this is the ONLY correct way to page through long documents. Rules: (1) IMPORTANT — on the first read after `search_documents`, pass `startOffset` equal to the hit's `suggestedStartOffset`. That value is the character offset of the matched chunk inside the document, so the very first window will land on the actual answer paragraph instead of the document's table of contents / front matter. Only omit `startOffset` if you have no `suggestedStartOffset` (e.g. direct read by known `documentId`). (2) If `hasMore` is true, call this tool AGAIN with the same `documentId` and the returned `continuationToken` to fetch the next window; do NOT switch to a different document just because the first window looks thin. (3) NEVER rerun with an identical payload — always advance the token. (4) A PDF's first 1-2 windows (offset 0) are almost always table of contents, copyright pages, and section headers (lines of dotted leader `................`, chapter numbers with no body text). If the only thing you see is ToC, you have NOT read the content yet — page forward with `continuationToken` until real paragraphs appear, then answer. Do NOT answer a content question from ToC text alone. (5) For image-backed documents the response can include `sourceAccess` and a `visualDescription` derived from the original source image; prefer that grounded description over guessing from OCR fragments.",
+        READ_DOCUMENT_TOOL_NAME => Some(McpToolDescriptor {
+            name: READ_DOCUMENT_TOOL_NAME,
+            description: "Read one document's text content. Use this after `search_documents` or when you already know the `documentId`. `mode=full` returns the whole document when it fits in one read window; otherwise it returns one paged window and includes `hasMore` plus a `continuationToken`. Rules: (1) On the first read after `search_documents`, pass `startOffset` equal to the hit's `suggestedStartOffset` when present. For a small document in `mode=full`, the backend still returns the whole document from offset 0 so the matched tail cannot hide earlier evidence. (2) If `hasMore` is true, call this tool AGAIN with the same `documentId` and the returned `continuationToken` to fetch the next window; do NOT switch to a different document just because the first window looks thin. (3) NEVER rerun with an identical payload — always advance the token. (4) A PDF's first 1-2 windows (offset 0) are often table of contents, copyright pages, and section headers. If the only thing you see is ToC, you have NOT read the content yet — page forward with `continuationToken` until real paragraphs appear, then answer. Do NOT answer a content question from ToC text alone. (5) For image-backed documents the response can include `sourceAccess` and a `visualDescription` derived from the original source image; prefer that grounded description over guessing from OCR fragments.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -91,7 +94,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "list_documents" => Some(McpToolDescriptor {
             name: "list_documents",
-            description: "List documents in a knowledge library. Use this ONLY for library inventory and meta questions (\"what documents do you have\", \"what is this library about\"). Never use it as the first step for ordinary content questions, setup questions, or factual questions — it returns only titles and status, not grounded body evidence. For those questions call `grounded_answer` first; use `search_documents` + `read_document` only when you need raw inspection after the grounded answer.",
+            description: "List documents in a knowledge library. Use this ONLY for library inventory and meta questions (\"what documents do you have\", \"what is this library about\"). Never use it as the first step for ordinary content questions, setup questions, factual questions, or versioned change-summary questions — it returns only titles and status, not grounded body evidence. For those questions call `grounded_answer` first; use `search_documents` + `read_document` only when you need raw inspection after the grounded answer.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -261,8 +264,8 @@ pub(crate) async fn call_tool(
     arguments: &Value,
 ) -> Option<McpToolResult> {
     let result = match name {
-        "search_documents" => search_documents(context, arguments).await,
-        "read_document" => read_document(context, arguments).await,
+        SEARCH_DOCUMENTS_TOOL_NAME => search_documents(context, arguments).await,
+        READ_DOCUMENT_TOOL_NAME => read_document(context, arguments).await,
         "list_documents" => list_documents(context, arguments).await,
         "upload_documents" => upload_documents(context, arguments).await,
         "update_document" => update_document(context, arguments).await,

@@ -144,13 +144,6 @@ fn runtime_node_type_from_candidate_type(candidate_type: &str) -> RuntimeNodeTyp
         "process" => RuntimeNodeType::Process,
         "concept" => RuntimeNodeType::Concept,
         "attribute" => RuntimeNodeType::Attribute,
-        "topic" => RuntimeNodeType::Concept,
-        "technology" => RuntimeNodeType::Artifact,
-        "api" => RuntimeNodeType::Artifact,
-        "code_symbol" => RuntimeNodeType::Artifact,
-        "natural_kind" => RuntimeNodeType::Natural,
-        "metric" => RuntimeNodeType::Attribute,
-        "regulation" => RuntimeNodeType::Artifact,
         _ => RuntimeNodeType::Entity,
     }
 }

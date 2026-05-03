@@ -67,22 +67,51 @@ pub(super) async fn download_document_source(
     }
 
     if descriptor.access.is_none() {
+        if let Some(rendered_source) = state
+            .canonical_services
+            .content
+            .render_revision_text_source(&state, revision.id)
+            .await?
+        {
+            let disposition = format!("attachment; filename=\"{}\"", descriptor.file_name);
+            return Ok((
+                [
+                    (header::CONTENT_TYPE, revision.mime_type),
+                    (header::CONTENT_DISPOSITION, disposition),
+                ],
+                Body::from(rendered_source),
+            )
+                .into_response());
+        }
         return Err(ApiError::BadRequest("document has no downloadable source".to_string()));
     }
 
-    let storage_key = revision
-        .storage_key
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or(state
+    let storage_key =
+        revision.storage_key.clone().filter(|value| !value.trim().is_empty()).or(state
             .canonical_services
             .content
             .resolve_revision_storage_key(&state, revision.id)
-            .await?)
-        .ok_or_else(|| {
-            ApiError::BadRequest("document has no stored source to download".to_string())
-        })?;
+            .await?);
     let disposition = format!("attachment; filename=\"{}\"", descriptor.file_name);
+
+    let Some(storage_key) = storage_key else {
+        if let Some(rendered_source) = state
+            .canonical_services
+            .content
+            .render_revision_text_source(&state, revision.id)
+            .await?
+        {
+            return Ok((
+                [
+                    (header::CONTENT_TYPE, revision.mime_type),
+                    (header::CONTENT_DISPOSITION, disposition),
+                ],
+                Body::from(rendered_source),
+            )
+                .into_response());
+        }
+        return Err(ApiError::BadRequest("document has no stored source to download".to_string()));
+    };
 
     if let Some(href) = state
         .content_storage

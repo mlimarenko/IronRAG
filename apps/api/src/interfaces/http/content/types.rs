@@ -13,7 +13,9 @@ use crate::{
     services::{
         content::{
             document_accounting::DocumentLifecycleDetail,
-            service::{ContentMutationAdmission, RevisionAdmissionMetadata},
+            service::{
+                ContentMutationAdmission, ReprocessRevisionSource, RevisionAdmissionMetadata,
+            },
         },
         ingest::web::RefetchedWebDocumentSource,
     },
@@ -225,14 +227,10 @@ pub(super) struct ContentDocumentDetailResponse {
     pub readiness: Option<ContentRevisionReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_summary: Option<DocumentReadinessSummary>,
-    // `prepared_revision` used to carry the entire parsed structured
-    // revision (every heading, paragraph, table, code block) on the
-    // detail response. On the reference library that was ~4 MB per
-    // document and the inspector polls it every 5 s, so it dominated
-    // bandwidth (~47 MB/min per open document) without the frontend
-    // reading anything from it beyond the two count fields below.
-    // Callers who need the actual prepared blocks use the paginated
-    // `/content/documents/{id}/prepared-segments` surface.
+    // Full prepared revision (~4 MB on PDF docs) is not returned here —
+    // the inspector only needs the two count fields below. Use the
+    // paginated `/content/documents/{id}/prepared-segments` endpoint
+    // for the actual blocks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepared_segment_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -350,17 +348,17 @@ pub(super) fn build_revision_metadata(
 
 pub(super) fn build_reprocess_revision_metadata(
     active_revision: &ContentRevision,
-    storage_key: Option<String>,
+    source: ReprocessRevisionSource,
 ) -> RevisionAdmissionMetadata {
     RevisionAdmissionMetadata {
         content_source_kind: active_revision.content_source_kind.clone(),
-        checksum: active_revision.checksum.clone(),
-        mime_type: active_revision.mime_type.clone(),
-        byte_size: active_revision.byte_size,
-        title: active_revision.title.clone(),
+        checksum: source.checksum,
+        mime_type: source.mime_type,
+        byte_size: source.byte_size,
+        title: source.title,
         language_code: active_revision.language_code.clone(),
-        source_uri: active_revision.source_uri.clone(),
-        storage_key: storage_key.or_else(|| active_revision.storage_key.clone()),
+        source_uri: source.source_uri,
+        storage_key: Some(source.storage_key),
     }
 }
 

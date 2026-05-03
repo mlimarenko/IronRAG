@@ -465,6 +465,17 @@ pub async fn run_library_graph_reextract(
 mod tests {
     use super::*;
 
+    fn with_terminal_marker_test_lock(test: impl FnOnce()) {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_terminal_markers_for_tests();
+        test();
+        reset_terminal_markers_for_tests();
+    }
+
     #[test]
     fn first_caller_acquires_backfill_slot() {
         let library_id = Uuid::now_v7();
@@ -488,49 +499,52 @@ mod tests {
 
     #[test]
     fn terminal_marker_skips_after_threshold_zero_attempts() {
-        reset_terminal_markers_for_tests();
-        let library_id = Uuid::now_v7();
-        let document_id = Uuid::now_v7();
-        let revision_id = Uuid::now_v7();
+        with_terminal_marker_test_lock(|| {
+            let library_id = Uuid::now_v7();
+            let document_id = Uuid::now_v7();
+            let revision_id = Uuid::now_v7();
 
-        for _ in 0..TERMINAL_MARKER_THRESHOLD {
-            assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_id));
-            record_terminal_marker_result(library_id, document_id, revision_id, false);
-        }
+            for _ in 0..TERMINAL_MARKER_THRESHOLD {
+                assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_id));
+                record_terminal_marker_result(library_id, document_id, revision_id, false);
+            }
 
-        assert!(should_skip_by_terminal_marker(library_id, document_id, revision_id));
+            assert!(should_skip_by_terminal_marker(library_id, document_id, revision_id));
+        });
     }
 
     #[test]
     fn terminal_marker_clears_when_revision_changes() {
-        reset_terminal_markers_for_tests();
-        let library_id = Uuid::now_v7();
-        let document_id = Uuid::now_v7();
-        let revision_a = Uuid::now_v7();
-        let revision_b = Uuid::now_v7();
+        with_terminal_marker_test_lock(|| {
+            let library_id = Uuid::now_v7();
+            let document_id = Uuid::now_v7();
+            let revision_a = Uuid::now_v7();
+            let revision_b = Uuid::now_v7();
 
-        for _ in 0..TERMINAL_MARKER_THRESHOLD {
-            record_terminal_marker_result(library_id, document_id, revision_a, false);
-        }
-        assert!(should_skip_by_terminal_marker(library_id, document_id, revision_a));
+            for _ in 0..TERMINAL_MARKER_THRESHOLD {
+                record_terminal_marker_result(library_id, document_id, revision_a, false);
+            }
+            assert!(should_skip_by_terminal_marker(library_id, document_id, revision_a));
 
-        // New revision — marker for revision_a must not apply.
-        assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_b));
+            // New revision — marker for revision_a must not apply.
+            assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_b));
+        });
     }
 
     #[test]
     fn terminal_marker_clears_on_successful_contribution() {
-        reset_terminal_markers_for_tests();
-        let library_id = Uuid::now_v7();
-        let document_id = Uuid::now_v7();
-        let revision_id = Uuid::now_v7();
+        with_terminal_marker_test_lock(|| {
+            let library_id = Uuid::now_v7();
+            let document_id = Uuid::now_v7();
+            let revision_id = Uuid::now_v7();
 
-        for _ in 0..TERMINAL_MARKER_THRESHOLD {
-            record_terminal_marker_result(library_id, document_id, revision_id, false);
-        }
-        assert!(should_skip_by_terminal_marker(library_id, document_id, revision_id));
+            for _ in 0..TERMINAL_MARKER_THRESHOLD {
+                record_terminal_marker_result(library_id, document_id, revision_id, false);
+            }
+            assert!(should_skip_by_terminal_marker(library_id, document_id, revision_id));
 
-        record_terminal_marker_result(library_id, document_id, revision_id, true);
-        assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_id));
+            record_terminal_marker_result(library_id, document_id, revision_id, true);
+            assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_id));
+        });
     }
 }

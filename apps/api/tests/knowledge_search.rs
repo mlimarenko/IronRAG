@@ -501,6 +501,7 @@ impl KnowledgeSearchHttpFixture {
                 byte_size: 32,
                 normalized_text: Some("orion lexical anchor".to_string()),
                 text_checksum: Some("knowledge-search-text-checksum".to_string()),
+                image_checksum: None,
                 text_state: "text_readable".to_string(),
                 vector_state: "vector_ready".to_string(),
                 graph_state: "graph_ready".to_string(),
@@ -538,6 +539,10 @@ impl KnowledgeSearchHttpFixture {
                 text_generation: Some(1),
                 vector_generation: Some(1),
                 quality_score: None,
+
+                window_text: None,
+
+                raptor_level: None,
             })
             .await
             .context("failed to insert knowledge search chunk")?;
@@ -807,10 +812,12 @@ impl KnowledgeSearchHttpFixture {
             target_types: Vec::new(),
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: Vec::new(),
             needs_clarification: None,
+            source_slice: None,
             confidence: 1.0,
         };
         loop {
@@ -960,6 +967,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 byte_size: 32,
                 normalized_text: Some("orion lexical anchor".to_string()),
                 text_checksum: Some("target-text-checksum".to_string()),
+                image_checksum: None,
                 text_state: "text_readable".to_string(),
                 vector_state: "pending".to_string(),
                 graph_state: "pending".to_string(),
@@ -997,6 +1005,10 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 text_generation: Some(1),
                 vector_generation: None,
                 quality_score: None,
+
+                window_text: None,
+
+                raptor_level: None,
             })
             .await
             .context("failed to insert target chunk")?;
@@ -1044,6 +1056,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 byte_size: 32,
                 normalized_text: Some("orion lexical anchor".to_string()),
                 text_checksum: Some("distractor-text-checksum".to_string()),
+                image_checksum: None,
                 text_state: "text_readable".to_string(),
                 vector_state: "pending".to_string(),
                 graph_state: "pending".to_string(),
@@ -1081,6 +1094,10 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 text_generation: Some(1),
                 vector_generation: None,
                 quality_score: None,
+
+                window_text: None,
+
+                raptor_level: None,
             })
             .await
             .context("failed to insert distractor chunk")?;
@@ -1165,6 +1182,7 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 byte_size: 32,
                 normalized_text: Some("vector generation anchor".to_string()),
                 text_checksum: Some("vector-text-checksum".to_string()),
+                image_checksum: None,
                 text_state: "text_readable".to_string(),
                 vector_state: "vector_ready".to_string(),
                 graph_state: "pending".to_string(),
@@ -1202,6 +1220,10 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 text_generation: Some(1),
                 vector_generation: Some(1),
                 quality_score: None,
+
+                window_text: None,
+
+                raptor_level: None,
             })
             .await
             .context("failed to insert vector test chunk")?;
@@ -1405,6 +1427,7 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 byte_size: 32,
                 normalized_text: Some("obsolete nebula anchor".to_string()),
                 text_checksum: Some("replacement-text-checksum-1".to_string()),
+                image_checksum: None,
                 text_state: "text_readable".to_string(),
                 vector_state: "pending".to_string(),
                 graph_state: "pending".to_string(),
@@ -1442,6 +1465,10 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 text_generation: Some(1),
                 vector_generation: None,
                 quality_score: None,
+
+                window_text: None,
+
+                raptor_level: None,
             })
             .await
             .context("failed to insert revision one chunk")?;
@@ -1489,6 +1516,7 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 byte_size: 32,
                 normalized_text: Some("fresh pulsar anchor".to_string()),
                 text_checksum: Some("replacement-text-checksum-2".to_string()),
+                image_checksum: None,
                 text_state: "graph_ready".to_string(),
                 vector_state: "vector_ready".to_string(),
                 graph_state: "graph_ready".to_string(),
@@ -1546,6 +1574,10 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 text_generation: Some(2),
                 vector_generation: Some(2),
                 quality_score: None,
+
+                window_text: None,
+
+                raptor_level: None,
             })
             .await
             .context("failed to insert revision two chunk")?;

@@ -20,7 +20,6 @@ import type { GraphLayoutType } from '@/components/graph/config';
 // built as a standalone chunk, so `graphology` and the layouts module
 // are bundled into the worker script instead of into the main app
 // bundle.
-// eslint-disable-next-line import/no-unresolved
 import GraphLayoutWorkerCtor from './graphLayout.worker?worker';
 
 type PendingResolver = {

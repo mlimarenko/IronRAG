@@ -2,13 +2,7 @@
 //!
 //! Every downstream stage in the query pipeline (planner, verification,
 //! session, ranking, answer generation) consumes **this** struct instead of
-//! re-classifying the raw question with hardcoded keyword lists. The fields
-//! here are derived from two sources:
-//!
-//! - `docs/query_ir_audit.md` — reverse-engineered decisions from ~450
-//!   hardcoded markers across 15 files, mapped to typed fields.
-//! - `tests/query_ir_golden.jsonl` — 330 real + synthetic questions with
-//!   hand-labelled expected IR used as evaluation gate.
+//! re-classifying the raw question with hardcoded keyword lists.
 //!
 //! Design rules, in priority order:
 //!
@@ -53,21 +47,20 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryAct {
-    /// "what is the URL", "какой порт" — literal value expected in the answer.
+    /// Literal value expected in the answer ("what is the URL", "what port does X listen on").
     RetrieveValue,
-    /// "explain X", "расскажи про Y" — conceptual / narrative answer.
+    /// Conceptual / narrative answer ("explain X", "describe Y").
     Describe,
-    /// "how do I configure Z", "как настроить модуль оплаты" — procedural answer.
+    /// Procedural answer ("how do I configure Z", "how to enable Y").
     ConfigureHow,
-    /// "compare X and Y", "чем отличается A от B".
+    /// Side-by-side contrast of two named subjects.
     Compare,
-    /// "list all", "which ones", "какие есть".
+    /// Listing all values matching a constraint.
     Enumerate,
-    /// Meta-questions about the library itself: "what documents are here",
-    /// "is there a GraphQL API in this corpus".
+    /// Meta-questions about the library itself ("what documents are here",
+    /// "is there a GraphQL API in this corpus").
     Meta,
-    /// User refers back to prior turn without restating the topic
-    /// ("а там?", "то же самое", "ещё").
+    /// User refers back to prior turn without restating the topic.
     FollowUp,
 }
 
@@ -140,11 +133,11 @@ impl QueryLanguage {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityRole {
-    /// Primary thing the question is about ("платежный модуль" in "как настроить платежный модуль").
+    /// Primary thing the question is about ("payment module" in "how to configure payment module").
     Subject,
     /// Secondary named thing, usually in comparisons or "for X" clauses.
     Object,
-    /// Qualifier on the subject ("новой" in "какие есть поля в новой таблице клиентов").
+    /// Qualifier on the subject (an adjective like "new" in "fields of the new customer table").
     Modifier,
 }
 
@@ -157,12 +150,12 @@ pub enum EntityRole {
 pub enum LiteralKind {
     /// Looks like http(s)://..., including API-style paths after a method.
     Url,
-    /// Filesystem or URL path (`/linuxcash/cash/conf/ncash.ini`, `/api/v2/orders`).
+    /// Filesystem or URL path (`/etc/app/config.ini`, `/api/v2/orders`).
     Path,
     /// Identifier in camelCase / snake_case / SCREAMING_CASE
-    /// (`fillPaymentDetails`, `DATABASE_URL`, `with_cards`).
+    /// (`fetchUserDetails`, `DATABASE_URL`, `with_cards`).
     Identifier,
-    /// Semver / release version (`4.6.205`, `1.2`).
+    /// Semver / release version (`4.5.1`, `1.2`).
     Version,
     /// Numeric-looking code (`71`, `500`, port number `8080`).
     NumericCode,
@@ -175,15 +168,26 @@ pub enum LiteralKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRefKind {
-    /// "it", "this", "что", "оно" — generic pronoun.
+    /// Generic pronoun referring to prior turn ("it", "this").
     Pronoun,
-    /// "там", "тут", "here", "that one" — deictic reference.
+    /// Deictic reference ("here", "that one").
     Deictic,
-    /// Missing noun phrase ("и ещё?", "а для другого провайдера?") — elliptic continuation.
+    /// Missing noun phrase — elliptic continuation ("and for the other one?").
     Elliptic,
-    /// Single interrogative word that cannot stand on its own
-    /// ("Что?", "Как?", "Where?").
+    /// Single interrogative word that cannot stand on its own ("What?", "How?", "Where?").
     BareInterrogative,
+}
+
+/// Direction of an ordered slice requested from a sequential source.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceSliceDirection {
+    /// Earliest units in the source order.
+    Head,
+    /// Latest units in the source order.
+    Tail,
+    /// Bounded representation of the whole ordered source.
+    All,
 }
 
 /// Why the compiler is unsure and would prefer clarification from the user.
@@ -281,7 +285,7 @@ impl LiteralKind {
 /// When `QueryAct::Compare`, the two sides and the dimension compared.
 ///
 /// `a` and `b` are optional because the user may ask a comparison without
-/// naming both sides explicitly ("compare both services", "сравни оба").
+/// naming both sides explicitly ("compare both services", "compare these two").
 /// The resolver picks the implicit sides from session state or document
 /// focus when possible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -310,9 +314,32 @@ pub struct DocumentHint {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct UnresolvedRef {
-    /// The exact surface form used ("там", "this", "the same", "то же").
+    /// The exact surface form used ("here", "this", "the same", "that one").
     pub surface: String,
     pub kind: ConversationRefKind,
+}
+
+/// Ordered slice request over a sequential source. The compiler sets this
+/// only when the user explicitly asks for a positional range of records/items
+/// in an ordered source. Ordinary summaries and needle lookups leave it null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSliceSpec {
+    pub direction: SourceSliceDirection,
+    #[serde(default)]
+    pub count: Option<u16>,
+}
+
+/// Date/time or date-range constraint normalized by the query compiler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalConstraint {
+    /// Exact surface span from the user-visible question or history.
+    pub surface: String,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
 }
 
 /// Clarification request the compiler would like to bubble up.
@@ -359,7 +386,7 @@ impl<'de> Deserialize<'de> for ClarificationSpec {
 /// + optional post-parse validator, not by the Rust type system):
 /// - `QueryAct::Compare` implies `Some(comparison)`.
 /// - `QueryAct::FollowUp` usually implies `!conversation_refs.is_empty()`,
-///   though a bare interrogative ("Что?") can be `FollowUp` with only a
+///   though a bare interrogative ("What?") can be `FollowUp` with only a
 ///   `BareInterrogative` ref.
 /// - `QueryScope::CrossLibrary` implies the user named another library
 ///   explicitly — the compiler SHOULD populate `document_focus` or
@@ -389,6 +416,12 @@ pub struct QueryIR {
     #[serde(default)]
     pub literal_constraints: Vec<LiteralSpan>,
 
+    /// Temporal constraints compiled into provider-normalized ISO bounds.
+    /// Downstream retrieval consumes these typed bounds instead of parsing
+    /// natural-language date wording.
+    #[serde(default)]
+    pub temporal_constraints: Vec<TemporalConstraint>,
+
     #[serde(default)]
     pub comparison: Option<ComparisonSpec>,
 
@@ -403,6 +436,12 @@ pub struct QueryIR {
     /// Populated only when the compiler is not confident enough to proceed.
     #[serde(default)]
     pub needs_clarification: Option<ClarificationSpec>,
+
+    /// Optional ordered slice request for sequential sources. Downstream
+    /// retrieval may consume this only after resolving it to a structured
+    /// source revision; it must not re-classify natural-language wording.
+    #[serde(default)]
+    pub source_slice: Option<SourceSliceSpec>,
 
     /// Compiler self-assessed confidence ∈ [0.0, 1.0]. Defaults to
     /// `1.0` when omitted so the golden evaluation set (which does not
@@ -421,28 +460,73 @@ const fn default_ground_truth_confidence() -> f32 {
 // =============================================================================
 
 impl QueryIR {
-    /// Previously `planner::is_exact_literal_technical_question`: now a
-    /// direct consequence of act + literal presence. Drives verifier
-    /// strictness and fact-search bias.
+    /// `true` when the query targets an exact configuration value.
+    /// Drives verifier strictness and fact-search bias.
     #[must_use]
     pub fn is_exact_literal_technical(&self) -> bool {
         matches!(self.act, QueryAct::RetrieveValue) && !self.literal_constraints.is_empty()
     }
 
-    /// Previously `planner::is_multi_document_technical_question` /
-    /// `document_target::is_multi_document_comparison` (three duplicated
-    /// keyword lists collapsed into one).
+    /// `true` when the query scope spans multiple documents.
     #[must_use]
     pub const fn is_multi_document(&self) -> bool {
         matches!(self.scope, QueryScope::MultiDocument)
     }
 
-    /// Previously the 38+27+13 follow-up marker lists in `session.rs`.
-    /// Follow-up is either explicitly declared by the compiler or
-    /// implicitly evidenced by unresolved refs.
+    /// `true` when the query is a follow-up — either explicitly declared
+    /// by the compiler or evidenced by unresolved conversation refs.
     #[must_use]
     pub fn is_follow_up(&self) -> bool {
         matches!(self.act, QueryAct::FollowUp) || !self.conversation_refs.is_empty()
+    }
+
+    /// Overview-style questions need source coverage, not just the
+    /// highest-scoring local passage. The signal is structural: broad
+    /// acts without exact literals or comparisons. Natural-language
+    /// wording stays inside the compiler output instead of becoming
+    /// downstream keyword lists.
+    #[must_use]
+    pub fn requests_source_coverage_context(&self) -> bool {
+        matches!(self.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
+            && self.literal_constraints.is_empty()
+            && self.comparison.is_none()
+            && !self.is_follow_up()
+    }
+
+    #[must_use]
+    pub const fn requests_source_slice_context(&self) -> bool {
+        self.source_slice.is_some()
+    }
+
+    /// Aggregate the typed `start` / `end` RFC3339 bounds from every
+    /// `temporal_constraints` entry into a single conservative range
+    /// (`min(start)`, `max(end)`). Returns `(None, None)` when no
+    /// constraint resolves to a parseable bound — downstream retrieval
+    /// then skips the temporal hard-filter and falls back to the
+    /// keyword-boost path. Compiler is the canonical NL date parser; this
+    /// helper does only structural RFC3339 parsing per CLAUDE.md
+    /// "запрещено держать захардкоженные словари... под конкретный
+    /// естественный язык".
+    #[must_use]
+    pub fn resolved_temporal_bounds(
+        &self,
+    ) -> (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>) {
+        let parse = |value: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|parsed| parsed.with_timezone(&chrono::Utc))
+        };
+        let mut start: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut end: Option<chrono::DateTime<chrono::Utc>> = None;
+        for constraint in &self.temporal_constraints {
+            if let Some(parsed) = constraint.start.as_deref().and_then(parse) {
+                start = Some(start.map_or(parsed, |existing| existing.min(parsed)));
+            }
+            if let Some(parsed) = constraint.end.as_deref().and_then(parse) {
+                end = Some(end.map_or(parsed, |existing| existing.max(parsed)));
+            }
+        }
+        (start, end)
     }
 
     /// Verifier strictness derived from IR, replacing the implicit
@@ -510,10 +594,12 @@ pub fn query_ir_json_schema() -> Value {
             "target_types",
             "target_entities",
             "literal_constraints",
+            "temporal_constraints",
             "comparison",
             "document_focus",
             "conversation_refs",
             "needs_clarification",
+            "source_slice",
             "confidence"
         ],
         "properties": {
@@ -578,6 +664,19 @@ pub fn query_ir_json_schema() -> Value {
                     }
                 }
             },
+            "temporal_constraints": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["surface", "start", "end"],
+                    "properties": {
+                        "surface": { "type": "string" },
+                        "start": { "type": ["string", "null"] },
+                        "end": { "type": ["string", "null"] }
+                    }
+                }
+            },
             "comparison": {
                 "type": ["object", "null"],
                 "additionalProperties": false,
@@ -628,6 +727,22 @@ pub fn query_ir_json_schema() -> Value {
                     "suggestion": { "type": "string" }
                 }
             },
+            "source_slice": {
+                "type": ["object", "null"],
+                "additionalProperties": false,
+                "required": ["direction", "count"],
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["head", "tail", "all"]
+                    },
+                    "count": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "maximum": 30
+                    }
+                }
+            },
             "confidence": {
                 "type": "number",
                 "minimum": 0.0,
@@ -649,14 +764,16 @@ mod tests {
             language: QueryLanguage::Ru,
             target_types: vec!["procedure".to_string()],
             target_entities: vec![EntityMention {
-                label: "платежный модуль".to_string(),
+                label: "payment module".to_string(),
                 role: EntityRole::Subject,
             }],
             literal_constraints: vec![],
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: vec![],
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.9,
         };
         let json = serde_json::to_value(&ir).unwrap();
@@ -676,10 +793,12 @@ mod tests {
                 text: "/system/info".to_string(),
                 kind: LiteralKind::Path,
             }],
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: vec![],
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.95,
         };
         assert!(ir.is_exact_literal_technical());
@@ -696,13 +815,15 @@ mod tests {
             target_types: vec![],
             target_entities: vec![],
             literal_constraints: vec![],
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: vec![UnresolvedRef {
-                surface: "там".to_string(),
+                surface: "there".to_string(),
                 kind: ConversationRefKind::Deictic,
             }],
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.7,
         };
         assert!(ir.is_follow_up());
@@ -718,10 +839,12 @@ mod tests {
             target_types: vec![],
             target_entities: vec![],
             literal_constraints: vec![],
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: vec![],
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.4,
         };
         assert!(!ir.should_request_clarification());
@@ -736,6 +859,7 @@ mod tests {
             target_types: vec![],
             target_entities: vec![],
             literal_constraints: vec![],
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: vec![],
@@ -743,9 +867,288 @@ mod tests {
                 reason: ClarificationReason::AmbiguousTooShort,
                 suggestion: String::new(),
             }),
+            source_slice: None,
             confidence: 0.9,
         };
         assert!(ir.should_request_clarification());
+    }
+
+    #[test]
+    fn broad_descriptive_ir_requests_source_coverage() {
+        let ir = QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.8,
+        };
+        assert!(ir.requests_source_coverage_context());
+    }
+
+    #[test]
+    fn source_slice_round_trips_as_typed_ir() {
+        let ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec!["record".to_string()],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: Some(SourceSliceSpec {
+                direction: SourceSliceDirection::Tail,
+                count: Some(20),
+            }),
+            confidence: 0.86,
+        };
+
+        let json = serde_json::to_value(&ir).unwrap();
+        let parsed: QueryIR = serde_json::from_value(json).unwrap();
+
+        assert!(parsed.requests_source_slice_context());
+        assert_eq!(parsed.source_slice, ir.source_slice);
+    }
+
+    #[test]
+    fn resolved_temporal_bounds_aggregates_min_start_and_max_end() {
+        let ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: vec![
+                TemporalConstraint {
+                    surface: "window-A".to_string(),
+                    start: Some("2026-03-01T00:00:00Z".to_string()),
+                    end: Some("2026-03-31T23:59:59Z".to_string()),
+                },
+                TemporalConstraint {
+                    surface: "window-B".to_string(),
+                    start: Some("2026-02-01T00:00:00Z".to_string()),
+                    end: Some("2026-02-28T23:59:59Z".to_string()),
+                },
+            ],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.9,
+        };
+
+        let (start, end) = ir.resolved_temporal_bounds();
+        let start = start.expect("min start");
+        let end = end.expect("max end");
+        assert_eq!(start.to_rfc3339(), "2026-02-01T00:00:00+00:00");
+        assert_eq!(end.to_rfc3339(), "2026-03-31T23:59:59+00:00");
+    }
+
+    #[test]
+    fn resolved_temporal_bounds_returns_none_when_constraints_empty() {
+        let ir = QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: vec![],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.5,
+        };
+
+        assert_eq!(ir.resolved_temporal_bounds(), (None, None));
+    }
+
+    #[test]
+    fn resolved_temporal_bounds_returns_only_start_when_only_start_provided() {
+        let ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: vec![TemporalConstraint {
+                surface: "window-half-open".to_string(),
+                start: Some("2026-04-01T00:00:00Z".to_string()),
+                end: None,
+            }],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.7,
+        };
+        let (start, end) = ir.resolved_temporal_bounds();
+        assert!(start.is_some());
+        assert_eq!(end, None);
+        assert_eq!(start.unwrap().to_rfc3339(), "2026-04-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn resolved_temporal_bounds_returns_only_end_when_only_end_provided() {
+        let ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: vec![TemporalConstraint {
+                surface: "window-half-closed".to_string(),
+                start: None,
+                end: Some("2026-04-30T23:59:59Z".to_string()),
+            }],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.7,
+        };
+        let (start, end) = ir.resolved_temporal_bounds();
+        assert_eq!(start, None);
+        assert!(end.is_some());
+        assert_eq!(end.unwrap().to_rfc3339(), "2026-04-30T23:59:59+00:00");
+    }
+
+    #[test]
+    fn resolved_temporal_bounds_aggregates_parseable_when_mixed_with_unparseable() {
+        let ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: vec![
+                TemporalConstraint {
+                    surface: "window-good".to_string(),
+                    start: Some("2026-05-01T00:00:00Z".to_string()),
+                    end: Some("2026-05-31T23:59:59Z".to_string()),
+                },
+                TemporalConstraint {
+                    surface: "window-bad".to_string(),
+                    start: Some("not a date".to_string()),
+                    end: Some("also not a date".to_string()),
+                },
+            ],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.9,
+        };
+        let (start, end) = ir.resolved_temporal_bounds();
+        // Only the parseable surface contributes; the broken one is silently skipped.
+        assert_eq!(start.unwrap().to_rfc3339(), "2026-05-01T00:00:00+00:00");
+        assert_eq!(end.unwrap().to_rfc3339(), "2026-05-31T23:59:59+00:00");
+    }
+
+    #[test]
+    fn resolved_temporal_bounds_skips_unparseable_rfc3339_surfaces() {
+        let ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: vec![TemporalConstraint {
+                surface: "later".to_string(),
+                start: Some("not a date".to_string()),
+                end: None,
+            }],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.4,
+        };
+
+        assert_eq!(ir.resolved_temporal_bounds(), (None, None));
+    }
+
+    #[test]
+    fn temporal_constraints_round_trip_as_typed_ir() {
+        let ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec!["record".to_string()],
+            target_entities: vec![],
+            literal_constraints: vec![],
+            temporal_constraints: vec![TemporalConstraint {
+                surface: "period 2026-03".to_string(),
+                start: Some("2026-03-01T00:00:00Z".to_string()),
+                end: Some("2026-04-01T00:00:00Z".to_string()),
+            }],
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.86,
+        };
+
+        let json = serde_json::to_value(&ir).unwrap();
+        let parsed: QueryIR = serde_json::from_value(json).unwrap();
+
+        assert_eq!(parsed.temporal_constraints, ir.temporal_constraints);
+    }
+
+    #[test]
+    fn exact_and_follow_up_ir_do_not_request_source_coverage() {
+        let exact_ir = QueryIR {
+            act: QueryAct::RetrieveValue,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![],
+            target_entities: vec![],
+            literal_constraints: vec![LiteralSpan {
+                text: "DATABASE_URL".to_string(),
+                kind: LiteralKind::Identifier,
+            }],
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: vec![],
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 0.8,
+        };
+        let follow_up_ir = QueryIR {
+            act: QueryAct::Describe,
+            conversation_refs: vec![UnresolvedRef {
+                surface: "that".to_string(),
+                kind: ConversationRefKind::Deictic,
+            }],
+            ..exact_ir.clone()
+        };
+        assert!(!exact_ir.requests_source_coverage_context());
+        assert!(!follow_up_ir.requests_source_coverage_context());
     }
 
     #[test]
@@ -759,10 +1162,12 @@ mod tests {
             "target_types",
             "target_entities",
             "literal_constraints",
+            "temporal_constraints",
             "comparison",
             "document_focus",
             "conversation_refs",
             "needs_clarification",
+            "source_slice",
             "confidence",
         ] {
             assert!(required.iter().any(|value| value == field), "schema should require `{field}`");
@@ -770,22 +1175,10 @@ mod tests {
     }
 }
 
-/// Bump when the IR schema changes incompatibly — callers key cached IR
-/// on this so stale rows are automatically ignored after a schema upgrade.
-///
-/// v3 is a cache-invalidation bump: the IR JSON shape is unchanged, but
-/// the compiler now repairs stateless `follow_up` outputs that carry an
-/// explicit target. Rows compiled under v2 may incorrectly route a
-/// standalone short question into the tool-loop path.
-///
-/// v2 was a cache-invalidation bump: the IR JSON shape is unchanged, but
-/// 0.3.1 changes how downstream consolidation consumes `document_focus`
-/// and widens the winner pack budget (`FOCUSED_WINNER_MAX_CHUNKS = 16`).
-/// Rows compiled under v1 semantics are treated as stale so retrieval
-/// always sees IR the current pipeline is calibrated against. The bump
-/// is zero-downtime — `get_query_ir_cache` filters by this version, so
-/// stale rows simply miss the cache and recompile on demand.
-pub const QUERY_IR_SCHEMA_VERSION: u16 = 3;
+/// Canonical QueryIR cache discriminator. When compiler semantics change,
+/// obsolete cache rows are discarded instead of read through compatibility
+/// aliases or parallel cache generations.
+pub const QUERY_IR_SCHEMA_VERSION: u16 = 6;
 
 /// Maximum age of a Postgres-tier `query_ir_cache` row before it is
 /// treated as a miss. Redis already holds its own 24h hot tier; the
@@ -843,10 +1236,12 @@ mod validation_tests {
             target_types: Vec::new(),
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: Vec::new(),
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.9,
         }
     }

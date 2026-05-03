@@ -23,7 +23,6 @@ use crate::{
         graph::identity::normalize_graph_identity_component,
         query::execution::{
             explicit_document_reference_literals, normalized_document_target_candidates,
-            question_asks_table_aggregation,
         },
     },
     shared::extraction::table_summary::is_table_summary_text,
@@ -59,7 +58,8 @@ pub(crate) fn build_prepared_segment_references(
         [literal] => Some(literal.as_str()),
         _ => None,
     };
-    let table_aggregation = question_asks_table_aggregation(query_text);
+    let _ = query_text;
+    let table_aggregation = false;
     let latest_revision_by_document = latest_block_revision_by_document(blocks);
     let latest_revision_has_table_analytics =
         latest_revision_has_table_analytics(blocks, &latest_revision_by_document);
@@ -305,7 +305,7 @@ fn prepared_segment_kind_priority(
         "heading" | "endpoint_block" => 4,
         "paragraph" | "code_block" | "table_row" => 3,
         "list_item" | "table" => 2,
-        "quote_block" | "metadata_block" => 1,
+        "quote_block" | "metadata_block" | "source_profile" | "source_unit" => 1,
         _ => 0,
     }
 }

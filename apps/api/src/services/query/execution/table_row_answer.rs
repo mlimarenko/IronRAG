@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use uuid::Uuid;
 
 use crate::domains::query_ir::{QueryAct, QueryIR};
@@ -184,28 +182,15 @@ fn build_table_value_inventory_answer(rows: &[ParsedTableRow]) -> Option<String>
 ///
 /// The canonical signal is the compiled IR: an `Enumerate` act scoped
 /// to a `table_row` target type means "list values from this table".
-/// When IR is not available we fall back to the previous 10-marker
-/// trigger list so older callers keep working unchanged.
 pub(crate) fn question_asks_table_value_inventory(question: &str, ir: Option<&QueryIR>) -> bool {
-    if let Some(ir) = ir {
-        return matches!(ir.act, QueryAct::Enumerate)
-            && ir.target_types.iter().any(|tag| tag == "table_row");
+    let _ = question;
+    if let Some(ir) = ir
+        && matches!(ir.act, QueryAct::Enumerate)
+        && ir.target_types.iter().any(|tag| tag == "table_row")
+    {
+        return true;
     }
-    let lowered = question.to_lowercase();
-    [
-        "какие значения",
-        "какие данные",
-        "какие строки",
-        "покажи значения",
-        "что за значения",
-        "what values",
-        "which values",
-        "list values",
-        "show values",
-        "show rows",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
+    false
 }
 
 fn best_matching_table_row<'a>(
@@ -256,44 +241,7 @@ fn best_matching_table_row<'a>(
 }
 
 fn requested_table_headers(question: &str, row: &ParsedTableRow) -> Vec<String> {
-    const HEADER_MARKERS: &[(&[&str], &[&str])] = &[
-        (&["должност", "job title", "position", "role"], &["job title"]),
-        (&["стран", "country"], &["country"]),
-        (&["город", "city"], &["city"]),
-        (&["компан", "company"], &["company"]),
-        (&["отрасл", "индустр", "industry"], &["industry"]),
-        (&["цен", "price"], &["price"]),
-        (&["stock", "остат", "inventory"], &["stock"]),
-        (&["сотруд", "employee", "employees", "headcount"], &["number of employees"]),
-        (&["availability", "налич", "доступ"], &["availability"]),
-        (&["source", "источ"], &["source"]),
-        (&["deal stage", "stage", "этап", "стад"], &["deal stage"]),
-        (&["email", "почт"], &["email", "email 1", "email 2"]),
-        (&["phone", "телефон"], &["phone", "phone 1", "phone 2"]),
-    ];
-
     let lowered = question.to_lowercase();
-    let available_headers =
-        row.fields.iter().map(|(header, _)| normalize_table_header(header)).collect::<HashSet<_>>();
-    let mut requested = Vec::new();
-
-    for (markers, aliases) in HEADER_MARKERS {
-        if !markers.iter().any(|marker| lowered.contains(marker)) {
-            continue;
-        }
-        for alias in *aliases {
-            let normalized = normalize_table_header(alias);
-            if available_headers.contains(&normalized) && !requested.contains(&normalized) {
-                requested.push(normalized);
-                break;
-            }
-        }
-    }
-
-    if !requested.is_empty() {
-        return requested;
-    }
-
     row.fields
         .iter()
         .map(|(header, _)| normalize_table_header(header))

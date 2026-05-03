@@ -1,4 +1,6 @@
-use crate::shared::extraction::text_render::normalize_for_structured_preparation;
+use crate::shared::extraction::{
+    text_quality::assess_text_quality, text_render::normalize_for_structured_preparation,
+};
 
 use super::*;
 
@@ -41,7 +43,7 @@ pub(super) fn normalize_extracted_content(
         normalized_text,
         normalization_status,
         normalization_profile,
-        ocr_source: (file_kind == UploadFileKind::Image).then_some("vision_llm".to_string()),
+        ocr_source: None,
         structure_hints: pre_structuring.structure_hints,
     }
 }
@@ -51,11 +53,16 @@ pub(super) fn with_extraction_quality_markers(
     normalized: &NormalizedExtractedContent,
     warning_count: usize,
     provider_kind: Option<&str>,
+    recognition_profile: RecognitionProfile,
 ) -> serde_json::Value {
     let mut source_map = match source_map {
         serde_json::Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
+    let recognition_ocr_source = (recognition_profile.capability
+        == RecognitionCapability::ImageOcr)
+        .then(|| recognition_engine_ocr_source(recognition_profile.engine.as_str()));
+    let text_quality = assess_text_quality(&normalized.normalized_text);
     source_map.insert(
         EXTRACTION_QUALITY_KEY.to_string(),
         serde_json::json!({
@@ -64,11 +71,18 @@ pub(super) fn with_extraction_quality_markers(
             "ocr_source": normalized
                 .ocr_source
                 .as_deref()
+                .or(recognition_ocr_source.as_deref())
                 .or_else(|| provider_kind.map(|_| "vision_llm")),
             "warning_count": warning_count,
+            "recognition_engine": recognition_profile.engine.as_str(),
+            "recognition_capability": recognition_profile.capability.as_str(),
+            "structure_tier": recognition_profile.structure_tier.as_str(),
+            "text_score": text_quality.score,
+            "text_low_confidence": text_quality.low_confidence,
+            "text_reasons": text_quality.reasons,
         }),
     );
-    serde_json::Value::Object(source_map)
+    with_recognition_source_map(serde_json::Value::Object(source_map), recognition_profile)
 }
 
 fn normalize_image_ocr_text(content_text: &str) -> String {

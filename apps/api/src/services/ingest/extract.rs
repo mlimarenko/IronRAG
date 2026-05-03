@@ -483,16 +483,16 @@ mod tests {
         let candidates = vec![NewNodeCandidate {
             canonical_key: String::new(),
             node_kind: "entity".to_string(),
-            display_label: "Первый печатный двор".to_string(),
+            display_label: "Acme Print House".to_string(),
             summary: None,
         }];
 
         let prepared = prepare_materialized_node_candidates(&candidates);
 
         assert_eq!(prepared.len(), 1);
-        assert_eq!(prepared[0].canonical_key, "entity:первый_печатный_двор");
+        assert_eq!(prepared[0].canonical_key, "entity:acme_print_house");
         assert_eq!(prepared[0].node_kind, "entity");
-        assert_eq!(prepared[0].display_label, "Первый печатный двор");
+        assert_eq!(prepared[0].display_label, "Acme Print House");
     }
 
     #[test]
@@ -501,13 +501,13 @@ mod tests {
             NewNodeCandidate {
                 canonical_key: String::new(),
                 node_kind: "entity".to_string(),
-                display_label: "Первый печатный двор".to_string(),
+                display_label: "Acme Print House".to_string(),
                 summary: None,
             },
             NewNodeCandidate {
                 canonical_key: String::new(),
                 node_kind: "topic".to_string(),
-                display_label: "Касса".to_string(),
+                display_label: "Register".to_string(),
                 summary: None,
             },
         ]);
@@ -515,18 +515,18 @@ mod tests {
             NewEdgeCandidate {
                 canonical_key: String::new(),
                 edge_kind: "mentions".to_string(),
-                from_display_label: "Первый печатный двор".to_string(),
+                from_display_label: "Acme Print House".to_string(),
                 from_canonical_key: String::new(),
-                to_display_label: "Касса".to_string(),
+                to_display_label: "Register".to_string(),
                 to_canonical_key: String::new(),
                 summary: None,
             },
             NewEdgeCandidate {
                 canonical_key: String::new(),
                 edge_kind: "   ".to_string(),
-                from_display_label: "Первый печатный двор".to_string(),
+                from_display_label: "Acme Print House".to_string(),
                 from_canonical_key: String::new(),
-                to_display_label: "Касса".to_string(),
+                to_display_label: "Register".to_string(),
                 to_canonical_key: String::new(),
                 summary: None,
             },
@@ -537,11 +537,11 @@ mod tests {
         assert_eq!(prepared.len(), 1);
         assert_eq!(
             prepared[0].canonical_key,
-            "entity:первый_печатный_двор--mentions--concept:касса"
+            "entity:acme_print_house--mentions--concept:register"
         );
         assert_eq!(prepared[0].edge_kind, "mentions");
-        assert_eq!(prepared[0].from_canonical_key, "entity:первый_печатный_двор");
-        assert_eq!(prepared[0].to_canonical_key, "concept:касса");
+        assert_eq!(prepared[0].from_canonical_key, "entity:acme_print_house");
+        assert_eq!(prepared[0].to_canonical_key, "concept:register");
     }
 
     #[test]
@@ -550,19 +550,19 @@ mod tests {
             NewNodeCandidate {
                 canonical_key: String::new(),
                 node_kind: "topic".to_string(),
-                display_label: "Касса".to_string(),
+                display_label: "Register".to_string(),
                 summary: None,
             },
             NewNodeCandidate {
                 canonical_key: String::new(),
                 node_kind: "entity".to_string(),
-                display_label: "Касса".to_string(),
+                display_label: "Register".to_string(),
                 summary: None,
             },
         ]);
 
         assert_eq!(prepared.len(), 2);
-        assert!(prepared.iter().all(|candidate| candidate.canonical_key == "entity:касса"));
+        assert!(prepared.iter().all(|candidate| candidate.canonical_key == "entity:register"));
         assert!(prepared.iter().all(|candidate| candidate.node_kind == "entity"));
     }
 }

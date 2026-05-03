@@ -3,7 +3,11 @@ use std::sync::Mutex;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::parse::{normalize_graph_extraction_output, parse_graph_extraction_output};
+use super::graph_extraction_cache_hash;
+use super::parse::{
+    normalize_graph_extraction_output, parse_graph_extraction_output,
+    sanitize_graph_extraction_candidate_set,
+};
 use super::prompt::{
     GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES, build_graph_extraction_prompt,
     build_graph_extraction_prompt_plan, build_graph_extraction_prompt_preview,
@@ -232,6 +236,81 @@ fn response_format_enum_matches_canonical_relation_catalog() {
 }
 
 #[test]
+fn graph_cache_hash_tracks_provider_contract_without_revision_noise() {
+    let binding = sample_runtime_binding();
+    let request = sample_request();
+    let base_prompt = build_graph_extraction_prompt_plan(
+        &request,
+        GraphExtractionPromptVariant::Initial,
+        None,
+        None,
+        None,
+        256 * 1024,
+    )
+    .prompt;
+    let base_hash = graph_extraction_cache_hash(&base_prompt, &binding);
+
+    let mut same_contract = request.clone();
+    same_contract.revision_id = Some(uuid::Uuid::now_v7());
+    same_contract.activated_by_attempt_id = Some(uuid::Uuid::now_v7());
+    same_contract.document.id = uuid::Uuid::now_v7();
+    same_contract.document.active_revision_id = Some(uuid::Uuid::now_v7());
+    let same_prompt = build_graph_extraction_prompt_plan(
+        &same_contract,
+        GraphExtractionPromptVariant::Initial,
+        None,
+        None,
+        None,
+        256 * 1024,
+    )
+    .prompt;
+    let mut same_binding = binding.clone();
+    same_binding.binding_id = uuid::Uuid::now_v7();
+    same_binding.provider_catalog_id = uuid::Uuid::now_v7();
+    same_binding.model_catalog_id = uuid::Uuid::now_v7();
+
+    assert_eq!(base_hash, graph_extraction_cache_hash(&same_prompt, &same_binding));
+
+    let mut different_prompt = request.clone();
+    different_prompt.library_extraction_prompt = Some("Prefer document-local terms.".to_string());
+    let different_prompt = build_graph_extraction_prompt_plan(
+        &different_prompt,
+        GraphExtractionPromptVariant::Initial,
+        None,
+        None,
+        None,
+        256 * 1024,
+    )
+    .prompt;
+    assert_ne!(base_hash, graph_extraction_cache_hash(&different_prompt, &binding));
+
+    let mut different_hints = request.clone();
+    different_hints.sub_type_hints = GraphExtractionSubTypeHints {
+        by_node_type: vec![GraphExtractionSubTypeHintGroup {
+            node_type: "artifact".to_string(),
+            entries: vec![GraphExtractionSubTypeHintEntry {
+                sub_type: "service".to_string(),
+                occurrences: 12,
+            }],
+        }],
+    };
+    let different_hints_prompt = build_graph_extraction_prompt_plan(
+        &different_hints,
+        GraphExtractionPromptVariant::Initial,
+        None,
+        None,
+        None,
+        256 * 1024,
+    )
+    .prompt;
+    assert_ne!(base_hash, graph_extraction_cache_hash(&different_hints_prompt, &binding));
+
+    let mut different_model = binding.clone();
+    different_model.model_name = "gpt-5.4".to_string();
+    assert_ne!(base_hash, graph_extraction_cache_hash(&base_prompt, &different_model));
+}
+
+#[test]
 fn deepseek_uses_json_object_response_format() {
     let response_format = graph_extraction_response_format("deepseek");
 
@@ -248,7 +327,7 @@ fn normalizes_json_and_string_candidates() {
         r#"{
           "entities": [
             "Annual report",
-            { "label": "OpenAI", "node_type": "topic", "aliases": ["Open AI"], "summary": "provider" }
+            { "label": "OpenAI", "node_type": "concept", "aliases": ["Open AI"], "summary": "provider" }
           ],
           "relations": [
             { "source": "Annual report", "target": "OpenAI", "type": "mentions" }
@@ -261,26 +340,6 @@ fn normalizes_json_and_string_candidates() {
     assert_eq!(normalized.entities[0].label, "Annual report");
     assert_eq!(normalized.entities[1].node_type, RuntimeNodeType::Concept);
     assert_eq!(normalized.relations[0].relation_type, "mentions");
-}
-
-#[test]
-fn accepts_expanded_node_type_values() {
-    let normalized = parse_graph_extraction_output(
-        r#"{
-          "entities": [
-            { "label": "Valid", "node_type": "topic", "aliases": [], "summary": "" },
-            { "label": "Google", "node_type": "organization", "aliases": [], "summary": "" }
-          ],
-          "relations": []
-        }"#,
-    )
-    .expect("parse graph extraction");
-
-    assert_eq!(normalized.entities.len(), 2);
-    assert_eq!(normalized.entities[0].label, "Valid");
-    assert_eq!(normalized.entities[0].node_type, RuntimeNodeType::Concept);
-    assert_eq!(normalized.entities[1].label, "Google");
-    assert_eq!(normalized.entities[1].node_type, RuntimeNodeType::Organization);
 }
 
 #[test]
@@ -354,7 +413,7 @@ fn drops_non_canonical_non_ascii_relation_types_at_parse_time() {
         r#"{
           "entities": [],
           "relations": [
-            { "source_label": "Alpha", "target_label": "Beta", "relation_type": "включает" },
+            { "source_label": "Alpha", "target_label": "Beta", "relation_type": "περιέχει" },
             { "source_label": "Alpha", "target_label": "Beta", "relation_type": "supports" }
           ]
         }"#,
@@ -415,6 +474,81 @@ fn rejects_named_sections_without_outer_object() {
     .expect_err("named sections must fail");
 
     assert!(error.parse_error.contains("malformed_output"));
+}
+
+#[test]
+fn sanitizes_low_confidence_graph_candidates_from_unstable_source_text() {
+    let candidates = GraphExtractionCandidateSet {
+        entities: vec![GraphEntityCandidate {
+            label: "aBcD3eFgH".to_string(),
+            node_type: RuntimeNodeType::Entity,
+            sub_type: None,
+            aliases: Vec::new(),
+            summary: Some("qWeR7tYuI zXcV9bNmP lMnO4pQrS tUvW6xYzA".to_string()),
+        }],
+        relations: vec![GraphRelationCandidate {
+            source_label: "aBcD3eFgH".to_string(),
+            target_label: "qWeR7tYuI".to_string(),
+            relation_type: "mentions".to_string(),
+            summary: Some("zXcV9bNmP lMnO4pQrS tUvW6xYzA aBcD3eFgH".to_string()),
+        }],
+    };
+
+    let sanitized = sanitize_graph_extraction_candidate_set(
+        candidates,
+        "aBcD3eFgH qWeR7tYuI zXcV9bNmP lMnO4pQrS tUvW6xYzA",
+    );
+
+    assert!(sanitized.entities.is_empty());
+    assert!(sanitized.relations.is_empty());
+}
+
+#[test]
+fn sanitizes_unstable_graph_labels_without_dropping_camel_case_labels() {
+    let candidates = GraphExtractionCandidateSet {
+        entities: vec![
+            GraphEntityCandidate {
+                label: "qWeR7tYuI".to_string(),
+                node_type: RuntimeNodeType::Entity,
+                sub_type: None,
+                aliases: Vec::new(),
+                summary: None,
+            },
+            GraphEntityCandidate {
+                label: "renderHTMLNode".to_string(),
+                node_type: RuntimeNodeType::Entity,
+                sub_type: None,
+                aliases: vec!["parseHTTPResponse".to_string()],
+                summary: None,
+            },
+        ],
+        relations: vec![
+            GraphRelationCandidate {
+                source_label: "qWeR7tYuI".to_string(),
+                target_label: "renderHTMLNode".to_string(),
+                relation_type: "mentions".to_string(),
+                summary: None,
+            },
+            GraphRelationCandidate {
+                source_label: "renderHTMLNode".to_string(),
+                target_label: "parseHTTPResponse".to_string(),
+                relation_type: "mentions".to_string(),
+                summary: None,
+            },
+        ],
+    };
+
+    let sanitized = sanitize_graph_extraction_candidate_set(
+        candidates,
+        "The renderHTMLNode utility calls parseHTTPResponse while building a response view.",
+    );
+
+    assert_eq!(sanitized.entities.len(), 1);
+    assert_eq!(sanitized.entities[0].label, "renderHTMLNode");
+    assert_eq!(sanitized.entities[0].aliases, vec!["parseHTTPResponse"]);
+    assert_eq!(sanitized.relations.len(), 1);
+    assert_eq!(sanitized.relations[0].source_label, "renderHTMLNode");
+    assert_eq!(sanitized.relations[0].target_label, "parseHTTPResponse");
 }
 
 #[tokio::test]

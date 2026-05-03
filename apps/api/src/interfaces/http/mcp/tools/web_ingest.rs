@@ -22,7 +22,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Submit a web ingest run for one seed URL. Default to mode single_page so only the submitted page is processed unless recursive_crawl is explicitly requested.",
             input_schema: json!({
                 "type": "object",
-                "required": ["library", "seedUrl", "mode"],
+                "required": ["library", "seedUrl", "mode", "urlFilter"],
                 "properties": {
                     "library": {
                         "type": "string",
@@ -53,19 +53,29 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                         "minimum": 1,
                         "description": "Optional crawl budget."
                     },
-                    "extraIgnorePatterns": {
-                        "type": "array",
-                        "description": "Optional URL ignore patterns added to this run on top of the target library web ingest policy.",
-                        "items": {
-                            "type": "object",
-                            "required": ["kind", "value"],
-                            "properties": {
-                                "kind": {
-                                    "type": "string",
-                                    "enum": ["url_prefix", "path_prefix", "glob"]
-                                },
-                                "value": {
-                                    "type": "string"
+                    "urlFilter": {
+                        "type": "object",
+                        "required": ["mode", "patterns"],
+                        "description": "Complete URL filtering snapshot for this run. blocklist excludes matching URLs; allowlist processes only matching URLs.",
+                        "properties": {
+                            "mode": {
+                                "type": "string",
+                                "enum": ["blocklist", "allowlist"]
+                            },
+                            "patterns": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["kind", "value"],
+                                    "properties": {
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": ["url_prefix", "path_prefix", "glob"]
+                                        },
+                                        "value": {
+                                            "type": "string"
+                                        }
+                                    }
                                 }
                             }
                         }

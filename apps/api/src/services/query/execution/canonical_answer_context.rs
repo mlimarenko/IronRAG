@@ -4,13 +4,16 @@ use anyhow::Context;
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState, infra::arangodb::document_store::KnowledgeDocumentRow,
+    app::state::AppState,
+    domains::query_ir::QueryIR,
+    infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
     shared::extraction::text_render::repair_technical_layout_noise,
 };
 
 use super::{
-    CanonicalAnswerEvidence, RuntimeMatchedChunk, build_table_row_grounded_answer,
-    explicit_target_document_ids_from_values, focused_answer_document_id, focused_excerpt_for,
+    CanonicalAnswerEvidence, RuntimeChunkScoreKind, RuntimeMatchedChunk,
+    build_table_row_grounded_answer, canonical_document_revision_id,
+    explicit_target_document_ids_from_values, focused_excerpt_for,
     load_initial_table_rows_for_documents, load_table_rows_for_documents,
     load_table_summary_chunks_for_documents, map_chunk_hit,
     merge_canonical_table_aggregation_chunks, merge_chunks, question_asks_table_aggregation,
@@ -21,6 +24,11 @@ use super::{
 
 const MAX_DIRECT_TABLE_ANALYTICS_ROWS: usize = 2_000;
 const MAX_CANONICAL_ANSWER_TECHNICAL_FACTS: usize = 24;
+const SOURCE_COVERAGE_DOCUMENT_LIMIT: usize = 3;
+const SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT: usize = 8;
+const SOURCE_PROFILE_SCORE: f32 = 1.25;
+const SOURCE_COVERAGE_SCORE_BASE: f32 = 0.95;
+const SOURCE_COVERAGE_SCORE_STEP: f32 = 0.001;
 
 pub(crate) async fn load_direct_targeted_table_answer(
     state: &AppState,
@@ -81,8 +89,10 @@ pub(crate) async fn load_direct_targeted_table_answer(
             document_id,
             revision_id: block.revision_id,
             chunk_index: block.ordinal,
+            chunk_kind: Some(block.block_kind.clone()),
             document_label: document_label.clone(),
             excerpt: focused_excerpt_for(&block.normalized_text, &plan_keywords, 280),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(10_000.0 - ordinal as f32),
             source_text: repair_technical_layout_noise(&block.normalized_text),
         })
@@ -100,6 +110,7 @@ pub(crate) async fn load_canonical_answer_chunks(
     state: &AppState,
     execution_id: Uuid,
     question: &str,
+    query_ir: &QueryIR,
     fallback_chunks: &[RuntimeMatchedChunk],
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
@@ -116,12 +127,10 @@ pub(crate) async fn load_canonical_answer_chunks(
             .map(move |value| (document.document_id, value))
         }),
     );
-    let focused_document_id = if explicit_targeted_document_ids.len() == 1 {
-        explicit_targeted_document_ids.iter().next().copied()
-    } else {
-        focused_answer_document_id(question, fallback_chunks)
-    };
-    let aggregation_summary_chunks = if question_asks_table_aggregation(question)
+    let focused_document_id = (explicit_targeted_document_ids.len() == 1)
+        .then(|| explicit_targeted_document_ids.iter().next().copied())
+        .flatten();
+    let aggregation_summary_chunks = if question_asks_table_aggregation(question, Some(query_ir))
         && let Some(document_id) = focused_document_id
     {
         let plan_keywords = crate::services::query::planner::extract_keywords(question);
@@ -138,7 +147,7 @@ pub(crate) async fn load_canonical_answer_chunks(
     } else {
         Vec::new()
     };
-    let aggregation_row_chunks = if question_asks_table_aggregation(question)
+    let aggregation_row_chunks = if question_asks_table_aggregation(question, Some(query_ir))
         && let Some(document_id) = focused_document_id
     {
         let plan_keywords = crate::services::query::planner::extract_keywords(question);
@@ -200,7 +209,15 @@ pub(crate) async fn load_canonical_answer_chunks(
             aggregate_chunks.sort_by(score_desc_chunks);
             return Ok(aggregate_chunks);
         }
-        return Ok(fallback_chunks.to_vec());
+        return augment_with_source_coverage_chunks(
+            state,
+            query_ir,
+            focused_document_id,
+            document_index,
+            &crate::services::query::planner::extract_keywords(question),
+            fallback_chunks.to_vec(),
+        )
+        .await;
     };
     let chunk_ids =
         bundle_refs.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>();
@@ -214,7 +231,15 @@ pub(crate) async fn load_canonical_answer_chunks(
             aggregate_chunks.sort_by(score_desc_chunks);
             return Ok(aggregate_chunks);
         }
-        return Ok(fallback_chunks.to_vec());
+        return augment_with_source_coverage_chunks(
+            state,
+            query_ir,
+            focused_document_id,
+            document_index,
+            &crate::services::query::planner::extract_keywords(question),
+            fallback_chunks.to_vec(),
+        )
+        .await;
     }
     let plan_keywords = crate::services::query::planner::extract_keywords(question);
     let rows = state
@@ -226,7 +251,8 @@ pub(crate) async fn load_canonical_answer_chunks(
         .into_iter()
         .filter_map(|chunk| map_chunk_hit(chunk, 1.0, document_index, &plan_keywords))
         .collect();
-    if question_asks_table_aggregation(question)
+    apply_runtime_chunk_overlays(&mut chunks, fallback_chunks);
+    if question_asks_table_aggregation(question, Some(query_ir))
         && let Some(document_id) = focused_document_id
     {
         chunks.retain(|chunk| chunk.document_id == document_id);
@@ -238,10 +264,20 @@ pub(crate) async fn load_canonical_answer_chunks(
         );
     }
     if chunks.is_empty() {
-        if question_asks_table_aggregation(question) && focused_document_id.is_some() {
+        if question_asks_table_aggregation(question, Some(query_ir))
+            && focused_document_id.is_some()
+        {
             return Ok(Vec::new());
         }
-        return Ok(fallback_chunks.to_vec());
+        return augment_with_source_coverage_chunks(
+            state,
+            query_ir,
+            focused_document_id,
+            document_index,
+            &plan_keywords,
+            fallback_chunks.to_vec(),
+        )
+        .await;
     }
     if let Some(row_count) = requested_initial_table_row_count(question)
         && let Some(document_id) = focused_document_id
@@ -259,8 +295,240 @@ pub(crate) async fn load_canonical_answer_chunks(
         .context("failed to load focused initial table rows for canonical answer")?;
         chunks = merge_chunks(chunks, initial_rows, chunk_limit);
     }
+    chunks = augment_with_source_coverage_chunks(
+        state,
+        query_ir,
+        focused_document_id,
+        document_index,
+        &plan_keywords,
+        chunks,
+    )
+    .await?;
+    apply_runtime_chunk_overlays(&mut chunks, fallback_chunks);
     chunks.sort_by(score_desc_chunks);
     Ok(chunks)
+}
+
+pub(crate) fn apply_runtime_chunk_overlays(
+    chunks: &mut [RuntimeMatchedChunk],
+    runtime_chunks: &[RuntimeMatchedChunk],
+) {
+    let runtime_by_chunk_id =
+        runtime_chunks.iter().map(|chunk| (chunk.chunk_id, chunk)).collect::<HashMap<_, _>>();
+    for chunk in chunks {
+        let Some(runtime_chunk) = runtime_by_chunk_id.get(&chunk.chunk_id) else {
+            continue;
+        };
+        if runtime_chunk.score_kind == RuntimeChunkScoreKind::GraphEvidence {
+            chunk.score_kind = RuntimeChunkScoreKind::GraphEvidence;
+            if runtime_chunk.score.is_some() {
+                chunk.score = runtime_chunk.score;
+            }
+            if !runtime_chunk.source_text.trim().is_empty() {
+                chunk.source_text = runtime_chunk.source_text.clone();
+            }
+            if !runtime_chunk.excerpt.trim().is_empty() {
+                chunk.excerpt = runtime_chunk.excerpt.clone();
+            }
+            continue;
+        }
+        if runtime_chunk.score_kind != RuntimeChunkScoreKind::Relevance {
+            chunk.score_kind = runtime_chunk.score_kind;
+        }
+        if runtime_chunk.score.is_some() {
+            chunk.score = runtime_chunk.score;
+        }
+        if runtime_chunk.source_text.trim().chars().count()
+            > chunk.source_text.trim().chars().count()
+        {
+            chunk.source_text = runtime_chunk.source_text.clone();
+        }
+        if runtime_chunk.excerpt.trim().chars().count() > chunk.excerpt.trim().chars().count()
+            || runtime_chunk.score_kind != RuntimeChunkScoreKind::Relevance
+        {
+            chunk.excerpt = runtime_chunk.excerpt.clone();
+        }
+    }
+}
+
+async fn augment_with_source_coverage_chunks(
+    state: &AppState,
+    query_ir: &QueryIR,
+    focused_document_id: Option<Uuid>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    mut chunks: Vec<RuntimeMatchedChunk>,
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    if !query_ir.requests_source_coverage_context() {
+        return Ok(chunks);
+    }
+    let mut document_ids = Vec::<Uuid>::new();
+    let mut seen_document_ids = HashSet::<Uuid>::new();
+    if let Some(document_id) = focused_document_id
+        && seen_document_ids.insert(document_id)
+    {
+        document_ids.push(document_id);
+    }
+    for chunk in &chunks {
+        if document_ids.len() >= SOURCE_COVERAGE_DOCUMENT_LIMIT {
+            break;
+        }
+        if seen_document_ids.insert(chunk.document_id) {
+            document_ids.push(chunk.document_id);
+        }
+    }
+    if document_ids.is_empty() {
+        return Ok(chunks);
+    }
+
+    let mut seen_chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
+    let mut coverage_rank = 0_usize;
+    for document_id in document_ids {
+        let Some(document) = document_index.get(&document_id) else {
+            continue;
+        };
+        let Some(revision_id) = canonical_document_revision_id(document) else {
+            continue;
+        };
+        let rows =
+            state.arango_document_store.list_chunks_by_revision(revision_id).await.with_context(
+                || {
+                    format!(
+                        "failed to load source coverage chunks for document {} revision {}",
+                        document_id, revision_id
+                    )
+                },
+            )?;
+        for row in select_source_coverage_chunk_rows(rows, SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT) {
+            if !seen_chunk_ids.insert(row.chunk_id) {
+                continue;
+            }
+            let is_source_profile = is_source_profile_chunk(&row);
+            let score = if is_source_profile {
+                SOURCE_PROFILE_SCORE
+            } else {
+                SOURCE_COVERAGE_SCORE_BASE - coverage_rank as f32 * SOURCE_COVERAGE_SCORE_STEP
+            };
+            coverage_rank = coverage_rank.saturating_add(1);
+            if let Some(mut chunk) = map_chunk_hit(row, score, document_index, plan_keywords) {
+                chunk.score = Some(score);
+                chunks.push(chunk);
+            }
+        }
+    }
+    Ok(chunks)
+}
+
+fn select_source_coverage_chunk_rows(
+    mut rows: Vec<KnowledgeChunkRow>,
+    limit: usize,
+) -> Vec<KnowledgeChunkRow> {
+    if rows.len() <= limit {
+        return rows;
+    }
+    rows.sort_by(|left, right| {
+        left.chunk_index.cmp(&right.chunk_index).then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+
+    let mut selected = BTreeSet::<usize>::new();
+    for (index, row) in rows.iter().enumerate() {
+        if is_source_profile_chunk(row) {
+            selected.insert(index);
+        }
+    }
+    for index in 0..rows.len().min(2) {
+        selected.insert(index);
+    }
+    if rows.len() > 4 {
+        let middle = rows.len() / 2;
+        selected.insert(middle.saturating_sub(1));
+        selected.insert(middle);
+    }
+    if rows.len() > 2 {
+        selected.insert(rows.len() - 2);
+        selected.insert(rows.len() - 1);
+    }
+    if selected.len() < limit && rows.len() > 1 {
+        for slot in 0..limit {
+            let index = slot * (rows.len() - 1) / (limit - 1);
+            selected.insert(index);
+            if selected.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    selected.into_iter().take(limit).filter_map(|index| rows.get(index).cloned()).collect()
+}
+
+fn is_source_profile_chunk(row: &KnowledgeChunkRow) -> bool {
+    super::source_profile::is_source_profile_chunk_row(row)
+}
+
+#[cfg(test)]
+mod source_coverage_tests {
+    use super::*;
+
+    fn chunk_row(chunk_index: i32, text: &str) -> KnowledgeChunkRow {
+        let chunk_id = Uuid::now_v7();
+        KnowledgeChunkRow {
+            key: chunk_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            chunk_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index,
+            chunk_kind: if text.contains("[source_profile ") {
+                Some("source_profile".to_string())
+            } else {
+                Some("paragraph".to_string())
+            },
+            content_text: text.to_string(),
+            normalized_text: text.to_string(),
+            span_start: None,
+            span_end: None,
+            token_count: None,
+            support_block_ids: Vec::new(),
+            section_path: Vec::new(),
+            heading_trail: Vec::new(),
+            literal_digest: None,
+            chunk_state: "ready".to_string(),
+            text_generation: Some(1),
+            vector_generation: Some(1),
+            quality_score: Some(1.0),
+            window_text: None,
+            raptor_level: None,
+            occurred_at: None,
+            occurred_until: None,
+        }
+    }
+
+    #[test]
+    fn source_coverage_selection_keeps_profile_edges_and_middle() {
+        let rows = (0..10)
+            .map(|index| {
+                if index == 5 {
+                    chunk_row(index, "[source_profile source_format=record_jsonl unit_count=42]")
+                } else {
+                    chunk_row(index, &format!("chunk {index}"))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let selected = select_source_coverage_chunk_rows(rows, 8);
+        let selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
+
+        assert!(selected_indexes.contains(&0));
+        assert!(selected_indexes.contains(&1));
+        assert!(selected_indexes.contains(&4));
+        assert!(selected_indexes.contains(&5));
+        assert!(selected_indexes.contains(&8));
+        assert!(selected_indexes.contains(&9));
+        assert!(selected.iter().any(is_source_profile_chunk));
+    }
 }
 
 pub(crate) async fn load_canonical_answer_evidence(
@@ -392,71 +660,16 @@ pub(crate) fn selected_fact_ids_for_canonical_evidence(
     fact_ids
 }
 
-pub(crate) async fn search_community_summaries(
-    state: &AppState,
-    library_id: Uuid,
-    question: &str,
-    limit: usize,
-) -> Vec<(i32, String, String)> {
-    let communities = sqlx::query_as::<_, (i32, Option<String>, Vec<String>, i32)>(
-        "SELECT community_id, summary, top_entities, node_count
-         FROM runtime_graph_community
-         WHERE library_id = $1 AND summary IS NOT NULL
-         ORDER BY node_count DESC",
-    )
-    .bind(library_id)
-    .fetch_all(&state.persistence.postgres)
-    .await
-    .unwrap_or_default();
-
-    let question_lower = question.to_ascii_lowercase();
-    let question_words: Vec<&str> = question_lower.split_whitespace().collect();
-
-    let mut scored: Vec<_> = communities
-        .into_iter()
-        .filter_map(|(cid, summary, entities, _)| {
-            let summary = summary?;
-            let summary_lower = summary.to_ascii_lowercase();
-            let entity_text = entities.join(" ").to_ascii_lowercase();
-
-            let score: usize = question_words
-                .iter()
-                .filter(|w| {
-                    w.len() > 2 && (summary_lower.contains(**w) || entity_text.contains(**w))
-                })
-                .count();
-
-            if score > 0 { Some((score, cid, summary, entities.join(", "))) } else { None }
-        })
-        .collect();
-
-    scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-    scored.truncate(limit);
-
-    scored.into_iter().map(|(_, cid, summary, entities)| (cid, summary, entities)).collect()
-}
-
-pub(crate) fn format_community_context(matches: &[(i32, String, String)]) -> Option<String> {
-    if matches.is_empty() {
-        return None;
-    }
-    let lines: Vec<String> = matches
-        .iter()
-        .map(|(_, summary, entities)| format!("- {summary} (key entities: {entities})"))
-        .collect();
-    Some(format!("Knowledge graph communities:\n{}", lines.join("\n")))
-}
-
 pub(crate) fn build_canonical_answer_context(
     question: &str,
     query_ir: &crate::domains::query_ir::QueryIR,
     technical_literals_text: Option<&str>,
     evidence: &CanonicalAnswerEvidence,
     canonical_answer_chunks: &[RuntimeMatchedChunk],
-    fallback_context: &str,
-    community_context: Option<&str>,
+    graph_evidence_context_lines: &[String],
 ) -> String {
-    let focused_document_id = focused_answer_document_id(question, canonical_answer_chunks);
+    let focused_document_id =
+        explicit_canonical_context_document_id(question, canonical_answer_chunks);
     let focused_document_label = focused_document_id.and_then(|document_id| {
         canonical_answer_chunks
             .iter()
@@ -511,9 +724,15 @@ pub(crate) fn build_canonical_answer_context(
         );
     }
 
-    let table_summary_section = render_table_summary_chunk_section(question, &filtered_chunks);
-    let suppress_tabular_detail =
-        question_asks_table_aggregation(question) && !table_summary_section.is_empty();
+    let graph_evidence_section = render_graph_evidence_context_lines(graph_evidence_context_lines);
+    if !graph_evidence_section.is_empty() {
+        sections.push(graph_evidence_section);
+    }
+
+    let table_summary_section =
+        render_table_summary_chunk_section(question, Some(query_ir), &filtered_chunks);
+    let suppress_tabular_detail = question_asks_table_aggregation(question, Some(query_ir))
+        && !table_summary_section.is_empty();
     if !table_summary_section.is_empty() {
         sections.push(table_summary_section);
     }
@@ -526,14 +745,9 @@ pub(crate) fn build_canonical_answer_context(
         }
     }
 
-    if let Some(community_text) = community_context
-        && !community_text.is_empty()
-    {
-        sections.push(community_text.to_string());
-    }
-
     let prepared_segment_section = render_prepared_segment_section(
         question,
+        Some(query_ir),
         &filtered_structured_blocks,
         suppress_tabular_detail,
     );
@@ -551,10 +765,6 @@ pub(crate) fn build_canonical_answer_context(
         sections.push(chunk_section);
     }
 
-    if sections.is_empty() {
-        return fallback_context.trim().to_string();
-    }
-
     if let Some(bundle) = evidence.bundle.as_ref() {
         sections.insert(
             0,
@@ -566,4 +776,34 @@ pub(crate) fn build_canonical_answer_context(
     }
 
     sections.join("\n\n")
+}
+
+fn render_graph_evidence_context_lines(graph_evidence_context_lines: &[String]) -> String {
+    let mut lines = Vec::<String>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for line in graph_evidence_context_lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            lines.push(trimmed.to_string());
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("Retrieved graph evidence\n{}", lines.join("\n"))
+    }
+}
+
+fn explicit_canonical_context_document_id(
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<Uuid> {
+    let document_ids = explicit_target_document_ids_from_values(
+        question,
+        chunks.iter().map(|chunk| (chunk.document_id, chunk.document_label.as_str())),
+    );
+    (document_ids.len() == 1).then(|| document_ids.iter().next().copied()).flatten()
 }

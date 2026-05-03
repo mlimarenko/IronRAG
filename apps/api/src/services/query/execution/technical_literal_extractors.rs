@@ -113,7 +113,6 @@ pub(super) fn extract_protocol_literals(text: &str, limit: usize) -> Vec<String>
     }
     if lowered.contains("rest")
         || lowered.contains("restful api")
-        || lowered.contains("rest-интерфейс")
         || lowered.contains("rest interface")
     {
         push_unique_limited(&mut protocols, &mut seen, "REST".to_string(), limit);
@@ -138,23 +137,63 @@ pub(super) fn extract_http_methods(text: &str, limit: usize) -> Vec<String> {
 }
 
 fn looks_like_parameter_identifier(token: &str) -> bool {
-    if token.len() < 3 || token.len() > 64 || !token.is_ascii() {
+    if token.len() < 3 || token.len() > 160 || !token.is_ascii() {
         return false;
     }
     let Some(first) = token.chars().next() else {
         return false;
     };
-    if !first.is_ascii_lowercase() {
+    if !first.is_ascii_alphabetic() {
         return false;
     }
-    if !token.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+    if !token.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    if !token.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/')) {
+        return false;
+    }
+    if token.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-' | '/')) {
         return false;
     }
 
     token.contains('_')
-        || token.starts_with("page")
-        || token.starts_with("with")
-        || token.chars().skip(1).any(|ch| ch.is_ascii_uppercase())
+        || token.contains('-')
+        || token.contains('.')
+        || token.contains('/')
+        || has_internal_ascii_case_boundary(token)
+}
+
+fn has_internal_ascii_case_boundary(token: &str) -> bool {
+    let mut seen_lowercase = false;
+    for ch in token.chars() {
+        if ch.is_ascii_lowercase() {
+            seen_lowercase = true;
+        } else if ch.is_ascii_uppercase() && seen_lowercase {
+            return true;
+        }
+    }
+    false
+}
+
+fn looks_like_parameter_assignment_name(token: &str) -> bool {
+    if token.is_empty() || token.len() > 160 || !token.is_ascii() {
+        return false;
+    }
+    let Some(first) = token.chars().next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && token.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        && token.chars().any(|ch| ch.is_ascii_alphabetic())
+        && (token.chars().any(|ch| ch.is_ascii_lowercase())
+            || token.chars().any(|ch| matches!(ch, '_' | '-' | '.'))
+            || token.chars().any(|ch| ch.is_ascii_digit()))
+}
+
+fn clean_parameter_candidate(candidate: &str) -> &str {
+    trim_literal_token(candidate).trim_start_matches('?').trim_matches(|ch: char| {
+        matches!(ch, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}')
+    })
 }
 
 pub(super) fn extract_parameter_literals(text: &str, limit: usize) -> Vec<String> {
@@ -162,9 +201,26 @@ pub(super) fn extract_parameter_literals(text: &str, limit: usize) -> Vec<String
     let mut seen = HashSet::new();
 
     for token in text.split_whitespace() {
-        let cleaned = trim_literal_token(token)
-            .trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';' | '?' | '!'));
-        if looks_like_parameter_identifier(cleaned) {
+        let has_literal_marker =
+            token.contains('`') || token.starts_with('?') || token.contains('=');
+        let cleaned = trim_literal_token(token).trim_end_matches(|ch: char| {
+            matches!(ch, '.' | ':' | ';' | '?' | '!' | ',' | ')' | ']' | '}')
+        });
+        if let Some((name, value)) = cleaned.split_once('=') {
+            let name = clean_parameter_candidate(name);
+            if looks_like_parameter_assignment_name(name) {
+                push_unique_limited(&mut parameters, &mut seen, name.to_string(), limit);
+            }
+            let value = clean_parameter_candidate(value);
+            if looks_like_parameter_identifier(value) {
+                push_unique_limited(&mut parameters, &mut seen, value.to_string(), limit);
+            }
+            continue;
+        }
+        let cleaned = clean_parameter_candidate(cleaned);
+        if looks_like_parameter_identifier(cleaned)
+            || (has_literal_marker && looks_like_parameter_assignment_name(cleaned))
+        {
             push_unique_limited(&mut parameters, &mut seen, cleaned.to_string(), limit);
         }
     }

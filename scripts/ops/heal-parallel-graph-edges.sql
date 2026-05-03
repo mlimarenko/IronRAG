@@ -83,14 +83,6 @@ drop_summaries as (
        and s.target_kind = 'edge'
        and s.target_id = losers.loser_id
     returning 1
-),
-drop_vectors as (
-    delete from runtime_vector_target v
-     using losers
-     where v.library_id = losers.library_id
-       and v.target_kind = 'edge'
-       and v.target_id = losers.loser_id
-    returning 1
 )
 delete from runtime_graph_edge
  using losers

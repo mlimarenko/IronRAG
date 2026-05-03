@@ -16,6 +16,8 @@ pub enum StructuredBlockKind {
     EndpointBlock,
     QuoteBlock,
     MetadataBlock,
+    SourceProfile,
+    SourceUnit,
 }
 
 impl StructuredBlockKind {
@@ -31,6 +33,8 @@ impl StructuredBlockKind {
             Self::EndpointBlock => "endpoint_block",
             Self::QuoteBlock => "quote_block",
             Self::MetadataBlock => "metadata_block",
+            Self::SourceProfile => "source_profile",
+            Self::SourceUnit => "source_unit",
         }
     }
 }
@@ -49,6 +53,8 @@ impl std::str::FromStr for StructuredBlockKind {
             "endpoint_block" => Ok(Self::EndpointBlock),
             "quote_block" => Ok(Self::QuoteBlock),
             "metadata_block" => Ok(Self::MetadataBlock),
+            "source_profile" => Ok(Self::SourceProfile),
+            "source_unit" => Ok(Self::SourceUnit),
             other => Err(format!("unsupported structured block kind: {other}")),
         }
     }
@@ -114,6 +120,7 @@ pub struct StructuredChunkWindow {
     pub quality_score: f32,
     pub simhash_fingerprint: Option<u64>,
     pub is_near_duplicate: bool,
+    pub window_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -368,6 +375,7 @@ mod tests {
                 quality_score: 1.0,
                 simhash_fingerprint: None,
                 is_near_duplicate: false,
+                window_text: None,
             }],
             prepared_at: Utc::now(),
         };

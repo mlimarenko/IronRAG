@@ -47,9 +47,12 @@ pub const KNOWLEDGE_STRUCTURED_REVISION_REVISION_INDEX: &str =
     "knowledge_structured_revision_revision_index";
 pub const KNOWLEDGE_STRUCTURED_BLOCK_REVISION_ORDINAL_INDEX: &str =
     "knowledge_structured_block_revision_ordinal_index";
+pub const KNOWLEDGE_STRUCTURED_BLOCK_BLOCK_ID_INDEX: &str =
+    "knowledge_structured_block_block_id_index";
 pub const KNOWLEDGE_TECHNICAL_FACT_REVISION_INDEX: &str = "knowledge_technical_fact_revision_index";
 pub const KNOWLEDGE_TECHNICAL_FACT_LITERAL_INDEX: &str = "knowledge_technical_fact_literal_index";
 pub const KNOWLEDGE_CHUNK_LIBRARY_DOCUMENT_INDEX: &str = "knowledge_chunk_library_document_index";
+pub const KNOWLEDGE_CHUNK_REVISION_INDEX: &str = "knowledge_chunk_revision_index";
 pub const KNOWLEDGE_DOCUMENT_LIBRARY_UPDATED_INDEX: &str =
     "knowledge_document_library_updated_index";
 pub const KNOWLEDGE_REVISION_REVISION_ID_INDEX: &str = "knowledge_revision_revision_id_index";
@@ -60,6 +63,10 @@ pub const KNOWLEDGE_LIBRARY_GENERATION_LIBRARY_UPDATED_INDEX: &str =
 pub const KNOWLEDGE_ENTITY_LIBRARY_SUPPORT_INDEX: &str = "knowledge_entity_library_support_index";
 pub const KNOWLEDGE_RELATION_LIBRARY_SUPPORT_INDEX: &str =
     "knowledge_relation_library_support_index";
+pub const KNOWLEDGE_CONTEXT_BUNDLE_EXECUTION_INDEX: &str =
+    "knowledge_context_bundle_execution_index";
+pub const KNOWLEDGE_CONTEXT_BUNDLE_LIBRARY_UPDATED_INDEX: &str =
+    "knowledge_context_bundle_library_updated_index";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArangoPersistentIndexSpec {
@@ -107,9 +114,23 @@ pub const KNOWLEDGE_PERSISTENT_INDEXES: &[ArangoPersistentIndexSpec] = &[
         sparse: false,
     },
     ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
+        name: KNOWLEDGE_STRUCTURED_BLOCK_BLOCK_ID_INDEX,
+        fields: &["block_id"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
         collection: KNOWLEDGE_CHUNK_COLLECTION,
         name: KNOWLEDGE_CHUNK_LIBRARY_DOCUMENT_INDEX,
         fields: &["library_id", "document_id", "chunk_state", "chunk_index"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_CHUNK_COLLECTION,
+        name: KNOWLEDGE_CHUNK_REVISION_INDEX,
+        fields: &["revision_id", "chunk_index", "chunk_id"],
         unique: false,
         sparse: false,
     },
@@ -131,6 +152,20 @@ pub const KNOWLEDGE_PERSISTENT_INDEXES: &[ArangoPersistentIndexSpec] = &[
         collection: KNOWLEDGE_RELATION_COLLECTION,
         name: KNOWLEDGE_RELATION_LIBRARY_SUPPORT_INDEX,
         fields: &["library_id", "support_count", "updated_at", "relation_id"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
+        name: KNOWLEDGE_CONTEXT_BUNDLE_EXECUTION_INDEX,
+        fields: &["query_execution_id"],
+        unique: false,
+        sparse: true,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
+        name: KNOWLEDGE_CONTEXT_BUNDLE_LIBRARY_UPDATED_INDEX,
+        fields: &["library_id", "updated_at", "bundle_id"],
         unique: false,
         sparse: false,
     },
@@ -236,11 +271,25 @@ pub const KNOWLEDGE_PERSISTENT_INDEXES: &[ArangoPersistentIndexSpec] = &[
         sparse: true,
     },
     ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_BUNDLE_CHUNK_EDGE,
+        name: "idx_edge_bundle_chunk_bundle_rank",
+        fields: &["bundle_id", "rank", "created_at"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
         collection: KNOWLEDGE_BUNDLE_ENTITY_EDGE,
         name: "idx_edge_bundle_entity_library",
         fields: &["library_id"],
         unique: false,
         sparse: true,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_BUNDLE_ENTITY_EDGE,
+        name: "idx_edge_bundle_entity_bundle_rank",
+        fields: &["bundle_id", "rank", "created_at"],
+        unique: false,
+        sparse: false,
     },
     ArangoPersistentIndexSpec {
         collection: KNOWLEDGE_BUNDLE_RELATION_EDGE,
@@ -250,11 +299,25 @@ pub const KNOWLEDGE_PERSISTENT_INDEXES: &[ArangoPersistentIndexSpec] = &[
         sparse: true,
     },
     ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_BUNDLE_RELATION_EDGE,
+        name: "idx_edge_bundle_rel_bundle_rank",
+        fields: &["bundle_id", "rank", "created_at"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
         collection: KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
         name: "idx_edge_bundle_evi_library",
         fields: &["library_id"],
         unique: false,
         sparse: true,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
+        name: "idx_edge_bundle_evi_bundle_rank",
+        fields: &["bundle_id", "rank", "created_at"],
+        unique: false,
+        sparse: false,
     },
 ];
 

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use std::time::Instant;
 
 use crate::{
@@ -19,7 +18,8 @@ use crate::{
     },
 };
 
-use super::parse::normalize_graph_extraction_output;
+use super::graph_extraction_cache_hash;
+use super::parse::{normalize_graph_extraction_output, sanitize_graph_extraction_candidate_set};
 use super::prompt::build_graph_extraction_prompt_plan;
 use super::types::*;
 
@@ -250,7 +250,10 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
                 );
                 let current_candidate = ParsedGraphExtractionCandidate {
                     raw: raw.clone(),
-                    normalized: normalized_attempt.normalized,
+                    normalized: sanitize_graph_extraction_candidate_set(
+                        normalized_attempt.normalized,
+                        &request.chunk.content,
+                    ),
                     normalization_path: normalized_attempt.normalization_path,
                 };
 
@@ -449,7 +452,7 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
     }
 
     Err(GraphExtractionFailureOutcome {
-        request_shape_key: "graph_extract_v6:unknown".to_string(),
+        request_shape_key: "graph_extract_v8:unknown".to_string(),
         request_size_bytes: 0,
         recovery_summary: extraction_recovery.classify_outcome(
             trace.provider_attempt_count,
@@ -478,7 +481,7 @@ pub(crate) async fn request_graph_extraction_with_prompt_plan(
     prompt_plan: &GraphExtractionPromptPlan,
     lifecycle: GraphExtractionLifecycle,
 ) -> Result<RawGraphExtractionResponse> {
-    let prompt_hash = sha256_hex(&prompt_plan.prompt);
+    let prompt_hash = graph_extraction_cache_hash(&prompt_plan.prompt, runtime_binding);
     let provider_kind = runtime_binding.provider_kind.clone();
     let model_name = runtime_binding.model_name.clone();
     let started_at = Utc::now();
@@ -720,10 +723,4 @@ pub(crate) fn finalize_recovery_attempt_records(
             recovered_summary: record.recovered_summary.clone(),
         })
         .collect()
-}
-
-fn sha256_hex(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    hex::encode(hasher.finalize())
 }

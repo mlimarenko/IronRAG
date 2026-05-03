@@ -6,10 +6,11 @@ use crate::domains::query_ir::QueryIR;
 use super::concise_document_subject_label;
 use super::retrieve::focused_excerpt_for;
 use super::technical_literals::{
-    TechnicalLiteralIntent, detect_technical_literal_intent, extract_explicit_path_literals,
-    extract_http_methods, extract_parameter_literals, extract_prefix_literals,
-    extract_url_literals, push_unique_limited, question_mentions_pagination,
-    select_document_balanced_chunks, technical_literal_focus_keywords,
+    TechnicalLiteralIntent, detect_technical_literal_intent_from_query_ir,
+    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
+    extract_prefix_literals, extract_url_literals, push_unique_limited,
+    question_mentions_pagination, select_document_balanced_chunks,
+    technical_literal_focus_keywords,
 };
 use super::types::RuntimeMatchedChunk;
 
@@ -49,7 +50,8 @@ pub(super) fn collect_technical_literal_groups(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Vec<TechnicalLiteralDocumentGroup> {
-    let intent: TechnicalLiteralIntent = detect_technical_literal_intent(question);
+    let intent: TechnicalLiteralIntent =
+        detect_technical_literal_intent_from_query_ir(question, query_ir);
     if !intent.any() {
         return Vec::new();
     }
@@ -75,9 +77,6 @@ pub(super) fn collect_technical_literal_groups(
                 groups.len() - 1
             });
         let group = &mut groups[group_index];
-        if group.matched_excerpt.is_none() && !chunk.excerpt.trim().is_empty() {
-            group.matched_excerpt = Some(chunk.excerpt.trim().to_string());
-        }
         let focused_source_text =
             focused_excerpt_for(&chunk.source_text, &literal_focus_keywords, 900);
         let literal_source_text = if focused_source_text.trim().is_empty() {
@@ -85,6 +84,20 @@ pub(super) fn collect_technical_literal_groups(
         } else {
             focused_source_text.as_str()
         };
+        if group.matched_excerpt.is_none() {
+            let excerpt = chunk.excerpt.trim();
+            let focused = focused_source_text.trim();
+            if !excerpt.is_empty() {
+                let mut matched = excerpt.to_string();
+                if !focused.is_empty() && focused != excerpt {
+                    matched.push_str(" Focused literal excerpt: ");
+                    matched.push_str(focused);
+                }
+                group.matched_excerpt = Some(matched);
+            } else if !focused.is_empty() {
+                group.matched_excerpt = Some(focused.to_string());
+            }
+        }
 
         if intent.wants_urls {
             for value in extract_url_literals(literal_source_text, 6) {
@@ -107,8 +120,18 @@ pub(super) fn collect_technical_literal_groups(
             }
         }
         if intent.wants_parameters {
-            for value in extract_parameter_literals(literal_source_text, 8) {
-                push_unique_limited(&mut group.parameters, &mut group.parameter_seen, value, 8);
+            for value in extract_parameter_literals(literal_source_text, 24) {
+                push_unique_limited(&mut group.parameters, &mut group.parameter_seen, value, 24);
+            }
+            if group.parameters.len() < 24 {
+                for value in extract_parameter_literals(&chunk.source_text, 24) {
+                    push_unique_limited(
+                        &mut group.parameters,
+                        &mut group.parameter_seen,
+                        value,
+                        24,
+                    );
+                }
             }
         }
     }

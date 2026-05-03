@@ -318,12 +318,14 @@ pub async fn embed_runtime_graph_nodes(
     let model_name_owned = embedding_binding.model_name.clone();
     let api_key_owned = embedding_binding.api_key.clone();
     let base_url_owned = embedding_binding.provider_base_url.clone();
+    let extra_parameters_json_owned = embedding_binding.extra_parameters_json.clone();
 
     let batch_responses = stream::iter(batches.into_iter().map(|batch| {
         let provider_kind = provider_kind_owned.clone();
         let model_name = model_name_owned.clone();
         let api_key = api_key_owned.clone();
         let base_url = base_url_owned.clone();
+        let extra_parameters_json = extra_parameters_json_owned.clone();
         async move {
             let inputs: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
             let first_index = batch.first().map(|(index, _)| *index).unwrap_or_default();
@@ -335,6 +337,7 @@ pub async fn embed_runtime_graph_nodes(
                     inputs,
                     api_key_override: api_key,
                     base_url_override: base_url,
+                    extra_parameters_json,
                 })
                 .await
                 .with_context(|| {
@@ -356,12 +359,8 @@ pub async fn embed_runtime_graph_nodes(
                 batch.len(),
             );
         }
-        // Postgres `runtime_vector_target` is a legacy write-only store
-        // from the pgvector era; vector similarity now runs entirely in
-        // Arango (`search_chunk_vectors_by_similarity`) with its own
-        // upsert path. We accumulate token usage and drop the embeddings
-        // on the floor here so every ingest stops growing the dead
-        // 8+ GB Postgres table.
+        // Graph similarity runs through the Arango vector path; this stage
+        // keeps provider usage accounting without persisting graph embeddings.
         let _ = batch;
         usage.absorb_usage_json(&batch_response.usage_json);
     }
@@ -419,12 +418,14 @@ pub async fn embed_runtime_graph_edges(
     let model_name_owned = embedding_binding.model_name.clone();
     let api_key_owned = embedding_binding.api_key.clone();
     let base_url_owned = embedding_binding.provider_base_url.clone();
+    let extra_parameters_json_owned = embedding_binding.extra_parameters_json.clone();
 
     let batch_responses = stream::iter(batches.into_iter().map(|batch| {
         let provider_kind = provider_kind_owned.clone();
         let model_name = model_name_owned.clone();
         let api_key = api_key_owned.clone();
         let base_url = base_url_owned.clone();
+        let extra_parameters_json = extra_parameters_json_owned.clone();
         async move {
             let inputs: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
             let first_index = batch.first().map(|(index, _)| *index).unwrap_or_default();
@@ -436,6 +437,7 @@ pub async fn embed_runtime_graph_edges(
                     inputs,
                     api_key_override: api_key,
                     base_url_override: base_url,
+                    extra_parameters_json,
                 })
                 .await
                 .with_context(|| {
@@ -457,10 +459,8 @@ pub async fn embed_runtime_graph_edges(
                 batch.len(),
             );
         }
-        // Same rationale as the node-embedding path above: Postgres
-        // `runtime_vector_target` is a legacy write-only store; the live
-        // vector-search pipeline runs in Arango. Drop the embeddings,
-        // keep the usage accounting.
+        // Same rationale as the node-embedding path above: graph similarity
+        // uses the Arango vector path, while this stage records usage only.
         let _ = batch;
         usage.absorb_usage_json(&batch_response.usage_json);
     }

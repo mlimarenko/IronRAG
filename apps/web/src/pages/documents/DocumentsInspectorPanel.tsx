@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { TFunction } from 'i18next';
 import {
   FilePenLine,
@@ -64,7 +64,11 @@ export function DocumentsInspectorPanel({
   );
   const displayName =
     isWebPage && selectedDoc.sourceUri ? selectedDoc.sourceUri : selectedDoc.fileName;
-  const [showFullName, setShowFullName] = useState(false);
+  const [nameExpansion, setNameExpansion] = useState({
+    documentId: selectedDoc.id,
+    expanded: false,
+  });
+  const showFullName = nameExpansion.documentId === selectedDoc.id && nameExpansion.expanded;
   const compactDisplayName = compactText(displayName, 96);
   const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t, {
     sourceUri: selectedDoc.sourceUri,
@@ -72,10 +76,6 @@ export function DocumentsInspectorPanel({
   });
   const compactTypeLabel = compactText(typeLabel, 54);
   const statusBadge = buildDocumentStatusBadgeConfig(t)[selectedDoc.status];
-
-  useEffect(() => {
-    setShowFullName(false);
-  }, [selectedDoc.id]);
 
   const openSource = () => {
     const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri;
@@ -106,7 +106,12 @@ export function DocumentsInspectorPanel({
             <button
               type="button"
               className="mt-1 text-xs font-medium text-primary hover:text-primary/80"
-              onClick={() => setShowFullName((value) => !value)}
+              onClick={() =>
+                setNameExpansion((value) => ({
+                  documentId: selectedDoc.id,
+                  expanded: value.documentId === selectedDoc.id ? !value.expanded : true,
+                }))
+              }
             >
               {showFullName ? t('documents.showLessName') : t('documents.showFullName')}
             </button>

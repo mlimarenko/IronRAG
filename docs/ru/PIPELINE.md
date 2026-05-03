@@ -26,11 +26,25 @@ Query pipeline начинается с:
 ### Поддерживаемые семейства источников
 
 - Text-like файлы: markdown, text, JSON, YAML, source code
-- PDF через text-layer extraction
-- Изображения через multimodal description
-- DOCX и PPTX через structured block extraction
-- Таблицы (`csv`, `xlsx`, `xlsb`, `ods`) через row-oriented extraction
+- PDF через Docling-backed document-layout extraction
+- Статические raster images через Docling OCR по умолчанию или через активный `vision` binding, если recognition policy библиотеки выбирает `vision`
+- DOCX и PPTX через Docling-backed structured block extraction
+- Таблицы (`csv`, `tsv`, `xls`, `xlsx`, `xlsb`, `ods`) через native row-oriented extraction
 - Web pages через HTML main-content extraction
+
+### Recognition routing
+
+Маршрут распознавания хранится как явная настройка библиотеки, а не как скрытый
+runtime fallback. Новые библиотеки наследуют
+`IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE`; допустимые значения —
+`docling` или `vision`, default — `docling`. Per-library обновление:
+`PUT /v1/catalog/libraries/{libraryId}/recognition-policy`.
+
+PDF, DOCX и PPTX layout extraction остаётся на embedded Docling CPU runtime.
+Таблицы остаются на native tabular parser. Static raster image OCR может идти
+через Docling или через активный `vision` binding. Если библиотека направляет
+image OCR в `vision`, но binding не настроен, ingest падает явно, без silent
+fallback. Video files в текущий ingest surface не входят.
 
 ### Table contract
 
@@ -113,18 +127,13 @@ Query path использует один канонический retrieval stac
 
 Exact-literal technical вопросы используют тот же answer contract, но могут идти по lexical-only fast path, если вопрос явно про endpoint, parameter name или transport literal.
 
-### Streaming contract
+### Turn contract
 
-`POST /v1/query/sessions/{sessionId}/turns` с `Accept: text/event-stream` отдает:
-
-- `runtime`
-- `delta`
-- `tool_call_started`
-- `tool_call_completed`
-- `completed`
-- `error`
-
-Финальный `completed` payload совпадает по shape с нестриминговым turn response.
+`POST /v1/query/sessions/{sessionId}/turns` — один JSON request/response turn.
+Ответ содержит завершённый grounded answer, evidence references, verifier state
+и runtime execution handle. Инкрементальный answer streaming не является
+отдельным путём UI assistant; MCP transport streaming остаётся изолированным в
+`/v1/mcp`.
 
 ## 7. Worker model
 

@@ -225,14 +225,6 @@ pub fn runtime_node_type_from_key(canonical_node_key: &str) -> RuntimeNodeType {
             "concept" => Some(RuntimeNodeType::Concept),
             "attribute" => Some(RuntimeNodeType::Attribute),
             "entity" => Some(RuntimeNodeType::Entity),
-            // Backward compatibility
-            "topic" => Some(RuntimeNodeType::Concept),
-            "technology" => Some(RuntimeNodeType::Artifact),
-            "api" => Some(RuntimeNodeType::Artifact),
-            "code_symbol" => Some(RuntimeNodeType::Artifact),
-            "natural_kind" => Some(RuntimeNodeType::Natural),
-            "metric" => Some(RuntimeNodeType::Attribute),
-            "regulation" => Some(RuntimeNodeType::Artifact),
             _ => None,
         })
         .unwrap_or(RuntimeNodeType::Entity)
@@ -330,18 +322,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_node_key_preserves_cyrillic_identity() {
+    fn canonical_node_key_preserves_non_ascii_identity() {
         assert_eq!(
-            canonical_node_key(RuntimeNodeType::Entity, "Первый печатный двор"),
-            "entity:первый_печатный_двор"
+            canonical_node_key(RuntimeNodeType::Entity, "Acme Imprenta Düsseldorf"),
+            "entity:acme_imprenta_düsseldorf"
         );
     }
 
     #[test]
     fn canonical_node_key_normalizes_mixed_script_labels() {
         assert_eq!(
-            canonical_node_key(RuntimeNodeType::Entity, "GraphRAG для Retail 2.0"),
-            "entity:graphrag_для_retail_2_0"
+            canonical_node_key(RuntimeNodeType::Entity, "GraphRAG περί Retail 2.0"),
+            "entity:graphrag_περί_retail_2_0"
         );
     }
 
@@ -354,7 +346,7 @@ mod tests {
 
     #[test]
     fn normalize_relation_type_rejects_unknown_predicates_after_unicode_normalization() {
-        assert!(normalize_relation_type("Связан с").is_empty());
+        assert!(normalize_relation_type("Συνδέεται με").is_empty());
     }
 
     #[test]
@@ -384,19 +376,19 @@ mod tests {
     #[test]
     fn label_node_type_index_prefers_entity_for_ambiguous_labels() {
         let mut index = GraphLabelNodeTypeIndex::new();
-        index.insert("Касса", RuntimeNodeType::Concept);
-        index.insert("Касса", RuntimeNodeType::Entity);
+        index.insert("Register", RuntimeNodeType::Concept);
+        index.insert("Register", RuntimeNodeType::Entity);
 
-        assert_eq!(index.canonical_node_key_for_label("Касса"), "entity:касса");
+        assert_eq!(index.canonical_node_key_for_label("Register"), "entity:register");
     }
 
     #[test]
     fn label_node_type_index_prefers_entity_for_alias_collisions() {
         let mut index = GraphLabelNodeTypeIndex::new();
-        index.insert_aliases("Acme POS", &["Касса".to_string()], RuntimeNodeType::Concept);
-        index.insert("Касса", RuntimeNodeType::Entity);
+        index.insert_aliases("Acme POS", &["Register".to_string()], RuntimeNodeType::Concept);
+        index.insert("Register", RuntimeNodeType::Entity);
 
-        assert_eq!(index.canonical_node_key_for_label("Касса"), "entity:касса");
+        assert_eq!(index.canonical_node_key_for_label("Register"), "entity:register");
     }
 
     #[test]
@@ -410,12 +402,12 @@ mod tests {
     #[test]
     /// "contains" is now a canonical relation type, so it must be accepted.
     fn normalize_relation_type_rejects_localized_and_paraphrased_predicates() {
-        assert!(normalize_relation_type("использует").is_empty());
-        assert!(normalize_relation_type("управляет").is_empty());
-        assert!(normalize_relation_type("обменивается данными с").is_empty());
-        assert!(normalize_relation_type("разработан компанией").is_empty());
-        assert!(normalize_relation_type("предназначен для").is_empty());
-        assert!(normalize_relation_type("содержит").is_empty());
+        assert!(normalize_relation_type("χρησιμοποιεί").is_empty());
+        assert!(normalize_relation_type("διαχειρίζεται").is_empty());
+        assert!(normalize_relation_type("ανταλλάσσει δεδομένα με").is_empty());
+        assert!(normalize_relation_type("desarrollado por").is_empty());
+        assert!(normalize_relation_type("destinado a").is_empty());
+        assert!(normalize_relation_type("περιέχει").is_empty());
         assert_eq!(normalize_relation_type("contains"), "contains");
         assert!(normalize_relation_type("contains section").is_empty());
         assert!(normalize_relation_type("based on").is_empty());
@@ -433,9 +425,8 @@ mod tests {
 
     #[test]
     fn runtime_node_type_from_key_uses_canonical_prefix() {
-        assert_eq!(runtime_node_type_from_key("concept:поставка"), RuntimeNodeType::Concept);
-        assert_eq!(runtime_node_type_from_key("entity:касса"), RuntimeNodeType::Entity);
-        // Backward compat: legacy "topic:" prefix maps to Concept
-        assert_eq!(runtime_node_type_from_key("topic:поставка"), RuntimeNodeType::Concept);
+        assert_eq!(runtime_node_type_from_key("concept:supply"), RuntimeNodeType::Concept);
+        assert_eq!(runtime_node_type_from_key("entity:register"), RuntimeNodeType::Entity);
+        assert_eq!(runtime_node_type_from_key("unknown:foo"), RuntimeNodeType::Entity);
     }
 }

@@ -323,6 +323,9 @@ async fn write_chunk(
                 text_generation: Some(1),
                 vector_generation: Some(1),
                 quality_score: None,
+                window_text: None,
+                occurred_at: None,
+                occurred_until: None,
             },
         )
         .await

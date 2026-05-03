@@ -43,10 +43,10 @@ apps/web/src/
 
 ### Assistant
 
-- Владеет списком сессий, активной сессией, историей сообщений, streaming state и debug context.
+- Владеет списком сессий, активной сессией, историей сообщений, pending-turn state и debug context.
 - Использует `/v1/query/sessions/*` для session CRUD и turn execution.
-- Стриминговый ответ читает SSE из `POST /v1/query/sessions/{sessionId}/turns` с `Accept: text/event-stream`.
-- Во время стрима должен обновляться только live bubble ассистента.
+- Turn execution — один JSON `POST /v1/query/sessions/{sessionId}/turns` request; отдельного UI SSE fallback/recovery lane нет.
+- Когда completed turn пришёл, заменяется только pending bubble ассистента.
 
 ### Graph
 

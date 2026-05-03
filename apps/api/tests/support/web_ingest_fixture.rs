@@ -19,6 +19,7 @@ use ironrag_backend::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         ingest::web::CreateWebIngestRunCommand,
     },
+    shared::web::ingest::WebIngestUrlFilter,
 };
 
 struct TempDatabase {
@@ -240,6 +241,38 @@ impl WebIngestFixture {
         .await
     }
 
+    #[allow(dead_code)]
+    pub async fn submit_recursive_run_with_url_filter(
+        &self,
+        seed_url: String,
+        boundary_policy: &str,
+        max_depth: Option<i32>,
+        max_pages: Option<i32>,
+        url_filter: WebIngestUrlFilter,
+    ) -> Result<WebIngestRun> {
+        self.state
+            .canonical_services
+            .web_ingest
+            .create_run(
+                &self.state,
+                CreateWebIngestRunCommand {
+                    workspace_id: self.workspace_id,
+                    library_id: self.library_id,
+                    seed_url,
+                    mode: "recursive_crawl".to_string(),
+                    boundary_policy: Some(boundary_policy.to_string()),
+                    max_depth,
+                    max_pages,
+                    url_filter,
+                    requested_by_principal_id: None,
+                    request_surface: "test".to_string(),
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .context("failed to submit filtered recursive web ingest run")
+    }
+
     async fn submit_run(
         &self,
         seed_url: String,
@@ -261,7 +294,8 @@ impl WebIngestFixture {
                     boundary_policy,
                     max_depth,
                     max_pages,
-                    extra_ignore_patterns: Vec::new(),
+                    url_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
+                        .url_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,

@@ -2,7 +2,7 @@
 //!
 //! Every constant here shapes a decision the runtime makes on behalf
 //! of the user — whether to clarify, how many sources to surface, how
-//! long the tool loop is allowed to run. They are grouped in one
+//! strict a fixed-evidence answer must be. They are grouped in one
 //! module so operators and future readers can scan the full set in
 //! one place instead of hunting them across `answer_pipeline.rs`,
 //! `agent_loop.rs`, and friends.
@@ -33,14 +33,14 @@ pub(crate) const CLARIFY_DOMINANCE_RATIO: f32 = 1.35;
 
 /// Absolute floor below which a single-shot answer is always treated
 /// as "model declined" and the question is escalated. Deliberately
-/// small — a genuine one-line answer ("Нажмите Ctrl+Alt+Del") is
-/// useful, but a two-word shrug almost never is.
+/// small: a genuine one-line answer is useful, but a two-word shrug
+/// almost never is.
 pub(crate) const SINGLE_SHOT_MIN_ANSWER_CHARS: usize = 24;
 
 /// When retrieval surfaces several candidate documents but the
 /// single-shot answer is still very short, the LLM almost certainly
-/// capitulated in front of good evidence. Escalate to the tool loop
-/// on the short path so the model reads a document and gives the
+/// capitulated in front of good evidence. Retry through canonical
+/// preflight over the same retrieved evidence so the model gives the
 /// user an actual answer. The threshold is structural — no
 /// decline-phrase matching — so language or provider changes do not
 /// silently break the gate.
@@ -49,9 +49,9 @@ pub(crate) const SINGLE_SHOT_CONFIDENT_ANSWER_CHARS: usize = 80;
 /// Minimum retrieval footprint that disarms the confident-length
 /// escalation above. When retrieval came back essentially empty the
 /// model has no real evidence to work with and a short "no answer"
-/// reply is the correct output; escalating to the tool loop there
-/// would only spend another 30–60 s of LLM time before returning
-/// the same refusal. Five retrieved documents is a conservative
+/// reply is the correct output; retrying through preflight there
+/// would only spend extra LLM time before returning the same refusal.
+/// Five retrieved documents is a conservative
 /// "the library has material about this" signal without overlapping
 /// the `ready`-bucket / decline case.
 pub(crate) const SINGLE_SHOT_RETRIEVAL_ESCALATION_MIN_DOCUMENTS: usize = 5;

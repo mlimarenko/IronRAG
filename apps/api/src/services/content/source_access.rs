@@ -54,7 +54,7 @@ pub fn derive_storage_backed_content_file_name(
     title: Option<&str>,
 ) -> Option<String> {
     match content_source_kind.trim() {
-        "upload" | "replace" => preferred_content_source_file_name(source_uri, title),
+        "upload" | "replace" | "append" => preferred_content_source_file_name(source_uri, title),
         "edit" => preferred_edited_markdown_file_name(source_uri, title),
         _ => None,
     }
@@ -158,7 +158,7 @@ fn normalized_non_empty(value: Option<&str>) -> Option<String> {
 
 fn has_stored_document_source(content_source_kind: &str, storage_key: Option<&str>) -> bool {
     storage_key.map(str::trim).is_some_and(|value| !value.is_empty())
-        || matches!(content_source_kind.trim(), "upload" | "replace" | "edit")
+        || matches!(content_source_kind.trim(), "upload" | "replace" | "edit" | "append")
 }
 
 fn normalize_external_source_uri(source_uri: Option<&str>) -> Option<String> {
@@ -228,10 +228,12 @@ mod tests {
     }
 
     #[test]
-    fn append_only_documents_do_not_claim_download_link() {
+    fn append_revisions_expose_generated_text_source_link() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
         let descriptor = describe_content_source(
-            Uuid::now_v7(),
-            Some(Uuid::now_v7()),
+            document_id,
+            Some(revision_id),
             "append",
             Some("append://inline"),
             None,
@@ -240,7 +242,12 @@ mod tests {
         );
 
         assert_eq!(descriptor.file_name, "Inline notes");
-        assert!(descriptor.access.is_none());
+        let access = descriptor.access.expect("append revisions should expose generated source");
+        assert_eq!(access.kind, ContentSourceAccessKind::StoredDocument);
+        assert_eq!(
+            access.href,
+            format!("/v1/content/documents/{document_id}/source?revisionId={revision_id}")
+        );
     }
 
     #[test]
@@ -297,5 +304,16 @@ mod tests {
         );
 
         assert_eq!(file_name.as_deref(), Some("Inventory.md"));
+    }
+
+    #[test]
+    fn appended_documents_rebuild_storage_file_name_from_title() {
+        let file_name = derive_storage_backed_content_file_name(
+            "append",
+            Some("append://inline"),
+            Some("conversation-log.jsonl"),
+        );
+
+        assert_eq!(file_name.as_deref(), Some("conversation-log.jsonl"));
     }
 }

@@ -1,13 +1,14 @@
 {
   "suiteId": "golden_multiformat_domain",
-  "description": "Golden benchmark for multiformat document extraction. Tests PDF, DOCX, and PPTX ingestion with structured content extraction quality.",
+  "description": "Golden benchmark for multiformat document extraction. Tests PDF, DOCX, PPTX, and XLSX ingestion with structured content extraction quality.",
   "strictBlocking": true,
   "documents": [
     "corpus/documents/api_design_guidelines.docx",
     "corpus/documents/incident_runbook.docx",
     "corpus/documents/system_architecture.pptx",
     "corpus/documents/database_schema.pdf",
-    "corpus/documents/monitoring_dashboard.pdf"
+    "corpus/documents/monitoring_dashboard.pdf",
+    "corpus/documents/revenue_workbook.xlsx"
   ],
   "cases": [
     {
@@ -156,6 +157,38 @@
       "expectedDocumentsContains": ["monitoring_dashboard"],
       "searchRequiredAll": ["alert"],
       "answerRequiredAny": ["p99", "500ms", "SEV", "error_rate", "CPU"],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 0,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "unverified"]
+    },
+    {
+      "id": "xlsx_revenue_central_region",
+      "question": "In the revenue workbook, which region has Q3 revenue of 143500 USD, and what risk flag is listed?",
+      "searchQuery": "Q3 143500 RevenueUSD Central risk flag Gamma Team",
+      "expectedDocumentsContains": ["revenue_workbook"],
+      "searchRequiredAll": ["143500"],
+      "answerRequiredAll": ["Central"],
+      "answerRequiredAny": ["high", "Gamma Team", "Q3"],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 0,
+      "minTechnicalFactReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "unverified"]
+    },
+    {
+      "id": "xlsx_enterprise_renewal_policy",
+      "question": "What discount percent and approval role are listed for Enterprise renewals in the workbook?",
+      "searchQuery": "Enterprise renewal discount percent Finance Lead 45 days",
+      "expectedDocumentsContains": ["revenue_workbook"],
+      "searchRequiredAll": ["Enterprise"],
+      "answerRequiredAll": ["Enterprise"],
+      "answerRequiredAny": ["12", "Finance Lead", "45 days"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,

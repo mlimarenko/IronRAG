@@ -39,16 +39,49 @@ impl WebBoundaryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WebIngestPolicy {
-    #[serde(default)]
-    pub ignore_patterns: Vec<WebIngestIgnorePattern>,
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebIngestUrlFilterMode {
+    #[default]
+    Blocklist,
+    Allowlist,
+}
+
+impl WebIngestUrlFilterMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocklist => "blocklist",
+            Self::Allowlist => "allowlist",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WebIngestIgnorePattern {
+pub struct WebIngestPolicy {
+    #[serde(default)]
+    pub url_filter: WebIngestUrlFilter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebIngestUrlFilter {
+    #[serde(default)]
+    pub mode: WebIngestUrlFilterMode,
+    #[serde(default)]
+    pub patterns: Vec<WebIngestPattern>,
+}
+
+impl Default for WebIngestUrlFilter {
+    fn default() -> Self {
+        default_web_ingest_policy().url_filter
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebIngestPattern {
     pub kind: String,
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,45 +89,53 @@ pub struct WebIngestIgnorePattern {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WebIngestIgnoreMatch {
+pub struct WebIngestPatternMatch {
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebIngestUrlFilterExclusion {
     pub detail: String,
 }
 
 #[must_use]
 pub fn default_web_ingest_policy() -> WebIngestPolicy {
     WebIngestPolicy {
-        ignore_patterns: [
-            ("path_prefix", "/aboutconfluencepage.action"),
-            ("path_prefix", "/collector/pages.action"),
-            ("path_prefix", "/dashboard/configurerssfeed.action"),
-            ("path_prefix", "/exportword"),
-            ("path_prefix", "/forgotuserpassword.action"),
-            ("path_prefix", "/labels/viewlabel.action"),
-            ("path_prefix", "/login.action"),
-            ("path_prefix", "/pages/diffpages.action"),
-            ("path_prefix", "/pages/diffpagesbyversion.action"),
-            ("path_prefix", "/pages/listundefinedpages.action"),
-            ("path_prefix", "/pages/reorderpages.action"),
-            ("path_prefix", "/pages/viewinfo.action"),
-            ("path_prefix", "/pages/viewpageattachments.action"),
-            ("path_prefix", "/pages/viewpreviousversions.action"),
-            ("path_prefix", "/plugins/viewsource/viewpagesrc.action"),
-            ("path_prefix", "/spacedirectory/view.action"),
-            ("path_prefix", "/spaces/flyingpdf/pdfpageexport.action"),
-            ("path_prefix", "/spaces/listattachmentsforspace.action"),
-            ("path_prefix", "/spaces/listrssfeeds.action"),
-            ("path_prefix", "/spaces/viewspacesummary.action"),
-            ("glob", "*/display/~*"),
-            ("glob", "*os_destination=*"),
-            ("glob", "*permissionviolation=*"),
-        ]
-        .into_iter()
-        .map(|(kind, value)| WebIngestIgnorePattern {
-            kind: kind.to_string(),
-            value: value.to_string(),
-            source: None,
-        })
-        .collect(),
+        url_filter: WebIngestUrlFilter {
+            mode: WebIngestUrlFilterMode::Blocklist,
+            patterns: [
+                ("path_prefix", "/aboutconfluencepage.action"),
+                ("path_prefix", "/collector/pages.action"),
+                ("path_prefix", "/dashboard/configurerssfeed.action"),
+                ("path_prefix", "/exportword"),
+                ("path_prefix", "/forgotuserpassword.action"),
+                ("path_prefix", "/labels/viewlabel.action"),
+                ("path_prefix", "/login.action"),
+                ("path_prefix", "/pages/diffpages.action"),
+                ("path_prefix", "/pages/diffpagesbyversion.action"),
+                ("path_prefix", "/pages/listundefinedpages.action"),
+                ("path_prefix", "/pages/reorderpages.action"),
+                ("path_prefix", "/pages/viewinfo.action"),
+                ("path_prefix", "/pages/viewpageattachments.action"),
+                ("path_prefix", "/pages/viewpreviousversions.action"),
+                ("path_prefix", "/plugins/viewsource/viewpagesrc.action"),
+                ("path_prefix", "/spacedirectory/view.action"),
+                ("path_prefix", "/spaces/flyingpdf/pdfpageexport.action"),
+                ("path_prefix", "/spaces/listattachmentsforspace.action"),
+                ("path_prefix", "/spaces/listrssfeeds.action"),
+                ("path_prefix", "/spaces/viewspacesummary.action"),
+                ("glob", "*/display/~*"),
+                ("glob", "*os_destination=*"),
+                ("glob", "*permissionviolation=*"),
+            ]
+            .into_iter()
+            .map(|(kind, value)| WebIngestPattern {
+                kind: kind.to_string(),
+                value: value.to_string(),
+                source: None,
+            })
+            .collect(),
+        },
     }
 }
 
@@ -102,53 +143,46 @@ pub fn default_web_ingest_policy() -> WebIngestPolicy {
 ///
 /// # Errors
 ///
-/// Returns an error when any ignore pattern uses an unknown kind or an invalid value.
+/// Returns an error when any URL filter pattern uses an unknown kind or an invalid value.
 pub fn validate_web_ingest_policy(policy: WebIngestPolicy) -> Result<WebIngestPolicy, String> {
     Ok(WebIngestPolicy {
-        ignore_patterns: normalize_web_ingest_ignore_patterns(
-            policy.ignore_patterns,
+        url_filter: normalize_web_ingest_url_filter(
+            policy.url_filter,
             None,
-            "webIngestPolicy.ignorePatterns",
+            "webIngestPolicy.urlFilter",
         )?,
     })
 }
 
-/// Merges library policy with run-local additions into a run snapshot.
+/// Validates and normalizes the full URL filter used by one web-ingest run.
 ///
 /// # Errors
 ///
-/// Returns an error when either policy source contains invalid ignore patterns.
-pub fn build_web_ingest_run_ignore_patterns(
-    library_policy: &WebIngestPolicy,
-    extra_ignore_patterns: Vec<WebIngestIgnorePattern>,
-) -> Result<Vec<WebIngestIgnorePattern>, String> {
-    let mut merged = normalize_web_ingest_ignore_patterns(
-        library_policy.ignore_patterns.clone(),
-        Some("library"),
-        "webIngestPolicy.ignorePatterns",
-    )?;
-    let mut seen = merged
-        .iter()
-        .map(|pattern| (pattern.kind.clone(), pattern.value.clone()))
-        .collect::<std::collections::BTreeSet<_>>();
+/// Returns an error when the filter is incomplete or any pattern is invalid.
+pub fn validate_web_ingest_url_filter(
+    filter: WebIngestUrlFilter,
+    field_name: &'static str,
+) -> Result<WebIngestUrlFilter, String> {
+    normalize_web_ingest_url_filter(filter, Some("run"), field_name)
+}
 
-    for pattern in normalize_web_ingest_ignore_patterns(
-        extra_ignore_patterns,
-        Some("run"),
-        "extraIgnorePatterns",
-    )? {
-        if seen.insert((pattern.kind.clone(), pattern.value.clone())) {
-            merged.push(pattern);
-        }
+fn normalize_web_ingest_url_filter(
+    filter: WebIngestUrlFilter,
+    source: Option<&'static str>,
+    field_name: &'static str,
+) -> Result<WebIngestUrlFilter, String> {
+    let patterns = normalize_web_ingest_patterns(filter.patterns, source, field_name)?;
+    if filter.mode == WebIngestUrlFilterMode::Allowlist && patterns.is_empty() {
+        return Err(format!("{field_name}.patterns must not be empty for allowlist mode"));
     }
-    Ok(merged)
+    Ok(WebIngestUrlFilter { mode: filter.mode, patterns })
 }
 
 #[must_use]
-pub fn match_web_ingest_ignore_pattern(
+pub fn match_web_ingest_pattern(
     url: &str,
-    patterns: &[WebIngestIgnorePattern],
-) -> Option<WebIngestIgnoreMatch> {
+    patterns: &[WebIngestPattern],
+) -> Option<WebIngestPatternMatch> {
     let parsed = Url::parse(url).ok();
     patterns.iter().find_map(|pattern| {
         let matched = match pattern.kind.as_str() {
@@ -159,7 +193,7 @@ pub fn match_web_ingest_ignore_pattern(
             "glob" => wildcard_matches(&pattern.value, url),
             _ => false,
         };
-        matched.then(|| WebIngestIgnoreMatch {
+        matched.then(|| WebIngestPatternMatch {
             detail: format!(
                 "{}:{}:{}",
                 pattern.source.as_deref().unwrap_or("policy"),
@@ -170,28 +204,56 @@ pub fn match_web_ingest_ignore_pattern(
     })
 }
 
-fn normalize_web_ingest_ignore_patterns(
-    patterns: Vec<WebIngestIgnorePattern>,
+#[must_use]
+pub fn classify_web_crawl_filter_exclusion(
+    url: &str,
+    filter: &WebIngestUrlFilter,
+) -> Option<WebIngestUrlFilterExclusion> {
+    if filter.mode != WebIngestUrlFilterMode::Blocklist {
+        return None;
+    }
+    match_web_ingest_pattern(url, &filter.patterns).map(|matched| WebIngestUrlFilterExclusion {
+        detail: format!("blocklist:{}", matched.detail),
+    })
+}
+
+#[must_use]
+pub fn classify_web_materialization_filter_exclusion(
+    url: &str,
+    filter: &WebIngestUrlFilter,
+) -> Option<WebIngestUrlFilterExclusion> {
+    let pattern_match = match_web_ingest_pattern(url, &filter.patterns);
+    match filter.mode {
+        WebIngestUrlFilterMode::Blocklist => pattern_match.map(|matched| {
+            WebIngestUrlFilterExclusion { detail: format!("blocklist:{}", matched.detail) }
+        }),
+        WebIngestUrlFilterMode::Allowlist => pattern_match
+            .is_none()
+            .then(|| WebIngestUrlFilterExclusion { detail: "allowlist:no_match".to_string() }),
+    }
+}
+
+fn normalize_web_ingest_patterns(
+    patterns: Vec<WebIngestPattern>,
     source: Option<&'static str>,
     field_name: &'static str,
-) -> Result<Vec<WebIngestIgnorePattern>, String> {
+) -> Result<Vec<WebIngestPattern>, String> {
     let mut normalized = Vec::with_capacity(patterns.len());
     let mut seen = std::collections::BTreeSet::<(String, String)>::new();
     for pattern in patterns {
-        let kind = normalize_ignore_pattern_kind(&pattern.kind, field_name)?;
-        let value = normalize_ignore_pattern_value(&kind, &pattern.value, field_name)?;
+        let kind = normalize_url_filter_pattern_kind(&pattern.kind, field_name)?;
+        let value = normalize_url_filter_pattern_value(&kind, &pattern.value, field_name)?;
         if seen.insert((kind.clone(), value.clone())) {
-            normalized.push(WebIngestIgnorePattern {
-                kind,
-                value,
-                source: source.map(str::to_string),
-            });
+            normalized.push(WebIngestPattern { kind, value, source: source.map(str::to_string) });
         }
     }
     Ok(normalized)
 }
 
-fn normalize_ignore_pattern_kind(value: &str, field_name: &'static str) -> Result<String, String> {
+fn normalize_url_filter_pattern_kind(
+    value: &str,
+    field_name: &'static str,
+) -> Result<String, String> {
     let normalized = value.trim();
     match normalized {
         "url_prefix" | "path_prefix" | "glob" => Ok(normalized.to_string()),
@@ -199,7 +261,7 @@ fn normalize_ignore_pattern_kind(value: &str, field_name: &'static str) -> Resul
     }
 }
 
-fn normalize_ignore_pattern_value(
+fn normalize_url_filter_pattern_value(
     kind: &str,
     value: &str,
     field_name: &'static str,
@@ -328,7 +390,7 @@ pub enum WebClassificationReason {
     OutsideBoundaryPolicy,
     ExceededMaxDepth,
     ExceededMaxPages,
-    IgnorePattern,
+    UrlFilter,
     UnsupportedScheme,
     InvalidUrl,
     Inaccessible,
@@ -344,7 +406,7 @@ impl WebClassificationReason {
         Self::OutsideBoundaryPolicy,
         Self::ExceededMaxDepth,
         Self::ExceededMaxPages,
-        Self::IgnorePattern,
+        Self::UrlFilter,
         Self::UnsupportedScheme,
         Self::InvalidUrl,
         Self::Inaccessible,
@@ -361,7 +423,7 @@ impl WebClassificationReason {
             Self::OutsideBoundaryPolicy => "outside_boundary_policy",
             Self::ExceededMaxDepth => "exceeded_max_depth",
             Self::ExceededMaxPages => "exceeded_max_pages",
-            Self::IgnorePattern => "ignore_pattern",
+            Self::UrlFilter => "url_filter",
             Self::UnsupportedScheme => "unsupported_scheme",
             Self::InvalidUrl => "invalid_url",
             Self::Inaccessible => "inaccessible",
@@ -534,9 +596,11 @@ fn parse_boundary_policy(boundary_policy: &str) -> Result<WebBoundaryPolicy, Str
 mod tests {
     use super::{
         DEFAULT_WEB_CRAWL_DEPTH, DEFAULT_WEB_CRAWL_MAX_PAGES, WebClassificationReason,
-        WebIngestIgnorePattern, WebIngestPolicy, WebRunCounts, WebRunFailureCode, WebRunState,
-        build_web_ingest_run_ignore_patterns, derive_terminal_run_state,
-        match_web_ingest_ignore_pattern, validate_web_ingest_policy, validate_web_run_settings,
+        WebIngestPattern, WebIngestPolicy, WebIngestUrlFilter, WebIngestUrlFilterMode,
+        WebRunCounts, WebRunFailureCode, WebRunState, classify_web_crawl_filter_exclusion,
+        classify_web_materialization_filter_exclusion, derive_terminal_run_state,
+        match_web_ingest_pattern, validate_web_ingest_policy, validate_web_ingest_url_filter,
+        validate_web_run_settings,
     };
 
     #[test]
@@ -602,7 +666,7 @@ mod tests {
                 "outside_boundary_policy",
                 "exceeded_max_depth",
                 "exceeded_max_pages",
-                "ignore_pattern",
+                "url_filter",
                 "unsupported_scheme",
                 "invalid_url",
                 "inaccessible",
@@ -615,24 +679,27 @@ mod tests {
     #[test]
     fn validates_library_web_ingest_policy() {
         let policy = validate_web_ingest_policy(WebIngestPolicy {
-            ignore_patterns: vec![
-                WebIngestIgnorePattern {
-                    kind: " path_prefix ".to_string(),
-                    value: " /labels/viewlabel.action ".to_string(),
-                    source: Some("ignored".to_string()),
-                },
-                WebIngestIgnorePattern {
-                    kind: "path_prefix".to_string(),
-                    value: "/labels/viewlabel.action".to_string(),
-                    source: None,
-                },
-            ],
+            url_filter: WebIngestUrlFilter {
+                mode: WebIngestUrlFilterMode::Blocklist,
+                patterns: vec![
+                    WebIngestPattern {
+                        kind: " path_prefix ".to_string(),
+                        value: " /labels/viewlabel.action ".to_string(),
+                        source: Some("ignored".to_string()),
+                    },
+                    WebIngestPattern {
+                        kind: "path_prefix".to_string(),
+                        value: "/labels/viewlabel.action".to_string(),
+                        source: None,
+                    },
+                ],
+            },
         })
         .expect("policy should validate");
 
         assert_eq!(
-            policy.ignore_patterns,
-            vec![WebIngestIgnorePattern {
+            policy.url_filter.patterns,
+            vec![WebIngestPattern {
                 kind: "path_prefix".to_string(),
                 value: "/labels/viewlabel.action".to_string(),
                 source: None,
@@ -641,41 +708,37 @@ mod tests {
     }
 
     #[test]
-    fn merges_library_and_run_ignore_patterns_with_sources() {
-        let merged = build_web_ingest_run_ignore_patterns(
-            &WebIngestPolicy {
-                ignore_patterns: vec![WebIngestIgnorePattern {
-                    kind: "path_prefix".to_string(),
-                    value: "/labels/viewlabel.action".to_string(),
+    fn validates_run_url_filter_with_sources() {
+        let filter = validate_web_ingest_url_filter(
+            WebIngestUrlFilter {
+                mode: WebIngestUrlFilterMode::Blocklist,
+                patterns: vec![WebIngestPattern {
+                    kind: "glob".to_string(),
+                    value: "*/print/*".to_string(),
                     source: None,
                 }],
             },
-            vec![WebIngestIgnorePattern {
-                kind: "glob".to_string(),
-                value: "*/print/*".to_string(),
-                source: None,
-            }],
+            "urlFilter",
         )
-        .expect("patterns should merge");
+        .expect("filter should validate");
 
-        assert_eq!(merged[0].source.as_deref(), Some("library"));
-        assert_eq!(merged[1].source.as_deref(), Some("run"));
+        assert_eq!(filter.patterns[0].source.as_deref(), Some("run"));
     }
 
     #[test]
-    fn matches_ignore_patterns_by_url_path_and_glob() {
+    fn matches_url_filter_patterns_by_url_path_and_glob() {
         let patterns = vec![
-            WebIngestIgnorePattern {
+            WebIngestPattern {
                 kind: "path_prefix".to_string(),
                 value: "/labels/viewlabel.action".to_string(),
                 source: Some("library".to_string()),
             },
-            WebIngestIgnorePattern {
+            WebIngestPattern {
                 kind: "url_prefix".to_string(),
                 value: "https://docs.example.test/archive/".to_string(),
                 source: Some("run".to_string()),
             },
-            WebIngestIgnorePattern {
+            WebIngestPattern {
                 kind: "glob".to_string(),
                 value: "*permissionviolation=*".to_string(),
                 source: Some("library".to_string()),
@@ -683,7 +746,7 @@ mod tests {
         ];
 
         assert_eq!(
-            match_web_ingest_ignore_pattern(
+            match_web_ingest_pattern(
                 "https://docs.example.test/labels/viewlabel.action?key=ABC",
                 &patterns,
             )
@@ -691,18 +754,56 @@ mod tests {
             Some("library:path_prefix:/labels/viewlabel.action".to_string())
         );
         assert!(
-            match_web_ingest_ignore_pattern(
-                "https://docs.example.test/archive/old-page",
-                &patterns,
-            )
-            .is_some()
+            match_web_ingest_pattern("https://docs.example.test/archive/old-page", &patterns,)
+                .is_some()
         );
         assert!(
-            match_web_ingest_ignore_pattern(
+            match_web_ingest_pattern(
                 "https://docs.example.test/login.action?permissionviolation=true",
                 &patterns,
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn classifies_allowlist_non_matches_as_excluded() {
+        let filter = WebIngestUrlFilter {
+            mode: WebIngestUrlFilterMode::Allowlist,
+            patterns: vec![WebIngestPattern {
+                kind: "path_prefix".to_string(),
+                value: "/docs/".to_string(),
+                source: Some("run".to_string()),
+            }],
+        };
+
+        assert!(
+            classify_web_materialization_filter_exclusion("https://example.test/docs/a", &filter)
+                .is_none()
+        );
+        assert_eq!(
+            classify_web_materialization_filter_exclusion("https://example.test/admin", &filter)
+                .map(|excluded| excluded.detail),
+            Some("allowlist:no_match".to_string())
+        );
+    }
+
+    #[test]
+    fn allowlist_non_matches_remain_crawlable() {
+        let filter = WebIngestUrlFilter {
+            mode: WebIngestUrlFilterMode::Allowlist,
+            patterns: vec![WebIngestPattern {
+                kind: "path_prefix".to_string(),
+                value: "/content/page".to_string(),
+                source: Some("run".to_string()),
+            }],
+        };
+
+        assert!(classify_web_crawl_filter_exclusion("https://example.test/", &filter).is_none());
+        assert_eq!(
+            classify_web_materialization_filter_exclusion("https://example.test/", &filter)
+                .map(|excluded| excluded.detail),
+            Some("allowlist:no_match".to_string())
         );
     }
 }

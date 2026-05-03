@@ -46,6 +46,7 @@ fn sample_settings() -> Settings {
         ui_bootstrap_vision_model_name: None,
         ui_session_ttl_hours: 720,
         upload_max_size_mb: 50,
+        recognition_default_raster_image_engine: "docling".into(),
         startup_authority_mode: "not_required".into(),
         dependency_postgres_mode: "external".into(),
         dependency_redis_mode: "external".into(),
@@ -66,14 +67,14 @@ fn sample_settings() -> Settings {
         web_ingest_max_redirects: 10,
         web_ingest_user_agent: "IronRAG-WebIngest/0.1".into(),
         web_ingest_crawl_concurrency: 4,
-        ingestion_max_parallel_jobs_global: 512,
-        ingestion_max_parallel_jobs_per_workspace: 128,
-        ingestion_max_parallel_jobs_per_library: 16,
+        ingestion_max_parallel_jobs_global: 64,
+        ingestion_max_parallel_jobs_per_workspace: 16,
+        ingestion_max_parallel_jobs_per_library: 4,
         ingestion_memory_soft_limit_mib: 0,
         ingestion_worker_lease_seconds: 300,
         ingestion_worker_heartbeat_interval_seconds: 15,
-        ingestion_embedding_parallelism: 4,
-        ingestion_graph_extract_parallelism_per_doc: 8,
+        ingestion_embedding_parallelism: 2,
+        ingestion_graph_extract_parallelism_per_doc: 2,
         llm_http_timeout_seconds: 120,
         llm_transport_retry_attempts: 5,
         llm_transport_retry_base_delay_ms: 500,
@@ -136,6 +137,7 @@ fn settings_from_env_entries(entries: &[(&str, &str)]) -> Settings {
     validate_service_name(&settings).expect("service name should validate");
     validate_arangodb_settings(&settings).expect("arangodb settings should validate");
     validate_ingestion_settings(&settings).expect("ingestion settings should validate");
+    validate_recognition_settings(&settings).expect("recognition settings should validate");
     validate_runtime_agent_settings(&settings).expect("runtime settings should validate");
     validate_release_monitor_settings(&settings).expect("release monitor settings should validate");
     validate_mcp_memory_settings(&settings).expect("mcp settings should validate");
@@ -151,19 +153,24 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.service_name, "ironrag-backend");
     assert_eq!(settings.environment, "local");
     assert_eq!(settings.database_max_connections, 64);
-    assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 8);
+    assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 2);
     assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
     assert_eq!(settings.arangodb_url, "http://127.0.0.1:8529");
     assert_eq!(settings.arangodb_database, "ironrag");
     assert_eq!(settings.log_filter, "info");
-    assert_eq!(settings.ingestion_max_parallel_jobs_global, 512);
-    assert_eq!(settings.ingestion_max_parallel_jobs_per_workspace, 128);
-    assert_eq!(settings.ingestion_max_parallel_jobs_per_library, 16);
+    assert_eq!(settings.ingestion_max_parallel_jobs_global, 64);
+    assert_eq!(settings.ingestion_max_parallel_jobs_per_workspace, 16);
+    assert_eq!(settings.ingestion_max_parallel_jobs_per_library, 4);
     assert_eq!(settings.ingestion_memory_soft_limit_mib, 0);
     assert_eq!(settings.runtime_agent_max_turns, 4);
     assert_eq!(settings.release_check_repository, "mlimarenko/IronRAG");
     assert_eq!(settings.release_check_interval_hours, 12);
     assert_eq!(settings.runtime_agent_max_parallel_actions, 4);
+    assert_eq!(settings.recognition_default_raster_image_engine, "docling");
+    assert_eq!(
+        settings.default_recognition_policy().raster_image_engine,
+        RecognitionEngine::Docling
+    );
     assert_eq!(
         settings.runtime_trace_payload_budget_bytes,
         DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES
@@ -187,6 +194,26 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.mcp_memory_max_search_limit, 25);
     assert_eq!(settings.mcp_memory_idempotency_retention_hours, 72);
     assert!(settings.mcp_memory_audit_enabled);
+}
+
+#[test]
+fn recognition_default_raster_image_engine_overrides_default() {
+    let settings =
+        settings_from_env_entries(&[("IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE", "vision")]);
+
+    assert_eq!(
+        settings.default_recognition_policy().raster_image_engine,
+        RecognitionEngine::Vision
+    );
+}
+
+#[test]
+fn recognition_default_raster_image_engine_rejects_unsupported_native() {
+    let mut settings = sample_settings();
+    settings.recognition_default_raster_image_engine = "native".to_string();
+
+    let error = validate_recognition_settings(&settings).expect_err("native must be rejected");
+    assert!(error.contains("rasterImageEngine must be either docling or vision"));
 }
 
 #[test]

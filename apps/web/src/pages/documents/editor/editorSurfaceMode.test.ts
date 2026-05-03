@@ -4,6 +4,7 @@ import {
   codeLanguageForSourceFormat,
   isCodeLikeSourceFormat,
   isEditorEditableSourceFormat,
+  isPlainTextSourceFormat,
   isTableLikeSourceFormat,
   resolveEditorSurfaceMode,
 } from './editorSurfaceMode';
@@ -18,6 +19,13 @@ describe('editorSurfaceMode', () => {
     expect(isCodeLikeSourceFormat('rs')).toBe(true);
     expect(codeLanguageForSourceFormat('rs')).toBe('rust');
     expect(resolveEditorSurfaceMode({ markdown: 'pub struct Node {}', sourceFormat: 'rs' })).toBe('code');
+  });
+
+  it('recognizes plain text source formats for lossless editor loading', () => {
+    expect(isPlainTextSourceFormat('txt')).toBe(true);
+    expect(isPlainTextSourceFormat('md')).toBe(true);
+    expect(isPlainTextSourceFormat('log')).toBe(true);
+    expect(isPlainTextSourceFormat('xlsx')).toBe(false);
   });
 
   it('falls back to markdown table heuristics', () => {

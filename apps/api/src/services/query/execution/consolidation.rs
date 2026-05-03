@@ -11,10 +11,10 @@
 //! clearly about ONE document" from the compiled `QueryIR`
 //! (explicit hint, subject-role entity matching a title, or an
 //! evidence-dominance / only-document signal on the retrieval itself),
-//! then reallocates the top-k budget to pack contiguous neighbours of
-//! that winner.
+//! then reallocates the top-k budget to pack ranked content anchors
+//! and their local neighbours from that winner.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use uuid::Uuid;
 
@@ -22,12 +22,16 @@ use crate::app::state::AppState;
 use crate::{
     domains::query_ir::{EntityRole, QueryIR, QueryScope},
     services::query::{
-        latest_versions::question_requests_latest_versions,
+        planner::extract_keywords,
         text_match::{near_token_overlap_count, normalized_alnum_tokens},
     },
 };
 
 use super::{RetrievalBundle, RuntimeMatchedChunk};
+use super::{
+    source_anchor_window,
+    source_profile::{is_source_profile_chunk_row, is_source_profile_runtime_chunk},
+};
 
 /// Why the consolidation stage picked a particular winner (or no
 /// winner). Carried in the answer-pipeline diagnostics so
@@ -190,6 +194,12 @@ fn topical_title_tokens(question: &str, chunks: &[RuntimeMatchedChunk]) -> BTree
         .collect()
 }
 
+// RRF-scored ordinary lexical/vector hits are around 0.01. Additive
+// evidence lanes (entity bio, graph evidence, query-IR focus) preserve
+// source scores near 1.0+ so downstream pruning can recognise them as
+// intentional retrieval anchors even when the document title is generic.
+const ADDITIVE_EVIDENCE_PRUNE_SCORE_FLOOR: f32 = 0.9;
+
 /// Drop the ranked tail when it is outside the user's explicit topic.
 ///
 /// Broad questions often retrieve a set of sibling documents plus a few
@@ -201,8 +211,9 @@ fn topical_title_tokens(question: &str, chunks: &[RuntimeMatchedChunk]) -> BTree
 pub(crate) fn prune_non_topical_document_tail(
     bundle: &mut RetrievalBundle,
     question: &str,
+    skip_prune: bool,
 ) -> TopicalPruneDiagnostics {
-    if question_requests_latest_versions(question) {
+    if skip_prune {
         return TopicalPruneDiagnostics::default();
     }
     let topical_tokens = topical_title_tokens(question, &bundle.chunks);
@@ -217,6 +228,7 @@ pub(crate) fn prune_non_topical_document_tail(
         .filter(|chunk| {
             let title_tokens = significant_tokens(&chunk.document_label);
             near_token_overlap_count(&topical_tokens, &title_tokens) > 0
+                || is_additive_evidence_chunk(chunk)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -233,6 +245,10 @@ pub(crate) fn prune_non_topical_document_tail(
     }
 }
 
+fn is_additive_evidence_chunk(chunk: &RuntimeMatchedChunk) -> bool {
+    chunk.score.unwrap_or(0.0) >= ADDITIVE_EVIDENCE_PRUNE_SCORE_FLOOR
+}
+
 /// Document-level aggregate over the rerank bundle. Captures both the
 /// "this doc has many hits" signal (for evidence dominance) and the
 /// "best-scored chunk so far" signal (so ties on evidence fall back
@@ -243,22 +259,38 @@ pub(crate) struct DocumentAggregate {
     pub(crate) revision_id: Uuid,
     pub(crate) evidence_count: usize,
     pub(crate) best_score: f32,
-    pub(crate) anchors: BTreeSet<i32>,
+    pub(crate) content_anchors: BTreeSet<i32>,
+    pub(crate) ranked_content_anchors: Vec<i32>,
 }
 
-fn aggregate_by_document(chunks: &[RuntimeMatchedChunk]) -> Vec<DocumentAggregate> {
-    let mut map: std::collections::HashMap<Uuid, DocumentAggregate> =
-        std::collections::HashMap::new();
-    for chunk in chunks {
+#[derive(Debug, Clone, Copy)]
+struct AnchorRank {
+    chunk_index: i32,
+    focus_score: usize,
+    retrieval_score: f32,
+    first_rank: usize,
+}
+
+fn aggregate_by_document(chunks: &[RuntimeMatchedChunk], question: &str) -> Vec<DocumentAggregate> {
+    let question_keywords = extract_keywords(question);
+    let mut map: HashMap<Uuid, DocumentAggregate> = HashMap::new();
+    let mut anchor_ranks = HashMap::<Uuid, HashMap<i32, AnchorRank>>::new();
+    for (rank, chunk) in chunks.iter().enumerate() {
+        if is_source_profile_runtime_chunk(chunk) {
+            continue;
+        }
         let entry = map.entry(chunk.document_id).or_insert_with(|| DocumentAggregate {
             document_id: chunk.document_id,
             revision_id: chunk.revision_id,
             evidence_count: 0,
             best_score: f32::MIN,
-            anchors: BTreeSet::new(),
+            content_anchors: BTreeSet::new(),
+            ranked_content_anchors: Vec::new(),
         });
         entry.evidence_count += 1;
-        entry.anchors.insert(chunk.chunk_index);
+        if entry.content_anchors.insert(chunk.chunk_index) {
+            entry.ranked_content_anchors.push(chunk.chunk_index);
+        }
         let score = chunk.score.unwrap_or(0.0);
         if score > entry.best_score {
             entry.best_score = score;
@@ -267,8 +299,47 @@ fn aggregate_by_document(chunks: &[RuntimeMatchedChunk]) -> Vec<DocumentAggregat
             // stays defensive if a doc ever spans revisions mid-swap.
             entry.revision_id = chunk.revision_id;
         }
+        let focus_score = anchor_focus_score(chunk, &question_keywords);
+        anchor_ranks
+            .entry(chunk.document_id)
+            .or_default()
+            .entry(chunk.chunk_index)
+            .and_modify(|existing| {
+                if anchor_rank_is_better(focus_score, score, rank, existing) {
+                    *existing = AnchorRank {
+                        chunk_index: chunk.chunk_index,
+                        focus_score,
+                        retrieval_score: score,
+                        first_rank: rank,
+                    };
+                }
+            })
+            .or_insert(AnchorRank {
+                chunk_index: chunk.chunk_index,
+                focus_score,
+                retrieval_score: score,
+                first_rank: rank,
+            });
     }
-    let mut agg: Vec<_> = map.into_values().collect();
+    let mut agg: Vec<_> = map
+        .into_values()
+        .map(|mut aggregate| {
+            if let Some(anchor_rank_map) = anchor_ranks.remove(&aggregate.document_id) {
+                let mut ranks = anchor_rank_map.into_values().collect::<Vec<_>>();
+                ranks.sort_by(|left, right| {
+                    right
+                        .retrieval_score
+                        .total_cmp(&left.retrieval_score)
+                        .then_with(|| right.focus_score.cmp(&left.focus_score))
+                        .then_with(|| left.first_rank.cmp(&right.first_rank))
+                        .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+                });
+                aggregate.ranked_content_anchors =
+                    ranks.into_iter().map(|rank| rank.chunk_index).collect();
+            }
+            aggregate
+        })
+        .collect();
     // Stable order: evidence desc, then score desc, then document_id for
     // determinism under ties.
     agg.sort_by(|a, b| {
@@ -280,6 +351,31 @@ fn aggregate_by_document(chunks: &[RuntimeMatchedChunk]) -> Vec<DocumentAggregat
             .then_with(|| a.document_id.cmp(&b.document_id))
     });
     agg
+}
+
+fn anchor_rank_is_better(
+    focus_score: usize,
+    retrieval_score: f32,
+    rank: usize,
+    existing: &AnchorRank,
+) -> bool {
+    retrieval_score > existing.retrieval_score
+        || (retrieval_score == existing.retrieval_score && focus_score > existing.focus_score)
+        || (retrieval_score == existing.retrieval_score
+            && focus_score == existing.focus_score
+            && rank < existing.first_rank)
+}
+
+fn anchor_focus_score(chunk: &RuntimeMatchedChunk, question_keywords: &[String]) -> usize {
+    if question_keywords.is_empty() {
+        return 0;
+    }
+    let haystack = format!("{} {}", chunk.excerpt, chunk.source_text).to_lowercase();
+    question_keywords
+        .iter()
+        .filter(|keyword| haystack.contains(keyword.as_str()))
+        .map(|keyword| keyword.chars().count().max(1))
+        .sum()
 }
 
 /// Rank candidate documents by how strongly their title overlaps the
@@ -300,7 +396,8 @@ fn pick_by_overlap<'agg>(
         .filter_map(|agg| {
             let title_tokens = title_tokens_for_document(agg.document_id, chunks);
             let overlap = near_token_overlap_count(reference_tokens, &title_tokens);
-            (overlap > 0).then_some((overlap, agg))
+            is_selective_title_overlap(overlap, reference_tokens.len(), title_tokens.len())
+                .then_some((overlap, agg))
         })
         .collect();
     if scored.is_empty() {
@@ -325,6 +422,14 @@ fn pick_by_overlap<'agg>(
         return None;
     }
     Some(top.1)
+}
+
+fn is_selective_title_overlap(
+    overlap: usize,
+    reference_token_count: usize,
+    _title_token_count: usize,
+) -> bool {
+    overlap >= 2 || (overlap == 1 && reference_token_count == 1)
 }
 
 /// Pick a winner from IR `document_focus.hint` by title-overlap size.
@@ -407,23 +512,121 @@ fn winner_from_score_dominance<'agg>(
     None
 }
 
-/// Expand an anchor set into a contiguous `[min, max]` range to fetch
-/// via `list_chunks_by_revision_range`. Budget controls how many
-/// additional chunks can be appended forward/backward from the outer
-/// anchors. "Contiguous around anchors (±1)" comes for free from the
-/// outer min/max span; the extra budget is applied first forward
-/// then backward so intro-chunk retrievals (chunk_index=0) grow in
-/// reading order rather than padding a non-existent prefix.
-fn anchor_expansion_window(
-    anchors: &BTreeSet<i32>,
-    budget_expand_forward: i32,
-    budget_expand_backward: i32,
-) -> Option<(i32, i32)> {
-    let &first = anchors.iter().next()?;
-    let &last = anchors.iter().next_back()?;
-    let expanded_min = (first - 1 - budget_expand_backward).max(0);
-    let expanded_max = last + 1 + budget_expand_forward;
-    Some((expanded_min, expanded_max))
+fn winner_anchor_expansion_forward(winner: &DocumentAggregate, budget: usize) -> i32 {
+    let materialized_anchor_count = winner.ranked_content_anchors.len().min(budget);
+    budget.saturating_sub(materialized_anchor_count).max(1) as i32
+}
+
+fn winner_anchor_windows(winner: &DocumentAggregate, budget: usize) -> Vec<(i32, i32)> {
+    let expansion_forward = winner_anchor_expansion_forward(winner, budget);
+    let mut windows = winner
+        .ranked_content_anchors
+        .iter()
+        .take(budget)
+        .map(|anchor| source_anchor_window(*anchor, 1, expansion_forward.saturating_add(1)))
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+
+    let mut merged = Vec::<(i32, i32)>::new();
+    for (min_index, max_index) in windows {
+        match merged.last_mut() {
+            Some((_, last_max)) if min_index <= last_max.saturating_add(1) => {
+                *last_max = (*last_max).max(max_index);
+            }
+            _ => merged.push((min_index, max_index)),
+        }
+    }
+    merged
+}
+
+fn push_winner_row_by_index(
+    selected: &mut Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    selected_indices: &mut BTreeSet<i32>,
+    rows_by_index: &BTreeMap<i32, crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    chunk_index: i32,
+    budget: usize,
+) {
+    if selected.len() >= budget || selected_indices.contains(&chunk_index) {
+        return;
+    }
+    let Some(row) = rows_by_index.get(&chunk_index) else {
+        return;
+    };
+    selected_indices.insert(chunk_index);
+    selected.push(row.clone());
+}
+
+fn select_winner_rows(
+    winner: &DocumentAggregate,
+    budget: usize,
+    fetched_rows: Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+) -> Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow> {
+    if budget == 0 || winner.ranked_content_anchors.is_empty() {
+        return Vec::new();
+    }
+
+    let mut rows_by_index =
+        BTreeMap::<i32, crate::infra::arangodb::document_store::KnowledgeChunkRow>::new();
+    for row in fetched_rows {
+        if row.revision_id != winner.revision_id || is_source_profile_chunk_row(&row) {
+            continue;
+        }
+        rows_by_index.entry(row.chunk_index).or_insert(row);
+    }
+    if rows_by_index.is_empty() {
+        return Vec::new();
+    }
+
+    let ranked_anchors =
+        winner.ranked_content_anchors.iter().copied().take(budget).collect::<Vec<_>>();
+    let mut selected = Vec::with_capacity(budget.min(rows_by_index.len()));
+    let mut selected_indices = BTreeSet::<i32>::new();
+    for anchor in &ranked_anchors {
+        push_winner_row_by_index(
+            &mut selected,
+            &mut selected_indices,
+            &rows_by_index,
+            *anchor,
+            budget,
+        );
+    }
+
+    for anchor in &ranked_anchors {
+        push_winner_row_by_index(
+            &mut selected,
+            &mut selected_indices,
+            &rows_by_index,
+            anchor.saturating_sub(1),
+            budget,
+        );
+    }
+
+    let expansion_forward = winner_anchor_expansion_forward(winner, budget);
+    for step in 1..=expansion_forward {
+        for anchor in &ranked_anchors {
+            push_winner_row_by_index(
+                &mut selected,
+                &mut selected_indices,
+                &rows_by_index,
+                anchor.saturating_add(step),
+                budget,
+            );
+        }
+    }
+
+    if selected.len() < budget {
+        for chunk_index in rows_by_index.keys().copied().collect::<Vec<_>>() {
+            push_winner_row_by_index(
+                &mut selected,
+                &mut selected_indices,
+                &rows_by_index,
+                chunk_index,
+                budget,
+            );
+        }
+    }
+
+    selected
 }
 
 /// Pure decision stage — picks a winner document (or not) given the
@@ -437,6 +640,7 @@ fn anchor_expansion_window(
 pub(crate) fn decide_focus(
     bundle: &RetrievalBundle,
     query_ir: &QueryIR,
+    question: &str,
     top_k: usize,
 ) -> Option<(DocumentAggregate, FocusReason, usize)> {
     if top_k < 2 || bundle.chunks.is_empty() {
@@ -448,7 +652,7 @@ pub(crate) fn decide_focus(
     ) {
         return None;
     }
-    let aggregates = aggregate_by_document(&bundle.chunks);
+    let aggregates = aggregate_by_document(&bundle.chunks, question);
 
     // Priority order: explicit hint → single-doc subject → only
     // retrieved document → evidence dominance. The first match wins;
@@ -512,11 +716,10 @@ pub(crate) fn apply_winner_chunks(
         .map(|chunk| (chunk.document_label.clone(), chunk.score.unwrap_or(0.0)))
         .unwrap_or_else(|| (String::new(), 0.0));
 
-    let mut winner_chunks: Vec<RuntimeMatchedChunk> = fetched_rows
+    let winner_chunks: Vec<RuntimeMatchedChunk> = select_winner_rows(winner, budget, fetched_rows)
         .into_iter()
-        .filter(|row| row.revision_id == winner.revision_id)
-        .take(budget)
-        .map(|row| {
+        .enumerate()
+        .map(|(selection_rank, row)| {
             let source_text = chunk_source_text(&row);
             let excerpt = super::retrieve::focused_excerpt_for(
                 &source_text,
@@ -525,21 +728,25 @@ pub(crate) fn apply_winner_chunks(
             );
             // Bias winner scores above any tangential so the downstream
             // global sort cannot re-interleave the pack back into the
-            // original fragmentation.
-            let biased = winner_score_seed.max(0.0) + 10_000.0 - (row.chunk_index as f32 * 0.001);
+            // original fragmentation. Selection rank, not source
+            // ordinal, owns the bias so sparse late anchors survive
+            // later top_k truncation.
+            let biased = winner_score_seed.max(0.0) + 10_000.0 - (selection_rank as f32 * 0.001);
             RuntimeMatchedChunk {
                 chunk_id: row.chunk_id,
                 document_id: row.document_id,
                 revision_id: row.revision_id,
                 chunk_index: row.chunk_index,
+                chunk_kind: row.chunk_kind.clone(),
                 document_label: winner_label.clone(),
                 excerpt,
+                score_kind:
+                    crate::services::query::execution::RuntimeChunkScoreKind::FocusedDocument,
                 score: Some(biased),
                 source_text,
             }
         })
         .collect();
-    winner_chunks.sort_by_key(|chunk| chunk.chunk_index);
 
     let winner_chunk_count = winner_chunks.len();
     if winner_chunk_count == 0 {
@@ -583,34 +790,33 @@ pub(crate) fn apply_winner_chunks(
 /// Mutation contract:
 /// - On `FocusReason::None` the bundle is left untouched.
 /// - On any other focus reason, `bundle.chunks` is rewritten to
-///   `[winner_chunks_sorted_by_index..., tangential_chunks...]`
+///   `[winner_chunks_by_anchor_priority..., tangential_chunks...]`
 ///   truncated to the allocated winner budget + remaining slots
 ///   for top-scored tangentials.
 /// - Winner chunks are materialized from Arango via
-///   `list_chunks_by_revision_range`; if that call fails, the bundle
+///   `list_chunks_by_revision_windows`; if that call fails, the bundle
 ///   is left untouched and `FocusReason::None` is returned (we'd
 ///   rather ship the original than panic the whole answer).
 pub(crate) async fn focused_document_consolidation(
     state: &AppState,
     bundle: &mut RetrievalBundle,
     query_ir: &QueryIR,
+    question: &str,
     top_k: usize,
 ) -> ConsolidationDiagnostics {
-    let Some((winner, focus_reason, budget)) = decide_focus(bundle, query_ir, top_k) else {
+    let Some((winner, focus_reason, budget)) = decide_focus(bundle, query_ir, question, top_k)
+    else {
         return ConsolidationDiagnostics::noop();
     };
 
-    let expansion_forward = budget.saturating_sub(winner.anchors.len()).max(1) as i32;
-    let expansion_backward = 1_i32;
-    let Some((min_index, max_index)) =
-        anchor_expansion_window(&winner.anchors, expansion_forward, expansion_backward)
-    else {
+    let windows = winner_anchor_windows(&winner, budget);
+    if windows.is_empty() {
         return ConsolidationDiagnostics::noop();
     };
 
     let fetched = match state
         .arango_document_store
-        .list_chunks_by_revision_range(winner.revision_id, min_index, max_index)
+        .list_chunks_by_revision_windows(winner.revision_id, &windows)
         .await
     {
         Ok(rows) => rows,
@@ -620,7 +826,8 @@ pub(crate) async fn focused_document_consolidation(
                 %error,
                 document_id = %winner.document_id,
                 revision_id = %winner.revision_id,
-                "range fetch failed — consolidation skipped"
+                window_count = windows.len(),
+                "window fetch failed — consolidation skipped"
             );
             return ConsolidationDiagnostics::noop();
         }
@@ -672,8 +879,10 @@ pub(crate) mod test_support {
             document_id,
             revision_id,
             chunk_index,
+            chunk_kind: None,
             document_label: document_label.to_string(),
             excerpt: format!("chunk {chunk_index}"),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(score),
             source_text: format!("source text for chunk {chunk_index}"),
         }
@@ -690,6 +899,8 @@ mod tests {
     };
     use crate::infra::arangodb::document_store::KnowledgeChunkRow;
 
+    const DEFAULT_TEST_QUESTION: &str = "Which focused document contains the requested evidence?";
+
     fn ir(scope: QueryScope) -> QueryIR {
         QueryIR {
             act: QueryAct::ConfigureHow,
@@ -698,10 +909,12 @@ mod tests {
             target_types: Vec::new(),
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
             comparison: None,
             document_focus: None,
             conversation_refs: Vec::new(),
             needs_clarification: None,
+            source_slice: None,
             confidence: 0.9,
         }
     }
@@ -710,6 +923,16 @@ mod tests {
         document_id: Uuid,
         revision_id: Uuid,
         chunk_index: i32,
+        content: &str,
+    ) -> KnowledgeChunkRow {
+        chunk_row_with_kind(document_id, revision_id, chunk_index, Some("paragraph"), content)
+    }
+
+    fn chunk_row_with_kind(
+        document_id: Uuid,
+        revision_id: Uuid,
+        chunk_index: i32,
+        chunk_kind: Option<&str>,
         content: &str,
     ) -> KnowledgeChunkRow {
         KnowledgeChunkRow {
@@ -722,7 +945,7 @@ mod tests {
             document_id,
             revision_id,
             chunk_index,
-            chunk_kind: Some("paragraph".to_string()),
+            chunk_kind: chunk_kind.map(str::to_string),
             content_text: content.to_string(),
             normalized_text: content.to_string(),
             span_start: Some(0),
@@ -736,6 +959,43 @@ mod tests {
             text_generation: Some(1),
             vector_generation: Some(1),
             quality_score: None,
+
+            window_text: None,
+
+            raptor_level: None,
+            occurred_at: None,
+            occurred_until: None,
+        }
+    }
+
+    fn source_profile_chunk(
+        document_id: Uuid,
+        revision_id: Uuid,
+        chunk_index: i32,
+        document_label: &str,
+        score: f32,
+    ) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_kind: Some("source_profile".to_string()),
+            source_text: "[source_profile source_format=record_jsonl sequence_kind=record_stream unit_count=600]"
+                .to_string(),
+            excerpt: "[source_profile source_format=record_jsonl unit_count=600]".to_string(),
+            ..sample_chunk(document_id, revision_id, chunk_index, document_label, score)
+        }
+    }
+
+    fn text_chunk(
+        document_id: Uuid,
+        revision_id: Uuid,
+        chunk_index: i32,
+        document_label: &str,
+        score: f32,
+        text: &str,
+    ) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            excerpt: text.to_string(),
+            source_text: text.to_string(),
+            ..sample_chunk(document_id, revision_id, chunk_index, document_label, score)
         }
     }
 
@@ -745,15 +1005,23 @@ mod tests {
         top_k: usize,
         revision_rows: Vec<KnowledgeChunkRow>,
     ) -> ConsolidationDiagnostics {
-        let Some((winner, reason, budget)) = decide_focus(bundle, query_ir, top_k) else {
+        run_apply_with_question(bundle, query_ir, DEFAULT_TEST_QUESTION, top_k, revision_rows)
+    }
+
+    fn run_apply_with_question(
+        bundle: &mut RetrievalBundle,
+        query_ir: &QueryIR,
+        question: &str,
+        top_k: usize,
+        revision_rows: Vec<KnowledgeChunkRow>,
+    ) -> ConsolidationDiagnostics {
+        let Some((winner, reason, budget)) = decide_focus(bundle, query_ir, question, top_k) else {
             return ConsolidationDiagnostics::noop();
         };
-        // Pure path also validates the anchor window is well-formed
+        // Pure path also validates the anchor windows are well-formed
         // for the chosen winner before we apply; mirrors the async
         // orchestrator's guard.
-        let expansion_forward = budget.saturating_sub(winner.anchors.len()).max(1) as i32;
-        let _ = anchor_expansion_window(&winner.anchors, expansion_forward, 1)
-            .expect("anchors present imply window");
+        assert!(!winner_anchor_windows(&winner, budget).is_empty());
         apply_winner_chunks(bundle, &winner, reason, budget, top_k, revision_rows)
     }
 
@@ -838,6 +1106,34 @@ mod tests {
         for chunk in &bundle.chunks {
             assert_eq!(chunk.document_id, hint_doc);
         }
+    }
+
+    #[test]
+    fn test_consolidation_rejects_weak_single_token_subject_overlap() {
+        let folder_doc = Uuid::now_v7();
+        let folder_rev = Uuid::now_v7();
+        let other_doc = Uuid::now_v7();
+        let other_rev = Uuid::now_v7();
+
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                sample_chunk(folder_doc, folder_rev, 0, "Shared folder", 0.8),
+                sample_chunk(other_doc, other_rev, 0, "Operations manual", 0.7),
+            ],
+        };
+
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_entities = vec![EntityMention {
+            label: "scan folder network configuration commands".to_string(),
+            role: EntityRole::Subject,
+        }];
+
+        let diag = run_apply(&mut bundle, &query_ir, 8, Vec::new());
+
+        assert_eq!(diag.focus_reason, FocusReason::None);
+        assert_eq!(diag.focused_document_id, None);
     }
 
     #[test]
@@ -983,7 +1279,7 @@ mod tests {
         };
         let query_ir = ir(QueryScope::SingleDocument);
 
-        assert!(decide_focus(&bundle, &query_ir, 8).is_none());
+        assert!(decide_focus(&bundle, &query_ir, DEFAULT_TEST_QUESTION, 8).is_none());
     }
 
     #[test]
@@ -1003,7 +1299,7 @@ mod tests {
         };
         let query_ir = ir(QueryScope::SingleDocument);
 
-        assert!(decide_focus(&below_identity_scale, &query_ir, 8).is_none());
+        assert!(decide_focus(&below_identity_scale, &query_ir, DEFAULT_TEST_QUESTION, 8).is_none());
 
         let non_finite = RetrievalBundle {
             entities: Vec::new(),
@@ -1014,7 +1310,7 @@ mod tests {
             ],
         };
 
-        assert!(decide_focus(&non_finite, &query_ir, 8).is_none());
+        assert!(decide_focus(&non_finite, &query_ir, DEFAULT_TEST_QUESTION, 8).is_none());
     }
 
     #[test]
@@ -1041,6 +1337,198 @@ mod tests {
         );
         assert!(diag.winner_chunk_count <= 16);
         assert!(bundle.chunks.iter().all(|chunk| chunk.document_id == winner_doc));
+    }
+
+    #[test]
+    fn test_consolidation_ignores_source_profile_as_sparse_anchor() {
+        let winner_doc = Uuid::now_v7();
+        let winner_rev = Uuid::now_v7();
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                source_profile_chunk(winner_doc, winner_rev, 0, "records.jsonl", 1_000_000.0),
+                sample_chunk(winner_doc, winner_rev, 500, "records.jsonl", 1000.0),
+            ],
+        };
+        let query_ir = ir(QueryScope::SingleDocument);
+        let mut revision_rows = vec![chunk_row_with_kind(
+            winner_doc,
+            winner_rev,
+            0,
+            Some("source_profile"),
+            "[source_profile source_format=record_jsonl sequence_kind=record_stream unit_count=600]",
+        )];
+        revision_rows.extend(
+            (0..520)
+                .map(|idx| chunk_row(winner_doc, winner_rev, idx, &format!("source chunk {idx}"))),
+        );
+
+        let diag = run_apply(&mut bundle, &query_ir, 8, revision_rows);
+
+        assert_eq!(diag.focus_reason, FocusReason::OnlyRetrievedDocument);
+        let indices = bundle.chunks.iter().map(|chunk| chunk.chunk_index).collect::<Vec<_>>();
+        assert!(
+            indices.contains(&500),
+            "late content anchor must survive winner materialization: {indices:?}"
+        );
+        assert!(
+            !indices.iter().all(|index| *index < 16),
+            "source profile at 0 must not expand into a head-only 0..15 pack: {indices:?}"
+        );
+    }
+
+    #[test]
+    fn test_consolidation_prioritizes_ranked_anchors_before_neighbors() {
+        let winner_doc = Uuid::now_v7();
+        let winner_rev = Uuid::now_v7();
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                sample_chunk(winner_doc, winner_rev, 500, "records.jsonl", 0.95),
+                sample_chunk(winner_doc, winner_rev, 120, "records.jsonl", 0.90),
+            ],
+        };
+        let winner = DocumentAggregate {
+            document_id: winner_doc,
+            revision_id: winner_rev,
+            evidence_count: 2,
+            best_score: 0.95,
+            content_anchors: [120, 500].into_iter().collect(),
+            ranked_content_anchors: vec![500, 120],
+        };
+        let revision_rows = [119, 120, 121, 499, 500, 501]
+            .into_iter()
+            .map(|idx| chunk_row(winner_doc, winner_rev, idx, &format!("source chunk {idx}")))
+            .collect::<Vec<_>>();
+
+        let diag = apply_winner_chunks(
+            &mut bundle,
+            &winner,
+            FocusReason::OnlyRetrievedDocument,
+            2,
+            2,
+            revision_rows,
+        );
+
+        assert_eq!(diag.winner_chunk_count, 2);
+        let indices = bundle.chunks.iter().map(|chunk| chunk.chunk_index).collect::<Vec<_>>();
+        assert_eq!(indices, vec![500, 120]);
+    }
+
+    #[test]
+    fn test_consolidation_ranks_single_document_anchors_by_question_focus() {
+        let winner_doc = Uuid::now_v7();
+        let winner_rev = Uuid::now_v7();
+        let question = "Which record mentions AlphaKey on 2024-09-03?";
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                text_chunk(
+                    winner_doc,
+                    winner_rev,
+                    40,
+                    "records.jsonl",
+                    1.0,
+                    "general record summary without the requested identifier",
+                ),
+                text_chunk(
+                    winner_doc,
+                    winner_rev,
+                    4,
+                    "records.jsonl",
+                    1.0,
+                    "record body: AlphaKey was listed on 2024-09-03 with supporting details",
+                ),
+                text_chunk(
+                    winner_doc,
+                    winner_rev,
+                    120,
+                    "records.jsonl",
+                    1.0,
+                    "record body: unrelated 2024 status note",
+                ),
+            ],
+        };
+        let query_ir = ir(QueryScope::SingleDocument);
+
+        let Some((winner, reason, budget)) = decide_focus(&bundle, &query_ir, question, 8) else {
+            panic!("single retrieved document should consolidate");
+        };
+        assert_eq!(reason, FocusReason::OnlyRetrievedDocument);
+        assert_eq!(winner.ranked_content_anchors.first().copied(), Some(4));
+        assert!(!winner_anchor_windows(&winner, budget).is_empty());
+
+        let revision_rows = (0..128)
+            .map(|idx| {
+                let text = if idx == 4 {
+                    "record body: AlphaKey was listed on 2024-09-03 with supporting details"
+                } else {
+                    "neighbor record"
+                };
+                chunk_row(winner_doc, winner_rev, idx, text)
+            })
+            .collect::<Vec<_>>();
+        let diag = run_apply_with_question(&mut bundle, &query_ir, question, 8, revision_rows);
+        assert_eq!(diag.focus_reason, FocusReason::OnlyRetrievedDocument);
+        assert_eq!(bundle.chunks.first().map(|chunk| chunk.chunk_index), Some(4));
+    }
+
+    #[test]
+    fn test_consolidation_anchor_ranking_prefers_retrieval_score_before_focus() {
+        let winner_doc = Uuid::now_v7();
+        let winner_rev = Uuid::now_v7();
+        let question = "Which record mentions AlphaKey?";
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                text_chunk(
+                    winner_doc,
+                    winner_rev,
+                    40,
+                    "records.jsonl",
+                    2.0,
+                    "high confidence retrieved record",
+                ),
+                text_chunk(
+                    winner_doc,
+                    winner_rev,
+                    4,
+                    "records.jsonl",
+                    1.0,
+                    "lower confidence record mentioning AlphaKey",
+                ),
+            ],
+        };
+        let query_ir = ir(QueryScope::SingleDocument);
+
+        let Some((winner, _, _)) = decide_focus(&bundle, &query_ir, question, 8) else {
+            panic!("single retrieved document should consolidate");
+        };
+        assert_eq!(winner.ranked_content_anchors.first().copied(), Some(40));
+    }
+
+    #[test]
+    fn test_consolidation_source_profile_only_retrieval_noops() {
+        let winner_doc = Uuid::now_v7();
+        let winner_rev = Uuid::now_v7();
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![source_profile_chunk(
+                winner_doc,
+                winner_rev,
+                0,
+                "records.jsonl",
+                1_000_000.0,
+            )],
+        };
+        let query_ir = ir(QueryScope::SingleDocument);
+
+        assert!(decide_focus(&bundle, &query_ir, DEFAULT_TEST_QUESTION, 8).is_none());
     }
 
     #[test]
@@ -1228,11 +1716,39 @@ mod tests {
             ],
         };
 
-        let diagnostics = prune_non_topical_document_tail(&mut bundle, "how to configure payment");
+        let diagnostics =
+            prune_non_topical_document_tail(&mut bundle, "how to configure payment", false);
 
         assert_eq!(diagnostics.removed_chunk_count, 1);
         assert_eq!(diagnostics.kept_chunk_count, 2);
         assert!(bundle.chunks.iter().all(|chunk| chunk.document_label.contains("Payment")));
+    }
+
+    #[test]
+    fn topical_prune_preserves_additive_evidence_chunk_without_title_match() {
+        let topic_a = Uuid::now_v7();
+        let topic_b = Uuid::now_v7();
+        let rare_evidence = Uuid::now_v7();
+        let generic = Uuid::now_v7();
+        let rev = Uuid::now_v7();
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                sample_chunk(topic_a, rev, 0, "Scanner Alpha Guide", 0.02),
+                sample_chunk(topic_b, rev, 0, "Scanner Beta Guide", 0.02),
+                sample_chunk(rare_evidence, rev, 0, "Shared Device Manual", 1.5),
+                sample_chunk(generic, rev, 0, "Generic Installation HOWTO", 0.02),
+            ],
+        };
+
+        let diagnostics =
+            prune_non_topical_document_tail(&mut bundle, "how to configure scanner", false);
+
+        assert_eq!(diagnostics.removed_chunk_count, 1);
+        assert_eq!(diagnostics.kept_chunk_count, 3);
+        assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == rare_evidence));
+        assert!(!bundle.chunks.iter().any(|chunk| chunk.document_id == generic));
     }
 
     #[test]
@@ -1251,8 +1767,7 @@ mod tests {
             ],
         };
 
-        let diagnostics =
-            prune_non_topical_document_tail(&mut bundle, "что нового в последних 5 релизах");
+        let diagnostics = prune_non_topical_document_tail(&mut bundle, "latest releases", true);
 
         assert_eq!(diagnostics.removed_chunk_count, 0);
         assert_eq!(bundle.chunks.len(), 3);
@@ -1272,7 +1787,7 @@ mod tests {
         let mut bundle =
             RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks: original };
 
-        let diagnostics = prune_non_topical_document_tail(&mut bundle, "platform setup");
+        let diagnostics = prune_non_topical_document_tail(&mut bundle, "platform setup", false);
 
         assert_eq!(diagnostics.removed_chunk_count, 0);
         assert_eq!(bundle.chunks.len(), 3);

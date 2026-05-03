@@ -10,16 +10,24 @@ use crate::{
     app::state::AppState,
     interfaces::http::{
         auth::AuthContext,
-        authorization::{POLICY_USAGE_READ, load_library_and_authorize},
+        authorization::{
+            POLICY_USAGE_READ, load_library_and_authorize, load_workspace_and_authorize,
+        },
         router_support::ApiError,
     },
-    services::ops::billing::{DocumentCostSummary, LibraryCostSummary},
+    services::ops::billing::{DocumentCostSummary, LibraryCostSummary, WorkspaceCostSummary},
 };
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LibraryCostQuery {
     library_id: Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceCostQuery {
+    workspace_id: Uuid,
 }
 
 pub fn router() -> Router<AppState> {
@@ -32,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/billing/executions/{execution_kind}/{execution_id}", get(get_execution_cost))
         .route("/billing/library-document-costs", get(list_library_document_costs))
         .route("/billing/library-cost-summary", get(get_library_cost_summary))
+        .route("/billing/workspace-cost-summary", get(get_workspace_cost_summary))
 }
 
 #[tracing::instrument(
@@ -145,5 +154,26 @@ async fn get_library_cost_summary(
     let _ = load_library_and_authorize(&auth, &state, query.library_id, POLICY_USAGE_READ).await?;
     let summary =
         state.canonical_services.billing.get_library_cost_summary(&state, query.library_id).await?;
+    Ok(Json(summary))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_workspace_cost_summary",
+    skip_all,
+    fields(workspace_id = %query.workspace_id)
+)]
+async fn get_workspace_cost_summary(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Query(query): Query<WorkspaceCostQuery>,
+) -> Result<Json<WorkspaceCostSummary>, ApiError> {
+    let _ =
+        load_workspace_and_authorize(&auth, &state, query.workspace_id, POLICY_USAGE_READ).await?;
+    let summary = state
+        .canonical_services
+        .billing
+        .get_workspace_cost_summary(&state, query.workspace_id)
+        .await?;
     Ok(Json(summary))
 }

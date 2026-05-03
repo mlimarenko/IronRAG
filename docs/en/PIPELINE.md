@@ -26,11 +26,24 @@ Every admitted source is normalized into structured blocks before chunking, embe
 ### Supported source families
 
 - Text-like files: markdown, text, JSON, YAML, source code
-- PDF via text-layer extraction
-- Images through multimodal description
-- DOCX and PPTX through structured block extraction
-- Spreadsheets (`csv`, `xlsx`, `xlsb`, `ods`) through row-oriented extraction
+- PDF through Docling-backed document-layout extraction
+- Static raster images through Docling OCR by default, or through the active `vision` binding when the library recognition policy selects `vision`
+- DOCX and PPTX through Docling-backed structured block extraction
+- Spreadsheets (`csv`, `tsv`, `xls`, `xlsx`, `xlsb`, `ods`) through native row-oriented extraction
 - Web pages through HTML main-content extraction
+
+### Recognition routing
+
+Recognition routing is explicit catalog state, not a hidden runtime fallback.
+New libraries inherit `IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE`, which
+accepts `docling` or `vision` and defaults to `docling`. Per-library updates use
+`PUT /v1/catalog/libraries/{libraryId}/recognition-policy`.
+
+PDF, DOCX, and PPTX layout extraction stays on the embedded Docling CPU runtime.
+Spreadsheets stay on the native tabular parser. Static raster image OCR can use
+either Docling or the active `vision` binding. If a library routes image OCR to
+`vision` and no vision binding is configured, ingestion fails loudly instead of
+silently falling back. Video files are not part of the current ingest surface.
 
 ### Table contract
 
@@ -113,18 +126,13 @@ The query path uses one canonical retrieval stack:
 
 Exact-literal technical questions use the same answer contract but may take a lexical-only fast path when the question clearly targets an endpoint, parameter name, or transport literal.
 
-### Streaming contract
+### Turn contract
 
-`POST /v1/query/sessions/{sessionId}/turns` with `Accept: text/event-stream` emits:
-
-- `runtime`
-- `delta`
-- `tool_call_started`
-- `tool_call_completed`
-- `completed`
-- `error`
-
-The final `completed` payload matches the non-streaming turn response shape.
+`POST /v1/query/sessions/{sessionId}/turns` is a single JSON request/response
+turn. The response contains the completed grounded answer, evidence references,
+verifier state, and runtime execution handle. Incremental answer streaming is
+not a separate UI assistant execution path; MCP transport streaming remains
+isolated under `/v1/mcp`.
 
 ## 7. Worker model
 

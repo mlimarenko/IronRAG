@@ -11,8 +11,9 @@ use crate::domains::{
         RuntimeStageState, RuntimeSurfaceKind, RuntimeTaskKind,
     },
     ai::AiBindingPurpose,
+    recognition::LibraryRecognitionPolicy,
 };
-use crate::shared::web::ingest::{WebIngestIgnorePattern, WebIngestPolicy};
+use crate::shared::web::ingest::{WebIngestPolicy, WebIngestUrlFilter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +67,7 @@ pub struct McpLibraryDescriptor {
     pub name: String,
     pub description: Option<String>,
     pub web_ingest_policy: WebIngestPolicy,
+    pub recognition_policy: LibraryRecognitionPolicy,
     pub ingestion_readiness: McpLibraryIngestionReadiness,
     pub document_count: usize,
     pub readable_document_count: usize,
@@ -195,10 +197,7 @@ pub struct McpTechnicalFactReference {
 }
 
 /// One search hit returned to an agent. Every optional/empty field is
-/// elided from the serialized JSON so the agent's context window stays
-/// tight — on a typical 3-hit response the bloated shape used to carry
-/// ~1 KB of `null` / `[]` padding per hit. `logicalDocumentId` has been
-/// dropped because it has always equaled `documentId`.
+/// elided from the serialized JSON to keep the agent's context window tight.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpDocumentHit {
@@ -344,8 +343,7 @@ pub struct McpSubmitWebIngestRunRequest {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
-    #[serde(default)]
-    pub extra_ignore_patterns: Vec<WebIngestIgnorePattern>,
+    pub url_filter: WebIngestUrlFilter,
     pub idempotency_key: Option<String>,
 }
 
@@ -721,7 +719,10 @@ mod tests {
             "boundaryPolicy": "same_host",
             "maxDepth": 0,
             "maxPages": 1,
-            "extraIgnorePatterns": [{"kind": "path_prefix", "value": "/labels/viewlabel.action"}],
+            "urlFilter": {
+                "mode": "blocklist",
+                "patterns": [{"kind": "path_prefix", "value": "/labels/viewlabel.action"}]
+            },
             "idempotencyKey": "web-seed-1"
         }))
         .expect("request should deserialize");
@@ -732,7 +733,7 @@ mod tests {
         assert_eq!(request.boundary_policy.as_deref(), Some("same_host"));
         assert_eq!(request.max_depth, Some(0));
         assert_eq!(request.max_pages, Some(1));
-        assert_eq!(request.extra_ignore_patterns.len(), 1);
+        assert_eq!(request.url_filter.patterns.len(), 1);
         assert_eq!(request.idempotency_key.as_deref(), Some("web-seed-1"));
     }
 

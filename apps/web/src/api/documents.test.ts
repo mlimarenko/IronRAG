@@ -35,3 +35,40 @@ describe("documentsApi.upload", () => {
     expect(((form as FormData).get("file") as File).name).toBe("file.txt");
   });
 });
+
+describe("documentsApi.getAllPreparedSegments", () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it("loads every prepared-segments page instead of returning the default first page", async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        total: 3,
+        offset: 0,
+        limit: 2,
+        items: [{ text: "a" }, { text: "b" }],
+      })
+      .mockResolvedValueOnce({
+        total: 3,
+        offset: 2,
+        limit: 2,
+        items: [{ text: "c" }],
+      });
+
+    await expect(documentsApi.getAllPreparedSegments("doc-1")).resolves.toEqual([
+      { text: "a" },
+      { text: "b" },
+      { text: "c" },
+    ]);
+
+    expect(apiFetch).toHaveBeenNthCalledWith(
+      1,
+      "/content/documents/doc-1/prepared-segments?offset=0&limit=500",
+    );
+    expect(apiFetch).toHaveBeenNthCalledWith(
+      2,
+      "/content/documents/doc-1/prepared-segments?offset=2&limit=500",
+    );
+  });
+});

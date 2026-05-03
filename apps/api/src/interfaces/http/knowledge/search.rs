@@ -13,7 +13,8 @@ use crate::{
     domains::ai::AiBindingPurpose,
     infra::arangodb::{
         document_store::{
-            KnowledgeDocumentRow, KnowledgeLibraryGenerationRow, KnowledgeRevisionRow,
+            KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
+            KnowledgeRevisionRow,
         },
         graph_store::KnowledgeEvidenceRow,
         search_store::{
@@ -27,7 +28,10 @@ use crate::{
         authorization::{POLICY_KNOWLEDGE_READ, load_library_and_authorize},
         router_support::ApiError,
     },
-    shared::extraction::text_render::repair_technical_layout_noise,
+    shared::{
+        extraction::text_render::repair_technical_layout_noise,
+        text_tokens::normalized_alnum_token_sequence_by,
+    },
 };
 
 use super::{
@@ -38,6 +42,8 @@ use super::{
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const DEFAULT_EVIDENCE_SAMPLE_LIMIT: usize = 5;
+const DOCUMENT_KEYWORD_COVERAGE_BONUS_WEIGHT: f64 = 0.8;
+const DOCUMENT_KEYWORD_AGGREGATE_COVERAGE_BONUS_WEIGHT: f64 = 0.25;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,33 +159,7 @@ fn sanitize_chunk_search_hit(hit: &KnowledgeChunkSearchRow) -> KnowledgeChunkSea
 }
 
 fn normalize_search_hit_text(text: &str) -> String {
-    let mut normalized = text
-        .replace("person names", "names of persons")
-        .replace("information system resources", "information resources");
-
-    for source in [
-        "In the case of document retrieval, queries can be based on full-text or other\ncontent-based indexing.",
-        "In the case of document retrieval, queries can be based on full-text or other content-based indexing.",
-    ] {
-        if normalized.contains(source)
-            && normalized.contains("information need")
-            && !normalized.contains("collections of information resources")
-        {
-            normalized = normalized.replace(
-                source,
-                "Documents are searched for in collections of information resources.",
-            );
-        }
-    }
-    if normalized.contains("information need")
-        && normalized.contains("document retrieval")
-        && !normalized.contains("collections of information resources")
-    {
-        normalized
-            .push_str("\n\nDocuments are searched for in collections of information resources.");
-    }
-
-    normalized
+    text.to_string()
 }
 
 fn document_search_keywords(query_text: &str) -> Vec<String> {
@@ -194,8 +174,36 @@ fn document_chunk_keyword_coverage(hit: &KnowledgeChunkSearchRow, keywords: &[St
     keywords.iter().filter(|keyword| haystack.contains(keyword.as_str())).count()
 }
 
+fn document_keyword_coverage_bonus(
+    chunk_hits: &[KnowledgeChunkSearchRow],
+    keywords: &[String],
+) -> f64 {
+    if chunk_hits.is_empty() || keywords.is_empty() {
+        return 0.0;
+    }
+    let denominator = keywords.len() as f64;
+    let best_chunk_coverage = chunk_hits
+        .iter()
+        .map(|hit| document_chunk_keyword_coverage(hit, keywords))
+        .max()
+        .unwrap_or_default() as f64;
+    let aggregate_haystack = chunk_hits
+        .iter()
+        .take(3)
+        .map(|hit| format!("{}\n{}", hit.content_text, hit.normalized_text))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    let aggregate_coverage =
+        keywords.iter().filter(|keyword| aggregate_haystack.contains(keyword.as_str())).count()
+            as f64;
+    let best_signal = (best_chunk_coverage / denominator).min(1.0);
+    let aggregate_signal = (aggregate_coverage / denominator).min(1.0);
+    (best_signal * DOCUMENT_KEYWORD_COVERAGE_BONUS_WEIGHT)
+        + (aggregate_signal * DOCUMENT_KEYWORD_AGGREGATE_COVERAGE_BONUS_WEIGHT)
+}
+
 fn expand_document_search_queries(query_text: &str) -> Vec<String> {
-    let lowered = query_text.to_lowercase();
     let mut queries = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
     let mut push_query = |value: &str| {
@@ -210,137 +218,11 @@ fn expand_document_search_queries(query_text: &str) -> Vec<String> {
     };
 
     push_query(query_text);
-    for (markers, expansion) in [
-        (&["knowledge graph", "graph structured data model"][..], "knowledge graph"),
-        (
-            &["graph database", "gremlin", "sparql", "cypher", "gql", "first-class citizens"][..],
-            "graph database",
-        ),
-        (&["vector database", "embeddings", "semantic similarity"][..], "vector database"),
-        (
-            &[
-                "large language model",
-                "text generation",
-                "generated language output",
-                "language generation",
-                "natural language processing",
-                "model family",
-                "reasoning",
-            ][..],
-            "large language model",
-        ),
-        (
-            &[
-                "retrieval augmented generation",
-                "retrieval-augmented generation",
-                "before answering",
-                "external documents",
-            ][..],
-            "retrieval-augmented generation",
-        ),
-        (
-            &["rust programming language", "memory safety", "programming language"][..],
-            "rust programming language",
-        ),
-        (&["borrow checker"][..], "rust programming language"),
-        (&["semantic web", "rdf", "owl", "machine-readable"][..], "semantic web"),
-        (
-            &["information retrieval", "information need", "document retrieval"][..],
-            "information retrieval",
-        ),
-        (
-            &["named entity recognition", "named-entity recognition", "organizations", "locations"]
-                [..],
-            "named-entity recognition",
-        ),
-    ] {
-        if markers.iter().any(|marker| lowered.contains(marker)) {
-            push_query(expansion);
-        }
+    for phrase in document_search_anchor_phrases(query_text).into_iter().take(6) {
+        push_query(&phrase);
     }
 
     queries
-}
-
-fn canonical_search_targets(query_text: &str) -> Vec<&'static str> {
-    let lowered = query_text.to_lowercase();
-    let mut targets = Vec::new();
-    if lowered.contains("vector database")
-        || (lowered.contains("embeddings") && lowered.contains("semantic similarity"))
-    {
-        targets.push("vector_database");
-    }
-    if lowered.contains("large language model")
-        || lowered.contains("language generation")
-        || lowered.contains("generated language output")
-        || (lowered.contains("natural language processing") && lowered.contains("model family"))
-    {
-        targets.push("large_language_model");
-    }
-    if lowered.contains("retrieval augmented generation")
-        || lowered.contains("retrieval-augmented generation")
-        || lowered.contains("before answering")
-        || lowered.contains("external documents")
-    {
-        targets.push("retrieval_augmented_generation");
-    }
-    if lowered.contains("rust")
-        || (lowered.contains("programming language") && lowered.contains("memory safety"))
-        || lowered.contains("borrow checker")
-    {
-        targets.push("rust_programming_language");
-    }
-    if lowered.contains("knowledge graph")
-        || lowered.contains("interlinked descriptions")
-        || lowered.contains("graph structured data model")
-    {
-        targets.push("knowledge_graph");
-    }
-    if lowered.contains("graph database")
-        || lowered.contains("gremlin")
-        || lowered.contains("sparql")
-        || lowered.contains("cypher")
-        || lowered.contains("gql")
-        || lowered.contains("first-class citizens")
-    {
-        targets.push("graph_database");
-    }
-    if lowered.contains("semantic web")
-        || lowered.contains("rdf")
-        || lowered.contains("owl")
-        || lowered.contains("machine-readable")
-    {
-        targets.push("semantic_web");
-    }
-    if lowered.contains("named entity recognition") || lowered.contains("named-entity recognition")
-    {
-        targets.push("named_entity_recognition");
-    }
-    if lowered.contains("information retrieval") {
-        targets.push("information_retrieval");
-    }
-    targets
-}
-
-fn document_matches_canonical_search_target(document: &KnowledgeDocumentRow, target: &str) -> bool {
-    let label = document
-        .title
-        .as_deref()
-        .unwrap_or(document.external_key.as_str())
-        .to_lowercase()
-        .replace(['_', '-'], " ");
-    match target {
-        "vector_database" => label.contains("vector database"),
-        "large_language_model" => label.contains("large language model"),
-        "retrieval_augmented_generation" => label.contains("retrieval augmented generation"),
-        "rust_programming_language" => label.contains("rust"),
-        "knowledge_graph" => label.contains("knowledge graph"),
-        "graph_database" => label.contains("graph database"),
-        "semantic_web" => label.contains("semantic web"),
-        "named_entity_recognition" => label.contains("named entity recognition"),
-        "information_retrieval" => label.contains("information retrieval"),
-        _ => false,
-    }
 }
 
 #[tracing::instrument(
@@ -415,7 +297,6 @@ async fn search_documents_impl(
     let chunk_hit_limit_per_document = chunk_hit_limit_per_document.unwrap_or(10).max(1);
     let evidence_sample_limit =
         evidence_sample_limit.unwrap_or(DEFAULT_EVIDENCE_SAMPLE_LIMIT).max(1);
-    let canonical_targets = canonical_search_targets(&query_text);
     let query_keywords = document_search_keywords(&query_text);
     let internal_candidate_limit =
         limit.saturating_mul(chunk_hit_limit_per_document.max(3)).saturating_mul(4).max(16);
@@ -423,7 +304,7 @@ async fn search_documents_impl(
     for search_query in expand_document_search_queries(&query_text) {
         let rows = state
             .arango_search_store
-            .search_chunks(library_id, &search_query, internal_candidate_limit)
+            .search_chunks(library_id, &search_query, internal_candidate_limit, None, None)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         for row in rows {
@@ -454,7 +335,7 @@ async fn search_documents_impl(
 
     let hybrid_context = resolve_hybrid_search_context(&state, library_id, &query_text).await?;
     let vector_candidate_limit = internal_candidate_limit.max(limit.saturating_mul(2).max(1));
-    let vector_chunk_hits = if let Some(context) = hybrid_context.as_ref() {
+    let mut vector_chunk_hits = if let Some(context) = hybrid_context.as_ref() {
         match state
             .arango_search_store
             .search_chunk_vectors_by_similarity(
@@ -462,7 +343,9 @@ async fn search_documents_impl(
                 &context.model_catalog_id.to_string(),
                 &context.query_vector,
                 vector_candidate_limit,
-                Some(16),
+                None,
+                None,
+                None,
             )
             .await
         {
@@ -488,7 +371,7 @@ async fn search_documents_impl(
                 &context.model_catalog_id.to_string(),
                 &context.query_vector,
                 vector_candidate_limit,
-                Some(16),
+                None,
             )
             .await
         {
@@ -515,8 +398,16 @@ async fn search_documents_impl(
         .into_iter()
         .collect();
     let chunks = load_chunks_by_ids(&state, &chunk_ids).await?;
-    let chunk_map: HashMap<Uuid, crate::infra::arangodb::document_store::KnowledgeChunkRow> =
+    let chunk_map: HashMap<Uuid, KnowledgeChunkRow> =
         chunks.into_iter().map(|chunk| (chunk.chunk_id, chunk)).collect();
+    if chunk_map.len() < chunk_ids.len() {
+        warn!(
+            library_id = %library_id,
+            requested_chunk_count = chunk_ids.len(),
+            loaded_chunk_count = chunk_map.len(),
+            "knowledge document search ignored stale chunk hits missing from the canonical chunk store",
+        );
+    }
 
     let revision_ids: Vec<Uuid> = chunk_map
         .values()
@@ -527,6 +418,14 @@ async fn search_documents_impl(
     let revisions = load_revisions_by_ids(&state, &revision_ids).await?;
     let revision_map: HashMap<Uuid, KnowledgeRevisionRow> =
         revisions.into_iter().map(|revision| (revision.revision_id, revision)).collect();
+    if revision_map.len() < revision_ids.len() {
+        warn!(
+            library_id = %library_id,
+            requested_revision_count = revision_ids.len(),
+            loaded_revision_count = revision_map.len(),
+            "knowledge document search ignored chunk hits whose revisions are no longer readable",
+        );
+    }
 
     let document_ids: Vec<Uuid> = chunk_map
         .values()
@@ -537,18 +436,31 @@ async fn search_documents_impl(
     let documents = load_documents_by_ids(&state, &document_ids).await?;
     let document_map: HashMap<Uuid, KnowledgeDocumentRow> =
         documents.into_iter().map(|document| (document.document_id, document)).collect();
+    if document_map.len() < document_ids.len() {
+        warn!(
+            library_id = %library_id,
+            requested_document_count = document_ids.len(),
+            loaded_document_count = document_map.len(),
+            "knowledge document search ignored chunk hits whose documents are no longer readable",
+        );
+    }
+
+    lexical_chunk_hits
+        .retain(|hit| resolved_chunk_hit(&hit.chunk_id, &chunk_map, &revision_map, &document_map));
+    vector_chunk_hits
+        .retain(|hit| resolved_chunk_hit(&hit.chunk_id, &chunk_map, &revision_map, &document_map));
 
     let mut accumulators: HashMap<Uuid, KnowledgeDocumentAccumulator> = HashMap::new();
     for (rank, hit) in lexical_chunk_hits.iter().enumerate() {
-        let chunk = chunk_map
-            .get(&hit.chunk_id)
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_chunk", hit.chunk_id))?;
-        let revision = revision_map
-            .get(&chunk.revision_id)
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", chunk.revision_id))?;
-        let document = document_map
-            .get(&chunk.document_id)
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_document", chunk.document_id))?;
+        let Some(chunk) = chunk_map.get(&hit.chunk_id) else {
+            continue;
+        };
+        let Some(revision) = revision_map.get(&chunk.revision_id) else {
+            continue;
+        };
+        let Some(document) = document_map.get(&chunk.document_id) else {
+            continue;
+        };
         let accumulator = accumulators.entry(document.document_id).or_insert_with(|| {
             KnowledgeDocumentAccumulator {
                 document: document.clone(),
@@ -572,15 +484,15 @@ async fn search_documents_impl(
     }
 
     for (rank, hit) in vector_chunk_hits.iter().enumerate() {
-        let chunk = chunk_map
-            .get(&hit.chunk_id)
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_chunk", hit.chunk_id))?;
-        let revision = revision_map
-            .get(&chunk.revision_id)
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", chunk.revision_id))?;
-        let document = document_map
-            .get(&chunk.document_id)
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_document", chunk.document_id))?;
+        let Some(chunk) = chunk_map.get(&hit.chunk_id) else {
+            continue;
+        };
+        let Some(revision) = revision_map.get(&chunk.revision_id) else {
+            continue;
+        };
+        let Some(document) = document_map.get(&chunk.document_id) else {
+            continue;
+        };
         let accumulator = accumulators.entry(document.document_id).or_insert_with(|| {
             KnowledgeDocumentAccumulator {
                 document: document.clone(),
@@ -665,17 +577,14 @@ async fn search_documents_impl(
         let lexical_signal = accumulator.lexical_score.map(f64::ln_1p).unwrap_or_default();
         let vector_signal = accumulator.vector_score.map(f64::ln_1p).unwrap_or_default();
         let provenance_bonus = (accumulator.evidence_samples.len() as f64) / 1000.0;
+        let keyword_coverage_bonus =
+            document_keyword_coverage_bonus(&accumulator.chunk_hits, &query_keywords);
         accumulator.score = lexical_signal
             + vector_signal
             + (1.0 / (60.0 + lexical_rank as f64))
             + (1.0 / (60.0 + vector_rank as f64))
-            + provenance_bonus;
-        if canonical_targets
-            .iter()
-            .any(|target| document_matches_canonical_search_target(&accumulator.document, target))
-        {
-            accumulator.score += 10.0;
-        }
+            + provenance_bonus
+            + keyword_coverage_bonus;
     }
 
     let mut document_hits = document_hits;
@@ -751,6 +660,18 @@ async fn search_documents_impl(
     }))
 }
 
+fn resolved_chunk_hit(
+    chunk_id: &Uuid,
+    chunk_map: &HashMap<Uuid, KnowledgeChunkRow>,
+    revision_map: &HashMap<Uuid, KnowledgeRevisionRow>,
+    document_map: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> bool {
+    let Some(chunk) = chunk_map.get(chunk_id) else {
+        return false;
+    };
+    revision_map.contains_key(&chunk.revision_id) && document_map.contains_key(&chunk.document_id)
+}
+
 fn map_search_revision_summary(revision: KnowledgeRevisionRow) -> KnowledgeSearchRevisionSummary {
     KnowledgeSearchRevisionSummary {
         revision_id: revision.revision_id,
@@ -823,63 +744,43 @@ async fn backfill_document_chunk_hits(
 }
 
 fn document_search_chunk_relevance(query_text: &str, hit: &KnowledgeChunkSearchRow) -> usize {
-    let lowered_query = query_text.to_lowercase();
     let lowered_text = format!("{} {}", hit.content_text, hit.normalized_text).to_lowercase();
     let keywords = crate::services::query::planner::extract_keywords(query_text);
     let keyword_score = keywords
         .iter()
         .map(|keyword| lowered_text.matches(keyword.as_str()).count())
         .sum::<usize>();
-    let anchor_score = document_search_anchor_tokens(&lowered_query)
+    let anchor_score = document_search_anchor_tokens(query_text)
         .into_iter()
         .filter(|token| lowered_text.contains(token))
         .count();
-    let phrase_score = document_search_anchor_phrases(&lowered_query)
+    let phrase_score = document_search_anchor_phrases(query_text)
         .into_iter()
         .filter(|phrase| lowered_text.contains(phrase))
         .count();
     keyword_score + anchor_score * 50 + phrase_score * 150
 }
 
-fn document_search_anchor_tokens(lowered_query: &str) -> Vec<String> {
-    let mut tokens = Vec::<String>::new();
-    let mut seen = HashSet::<String>::new();
-    for token in lowered_query
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        let keep = token.chars().all(|ch| ch.is_ascii_digit())
-            || token.len() >= 5
-            || matches!(token, "gql" | "ocr" | "rdf" | "owl");
-        if keep && seen.insert(token.to_string()) {
-            tokens.push(token.to_string());
-        }
-    }
-    tokens
+fn document_search_anchor_tokens(query_text: &str) -> Vec<String> {
+    normalized_alnum_token_sequence_by(
+        query_text,
+        |token| token.chars().count() >= 4 || token.chars().any(|ch| ch.is_ascii_digit()),
+        Some(32),
+    )
 }
 
-fn document_search_anchor_phrases(lowered_query: &str) -> Vec<String> {
-    let tokens = lowered_query
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    let anchors = document_search_anchor_tokens(lowered_query).into_iter().collect::<HashSet<_>>();
-    let stopwords = [
-        "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "from", "what",
-        "which", "is", "are", "was", "were", "approved",
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
+fn document_search_anchor_phrases(query_text: &str) -> Vec<String> {
+    let tokens = normalized_alnum_token_sequence_by(
+        query_text,
+        |token| token.chars().count() >= 2 || token.chars().any(|ch| ch.is_ascii_digit()),
+        Some(48),
+    );
+    let anchors = document_search_anchor_tokens(query_text).into_iter().collect::<HashSet<_>>();
     let mut phrases = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
     for window_size in 2..=5 {
         for window in tokens.windows(window_size) {
-            if window.iter().all(|token| stopwords.contains(token)) {
-                continue;
-            }
-            if !window.iter().any(|token| anchors.contains(*token)) {
+            if !window.iter().any(|token| anchors.contains(token)) {
                 continue;
             }
             let phrase = window.join(" ");
@@ -889,6 +790,50 @@ fn document_search_anchor_phrases(lowered_query: &str) -> Vec<String> {
         }
     }
     phrases
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk_hit(text: &str) -> KnowledgeChunkSearchRow {
+        KnowledgeChunkSearchRow {
+            chunk_id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            library_id: Uuid::nil(),
+            revision_id: Uuid::nil(),
+            content_text: text.to_string(),
+            normalized_text: text.to_string(),
+            section_path: Vec::new(),
+            heading_trail: Vec::new(),
+            score: 1.0,
+            quality_score: None,
+        }
+    }
+
+    #[test]
+    fn document_keyword_coverage_bonus_rewards_concentrated_evidence() {
+        let keywords =
+            document_search_keywords("Alpha Gateway auth billing payment service ports queue");
+        let weak = chunk_hit("Alpha Gateway API mentions payment once.");
+        let strong = chunk_hit(
+            "Alpha Gateway auth service, billing service, payment service, ports, and queue.",
+        );
+
+        let weak_bonus = document_keyword_coverage_bonus(&[weak], &keywords);
+        let strong_bonus = document_keyword_coverage_bonus(&[strong], &keywords);
+
+        assert!(strong_bonus > weak_bonus + 0.2);
+    }
+
+    #[test]
+    fn anchor_phrases_are_generated_from_structure_without_topic_aliases() {
+        let queries = expand_document_search_queries("Alpha Gateway auth service ports");
+
+        assert_eq!(queries[0], "Alpha Gateway auth service ports");
+        assert!(queries.iter().any(|query| query == "alpha gateway"));
+        assert!(queries.iter().any(|query| query == "gateway auth"));
+    }
 }
 
 async fn resolve_hybrid_search_context(
@@ -926,6 +871,7 @@ async fn resolve_hybrid_search_context(
             input: query_text.to_string(),
             api_key_override: binding.api_key.clone(),
             base_url_override: binding.provider_base_url.clone(),
+            extra_parameters_json: binding.extra_parameters_json.clone(),
         })
         .await
         .map_err(|error| {

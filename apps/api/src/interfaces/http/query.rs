@@ -1,26 +1,19 @@
-use std::{convert::Infallible, time::Duration};
-
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, header},
-    response::{
-        IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
-    },
+    response::{IntoResponse, Response},
     routing::get,
 };
 use chrono::Utc;
-use futures::stream;
 use ironrag_contracts;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::agent_runtime::{
         RuntimeExecutionSummary, RuntimePolicyDecisionSummary, RuntimePolicySummary,
+        RuntimeSurfaceKind,
     },
     domains::query::{
         PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryConversationDetail,
@@ -40,9 +33,7 @@ use crate::{
     services::{
         iam::audit::{AppendAuditEventCommand, AppendQueryExecutionAuditCommand},
         mcp::access::library_catalog_ref,
-        query::service::{
-            CreateConversationCommand, ExecuteConversationTurnCommand, QueryTurnProgressEvent,
-        },
+        query::service::{CreateConversationCommand, ExecuteConversationTurnCommand},
     },
 };
 
@@ -67,44 +58,6 @@ struct CreateSessionTurnRequest {
     content_text: String,
     top_k: Option<usize>,
     include_debug: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QueryTurnStreamRuntimePayload {
-    runtime: RuntimeExecutionSummary,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QueryTurnStreamDeltaPayload {
-    delta: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QueryTurnStreamToolCallStartedPayload {
-    iteration: usize,
-    call_id: String,
-    name: String,
-    arguments_preview: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QueryTurnStreamToolCallCompletedPayload {
-    iteration: usize,
-    call_id: String,
-    name: String,
-    is_error: bool,
-    result_preview: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QueryTurnStreamErrorPayload {
-    error: String,
-    error_kind: &'static str,
 }
 
 pub fn router() -> Router<AppState> {
@@ -134,22 +87,21 @@ struct AssistantSystemPromptResponse {
     template: String,
     /// Template rendered with the canonical `<workspace>/<library>` ref
     /// of the requested `libraryId`, when one was passed. Same text the
-    /// in-app assistant agent uses for that library.
+    /// public MCP clients should use for that library.
     rendered: Option<String>,
     library_id: Option<Uuid>,
 }
 
 /// Publish the canonical MCP assistant system prompt.
 ///
-/// This is the single source of truth for two surfaces:
-///   * our in-app assistant (`agent_loop::run_assistant_turn`);
-///   * the admin UI's "MCP client setup" card, which serves the same
-///     text verbatim for operators to copy into their own agents.
+/// This is the single source of truth for external MCP clients and the
+/// admin UI's "MCP client setup" card, which serves the same text
+/// verbatim for operators to copy into their own agents.
 ///
-/// Any drift between the in-app agent and external agents would
-/// silently change grounding behavior per client — so the text lives
-/// in `services::query::assistant_prompt` and every consumer reads
-/// from there.
+/// Any drift between MCP client setup surfaces would silently change
+/// grounding behavior per client, so the text lives in
+/// `services::query::assistant_prompt` and every consumer reads from
+/// there.
 #[tracing::instrument(
     level = "info",
     name = "http.query.get_assistant_system_prompt",
@@ -249,7 +201,7 @@ async fn create_session(
             &state,
             AppendAuditEventCommand {
                 actor_principal_id: Some(auth.principal_id),
-                surface_kind: "rest".to_string(),
+                surface_kind: "ui".to_string(),
                 action_kind: "query.session.create".to_string(),
                 request_id: None,
                 trace_id: None,
@@ -299,15 +251,11 @@ async fn create_session_turn(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
-    headers: HeaderMap,
     Json(payload): Json<CreateSessionTurnRequest>,
 ) -> Result<Response, ApiError> {
     let started_at = std::time::Instant::now();
     let span = tracing::Span::current();
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
-    if accepts_event_stream(&headers) {
-        return Ok(create_session_turn_stream(auth, state, session_id, payload).into_response());
-    }
     let outcome = state
         .canonical_services
         .query
@@ -316,15 +264,15 @@ async fn create_session_turn(
             ExecuteConversationTurnCommand {
                 conversation_id: session_id,
                 author_principal_id: Some(auth.principal_id),
+                surface_kind: RuntimeSurfaceKind::Ui,
                 content_text: payload.content_text,
                 external_prior_turns: Vec::new(),
                 top_k: payload.top_k.unwrap_or(8),
                 include_debug: payload.include_debug.unwrap_or(false),
-                auth: auth.clone(),
             },
         )
         .await?;
-    append_query_execution_audit(state.clone(), auth.principal_id, &outcome).await;
+    append_query_execution_audit(state.clone(), auth.principal_id, "ui", &outcome).await;
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
     Ok(Json(map_turn_execution_response(outcome)).into_response())
 }
@@ -444,12 +392,6 @@ fn map_execution_detail(
             .map(map_verification_warning)
             .collect(),
     }
-}
-
-fn accepts_event_stream(headers: &HeaderMap) -> bool {
-    headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|value| {
-        value.split(',').any(|item| item.trim().starts_with("text/event-stream"))
-    })
 }
 
 fn map_turn_execution_response(
@@ -741,6 +683,7 @@ const fn map_graph_edge_reference(
 async fn append_query_execution_audit(
     state: AppState,
     principal_id: Uuid,
+    surface_kind: &'static str,
     outcome: &crate::services::query::service::QueryTurnExecutionResult,
 ) {
     if let Err(error) = state
@@ -750,7 +693,7 @@ async fn append_query_execution_audit(
             &state,
             AppendQueryExecutionAuditCommand {
                 actor_principal_id: principal_id,
-                surface_kind: "rest".to_string(),
+                surface_kind: surface_kind.to_string(),
                 request_id: None,
                 query_session_id: outcome.conversation.id,
                 query_execution_id: outcome.execution.id,
@@ -764,148 +707,5 @@ async fn append_query_execution_audit(
         .await
     {
         tracing::warn!(stage = "audit", error = %error, "audit append failed");
-    }
-}
-
-fn create_session_turn_stream(
-    auth: AuthContext,
-    state: AppState,
-    session_id: Uuid,
-    payload: CreateSessionTurnRequest,
-) -> Sse<impl stream::Stream<Item = Result<Event, Infallible>>> {
-    let principal_id = auth.principal_id;
-    let (sender, receiver) = mpsc::unbounded_channel::<QueryTurnStreamFrame>();
-    let state_for_task = state.clone();
-    tokio::spawn(async move {
-        let (progress_sender, mut progress_receiver) =
-            mpsc::unbounded_channel::<QueryTurnProgressEvent>();
-        let frame_sender = sender.clone();
-        let progress_bridge = tokio::spawn(async move {
-            while let Some(event) = progress_receiver.recv().await {
-                if frame_sender.send(QueryTurnStreamFrame::from(event)).is_err() {
-                    break;
-                }
-            }
-        });
-        let outcome = state_for_task
-            .canonical_services
-            .query
-            .execute_turn_stream(
-                &state_for_task,
-                ExecuteConversationTurnCommand {
-                    conversation_id: session_id,
-                    author_principal_id: Some(principal_id),
-                    content_text: payload.content_text,
-                    external_prior_turns: Vec::new(),
-                    top_k: payload.top_k.unwrap_or(8),
-                    include_debug: payload.include_debug.unwrap_or(false),
-                    auth: auth.clone(),
-                },
-                progress_sender,
-            )
-            .await;
-        let _ = progress_bridge.await;
-
-        match outcome {
-            Ok(outcome) => {
-                append_query_execution_audit(state_for_task.clone(), principal_id, &outcome).await;
-                let _ = sender
-                    .send(QueryTurnStreamFrame::Completed(map_turn_execution_response(outcome)));
-            }
-            Err(error) => {
-                let _ = sender.send(QueryTurnStreamFrame::Error(QueryTurnStreamErrorPayload {
-                    error: error.to_string(),
-                    error_kind: error.kind(),
-                }));
-            }
-        }
-    });
-
-    let stream = stream::unfold(receiver, |mut receiver| async {
-        receiver.recv().await.map(|frame| (Ok(frame.into_event()), receiver))
-    });
-
-    // Keep-alive interval is intentionally short. Firefox Enhanced
-    // Tracking Protection (and some corporate proxies) time out idle
-    // fetch streams around 10 s; retrieval + context assembly can eat
-    // 15-20 s before the first real `runtime`/`delta` frame, so we
-    // need a filler frame under that ceiling. 3 s is cheap — comment
-    // frames are ~15 bytes — and keeps the long-running turn stream
-    // intact even when the retrieval stage takes its full budget.
-    Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(3)).text("keep-alive"))
-}
-
-enum QueryTurnStreamFrame {
-    Runtime(QueryTurnStreamRuntimePayload),
-    Delta(QueryTurnStreamDeltaPayload),
-    ToolCallStarted(QueryTurnStreamToolCallStartedPayload),
-    ToolCallCompleted(QueryTurnStreamToolCallCompletedPayload),
-    Completed(ironrag_contracts::assistant::AssistantExecutionDetail),
-    Error(QueryTurnStreamErrorPayload),
-}
-
-impl From<QueryTurnProgressEvent> for QueryTurnStreamFrame {
-    fn from(value: QueryTurnProgressEvent) -> Self {
-        match value {
-            QueryTurnProgressEvent::Runtime(runtime) => {
-                Self::Runtime(QueryTurnStreamRuntimePayload { runtime })
-            }
-            QueryTurnProgressEvent::AnswerDelta(delta) => {
-                Self::Delta(QueryTurnStreamDeltaPayload { delta })
-            }
-            QueryTurnProgressEvent::AssistantToolCallStarted {
-                iteration,
-                call_id,
-                name,
-                arguments_preview,
-            } => Self::ToolCallStarted(QueryTurnStreamToolCallStartedPayload {
-                iteration,
-                call_id,
-                name,
-                arguments_preview,
-            }),
-            QueryTurnProgressEvent::AssistantToolCallCompleted {
-                iteration,
-                call_id,
-                name,
-                is_error,
-                result_preview,
-            } => Self::ToolCallCompleted(QueryTurnStreamToolCallCompletedPayload {
-                iteration,
-                call_id,
-                name,
-                is_error,
-                result_preview,
-            }),
-        }
-    }
-}
-
-impl QueryTurnStreamFrame {
-    fn into_event(self) -> Event {
-        match self {
-            Self::Runtime(payload) => serialize_sse_event("runtime", &payload),
-            Self::Delta(payload) => serialize_sse_event("delta", &payload),
-            Self::ToolCallStarted(payload) => serialize_sse_event("tool_call_started", &payload),
-            Self::ToolCallCompleted(payload) => {
-                serialize_sse_event("tool_call_completed", &payload)
-            }
-            Self::Completed(payload) => serialize_sse_event("completed", &payload),
-            Self::Error(payload) => serialize_sse_event("error", &payload),
-        }
-    }
-}
-
-fn serialize_sse_event(event_name: &'static str, payload: &impl Serialize) -> Event {
-    match serde_json::to_string(payload) {
-        Ok(data) => Event::default().event(event_name).data(data),
-        Err(error) => Event::default().event("error").data(
-            serde_json::json!({
-                "error": format!("failed to serialize query stream event: {error}"),
-                "errorKind": "internal",
-            })
-            .to_string(),
-        ),
     }
 }

@@ -375,7 +375,7 @@ fn lexical_overlap_score(text: &str, keywords: &[String]) -> f32 {
     if keywords.is_empty() {
         return 0.0;
     }
-    let normalized = text.to_ascii_lowercase();
+    let normalized = text.to_lowercase();
     let matched = keywords.iter().filter(|keyword| normalized.contains(keyword.as_str())).count();
     matched as f32 / keywords.len() as f32
 }
@@ -455,6 +455,38 @@ mod tests {
         assert_eq!(outcome.metadata.status, RerankStatus::Applied);
         assert_eq!(outcome.chunks.first().map(String::as_str), Some("c1"));
         assert!(outcome.metadata.reordered_count.unwrap_or_default() > 0);
+    }
+
+    #[test]
+    fn rerank_overlap_uses_unicode_case_folding() {
+        let request = RerankRequest {
+            question: "café δelta".to_string(),
+            requested_mode: RuntimeQueryMode::Hybrid,
+            candidate_count: 3,
+            enabled: true,
+            result_limit: 1,
+        };
+        let chunks = [
+            RerankCandidate {
+                id: "plain".to_string(),
+                text: "ordinary candidate".to_string(),
+                score: Some(0.8),
+            },
+            RerankCandidate {
+                id: "unicode".to_string(),
+                text: "CAFÉ ΔELTA candidate".to_string(),
+                score: Some(0.1),
+            },
+        ];
+        let outcome = rerank_query_candidates(&QueryRerankTaskInput {
+            request,
+            entity_candidates: Vec::new(),
+            relationship_candidates: Vec::new(),
+            chunk_candidates: chunks.to_vec(),
+        })
+        .unwrap_or_else(|_| build_failed_rerank_outcome(&[], &[], &chunks));
+
+        assert_eq!(outcome.chunks.first().map(String::as_str), Some("unicode"));
     }
 
     #[test]

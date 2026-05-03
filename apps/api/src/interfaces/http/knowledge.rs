@@ -439,12 +439,8 @@ fn runtime_graph_confidence(metadata: &serde_json::Value) -> Option<f64> {
 fn runtime_graph_state(metadata: &serde_json::Value, fallback: &str) -> String {
     // `extraction_recovery_status` describes HOW extraction produced the
     // node (clean / partial / recovered / failed) — it is NOT the
-    // admittance state. Previously this function returned the recovery
-    // value here, and the workbench filter then dropped every node whose
-    // recovery state wasn't the literal string "active", hiding ~99% of
-    // the graph on dashboards and the graph viewer. The admittance state
-    // lives in `entity_state` / `relation_state`, which default to
-    // "active" when the node is admitted into the projection.
+    // admittance state. The admittance state lives in `entity_state` /
+    // `relation_state`, which default to "active" when admitted.
     metadata
         .get("entity_state")
         .and_then(serde_json::Value::as_str)

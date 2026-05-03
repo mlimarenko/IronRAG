@@ -140,15 +140,15 @@ describe('mapListItem', () => {
   it('decodes URL-encoded names so the UI shows real characters for web-captured docs', () => {
     const doc = mapListItem(
       buildRaw({
-        fileName: 'Frontol%206.%20%D0%A0%D1%83%D0%BA%D0%BE%D0%B2%D0%BE%D0%B4%D1%81%D1%82%D0%B2%D0%BE.pdf',
+        fileName: 'M%C3%BCller%20Handbook%20v2.pdf',
         fileType: 'application/pdf;charset=utf-8',
         sourceKind: 'web_page',
       }),
       i18n.t.bind(i18n),
     );
 
-    expect(doc.fileName.startsWith('Frontol 6.')).toBe(true);
-    expect(doc.fileName).toContain('Руководство');
+    expect(doc.fileName.startsWith('Müller Handbook')).toBe(true);
+    expect(doc.fileName).toContain('v2');
     expect(doc.fileType).toBe('pdf');
   });
 

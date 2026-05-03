@@ -549,16 +549,11 @@ pub async fn claim_next_queued_ingest_job(
     max_jobs_per_workspace: i64,
     max_jobs_global: i64,
 ) -> Result<Option<IngestJobRow>, sqlx::Error> {
-    // The dispatcher counts ALL leased jobs against the limits. Previously
-    // the CTE filtered on `heartbeat_at > now() - 90s` to exclude zombie
-    // leases from crashed workers, which introduced a TOCTOU bug: between
-    // the moment a fresh claim sets `queue_state='leased'` and the moment
-    // the per-attempt row is inserted with `heartbeat_at=now()`, the next
-    // concurrent claim query sees zero "active" leases for that library
-    // and bypasses the per-library cap entirely. With the worker claiming
-    // slots in a tight loop, all slots filled before any attempt heartbeat
-    // was written — effectively `per_library=∞`, which overran the worker
-    // memory budget and OOM-killed it.
+    // The dispatcher counts ALL leased jobs against the limits, including
+    // those whose attempt row has not yet written its first heartbeat.
+    // Filtering on heartbeat_at introduces a TOCTOU gap: a fresh lease
+    // sets queue_state='leased' before the attempt heartbeat exists, so a
+    // concurrent claim sees zero active leases and bypasses the cap.
     //
     // The zombie-lease problem is handled by `recover_stale_canonical_leases`
     // (the stale-lease reaper) on its own tick. The dispatcher should not

@@ -11,11 +11,10 @@ use crate::{
 use super::{
     CanonicalAnswerEvidence, PreparedAnswerQueryResult, RuntimeMatchedChunk,
     build_canonical_answer_context, build_deterministic_grounded_answer,
-    build_missing_explicit_document_answer, build_unsupported_capability_answer,
-    format_community_context, load_canonical_answer_chunks, load_canonical_answer_evidence,
-    load_direct_targeted_table_answer, load_document_index, question_requests_multi_document_scope,
+    build_missing_explicit_document_answer, load_canonical_answer_chunks,
+    load_canonical_answer_evidence, load_direct_targeted_table_answer, load_document_index,
+    question_requests_multi_document_scope,
     retrieve::{merge_chunks, score_value},
-    search_community_summaries,
     technical_literals::{
         TechnicalLiteralIntent, document_local_focus_keywords, question_mentions_pagination,
         select_document_balanced_chunks, technical_chunk_selection_score, technical_keyword_weight,
@@ -50,13 +49,12 @@ pub(super) async fn prepare_canonical_answer_preflight(
         state,
         execution_id,
         question,
-        &prepared.structured.technical_literal_chunks,
+        &prepared.query_ir,
+        &prepared.structured.context_chunks,
         &document_index,
     )
     .await?;
     let canonical_evidence = load_canonical_answer_evidence(state, execution_id).await?;
-    let community_matches = search_community_summaries(state, library_id, question, 3).await;
-    let community_context_text = format_community_context(&community_matches);
     let scoped_document_ids = preflight_exact_literal_document_scope(
         question,
         &prepared.query_ir,
@@ -72,14 +70,16 @@ pub(super) async fn prepare_canonical_answer_preflight(
         &canonical_evidence,
         scoped_document_ids.as_ref(),
     );
+    let graph_evidence_context_lines = build_preflight_graph_evidence_context_lines(
+        &prepared.structured.graph_evidence_context_lines,
+    );
     let prompt_context = build_canonical_answer_context(
         question,
         &prepared.query_ir,
         prepared.structured.technical_literals_text.as_deref(),
         &preflight_evidence,
         &preflight_answer_chunks,
-        &prepared.answer_context,
-        community_context_text.as_deref(),
+        &graph_evidence_context_lines,
     );
     let answer_override = build_canonical_preflight_answer(
         question,
@@ -109,8 +109,6 @@ pub(super) fn build_canonical_preflight_answer(
 ) -> Option<String> {
     let missing_explicit_document_answer =
         build_missing_explicit_document_answer(question, document_index);
-    let unsupported_capability_answer =
-        build_unsupported_capability_answer(intent_profile, question, canonical_answer_chunks);
     let deterministic_grounded_answer = build_deterministic_grounded_answer(
         question,
         query_ir,
@@ -147,7 +145,6 @@ pub(super) fn build_canonical_preflight_answer(
             structured_block_count = canonical_evidence.structured_blocks.len(),
             has_missing_explicit_document_answer = missing_explicit_document_answer.is_some(),
             has_direct_targeted_table_answer = direct_targeted_table_answer.is_some(),
-            has_unsupported_capability_answer = unsupported_capability_answer.is_some(),
             has_deterministic_grounded_answer = deterministic_grounded_answer.is_some(),
             top_documents = ?top_documents,
             top_chunk_previews = ?top_chunk_previews,
@@ -157,8 +154,13 @@ pub(super) fn build_canonical_preflight_answer(
 
     missing_explicit_document_answer
         .or(direct_targeted_table_answer)
-        .or(unsupported_capability_answer)
         .or(deterministic_grounded_answer)
+}
+
+pub(super) fn build_preflight_graph_evidence_context_lines(
+    graph_evidence_context_lines: &[String],
+) -> Vec<String> {
+    graph_evidence_context_lines.to_vec()
 }
 
 #[cfg(test)]
@@ -198,7 +200,7 @@ pub(super) fn select_technical_literal_chunks(
     };
     let max_chunks_per_document = if technical_literal_intent.any() { 4 } else { 3 };
     let focused_chunks = if technical_literal_intent.any()
-        && question_prefers_single_exact_literal_scope(question)
+        && question_prefers_single_exact_literal_scope(question, query_ir)
     {
         select_preflight_literal_document_id(question, query_ir, chunks).map(|document_id| {
             chunks
@@ -252,7 +254,7 @@ pub(super) fn preflight_exact_literal_document_scope(
         return None;
     }
 
-    if !question_prefers_single_exact_literal_scope(question) {
+    if !question_prefers_single_exact_literal_scope(question, query_ir) {
         return Some(
             technical_literal_chunks.iter().map(|chunk| chunk.document_id).collect::<HashSet<_>>(),
         );
@@ -270,32 +272,15 @@ pub(super) fn preflight_exact_literal_document_scope(
         })
 }
 
-pub(super) fn question_prefers_single_exact_literal_scope(question: &str) -> bool {
-    if question_requests_multi_document_scope(question, None) {
+pub(super) fn question_prefers_single_exact_literal_scope(
+    question: &str,
+    query_ir: &QueryIR,
+) -> bool {
+    let _ = question;
+    if question_requests_multi_document_scope(question, Some(query_ir)) {
         return false;
     }
-
-    let lowered = question.to_lowercase();
-    ![
-        "какие ",
-        "which ",
-        "list ",
-        "перечисл",
-        "available",
-        "доступны",
-        "all ",
-        "все ",
-        "parameters",
-        "параметры",
-        "endpoints",
-        "эндпоинты",
-        "paths",
-        "пути",
-        "methods",
-        "методы",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
+    !matches!(query_ir.act, crate::domains::query_ir::QueryAct::Enumerate)
 }
 
 pub(super) fn select_preflight_literal_document_id(
@@ -379,10 +364,10 @@ pub(super) fn select_preflight_literal_document_id(
 
     candidates.sort_by(|left, right| {
         right
-            .label_score
-            .cmp(&left.label_score)
-            .then_with(|| right.best_chunk_signal.cmp(&left.best_chunk_signal))
+            .best_chunk_signal
+            .cmp(&left.best_chunk_signal)
             .then_with(|| right.chunk_signal_sum.cmp(&left.chunk_signal_sum))
+            .then_with(|| right.label_score.cmp(&left.label_score))
             .then_with(|| right.retrieval_score_sum.total_cmp(&left.retrieval_score_sum))
             .then_with(|| left.first_rank.cmp(&right.first_rank))
             .then_with(|| left.document_label.cmp(right.document_label))

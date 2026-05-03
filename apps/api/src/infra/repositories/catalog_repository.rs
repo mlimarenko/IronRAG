@@ -22,7 +22,10 @@ pub struct CatalogLibraryRow {
     pub description: Option<String>,
     pub extraction_prompt: Option<String>,
     pub web_ingest_policy: Value,
+    pub recognition_policy: Value,
     pub lifecycle_state: String,
+    #[sqlx(default)]
+    pub chunking_template: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -161,7 +164,7 @@ pub async fn list_libraries(
     match workspace_id {
         Some(workspace_id) => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
                  from catalog_library
                  where workspace_id = $1
                  order by created_at desc",
@@ -172,7 +175,7 @@ pub async fn list_libraries(
         }
         None => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
                  from catalog_library
                  order by created_at desc",
             )
@@ -187,7 +190,7 @@ pub async fn get_library_by_id(
     library_id: Uuid,
 ) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
-        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at
+        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
          from catalog_library
          where id = $1",
     )
@@ -202,7 +205,7 @@ pub async fn get_library_by_workspace_and_slug(
     slug: &str,
 ) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
-        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at
+        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
          from catalog_library
          where workspace_id = $1 and slug = $2",
     )
@@ -220,6 +223,27 @@ pub async fn create_library(
     description: Option<&str>,
     created_by_principal_id: Option<Uuid>,
 ) -> Result<CatalogLibraryRow, sqlx::Error> {
+    create_library_with_recognition_policy(
+        postgres,
+        workspace_id,
+        slug,
+        display_name,
+        description,
+        serde_json::json!({ "rasterImageEngine": "docling" }),
+        created_by_principal_id,
+    )
+    .await
+}
+
+pub async fn create_library_with_recognition_policy(
+    postgres: &PgPool,
+    workspace_id: Uuid,
+    slug: &str,
+    display_name: &str,
+    description: Option<&str>,
+    recognition_policy: Value,
+    created_by_principal_id: Option<Uuid>,
+) -> Result<CatalogLibraryRow, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
         "insert into catalog_library (
             id,
@@ -227,19 +251,21 @@ pub async fn create_library(
             slug,
             display_name,
             description,
+            recognition_policy,
             lifecycle_state,
             created_by_principal_id,
             created_at,
             updated_at
         )
-        values ($1, $2, $3, $4, $5, 'active', $6, now(), now())
-        returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+        values ($1, $2, $3, $4, $5, $6, 'active', $7, now(), now())
+        returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(slug)
     .bind(display_name)
     .bind(description)
+    .bind(recognition_policy)
     .bind(created_by_principal_id)
     .fetch_one(postgres)
     .await
@@ -295,7 +321,7 @@ pub async fn update_library(
              lifecycle_state = $6::catalog_library_lifecycle_state,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(library_id)
     .bind(slug)
@@ -317,10 +343,28 @@ pub async fn update_library_web_ingest_policy(
          set web_ingest_policy = $2,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(library_id)
     .bind(web_ingest_policy)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn update_library_recognition_policy(
+    postgres: &PgPool,
+    library_id: Uuid,
+    recognition_policy: Value,
+) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
+    sqlx::query_as::<_, CatalogLibraryRow>(
+        "update catalog_library
+         set recognition_policy = $2,
+             updated_at = now()
+         where id = $1
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
+    )
+    .bind(library_id)
+    .bind(recognition_policy)
     .fetch_optional(postgres)
     .await
 }
@@ -334,7 +378,7 @@ pub async fn archive_library(
          set lifecycle_state = 'archived',
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, lifecycle_state::text as lifecycle_state, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(library_id)
     .fetch_optional(postgres)

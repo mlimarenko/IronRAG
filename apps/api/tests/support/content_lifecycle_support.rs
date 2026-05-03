@@ -154,10 +154,10 @@ impl ContentLifecycleFixture {
             .await
             .context("failed to connect content lifecycle postgres")?;
 
-        sqlx::raw_sql(include_str!("../../migrations/0001_init.sql"))
-            .execute(&postgres)
+        sqlx::migrate!("./migrations")
+            .run(&postgres)
             .await
-            .context("failed to apply canonical 0001_init.sql for content lifecycle test")?;
+            .context("failed to apply canonical migrations for content lifecycle test")?;
 
         let arango_client = Arc::new(
             ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
@@ -227,6 +227,7 @@ impl ContentLifecycleFixture {
         self.temp_database.drop().await
     }
 
+    #[allow(dead_code)]
     pub async fn drop_arango_database(&self) -> Result<()> {
         self.temp_arango.drop_runtime_database().await
     }

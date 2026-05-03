@@ -36,10 +36,12 @@ use crate::{
         graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
     },
     infra::repositories,
-    services::ingest::runtime::RuntimeTaskExecutionContext,
+    services::{
+        ai_catalog_service::ResolvedRuntimeBinding, ingest::runtime::RuntimeTaskExecutionContext,
+    },
 };
 
-use prompt::normalized_downgrade_level;
+use prompt::{build_graph_extraction_prompt_plan, normalized_downgrade_level};
 use recovery::{
     append_graph_runtime_policy_audit, begin_graph_runtime_stage, graph_async_operation_status,
     graph_extraction_execution_error, graph_failure_code_from_outcome,
@@ -47,7 +49,127 @@ use recovery::{
     map_graph_runtime_execution_error, record_graph_runtime_stage,
 };
 use session::build_raw_output_json;
-use types::GraphExtractionFailureOutcome;
+use sha2::{Digest, Sha256};
+use types::{GraphExtractionFailureOutcome, GraphExtractionPromptVariant};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphExtractionCacheFingerprint {
+    pub extraction_version: String,
+    pub prompt_hash: String,
+    pub request_shape_key: String,
+    pub request_size_bytes: usize,
+}
+
+#[must_use]
+pub fn build_graph_extraction_cache_fingerprint(
+    request: &GraphExtractionRequest,
+    runtime_binding: &ResolvedRuntimeBinding,
+    request_size_soft_limit_bytes: usize,
+) -> GraphExtractionCacheFingerprint {
+    let prompt_plan = build_graph_extraction_prompt_plan(
+        request,
+        GraphExtractionPromptVariant::Initial,
+        None,
+        None,
+        None,
+        request_size_soft_limit_bytes,
+    );
+    GraphExtractionCacheFingerprint {
+        extraction_version: prompt::GRAPH_EXTRACTION_VERSION.to_string(),
+        prompt_hash: graph_extraction_cache_hash(&prompt_plan.prompt, runtime_binding),
+        request_shape_key: prompt_plan.request_shape_key,
+        request_size_bytes: prompt_plan.request_size_bytes,
+    }
+}
+
+pub(crate) fn graph_extraction_cache_hash(
+    prompt: &str,
+    runtime_binding: &ResolvedRuntimeBinding,
+) -> String {
+    let mut hasher = Sha256::new();
+    update_hash_str(&mut hasher, "graph_extraction_cache");
+    update_hash_str(&mut hasher, prompt::GRAPH_EXTRACTION_VERSION);
+    update_hash_str(&mut hasher, prompt);
+    update_hash_str(&mut hasher, &runtime_binding.provider_kind);
+    update_hash_opt_str(&mut hasher, runtime_binding.provider_base_url.as_deref());
+    update_hash_str(&mut hasher, &runtime_binding.provider_api_style);
+    update_hash_str(&mut hasher, &runtime_binding.model_name);
+    update_hash_opt_str(&mut hasher, runtime_binding.system_prompt.as_deref());
+    update_hash_opt_f64(&mut hasher, runtime_binding.temperature);
+    update_hash_opt_f64(&mut hasher, runtime_binding.top_p);
+    update_hash_opt_i32(&mut hasher, runtime_binding.max_output_tokens_override);
+    update_hash_json(&mut hasher, &runtime_binding.extra_parameters_json);
+    hex::encode(hasher.finalize())
+}
+
+fn update_hash_str(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn update_hash_opt_str(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            update_hash_str(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn update_hash_opt_i32(hasher: &mut Sha256, value: Option<i32>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn update_hash_opt_f64(hasher: &mut Sha256, value: Option<f64>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn update_hash_json(hasher: &mut Sha256, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => hasher.update([0]),
+        serde_json::Value::Bool(value) => hasher.update([1, u8::from(*value)]),
+        serde_json::Value::Number(value) => {
+            hasher.update([2]);
+            update_hash_str(hasher, &value.to_string());
+        }
+        serde_json::Value::String(value) => {
+            hasher.update([3]);
+            update_hash_str(hasher, value);
+        }
+        serde_json::Value::Array(values) => {
+            hasher.update([4]);
+            hasher.update(values.len().to_le_bytes());
+            for item in values {
+                update_hash_json(hasher, item);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            hasher.update([5]);
+            hasher.update(values.len().to_le_bytes());
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                update_hash_str(hasher, key);
+                if let Some(item) = values.get(key) {
+                    update_hash_json(hasher, item);
+                }
+            }
+        }
+    }
+}
 
 pub async fn extract_chunk_graph_candidates(
     state: &AppState,

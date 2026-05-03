@@ -35,10 +35,14 @@ pub mod ops_repository;
 pub mod query_ir_cache_repository;
 #[allow(clippy::missing_errors_doc)]
 pub mod query_repository;
+#[allow(clippy::missing_errors_doc)]
+pub mod query_result_cache_repository;
 mod runtime_graph_repository;
 mod runtime_graph_summary_repository;
 pub mod runtime_provider_repository;
 pub mod runtime_repository;
+#[allow(clippy::missing_errors_doc)]
+pub mod webhook_repository;
 
 pub use self::catalog_repository::{
     get_library_source_truth_version, touch_library_source_truth_version,
@@ -652,6 +656,51 @@ pub async fn list_runtime_graph_extraction_records_by_document(
     )
     .bind(document_id)
     .fetch_all(pool)
+    .await
+}
+
+/// Loads the newest ready graph extraction that matches the canonical cache key.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying graph extraction records.
+pub async fn find_ready_runtime_graph_extraction_record_by_cache_key(
+    pool: &PgPool,
+    library_id: Uuid,
+    text_checksum: &str,
+    extraction_version: &str,
+    provider_kind: &str,
+    model_name: &str,
+    prompt_hash: &str,
+) -> Result<Option<RuntimeGraphExtractionRecordRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphExtractionRecordRow>(
+        "select extraction.id, extraction.runtime_execution_id, extraction.library_id,
+            extraction.document_id, extraction.chunk_id, extraction.provider_kind,
+            extraction.model_name, extraction.extraction_version, extraction.prompt_hash,
+            extraction.status, extraction.raw_output_json, extraction.normalized_output_json,
+            extraction.glean_pass_count, extraction.error_message, extraction.created_at
+         from runtime_graph_extraction as extraction
+         join content_chunk as chunk
+           on chunk.id = extraction.chunk_id
+         join content_revision as revision
+           on revision.id = chunk.revision_id
+          and revision.library_id = extraction.library_id
+         where extraction.library_id = $1
+           and chunk.text_checksum = $2
+           and extraction.extraction_version = $3
+           and extraction.provider_kind = $4
+           and extraction.model_name = $5
+           and extraction.prompt_hash = $6
+           and extraction.status = 'ready'
+         order by extraction.created_at desc, extraction.id desc
+         limit 1",
+    )
+    .bind(library_id)
+    .bind(text_checksum)
+    .bind(extraction_version)
+    .bind(provider_kind)
+    .bind(model_name)
+    .bind(prompt_hash)
+    .fetch_optional(pool)
     .await
 }
 

@@ -1,3 +1,5 @@
+use crate::shared::extraction::text_quality::is_low_confidence_text;
+
 #[derive(Clone, Copy)]
 pub struct DocumentSummaryBlock<'a> {
     pub block_kind: &'a str,
@@ -24,6 +26,9 @@ pub fn build_document_summary_from_blocks<'a>(
         }
 
         if text.chars().count() < 10 && block.block_kind != "heading" {
+            continue;
+        }
+        if is_low_confidence_text(text) {
             continue;
         }
 
@@ -80,8 +85,24 @@ mod tests {
     }
 
     #[test]
+    fn skips_low_confidence_ocr_like_blocks() {
+        let summary = build_document_summary_from_blocks([
+            DocumentSummaryBlock {
+                block_kind: "paragraph",
+                text: "aBcD3eFgH qWeR7tYuI zXcV9bNmP lMnO4pQrS tUvW6xYzA",
+            },
+            DocumentSummaryBlock {
+                block_kind: "paragraph",
+                text: "This block is stable enough to describe the document.",
+            },
+        ]);
+
+        assert_eq!(summary, "This block is stable enough to describe the document.");
+    }
+
+    #[test]
     fn truncates_without_crossing_char_boundaries() {
-        let text = "я".repeat(DOCUMENT_SUMMARY_CHAR_LIMIT + 8);
+        let text = "é".repeat(DOCUMENT_SUMMARY_CHAR_LIMIT + 8);
         let summary = build_document_summary_from_blocks([DocumentSummaryBlock {
             block_kind: "paragraph",
             text: &text,

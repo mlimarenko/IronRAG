@@ -67,6 +67,90 @@ pub struct DocumentKnowledgeCoverageState {
     pub typed_fact_coverage: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DocumentKnowledgeSignals<'a> {
+    pub processing_active: bool,
+    pub hard_failure: bool,
+    pub canceled_terminal: bool,
+    pub revision_text_ready: bool,
+    pub revision_graph_ready: bool,
+    pub preparation_ready: bool,
+    pub preparation_failed: bool,
+    pub graph_failed: bool,
+    pub observed_preparation_state: Option<&'a str>,
+    pub block_count: Option<i32>,
+    pub typed_fact_count: Option<i32>,
+}
+
+#[must_use]
+pub(crate) fn classify_document_knowledge_signals(
+    signals: DocumentKnowledgeSignals<'_>,
+) -> DocumentKnowledgeCoverageState {
+    let readable = signals.preparation_ready || signals.revision_text_ready;
+    let graph_ready = signals.preparation_ready && signals.revision_graph_ready;
+    let graph_sparse =
+        readable && !graph_ready && (signals.preparation_ready || signals.revision_graph_ready);
+    let failed = (signals.hard_failure || signals.canceled_terminal || signals.preparation_failed)
+        && !readable;
+    let graph_coverage_failed = failed || signals.graph_failed || signals.preparation_failed;
+
+    let readiness_kind = if failed {
+        "failed"
+    } else if signals.processing_active && readable {
+        "readable"
+    } else if signals.processing_active {
+        "processing"
+    } else if graph_ready {
+        "graph_ready"
+    } else if graph_sparse {
+        "graph_sparse"
+    } else if readable {
+        "readable"
+    } else {
+        "processing"
+    };
+    let graph_coverage_kind = if graph_coverage_failed {
+        "failed"
+    } else if graph_ready {
+        "graph_ready"
+    } else if graph_sparse {
+        "graph_sparse"
+    } else {
+        "processing"
+    };
+    let preparation_state =
+        signals.observed_preparation_state.map(str::to_string).unwrap_or_else(|| {
+            if failed {
+                "failed".to_string()
+            } else if signals.processing_active {
+                "building".to_string()
+            } else if signals.preparation_ready {
+                "prepared".to_string()
+            } else {
+                "pending".to_string()
+            }
+        });
+    let typed_fact_coverage = signals.block_count.map(|block_count| {
+        if block_count <= 0 {
+            0.0
+        } else {
+            let typed_fact_count = signals.typed_fact_count.unwrap_or_default();
+            (f64::from(typed_fact_count) / f64::from(block_count)).clamp(0.0, 1.0)
+        }
+    });
+
+    DocumentKnowledgeCoverageState {
+        processing_active: signals.processing_active,
+        failed,
+        readable,
+        graph_ready,
+        readiness_kind: readiness_kind.to_string(),
+        preparation_state,
+        graph_coverage_kind: graph_coverage_kind.to_string(),
+        typed_fact_coverage,
+    }
+}
+
 impl OpsService {
     #[must_use]
     pub const fn new() -> Self {
@@ -250,89 +334,51 @@ impl OpsService {
             || latest_mutation.as_ref().is_some_and(|mutation| {
                 matches!(mutation.mutation_state.as_str(), "accepted" | "running")
             });
-        let failed = latest_job
-            .as_ref()
-            .is_some_and(|job| matches!(job.queue_state.as_str(), "failed" | "canceled"))
+        let hard_failure = latest_job.as_ref().is_some_and(|job| job.queue_state == "failed")
             || latest_mutation.as_ref().is_some_and(|mutation| {
-                matches!(mutation.mutation_state.as_str(), "failed" | "conflicted" | "canceled")
+                matches!(mutation.mutation_state.as_str(), "failed" | "conflicted")
             })
             || effective_readiness_row.as_ref().is_some_and(|revision| {
                 matches!(revision.text_state.as_str(), "failed" | "unavailable")
                     || revision.vector_state == "failed"
-                    || revision.graph_state == "failed"
             })
             || prepared_revision
                 .as_ref()
                 .is_some_and(|revision| revision.preparation_state == "failed");
+        let canceled_terminal =
+            latest_job.as_ref().is_some_and(|job| job.queue_state == "canceled")
+                || latest_mutation
+                    .as_ref()
+                    .is_some_and(|mutation| mutation.mutation_state == "canceled");
         let revision_text_ready = effective_readiness_row
             .as_ref()
             .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
         let revision_graph_ready = effective_readiness_row.as_ref().is_some_and(|revision| {
             matches!(revision.graph_state.as_str(), "ready" | "graph_ready")
         });
+        let graph_failed = effective_readiness_row
+            .as_ref()
+            .is_some_and(|revision| revision.graph_state == "failed");
         let preparation_ready = prepared_revision
             .as_ref()
             .is_some_and(|revision| revision.preparation_state == "prepared");
-        let readable = preparation_ready || revision_text_ready;
-        let graph_ready = preparation_ready && revision_graph_ready;
-        let graph_sparse = readable && !graph_ready && (preparation_ready || revision_graph_ready);
-        let readiness_kind = if failed {
-            "failed"
-        } else if processing_active && readable {
-            "readable"
-        } else if processing_active {
-            "processing"
-        } else if graph_ready {
-            "graph_ready"
-        } else if graph_sparse {
-            "graph_sparse"
-        } else if readable {
-            "readable"
-        } else {
-            "processing"
-        };
-        let graph_coverage_kind = if failed {
-            "failed"
-        } else if graph_ready {
-            "graph_ready"
-        } else if graph_sparse {
-            "graph_sparse"
-        } else {
-            "processing"
-        };
-        let preparation_state = prepared_revision
-            .as_ref()
-            .map(|revision| revision.preparation_state.clone())
-            .unwrap_or_else(|| {
-                if failed {
-                    "failed".to_string()
-                } else if processing_active {
-                    "building".to_string()
-                } else if preparation_ready {
-                    "prepared".to_string()
-                } else {
-                    "pending".to_string()
-                }
-            });
-        let typed_fact_coverage = prepared_revision.as_ref().map(|revision| {
-            if revision.block_count <= 0 {
-                0.0
-            } else {
-                (f64::from(revision.typed_fact_count) / f64::from(revision.block_count))
-                    .clamp(0.0, 1.0)
-            }
-        });
-
-        DocumentKnowledgeCoverageState {
+        classify_document_knowledge_signals(DocumentKnowledgeSignals {
             processing_active,
-            failed,
-            readable,
-            graph_ready,
-            readiness_kind: readiness_kind.to_string(),
-            preparation_state,
-            graph_coverage_kind: graph_coverage_kind.to_string(),
-            typed_fact_coverage,
-        }
+            hard_failure,
+            canceled_terminal,
+            revision_text_ready,
+            revision_graph_ready,
+            preparation_ready,
+            preparation_failed: prepared_revision
+                .as_ref()
+                .is_some_and(|revision| revision.preparation_state == "failed"),
+            graph_failed,
+            observed_preparation_state: prepared_revision
+                .as_ref()
+                .map(|revision| revision.preparation_state.as_str()),
+            block_count: prepared_revision.as_ref().map(|revision| revision.block_count),
+            typed_fact_count: prepared_revision.as_ref().map(|revision| revision.typed_fact_count),
+        })
     }
 
     pub fn derive_document_readiness_summary(
@@ -642,7 +688,8 @@ fn derived_warning(
 #[cfg(test)]
 mod tests {
     use super::{
-        LibraryCoverageFast, build_library_warnings_from_aggregate, derive_degraded_state,
+        DocumentKnowledgeSignals, LibraryCoverageFast, build_library_warnings_from_aggregate,
+        classify_document_knowledge_signals, derive_degraded_state,
     };
     use crate::domains::knowledge::KnowledgeLibraryGeneration;
     use crate::domains::ops::OpsLibraryWarning;
@@ -678,6 +725,59 @@ mod tests {
             created_at: Utc::now(),
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn classifier_keeps_readable_revision_visible_after_canceled_job() {
+        let state = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            canceled_terminal: true,
+            revision_text_ready: true,
+            ..Default::default()
+        });
+
+        assert!(!state.failed);
+        assert!(state.readable);
+        assert_eq!(state.readiness_kind, "readable");
+        assert_eq!(state.graph_coverage_kind, "processing");
+    }
+
+    #[test]
+    fn classifier_reports_graph_failure_without_hiding_readable_text() {
+        let state = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            revision_text_ready: true,
+            graph_failed: true,
+            ..Default::default()
+        });
+
+        assert!(!state.failed);
+        assert!(state.readable);
+        assert_eq!(state.readiness_kind, "readable");
+        assert_eq!(state.graph_coverage_kind, "failed");
+    }
+
+    #[test]
+    fn classifier_fails_when_terminal_state_has_no_readable_artifact() {
+        let state = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            canceled_terminal: true,
+            ..Default::default()
+        });
+
+        assert!(state.failed);
+        assert!(!state.readable);
+        assert_eq!(state.readiness_kind, "failed");
+    }
+
+    #[test]
+    fn classifier_keeps_readable_revision_visible_after_canceled_mutation() {
+        let state = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            canceled_terminal: true,
+            revision_text_ready: true,
+            ..Default::default()
+        });
+
+        assert!(!state.failed);
+        assert!(state.readable);
+        assert_eq!(state.readiness_kind, "readable");
     }
 
     #[test]

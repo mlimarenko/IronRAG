@@ -14,21 +14,44 @@ use crate::{
         },
         repositories::query_repository,
     },
+    services::query::execution::QueryChunkReferenceSnapshot,
 };
 
 use super::{
-    ExternalConversationTurn, MAX_DETAIL_PREPARED_SEGMENT_REFERENCES,
-    MAX_DETAIL_TECHNICAL_FACT_REFERENCES, RankedBundleReference,
-    context::{derive_fact_rank_refs, selected_fact_ids_for_detail},
+    MAX_DETAIL_PREPARED_SEGMENT_REFERENCES, MAX_DETAIL_TECHNICAL_FACT_REFERENCES,
+    RankedBundleReference,
+    context::{
+        derive_fact_rank_refs, seed_chunk_refs_from_answer_context, selected_fact_ids_for_detail,
+    },
     formatting::{
         build_prepared_segment_references, parse_query_verification_state,
         render_answer_source_links,
     },
-    session::{
-        build_conversation_runtime_context,
-        build_conversation_runtime_context_with_external_history,
-    },
+    session::build_conversation_runtime_context,
 };
+
+#[test]
+fn seed_chunk_refs_from_answer_context_uses_answer_chunks_as_canonical_source() {
+    let first_chunk_id = Uuid::now_v7();
+    let second_chunk_id = Uuid::now_v7();
+    let refs = vec![
+        QueryChunkReferenceSnapshot { chunk_id: first_chunk_id, rank: 2, score: 0.45 },
+        QueryChunkReferenceSnapshot { chunk_id: second_chunk_id, rank: 1, score: 0.90 },
+    ];
+
+    let seeded = seed_chunk_refs_from_answer_context(&refs);
+
+    assert_eq!(seeded.len(), 2);
+    let first = seeded.get(&first_chunk_id).expect("first answer chunk");
+    assert_eq!(first.rank, 2);
+    assert_eq!(first.score, 0.45);
+    assert!(first.reasons.contains("answer_context"));
+
+    let second = seeded.get(&second_chunk_id).expect("second answer chunk");
+    assert_eq!(second.rank, 1);
+    assert_eq!(second.score, 0.90);
+    assert!(second.reasons.contains("answer_context"));
+}
 
 #[test]
 fn derive_fact_rank_refs_merges_evidence_and_selected_fact_ids() {
@@ -263,7 +286,7 @@ fn build_prepared_segment_references_prioritizes_query_matching_headings_and_lim
         Some(&bundle),
         &blocks,
         &block_rank_refs,
-        "Что такое Acme Control Center?",
+        "What is Acme Control Center?",
         &HashMap::new(),
     );
 
@@ -373,7 +396,7 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
         turn_index: 1,
         turn_kind: QueryTurnKind::User,
         author_principal_id: None,
-        content_text: "как в the product перемещение сделать скажи".to_string(),
+        content_text: "tell me how to move items in the product".to_string(),
         execution_id: None,
         created_at: Utc::now(),
     };
@@ -383,7 +406,7 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
         turn_index: 2,
         turn_kind: QueryTurnKind::Assistant,
         author_principal_id: None,
-        content_text: "Могу сразу расписать это пошагово для the product.".to_string(),
+        content_text: "Sure, here are the product steps.".to_string(),
         execution_id: Some(Uuid::now_v7()),
         created_at: Utc::now(),
     };
@@ -393,7 +416,7 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
         turn_index: 3,
         turn_kind: QueryTurnKind::User,
         author_principal_id: None,
-        content_text: "давай".to_string(),
+        content_text: "continue".to_string(),
         execution_id: None,
         created_at: Utc::now(),
     };
@@ -403,17 +426,13 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
         follow_up_turn.id,
     );
 
-    assert!(context.effective_query_text.contains("как в the product перемещение сделать скажи"));
-    assert!(
-        !context
-            .effective_query_text
-            .contains("Могу сразу расписать это пошагово для the product.")
-    );
-    assert!(context.effective_query_text.ends_with("давай"));
+    assert!(context.effective_query_text.contains("tell me how to move items in the product"));
+    assert!(!context.effective_query_text.contains("Sure, here are the product steps."));
+    assert!(context.effective_query_text.ends_with("continue"));
     assert_eq!(
         context.prompt_history_text.as_deref(),
         Some(
-            "User: как в the product перемещение сделать скажи\nAssistant: Могу сразу расписать это пошагово для the product."
+            "User: tell me how to move items in the product\nAssistant: Sure, here are the product steps."
         )
     );
 }
@@ -478,7 +497,7 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
         turn_index: 1,
         turn_kind: QueryTurnKind::User,
         author_principal_id: None,
-        content_text: "как перемещение оформить".to_string(),
+        content_text: "how to fill in a transfer".to_string(),
         execution_id: None,
         created_at: Utc::now(),
     };
@@ -488,7 +507,7 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
         turn_index: 2,
         turn_kind: QueryTurnKind::User,
         author_principal_id: None,
-        content_text: "как в the product перемещение сделать скажи".to_string(),
+        content_text: "tell me how to move items in the product".to_string(),
         execution_id: None,
         created_at: Utc::now(),
     };
@@ -496,7 +515,6 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
     let context =
         build_conversation_runtime_context(&[first_turn, second_turn.clone()], second_turn.id);
 
-    assert_eq!(context.effective_query_text, "как в the product перемещение сделать скажи");
+    assert_eq!(context.effective_query_text, "tell me how to move items in the product");
     assert_eq!(context.prompt_history_text, None);
 }
-

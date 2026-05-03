@@ -1,14 +1,25 @@
 use std::collections::HashSet;
 
-use super::question_intent::{QuestionIntent, classify_focused_document_intent};
+use crate::domains::query_ir::QueryIR;
+
+use super::question_intent::{QuestionIntent, classify_query_ir_intents};
 use super::{focused_answer_document_id, types::RuntimeMatchedChunk};
 
 pub(crate) fn build_focused_document_answer(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let document_chunks = focused_or_single_document_chunks(question, chunks)?;
-    match classify_focused_document_intent(question)? {
+    let intents = classify_query_ir_intents(query_ir);
+    let intent = [
+        QuestionIntent::FocusedFormatsUnderTest,
+        QuestionIntent::FocusedSecondaryHeading,
+        QuestionIntent::FocusedPrimaryHeading,
+    ]
+    .into_iter()
+    .find(|intent| intents.contains(intent))?;
+    match intent {
         QuestionIntent::FocusedFormatsUnderTest => {
             extract_formats_under_test_answer(&document_chunks)
         }
@@ -44,7 +55,7 @@ fn extract_formats_under_test_answer(document_chunks: &[&RuntimeMatchedChunk]) -
     for chunk in document_chunks {
         for line in chunk.source_text.lines().map(str::trim) {
             let lowered = line.to_lowercase();
-            if !(lowered.contains("formats under test") || lowered.contains("формат")) {
+            if !lowered.contains("formats under test") {
                 continue;
             }
             let Some((_, remainder)) = line.split_once(':') else {

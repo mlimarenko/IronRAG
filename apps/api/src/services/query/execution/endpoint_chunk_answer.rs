@@ -8,8 +8,8 @@ use super::{
     document_target::{focused_answer_document_id, question_requests_multi_document_scope},
     endpoint_answer::select_multi_document_scope_ids,
     question_intent::{
-        QuestionIntent, classify_question_intents, has_question_intent,
-        question_blocks_endpoint_lookup,
+        QuestionIntent, classify_question_or_ir_intents, has_question_intent,
+        query_ir_blocks_endpoint_lookup,
     },
     retrieve::{focused_excerpt_for, score_value},
     technical_answer::prioritized_technical_chunk_score,
@@ -27,14 +27,14 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_intents(question);
+    let intents = classify_question_or_ir_intents(question, query_ir);
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if !question_requests_multi_document_scope(question, None) {
+    if !question_requests_multi_document_scope(question, Some(query_ir)) {
         return None;
     }
-    if question_blocks_endpoint_lookup(question) {
+    if query_ir_blocks_endpoint_lookup(query_ir) {
         return None;
     }
 
@@ -117,10 +117,10 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
             .into_iter()
             .next()
             .map_or_else(|| format!("`{endpoint}`"), |method| format!("`{method} {endpoint}`"));
-        lines.push(format!("- для {subject} — {literal}"));
+        lines.push(format!("- {subject}: {literal}"));
     }
 
-    (lines.len() >= 2).then(|| format!("Нужны два endpoint'а:\n\n{}", lines.join("\n")))
+    (lines.len() >= 2).then(|| format!("Required endpoints:\n\n{}", lines.join("\n")))
 }
 
 pub(crate) fn build_single_endpoint_answer_from_chunks(
@@ -128,12 +128,12 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_intents(question);
+    let intents = classify_question_or_ir_intents(question, query_ir);
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if question_requests_multi_document_scope(question, None)
-        || question_blocks_endpoint_lookup(question)
+    if question_requests_multi_document_scope(question, Some(query_ir))
+        || query_ir_blocks_endpoint_lookup(query_ir)
     {
         return None;
     }
@@ -206,11 +206,7 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
         .next()
         .map_or_else(|| format!("`{endpoint}`"), |method| format!("`{method} {endpoint}`"));
 
-    Some(if super::question_prefers_russian(question) {
-        format!("Нужен endpoint {literal}.")
-    } else {
-        format!("The endpoint is {literal}.")
-    })
+    Some(format!("The endpoint is {literal}."))
 }
 
 fn chunks_by_document(chunks: &[RuntimeMatchedChunk]) -> HashMap<Uuid, Vec<&RuntimeMatchedChunk>> {

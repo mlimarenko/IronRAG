@@ -186,7 +186,8 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
             boundary_policy: "same_host".to_string(),
             max_depth: 1,
             max_pages: 8,
-            ignore_patterns: Vec::new(),
+            url_filter_mode: "blocklist".to_string(),
+            url_patterns: Vec::new(),
             run_state: WebIngestRunState::Completed,
             seed_url: "https://example.test".to_string(),
             counts: WebRunCounts {

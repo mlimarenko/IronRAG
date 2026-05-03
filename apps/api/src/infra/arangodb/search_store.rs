@@ -26,6 +26,31 @@ const TITLE_NGRAM_MIN_TERM_CHARS: usize = 8;
 const TITLE_NGRAM_MAX_TERMS: usize = 4;
 const TITLE_IDENTITY_MAX_TERMS: usize = 6;
 
+/// ANN over-fetch when no temporal hard-filter is active. 8× covers the
+/// typical post-rank dedup cliff while staying inside Arango's per-query
+/// budget on a 5-turn concurrency floor.
+const VECTOR_OVER_FETCH_DEFAULT_FACTOR: usize = 8;
+const VECTOR_OVER_FETCH_DEFAULT_FLOOR: usize = 64;
+
+/// Hard cap on `over_fetch` regardless of which factor applied. Without
+/// it, a pathological caller passing `limit=1000` would queue a 32 000-row
+/// post-filter that can hold an Arango worker thread for seconds. 8 192
+/// keeps a 256 GB Arango heap-budget headroom even on the temporal lane.
+const VECTOR_OVER_FETCH_MAX: usize = 8_192;
+
+// TODO[T1.x-followup]: extract the duplicated `FILTER (@temporal_start_iso ==
+// null AND @temporal_end_iso == null) OR (X.occurred_at != null AND ...)`
+// snippet from the four lexical lanes of `search_chunks` (text view,
+// title-identity, title-soft, backstop fallback) and the vector ANN sieve
+// into a shared helper string. Architect-amendment 1 will mirror
+// `occurred_at` / `occurred_until` onto `KnowledgeChunkVectorRow`, which
+// removes the vector-side `DOCUMENT()` lookup and lets all five sites use
+// the same filter shape against the iteration variable directly. Until
+// that lands, the filter snippet stays duplicated (5 sites) so each AQL
+// stays a single string literal — restructuring before the schema change
+// would force a `format!`-based AQL build that this diff is not large
+// enough to also include safely.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeChunkVectorRow {
     #[serde(rename = "_key")]
@@ -45,6 +70,15 @@ pub struct KnowledgeChunkVectorRow {
     pub vector: Vec<f32>,
     pub freshness_generation: i64,
     pub created_at: DateTime<Utc>,
+    /// Mirror of `KnowledgeChunkRow.occurred_at` so the ANN post-filter
+    /// can hard-bound by time without a per-candidate `DOCUMENT()`
+    /// lookup. JSONL ingest only; None for non-temporal sources.
+    /// (Architect-amendment-1.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<DateTime<Utc>>,
+    /// Mirror of `KnowledgeChunkRow.occurred_until`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,7 +229,9 @@ impl ArangoSearchStore {
                     dimensions: @dimensions,
                     vector: @vector,
                     freshness_generation: @freshness_generation,
-                    created_at: @created_at
+                    created_at: @created_at,
+                    occurred_at: @occurred_at,
+                    occurred_until: @occurred_until
                  }
                  UPDATE {
                     workspace_id: @workspace_id,
@@ -206,7 +242,9 @@ impl ArangoSearchStore {
                     vector_kind: @vector_kind,
                     dimensions: @dimensions,
                     vector: @vector,
-                    freshness_generation: @freshness_generation
+                    freshness_generation: @freshness_generation,
+                    occurred_at: @occurred_at,
+                    occurred_until: @occurred_until
                  }
                  IN @@collection
                  RETURN NEW",
@@ -224,6 +262,8 @@ impl ArangoSearchStore {
                     "vector": row.vector,
                     "freshness_generation": row.freshness_generation,
                     "created_at": row.created_at,
+                    "occurred_at": row.occurred_at,
+                    "occurred_until": row.occurred_until,
                 }),
             )
             .await
@@ -270,7 +310,9 @@ impl ArangoSearchStore {
                     dimensions: row.dimensions,
                     vector: row.vector,
                     freshness_generation: row.freshness_generation,
-                    created_at: row.created_at
+                    created_at: row.created_at,
+                    occurred_at: row.occurred_at,
+                    occurred_until: row.occurred_until
                  }
                  UPDATE {
                     workspace_id: row.workspace_id,
@@ -281,7 +323,9 @@ impl ArangoSearchStore {
                     vector_kind: row.vector_kind,
                     dimensions: row.dimensions,
                     vector: row.vector,
-                    freshness_generation: row.freshness_generation
+                    freshness_generation: row.freshness_generation,
+                    occurred_at: row.occurred_at,
+                    occurred_until: row.occurred_until
                  }
                  IN @@collection
                  RETURN NEW",
@@ -342,6 +386,67 @@ impl ArangoSearchStore {
             .await
             .context("failed to list knowledge chunk vectors")?;
         decode_many_results(cursor)
+    }
+
+    pub async fn list_chunk_vectors_by_chunks(
+        &self,
+        chunk_ids: &[Uuid],
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<Vec<KnowledgeChunkVectorRow>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 FILTER vector.chunk_id IN @chunk_ids
+                   AND vector.embedding_model_key == @embedding_model_key
+                   AND vector.vector_kind == @vector_kind
+                 SORT vector.chunk_id ASC, vector.freshness_generation DESC, vector.created_at DESC
+                 RETURN vector",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "chunk_ids": chunk_ids,
+                    "embedding_model_key": embedding_model_key,
+                    "vector_kind": vector_kind,
+                }),
+            )
+            .await
+            .context("failed to list knowledge chunk vectors by chunk batch")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn count_chunk_vectors_by_revision(
+        &self,
+        revision_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+        freshness_generation: i64,
+    ) -> anyhow::Result<usize> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 FILTER vector.revision_id == @revision_id
+                   AND vector.embedding_model_key == @embedding_model_key
+                   AND vector.vector_kind == @vector_kind
+                   AND vector.freshness_generation == @freshness_generation
+                 COLLECT WITH COUNT INTO vector_count
+                 RETURN vector_count",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "revision_id": revision_id,
+                    "embedding_model_key": embedding_model_key,
+                    "vector_kind": vector_kind,
+                    "freshness_generation": freshness_generation,
+                }),
+            )
+            .await
+            .context("failed to count chunk vectors by revision")?;
+        let count: i64 = decode_single_result(cursor)?;
+        usize::try_from(count).context("chunk vector count overflowed usize")
     }
 
     pub async fn upsert_entity_vector(
@@ -471,6 +576,8 @@ impl ArangoSearchStore {
         library_id: Uuid,
         query: &str,
         limit: usize,
+        temporal_start: Option<chrono::DateTime<chrono::Utc>>,
+        temporal_end: Option<chrono::DateTime<chrono::Utc>>,
     ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>> {
         let normalized_limit = limit.max(1);
         let query_lower = query.trim().to_lowercase();
@@ -478,15 +585,22 @@ impl ArangoSearchStore {
         let title_ngram_terms = title_ngram_terms(&query_terms);
         let title_identity_terms = title_identity_terms(query, &query_terms);
         let title_soft_raw_enabled = title_soft_raw_enabled(&query_terms);
-        // Over-fetch by 4× so the per-document dedup below has a
-        // realistic candidate pool. On short Russian "how to
-        // configure X" queries the bare BM25 ranking can fill the
-        // first 16 slots with chunks from one stem-collision document
-        // (every `настроен/настроено/настроить` stems to `настро`),
-        // drowning out the actual answer. With a 4× over-fetch
-        // followed by `LIMIT max_per_document_chunks=2` per doc, the
-        // final `@limit` slots go to chunks from up to `@limit`
-        // different documents ranked by their top chunk's BM25.
+        // Hard-filter on `occurred_at` / `occurred_until` is applied to
+        // every chunk-touching lane (text view, title-identity, title-soft,
+        // backstop). When the user explicitly scopes a question to a date
+        // range the LLM compiler populates `QueryIR.temporal_constraints`,
+        // and retrieve.rs threads the resolved typed bounds in here. RFC3339
+        // strings sort lexicographically equal to chronological order, so a
+        // single `>=` / `<=` comparison covers any precision.
+        let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
+        let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
+        // Over-fetch by 4x so the per-document dedup below has a
+        // realistic candidate pool. On short configure-style queries,
+        // bare BM25 ranking can fill the first slots with chunks from
+        // one analyzer-collision document, drowning out the actual
+        // answer. With over-fetch followed by per-document limiting,
+        // the final slots go to different documents ranked by their top
+        // chunk's BM25.
         let over_fetch = normalized_limit.saturating_mul(4).max(48);
         let title_ngram_0 = title_ngram_terms.first().map_or("", String::as_str);
         let title_ngram_1 = title_ngram_terms.get(1).map_or("", String::as_str);
@@ -599,6 +713,20 @@ impl ArangoSearchStore {
                             OR ANALYZER(PHRASE(doc.normalized_text, @query, 'text_ru'), 'text_ru')
                             OR ANALYZER(PHRASE(doc.content_text, @query, 'text_ru'), 'text_ru')
                        )
+                     /* Temporal hard-filter (T1.4): when QueryIR carries
+                        resolved RFC3339 bounds, exclude chunks whose
+                        [occurred_at, occurred_until] does not overlap the
+                        requested range. Chunks without occurred_at are
+                        excluded only when bounds are present so date-only
+                        questions don't bleed into non-temporal corpora. */
+                     FILTER (@temporal_start_iso == null AND @temporal_end_iso == null)
+                         OR (
+                              doc.occurred_at != null
+                              AND (@temporal_start_iso == null
+                                   OR (doc.occurred_until != null ? doc.occurred_until : doc.occurred_at) >= @temporal_start_iso)
+                              AND (@temporal_end_iso == null
+                                   OR doc.occurred_at <= @temporal_end_iso)
+                         )
                      LET base_score = BM25(doc)
                      /* Title boost (doc-level) dominates heading boost
                         (chunk-local). When both fire they do NOT
@@ -652,51 +780,77 @@ impl ArangoSearchStore {
                      }
                  )
                  LET title_identity_raw = (
-                     FOR chunk IN @@chunk_collection
-                       FILTER chunk.library_id == @library_id
-                         AND chunk.chunk_state == 'ready'
-                         AND chunk.document_id IN title_identity_docs
-                       LET quality_boost = chunk.quality_score != null ? chunk.quality_score : 1.0
-                       LET score = (1000000 - chunk.chunk_index) * quality_boost
-                       SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
+                     FOR title_doc_id IN title_identity_docs
+                       FOR title_chunk IN (
+                         FOR chunk IN @@chunk_collection
+                           FILTER chunk.library_id == @library_id
+                             AND chunk.chunk_state == 'ready'
+                             AND chunk.document_id == title_doc_id
+                             AND ((@temporal_start_iso == null AND @temporal_end_iso == null)
+                                  OR (chunk.occurred_at != null
+                                      AND (@temporal_start_iso == null
+                                           OR (chunk.occurred_until != null ? chunk.occurred_until : chunk.occurred_at) >= @temporal_start_iso)
+                                      AND (@temporal_end_iso == null
+                                           OR chunk.occurred_at <= @temporal_end_iso)))
+                           LET quality_boost = chunk.quality_score != null ? chunk.quality_score : 1.0
+                           LET score = (1000000 - chunk.chunk_index) * quality_boost
+                           SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
+                           LIMIT 2
+                           RETURN {
+                              chunk_id: chunk.chunk_id,
+                              workspace_id: chunk.workspace_id,
+                              library_id: chunk.library_id,
+                              document_id: chunk.document_id,
+                              revision_id: chunk.revision_id,
+                              chunk_index: chunk.chunk_index,
+                              content_text: chunk.content_text,
+                              normalized_text: chunk.normalized_text,
+                              section_path: chunk.section_path,
+                              heading_trail: chunk.heading_trail,
+                              score: score,
+                              quality_score: chunk.quality_score
+                           }
+                       )
+                       SORT title_chunk.score DESC, title_chunk.revision_id DESC, title_chunk.chunk_index ASC
                        LIMIT @over_fetch
-                       RETURN {
-                          chunk_id: chunk.chunk_id,
-                          workspace_id: chunk.workspace_id,
-                          library_id: chunk.library_id,
-                          document_id: chunk.document_id,
-                          revision_id: chunk.revision_id,
-                          content_text: chunk.content_text,
-                          normalized_text: chunk.normalized_text,
-                          section_path: chunk.section_path,
-                          heading_trail: chunk.heading_trail,
-                          score: score,
-                          quality_score: chunk.quality_score
-                       }
+                       RETURN title_chunk
                  )
                  LET title_soft_raw = (
-                     FOR chunk IN @@chunk_collection
-                       FILTER chunk.library_id == @library_id
-                         AND chunk.chunk_state == 'ready'
-                         AND @title_soft_raw_enabled
-                         AND chunk.document_id IN soft_title_match_docs
-                       LET quality_boost = chunk.quality_score != null ? chunk.quality_score : 1.0
-                       LET score = (50 - (chunk.chunk_index * 0.001)) * quality_boost
-                       SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
+                     FOR soft_doc_id IN soft_title_match_docs
+                       FILTER @title_soft_raw_enabled
+                       FOR title_chunk IN (
+                         FOR chunk IN @@chunk_collection
+                           FILTER chunk.library_id == @library_id
+                             AND chunk.chunk_state == 'ready'
+                             AND chunk.document_id == soft_doc_id
+                             AND ((@temporal_start_iso == null AND @temporal_end_iso == null)
+                                  OR (chunk.occurred_at != null
+                                      AND (@temporal_start_iso == null
+                                           OR (chunk.occurred_until != null ? chunk.occurred_until : chunk.occurred_at) >= @temporal_start_iso)
+                                      AND (@temporal_end_iso == null
+                                           OR chunk.occurred_at <= @temporal_end_iso)))
+                           LET quality_boost = chunk.quality_score != null ? chunk.quality_score : 1.0
+                           LET score = (50 - (chunk.chunk_index * 0.001)) * quality_boost
+                           SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC
+                           LIMIT 2
+                           RETURN {
+                              chunk_id: chunk.chunk_id,
+                              workspace_id: chunk.workspace_id,
+                              library_id: chunk.library_id,
+                              document_id: chunk.document_id,
+                              revision_id: chunk.revision_id,
+                              chunk_index: chunk.chunk_index,
+                              content_text: chunk.content_text,
+                              normalized_text: chunk.normalized_text,
+                              section_path: chunk.section_path,
+                              heading_trail: chunk.heading_trail,
+                              score: score,
+                              quality_score: chunk.quality_score
+                           }
+                       )
+                       SORT title_chunk.score DESC, title_chunk.revision_id DESC, title_chunk.chunk_index ASC
                        LIMIT @over_fetch
-                       RETURN {
-                          chunk_id: chunk.chunk_id,
-                          workspace_id: chunk.workspace_id,
-                          library_id: chunk.library_id,
-                          document_id: chunk.document_id,
-                          revision_id: chunk.revision_id,
-                          content_text: chunk.content_text,
-                          normalized_text: chunk.normalized_text,
-                          section_path: chunk.section_path,
-                          heading_trail: chunk.heading_trail,
-                          score: score,
-                          quality_score: chunk.quality_score
-                       }
+                       RETURN title_chunk
                  )
                  LET raw = APPEND(text_raw, APPEND(title_identity_raw, title_soft_raw))
                  /* Per-document dedup: keep at most 2 chunks per
@@ -744,6 +898,8 @@ impl ArangoSearchStore {
                     "title_identity_terms": title_identity_terms,
                     "title_identity_term_count": title_identity_terms.len(),
                     "title_soft_raw_enabled": title_soft_raw_enabled,
+                    "temporal_start_iso": temporal_start_iso,
+                    "temporal_end_iso": temporal_end_iso,
                 }),
             )
             .await
@@ -778,6 +934,12 @@ impl ArangoSearchStore {
                 "FOR chunk IN @@collection
                  FILTER chunk.library_id == @library_id
                    AND chunk.chunk_state == 'ready'
+                   AND ((@temporal_start_iso == null AND @temporal_end_iso == null)
+                        OR (chunk.occurred_at != null
+                            AND (@temporal_start_iso == null
+                                 OR (chunk.occurred_until != null ? chunk.occurred_until : chunk.occurred_at) >= @temporal_start_iso)
+                            AND (@temporal_end_iso == null
+                                 OR chunk.occurred_at <= @temporal_end_iso)))
                  LET normalized_lower = LOWER(chunk.normalized_text)
                  LET content_lower = LOWER(chunk.content_text)
                  LET matched_terms = UNIQUE(
@@ -822,6 +984,8 @@ impl ArangoSearchStore {
                     "query_lower": fallback_query_lower,
                     "query_terms": fallback_terms,
                     "limit": normalized_limit,
+                    "temporal_start_iso": temporal_start_iso,
+                    "temporal_end_iso": temporal_end_iso,
                 }),
             )
             .await
@@ -1101,9 +1265,28 @@ impl ArangoSearchStore {
         query_vector: &[f32],
         limit: usize,
         n_probe: Option<u64>,
+        temporal_start: Option<chrono::DateTime<chrono::Utc>>,
+        temporal_end: Option<chrono::DateTime<chrono::Utc>>,
     ) -> anyhow::Result<Vec<KnowledgeChunkVectorSearchRow>> {
         let limit = limit.max(1);
-        let over_fetch = limit.saturating_mul(8).max(64);
+        // Larger over_fetch when temporal hard-filter is active so the
+        // post-ANN sieve still has enough candidates to fill top-K after
+        // dropping out-of-range chunks. ANN is ranked by cosine similarity
+        // which has no temporal awareness, so low-score-but-in-range
+        // chunks would otherwise never bubble up.
+        // Architect-amendment-1: `occurred_at` and `occurred_until`
+        // are mirrored onto the vector row at embed-write time, so the
+        // post-ANN filter operates directly on the candidate doc and
+        // we no longer need the 32× over_fetch cliff that the previous
+        // `DOCUMENT()` lookup pattern required. Default 8× covers the
+        // typical filter dropout while staying inside Arango's
+        // per-query budget on a 5+ concurrency floor.
+        let over_fetch = limit
+            .saturating_mul(VECTOR_OVER_FETCH_DEFAULT_FACTOR)
+            .max(VECTOR_OVER_FETCH_DEFAULT_FLOOR)
+            .min(VECTOR_OVER_FETCH_MAX);
+        let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
+        let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
         let cursor = self
             .client
             .query_json(
@@ -1121,12 +1304,25 @@ impl ArangoSearchStore {
                              embedding_model_key: vector.embedding_model_key,
                              vector_kind: vector.vector_kind,
                              freshness_generation: vector.freshness_generation,
+                             occurred_at: vector.occurred_at,
+                             occurred_until: vector.occurred_until,
                              score: score
                          }
                  )
                  FOR c IN candidates
                      FILTER c.library_id == @library_id
                        AND c.embedding_model_key == @embedding_model_key
+                     /* Temporal hard-filter: occurred_at / occurred_until
+                        are mirrored onto the vector row by ingest, so the
+                        sieve runs directly on the candidate doc — no
+                        per-row DOCUMENT() lookup. Skipped when bounds
+                        are not bound. */
+                     FILTER (@temporal_start_iso == null AND @temporal_end_iso == null)
+                         OR (c.occurred_at != null
+                             AND (@temporal_start_iso == null
+                                  OR (c.occurred_until != null ? c.occurred_until : c.occurred_at) >= @temporal_start_iso)
+                             AND (@temporal_end_iso == null
+                                  OR c.occurred_at <= @temporal_end_iso))
                      SORT c.score DESC, c.chunk_id ASC
                      LIMIT @limit
                      RETURN c",
@@ -1138,6 +1334,8 @@ impl ArangoSearchStore {
                     "limit": limit,
                     "over_fetch": over_fetch,
                     "options": vector_search_options(n_probe),
+                    "temporal_start_iso": temporal_start_iso,
+                    "temporal_end_iso": temporal_end_iso,
                 }),
             )
             .await
@@ -1308,11 +1506,11 @@ mod tests {
     };
 
     #[test]
-    fn lexical_query_terms_keep_cyrillic_and_deduplicate() {
+    fn lexical_query_terms_deduplicate_repeated_tokens() {
         assert_eq!(
-            lexical_query_terms("Сервер checkout-api /system/info endpoint сервер"),
+            lexical_query_terms("Server checkout-api /system/info endpoint server"),
             vec![
-                "сервер".to_string(),
+                "server".to_string(),
                 "checkout".to_string(),
                 "api".to_string(),
                 "/system/info".to_string(),
@@ -1332,15 +1530,15 @@ mod tests {
 
     #[test]
     fn title_ngram_terms_drop_short_suffix_noise() {
-        let terms = lexical_query_terms("что нового в последних релизах");
-        assert_eq!(title_ngram_terms(&terms), vec!["последних".to_string()]);
+        let terms = lexical_query_terms("what is new in the latest releases");
+        assert_eq!(title_ngram_terms(&terms), vec!["releases".to_string()]);
     }
 
     #[test]
     fn title_identity_terms_keep_numeric_literal_and_drop_surrounding_noise() {
-        let terms = lexical_query_terms("что нового в версии 9.8.765");
+        let terms = lexical_query_terms("what is new in version 9.8.765");
         assert_eq!(
-            title_identity_terms("что нового в версии 9.8.765", &terms),
+            title_identity_terms("what is new in version 9.8.765", &terms),
             vec!["9.8.765".to_string()]
         );
     }
@@ -1355,20 +1553,20 @@ mod tests {
 
     #[test]
     fn title_identity_terms_keep_short_exact_title_queries() {
-        let terms = lexical_query_terms("История изменений");
+        let terms = lexical_query_terms("Change History");
         assert_eq!(
-            title_identity_terms("История изменений", &terms),
-            vec!["история".to_string(), "изменений".to_string()]
+            title_identity_terms("Change History", &terms),
+            vec!["change".to_string(), "history".to_string()]
         );
     }
 
     #[test]
     fn title_identity_terms_drop_long_natural_language_queries() {
         let terms =
-            lexical_query_terms("что нового в последних релизах по каждой версии список изменений");
+            lexical_query_terms("what is new in the latest releases for every version change list");
         assert!(
             title_identity_terms(
-                "что нового в последних релизах по каждой версии список изменений",
+                "what is new in the latest releases for every version change list",
                 &terms
             )
             .is_empty()
@@ -1378,7 +1576,7 @@ mod tests {
     #[test]
     fn title_soft_raw_disabled_for_long_natural_language_queries() {
         let terms =
-            lexical_query_terms("что нового в последних релизах по каждой версии список изменений");
+            lexical_query_terms("what is new in the latest releases for every version change list");
         assert!(!title_soft_raw_enabled(&terms));
     }
 

@@ -946,17 +946,17 @@ pub(super) async fn reprocess_single_document(
             .await?;
         build_web_refetch_revision_metadata(&active_revision, refetched)
     } else {
-        let resolved_storage_key = state
+        let reprocess_source = state
             .canonical_services
             .content
-            .resolve_revision_storage_key(state, active_revision.id)
+            .resolve_reprocess_revision_source(state, &active_revision)
             .await?;
-        if active_revision.storage_key.is_none() && resolved_storage_key.is_none() {
+        let Some(reprocess_source) = reprocess_source else {
             return Err(ApiError::BadRequest(
                 "document has no stored source to reprocess".to_string(),
             ));
-        }
-        build_reprocess_revision_metadata(&active_revision, resolved_storage_key)
+        };
+        build_reprocess_revision_metadata(&active_revision, reprocess_source)
     };
 
     // Force-cancel any inflight ingest for this document before admitting a

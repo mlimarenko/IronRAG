@@ -2,17 +2,18 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::QueryIR;
+use crate::domains::query_ir::{QueryIR, QueryScope};
 
 use super::retrieve::score_value;
 use super::types::RuntimeMatchedChunk;
 
 /// Extracts focus keywords for technical chunk ranking.
 ///
-/// When `ir` carries at least one `literal_constraint`, the filter is driven
-/// by those constraints: a token is kept iff it appears inside some quoted /
-/// typed literal the compiler already extracted. This is the strongest
-/// possible signal for exact-literal technical questions.
+/// When `ir` carries literal constraints, tokens from those constraints are
+/// emitted first because they are the strongest focus signal. The remaining
+/// structural tokens from the question are still retained afterwards: exact
+/// technical answers often require the surrounding verb, endpoint role, or
+/// setting purpose to disambiguate between nearby literal blocks.
 ///
 /// When `ir` is `None` (retrieval runs in parallel with IR compilation, so
 /// the lexical query builder cannot see the IR yet) or carries no literal
@@ -25,32 +26,36 @@ pub(super) fn technical_literal_focus_keywords(
     question: &str,
     ir: Option<&QueryIR>,
 ) -> Vec<String> {
-    let literal_constraints = ir
-        .map(|ir| {
-            ir.literal_constraints
-                .iter()
-                .map(|literal| literal.text.to_lowercase())
-                .collect::<Vec<_>>()
-        })
-        .filter(|literals| !literals.is_empty());
     let mut keywords = Vec::new();
     let mut seen = HashSet::new();
+    if let Some(ir) = ir {
+        for literal in &ir.literal_constraints {
+            for token in technical_literal_question_tokens(&literal.text) {
+                if seen.insert(token.clone()) {
+                    keywords.push(token);
+                }
+            }
+        }
+    }
     for token in question
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
         .map(str::trim)
         .filter(|token| token.chars().count() >= 4)
         .map(str::to_lowercase)
     {
-        if let Some(literals) = literal_constraints.as_ref()
-            && !literals.iter().any(|literal| literal.contains(token.as_str()))
-        {
-            continue;
-        }
         if seen.insert(token.clone()) {
             keywords.push(token.clone());
         }
     }
     keywords
+}
+
+fn technical_literal_question_tokens(value: &str) -> impl Iterator<Item = String> + '_ {
+    value
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
+        .map(str::trim)
+        .filter(|token| token.chars().count() >= 4)
+        .map(str::to_lowercase)
 }
 
 fn technical_keyword_stem(keyword: &str) -> Option<String> {
@@ -75,38 +80,29 @@ pub(super) fn technical_keyword_weight(lowered_text: &str, keyword: &str) -> usi
 
 pub(super) fn question_mentions_pagination(question: &str) -> bool {
     let lowered = question.to_lowercase();
-    ["bypage", "page", "pagesize", "pagenumber", "пейдж", "постранич", "страниц", "пагинац"]
-        .iter()
-        .any(|marker| lowered.contains(marker))
-}
-
-pub(super) fn question_mentions_protocol(question: &str) -> bool {
-    let lowered = question.to_lowercase();
-    lowered.contains("protocol") || lowered.contains("протокол")
-}
-
-pub(super) fn technical_literal_focus_segments_text(question: &str) -> Vec<String> {
-    question
-        .to_lowercase()
-        .replace(" и отдельно ", " | ")
-        .replace(" отдельно ", " | ")
-        .replace(" and then ", " | ")
-        .replace(" then ", " | ")
-        .replace(" and ", " | ")
-        .replace([';', ','], "|")
-        .split('|')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>()
+    ["bypage", "page", "pagesize", "pagenumber"].iter().any(|marker| lowered.contains(marker))
 }
 
 pub(super) fn technical_literal_focus_keyword_segments(
     question: &str,
     ir: Option<&QueryIR>,
 ) -> Vec<Vec<String>> {
-    let segments = technical_literal_focus_segments_text(question)
-        .into_iter()
+    if let Some(ir) = ir
+        && matches!(ir.scope, QueryScope::MultiDocument)
+    {
+        let literal_segments = ir
+            .literal_constraints
+            .iter()
+            .map(|literal| technical_literal_question_tokens(&literal.text).collect::<Vec<_>>())
+            .filter(|keywords| !keywords.is_empty())
+            .collect::<Vec<_>>();
+        if !literal_segments.is_empty() {
+            return literal_segments;
+        }
+    }
+
+    let segments = question
+        .split([';', ',', '\n'])
         .map(|segment| technical_literal_focus_keywords(&segment, ir))
         .filter(|keywords| !keywords.is_empty())
         .collect::<Vec<_>>();

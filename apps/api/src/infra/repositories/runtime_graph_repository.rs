@@ -3,12 +3,15 @@
 mod coordination;
 mod snapshot;
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use super::RuntimeGraphFilteredArtifactRow;
+use crate::shared::text_tokens::normalized_alnum_token_sequence_by;
 
 pub use coordination::*;
 pub use snapshot::*;
@@ -83,6 +86,18 @@ pub struct RuntimeGraphEvidenceLifecycleRow {
     pub confidence_score: Option<f64>,
     pub created_at: DateTime<Utc>,
 }
+
+const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP: usize = 16;
+const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_QUERY_CAP: usize = 8;
+const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_CAP: usize = 16;
+const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_MIN_CHARS: usize = 4;
+const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_MIN_TOTAL_CHARS: usize = 11;
+const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MIN_TOKENS: usize = 2;
+const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MAX_TOKENS: usize = 4;
+const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_TOKENS: usize = 6;
+const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_TOKENS: usize = 20;
+const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_CHARS: usize = 128;
+const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_CHARS: usize = 220;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RuntimeGraphProjectionCountsRow {
@@ -264,13 +279,13 @@ pub async fn list_library_documents_needing_graph_reextract(
                 select 1 from runtime_graph_node n
                  where n.library_id = $1
                    and n.node_type = 'document'
-                   and n.canonical_key = 'document:' || h.document_id::text
+                   and n.document_id = h.document_id
            )
            and not exists (
                 select 1 from runtime_graph_extraction e
                  where e.document_id = h.document_id
-                   and (e.raw_output_json->'lifecycle'->>'revision_id')::uuid
-                       = h.active_revision_id
+                   and e.raw_output_json #>> '{lifecycle,revision_id}'
+                       = h.active_revision_id::text
            )
            and exists (
                 select 1 from runtime_graph_extraction e
@@ -310,14 +325,14 @@ pub async fn list_library_documents_missing_graph_node(
                 select 1 from runtime_graph_node n
                  where n.library_id = $1
                    and n.node_type = 'document'
-                   and n.canonical_key = 'document:' || h.document_id::text
+                   and n.document_id = h.document_id
            )
            and exists (
                 select 1 from runtime_graph_extraction e
                  where e.document_id = h.document_id
                    and e.status = 'ready'
-                   and (e.raw_output_json->'lifecycle'->>'revision_id')::uuid
-                       = h.active_revision_id
+                   and e.raw_output_json #>> '{lifecycle,revision_id}'
+                       = h.active_revision_id::text
            )
          order by h.document_id
          limit $2",
@@ -346,7 +361,7 @@ pub async fn list_top_admitted_runtime_graph_entities_by_library(
          where library_id = $1
            and projection_version = $2
            and node_type <> 'document'
-         order by support_count desc, label asc, created_at asc
+         order by support_count desc, label asc, created_at asc, id asc
          limit $3",
     )
     .bind(library_id)
@@ -403,7 +418,7 @@ pub async fn list_admitted_runtime_graph_edges_by_library(
            and projection_version = $2
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, created_at asc",
+         order by relation_type asc, created_at asc, id asc",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -413,13 +428,8 @@ pub async fn list_admitted_runtime_graph_edges_by_library(
 
 /// Compact edge row — only the columns consumed by the NDJSON topology
 /// (`build_compact_topology` in `services/knowledge/graph_stream.rs`).
-/// Dropping the wide columns (`summary`, `canonical_key`, `metadata_json`,
-/// `weight`, timestamps) cuts the row width ~5× and the heap-fetch cost
-/// accordingly: a reference library with 155 k edges used to spend
-/// ~5.7 s just materialising the wide rows; the slim variant returns
-/// the same 155 k rows in ~1.5 s because Postgres can stream directly
-/// from the `idx_runtime_graph_edge_library_projection_nodes` leaf
-/// pages without a separate heap touch for the JSON payloads.
+/// Dropping the wide columns cuts the row width ~5× and lets Postgres
+/// serve the full result set from index leaf pages without heap fetches.
 #[derive(Debug, Clone, FromRow)]
 pub struct RuntimeGraphEdgeCompactRow {
     pub from_node_id: Uuid,
@@ -440,7 +450,7 @@ pub async fn list_admitted_runtime_graph_edges_compact_by_library(
            and projection_version = $2
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, support_count desc",
+         order by relation_type asc, support_count desc, from_node_id asc, to_node_id asc",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -467,7 +477,7 @@ pub async fn list_runtime_graph_nodes_by_ids_or_document_type(
          where library_id = $1
            and projection_version = $2
            and (node_type = 'document' or id = any($3::uuid[]))
-         order by node_type asc, label asc, created_at asc",
+         order by node_type asc, label asc, created_at asc, id asc",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -540,7 +550,7 @@ pub async fn list_top_admitted_runtime_graph_relations_by_library(
            and edge.projection_version = $2
            and btrim(edge.relation_type) <> ''
            and edge.from_node_id <> edge.to_node_id
-         order by edge.support_count desc, edge.relation_type asc, edge.created_at asc
+         order by edge.support_count desc, edge.relation_type asc, edge.created_at asc, edge.id asc
          limit $3",
     )
     .bind(library_id)
@@ -573,7 +583,7 @@ pub async fn list_admitted_runtime_graph_edges_by_ids(
            and id = any($3)
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, created_at asc",
+         order by relation_type asc, created_at asc, id asc",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -605,7 +615,7 @@ pub async fn list_admitted_runtime_graph_edges_by_node_ids(
            and (from_node_id = any($3) or to_node_id = any($3))
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, created_at asc",
+         order by relation_type asc, created_at asc, id asc",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -624,6 +634,7 @@ pub async fn upsert_runtime_graph_node(
     canonical_key: &str,
     label: &str,
     node_type: &str,
+    document_id: Option<Uuid>,
     aliases_json: serde_json::Value,
     summary: Option<&str>,
     metadata_json: serde_json::Value,
@@ -632,12 +643,13 @@ pub async fn upsert_runtime_graph_node(
 ) -> Result<RuntimeGraphNodeRow, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphNodeRow>(
         "insert into runtime_graph_node (
-            id, library_id, canonical_key, label, node_type, aliases_json, summary,
+            id, library_id, canonical_key, label, node_type, document_id, aliases_json, summary,
             metadata_json, support_count, projection_version
-         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          on conflict (library_id, canonical_key, projection_version) do update
          set label = excluded.label,
              node_type = excluded.node_type,
+             document_id = excluded.document_id,
              aliases_json = excluded.aliases_json,
              summary = CASE
                  WHEN excluded.summary IS NOT NULL AND excluded.summary != ''
@@ -657,6 +669,70 @@ pub async fn upsert_runtime_graph_node(
     .bind(canonical_key)
     .bind(label)
     .bind(node_type)
+    .bind(document_id)
+    .bind(aliases_json)
+    .bind(summary)
+    .bind(metadata_json)
+    .bind(support_count)
+    .bind(projection_version)
+    .fetch_one(pool)
+    .await
+}
+
+/// Upserts the one canonical source-document node for a logical document.
+///
+/// Document nodes have a second uniqueness contract: exactly one
+/// `(library_id, canonical_key, projection_version)` row whose
+/// `canonical_key` is derived from the document id. Multi-chunk graph
+/// rebuilds may merge chunks in parallel, so this path uses the same global
+/// canonical-key conflict target that can fire during concurrent inserts.
+pub async fn upsert_runtime_graph_document_node(
+    pool: &PgPool,
+    library_id: Uuid,
+    document_id: Uuid,
+    canonical_key: &str,
+    label: &str,
+    aliases_json: serde_json::Value,
+    summary: Option<&str>,
+    metadata_json: serde_json::Value,
+    support_count: i32,
+    projection_version: i64,
+) -> Result<RuntimeGraphNodeRow, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "with document_node_lock as (
+            select pg_advisory_xact_lock(
+                hashtextextended($2::text || ':' || $5::text || ':' || $10::text, 0)
+            )
+         )
+         insert into runtime_graph_node (
+            id, library_id, canonical_key, label, node_type, document_id, aliases_json, summary,
+            metadata_json, support_count, projection_version
+         )
+         select $1, $2, $3, $4, 'document', $5, $6, $7, $8, $9, $10
+         from document_node_lock
+         on conflict (library_id, canonical_key, projection_version) do update
+         set label = excluded.label,
+             node_type = 'document',
+             document_id = excluded.document_id,
+             aliases_json = excluded.aliases_json,
+             summary = CASE
+                 WHEN excluded.summary IS NOT NULL AND excluded.summary != ''
+                      AND (runtime_graph_node.summary IS NULL OR runtime_graph_node.summary = ''
+                           OR length(excluded.summary) > length(runtime_graph_node.summary))
+                 THEN excluded.summary
+                 ELSE runtime_graph_node.summary
+             END,
+             metadata_json = excluded.metadata_json,
+             support_count = excluded.support_count,
+             updated_at = now()
+         returning id, library_id, canonical_key, label, node_type, aliases_json, summary,
+            metadata_json, support_count, projection_version, created_at, updated_at",
+    )
+    .bind(Uuid::now_v7())
+    .bind(library_id)
+    .bind(canonical_key)
+    .bind(label)
+    .bind(document_id)
     .bind(aliases_json)
     .bind(summary)
     .bind(metadata_json)
@@ -853,7 +929,7 @@ pub async fn list_runtime_graph_nodes_by_library(
             metadata_json, support_count, projection_version, created_at, updated_at
          from runtime_graph_node
          where library_id = $1 and projection_version = $2
-         order by node_type asc, label asc, created_at asc",
+         order by node_type asc, label asc, created_at asc, id asc",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -1001,7 +1077,7 @@ pub async fn list_runtime_graph_edges_by_library(
             summary, weight, support_count, metadata_json, projection_version, created_at, updated_at
          from runtime_graph_edge
          where library_id = $1 and projection_version = $2
-         order by relation_type asc, created_at asc",
+         order by relation_type asc, created_at asc, id asc",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -1202,6 +1278,11 @@ pub const RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_BY_IDS_SQL: &str = "with
          evidence_counts as (
             select evidence.target_id, count(*)::int as support_count
             from runtime_graph_evidence as evidence
+            join content_document as document
+              on document.id = evidence.document_id
+             and document.library_id = $1
+             and document.document_state = 'active'
+             and document.deleted_at is null
             where evidence.library_id = $1
               and evidence.target_kind = 'node'
               and evidence.target_id = any($3)
@@ -1253,6 +1334,11 @@ pub const RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_BY_IDS_SQL: &str = "with
          evidence_counts as (
             select evidence.target_id, count(*)::int as support_count
             from runtime_graph_evidence as evidence
+            join content_document as document
+              on document.id = evidence.document_id
+             and document.library_id = $1
+             and document.document_state = 'active'
+             and document.deleted_at is null
             where evidence.library_id = $1
               and evidence.target_kind = 'edge'
               and evidence.target_id = any($3)
@@ -1305,13 +1391,565 @@ pub async fn list_runtime_graph_evidence_by_target(
             page_ref, evidence_text, confidence_score, created_at
          from runtime_graph_evidence
          where library_id = $1 and target_kind = $2 and target_id = $3
-         order by created_at desc",
+         order by created_at desc, id desc",
     )
     .bind(library_id)
     .bind(target_kind)
     .bind(target_id)
     .fetch_all(pool)
     .await
+}
+
+/// Lists runtime graph evidence for an ordered set of node / edge targets.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the evidence rows.
+pub async fn list_runtime_graph_evidence_by_targets(
+    pool: &PgPool,
+    library_id: Uuid,
+    targets: &[(String, Uuid)],
+    limit: i64,
+) -> Result<Vec<RuntimeGraphEvidenceRow>, sqlx::Error> {
+    if targets.is_empty() || limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let target_kinds = targets.iter().map(|(kind, _)| kind.clone()).collect::<Vec<_>>();
+    let target_ids = targets.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+
+    sqlx::query_as::<_, RuntimeGraphEvidenceRow>(
+        "with requested(target_kind, target_id, ordinal) as (
+             select *
+             from unnest($2::text[], $3::uuid[]) with ordinality
+         )
+         select evidence.id, evidence.library_id, evidence.target_kind, evidence.target_id,
+            evidence.document_id, evidence.chunk_id, evidence.source_file_name,
+            evidence.page_ref, evidence.evidence_text, evidence.confidence_score,
+            evidence.created_at
+         from requested
+         join runtime_graph_evidence as evidence
+           on evidence.library_id = $1
+          and evidence.target_kind = requested.target_kind
+          and evidence.target_id = requested.target_id
+         order by requested.ordinal asc, evidence.created_at desc, evidence.id desc
+         limit $4",
+    )
+    .bind(library_id)
+    .bind(target_kinds)
+    .bind(target_ids)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Searches runtime graph evidence bodies using the same active evidence table
+/// that powers graph support. This complements target-based evidence lookup for
+/// rare facts whose text is more discriminative than their node label.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying the evidence rows.
+pub async fn search_runtime_graph_evidence_by_text(
+    pool: &PgPool,
+    library_id: Uuid,
+    query_texts: &[String],
+    limit: i64,
+) -> Result<Vec<RuntimeGraphEvidenceRow>, sqlx::Error> {
+    if query_texts.is_empty() || limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let search_queries = runtime_graph_evidence_text_search_queries(query_texts);
+    let literal_queries = runtime_graph_evidence_literal_search_queries(query_texts);
+    if search_queries.is_empty() && literal_queries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, RuntimeGraphEvidenceRow>(
+        "with requested_text(search_query, ordinal) as (
+             select search_query, ordinal::integer
+             from unnest($2::text[]) with ordinality as request(search_query, ordinal)
+         ),
+         requested_text_query as (
+             select
+                search_query,
+                ordinal,
+                to_tsquery('simple', search_query) as ts_query
+             from requested_text
+         ),
+         requested_literal(literal_query, ordinal) as (
+             select literal_query, ordinal::integer
+             from unnest($3::text[]) with ordinality as request(literal_query, ordinal)
+         ),
+         requested_literal_query as (
+             select
+                literal_query,
+                ordinal,
+                '%' || replace(
+                    replace(replace(literal_query, '~', '~~'), '%', '~%'),
+                    '_',
+                    '~_'
+                ) || '%' as literal_pattern
+             from requested_literal
+         ),
+         text_matched as (
+             select
+                evidence.id,
+                evidence.library_id,
+                evidence.target_kind,
+                evidence.target_id,
+                evidence.document_id,
+                evidence.chunk_id,
+                evidence.source_file_name,
+                evidence.page_ref,
+                evidence.evidence_text,
+                evidence.confidence_score,
+                evidence.created_at,
+                evidence.body_key,
+                evidence.first_query_ordinal,
+                evidence.body_match,
+                evidence.literal_match,
+                evidence.body_rank
+             from requested_text_query
+             cross join lateral (
+                 select
+                    evidence.id,
+                    evidence.library_id,
+                    evidence.target_kind,
+                    evidence.target_id,
+                    evidence.document_id,
+                    evidence.chunk_id,
+                    evidence.source_file_name,
+                    evidence.page_ref,
+                    evidence.evidence_text,
+                    evidence.confidence_score,
+                    evidence.created_at,
+                    md5(lower(regexp_replace(btrim(evidence.evidence_text), '[[:space:]]+', ' ', 'g'))) as body_key,
+                    requested_text_query.ordinal as first_query_ordinal,
+                    true as body_match,
+                    false as literal_match,
+                    ts_rank_cd(
+                        to_tsvector(
+                            'simple',
+                            evidence.evidence_text || ' ' || coalesce(evidence.source_file_name, '')
+                        ),
+                        requested_text_query.ts_query
+                    ) as body_rank
+                 from runtime_graph_evidence as evidence
+                 where evidence.library_id = $1
+                   and btrim(evidence.evidence_text) <> ''
+                   and to_tsvector(
+                        'simple',
+                        evidence.evidence_text || ' ' || coalesce(evidence.source_file_name, '')
+                   ) @@ requested_text_query.ts_query
+                 order by
+                    body_rank desc,
+                    evidence.confidence_score desc nulls last,
+                    evidence.created_at desc,
+                    evidence.id desc
+                 limit $4
+             ) as evidence
+         ),
+         literal_matched as (
+             select
+                evidence.id,
+                evidence.library_id,
+                evidence.target_kind,
+                evidence.target_id,
+                evidence.document_id,
+                evidence.chunk_id,
+                evidence.source_file_name,
+                evidence.page_ref,
+                evidence.evidence_text,
+                evidence.confidence_score,
+                evidence.created_at,
+                evidence.body_key,
+                evidence.first_query_ordinal,
+                evidence.body_match,
+                evidence.literal_match,
+                evidence.body_rank
+             from requested_literal_query
+             cross join lateral (
+                 select
+                    evidence.id,
+                    evidence.library_id,
+                    evidence.target_kind,
+                    evidence.target_id,
+                    evidence.document_id,
+                    evidence.chunk_id,
+                    evidence.source_file_name,
+                    evidence.page_ref,
+                    evidence.evidence_text,
+                    evidence.confidence_score,
+                    evidence.created_at,
+                    md5(lower(regexp_replace(btrim(evidence.evidence_text), '[[:space:]]+', ' ', 'g'))) as body_key,
+                    requested_literal_query.ordinal as first_query_ordinal,
+                    false as body_match,
+                    true as literal_match,
+                    0::real as body_rank
+                 from runtime_graph_evidence as evidence
+                 where evidence.library_id = $1
+                   and btrim(evidence.evidence_text) <> ''
+                   and lower(evidence.evidence_text || ' ' || coalesce(evidence.source_file_name, ''))
+                       like requested_literal_query.literal_pattern escape '~'
+                 order by
+                    evidence.confidence_score desc nulls last,
+                    evidence.created_at desc,
+                    evidence.id desc
+                 limit $4
+             ) as evidence
+         ),
+         matched as (
+             select distinct on (evidence.id)
+                evidence.id,
+                evidence.library_id,
+                evidence.target_kind,
+                evidence.target_id,
+                evidence.document_id,
+                evidence.chunk_id,
+                evidence.source_file_name,
+                evidence.page_ref,
+                evidence.evidence_text,
+                evidence.confidence_score,
+                evidence.created_at,
+                evidence.body_key,
+                evidence.first_query_ordinal,
+                evidence.body_match,
+                evidence.literal_match,
+                evidence.body_rank
+             from (
+                 select * from text_matched
+                 union all
+                 select * from literal_matched
+             ) as evidence
+             order by
+                evidence.id,
+                evidence.first_query_ordinal asc,
+                evidence.literal_match desc,
+                evidence.body_rank desc,
+                evidence.body_match desc
+         ),
+         deduped as (
+             select distinct on (body_key)
+                id,
+                library_id,
+                target_kind,
+                target_id,
+                document_id,
+                chunk_id,
+                source_file_name,
+                page_ref,
+                evidence_text,
+                confidence_score,
+                created_at,
+                first_query_ordinal,
+                body_match,
+                literal_match,
+                body_rank
+             from matched
+             order by
+                body_key,
+                first_query_ordinal asc,
+                literal_match desc,
+                body_rank desc,
+                body_match desc,
+                confidence_score desc nulls last,
+                created_at desc,
+                id desc
+         )
+         select
+            id,
+            library_id,
+            target_kind,
+            target_id,
+            document_id,
+            chunk_id,
+            source_file_name,
+            page_ref,
+            evidence_text,
+            confidence_score,
+            created_at
+         from deduped
+         order by
+            first_query_ordinal asc,
+            literal_match desc,
+            body_rank desc,
+            body_match desc,
+            confidence_score desc nulls last,
+            created_at desc,
+            id desc
+         limit $4",
+    )
+    .bind(library_id)
+    .bind(search_queries)
+    .bind(literal_queries)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+fn runtime_graph_evidence_text_search_queries(query_texts: &[String]) -> Vec<String> {
+    let mut seen_queries = BTreeSet::new();
+    let mut token_windows_by_query = Vec::new();
+    for query_text in query_texts {
+        let tokens = runtime_graph_evidence_text_search_tokens(query_text);
+        if !runtime_graph_evidence_text_search_tokens_are_selective(&tokens) {
+            continue;
+        }
+        token_windows_by_query.push(runtime_graph_evidence_text_search_token_windows(&tokens));
+    }
+
+    let mut search_queries = Vec::new();
+    let mut window_index = 0usize;
+    loop {
+        let mut saw_window = false;
+        for token_windows in &token_windows_by_query {
+            let Some(token_window) = token_windows.get(window_index) else {
+                continue;
+            };
+            saw_window = true;
+            let search_query = runtime_graph_evidence_text_search_query(token_window);
+            if seen_queries.insert(search_query.clone()) {
+                search_queries.push(search_query);
+                if search_queries.len() >= RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP {
+                    return search_queries;
+                }
+            }
+        }
+        if !saw_window {
+            break;
+        }
+        window_index += 1;
+    }
+    search_queries
+}
+
+fn runtime_graph_evidence_literal_search_queries(query_texts: &[String]) -> Vec<String> {
+    let mut seen_queries = BTreeSet::new();
+    let mut queries = Vec::new();
+    for query_text in query_texts {
+        let normalized = query_text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !runtime_graph_evidence_literal_search_query_is_selective(&normalized) {
+            continue;
+        }
+        let query = normalized.to_lowercase();
+        if seen_queries.insert(query.clone()) {
+            queries.push(query);
+            if queries.len() >= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_QUERY_CAP {
+                break;
+            }
+        }
+    }
+    queries
+}
+
+fn runtime_graph_evidence_literal_search_query_is_selective(query_text: &str) -> bool {
+    let alphanumeric_count = query_text.chars().filter(|ch| ch.is_alphanumeric()).count();
+    if alphanumeric_count < 4 {
+        return false;
+    }
+    let char_count = query_text.chars().count();
+    let tokens = normalized_alnum_token_sequence_by(
+        query_text,
+        |token| !token.trim().is_empty(),
+        Some(RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_CAP),
+    );
+    let has_numeric =
+        tokens.iter().any(|token| runtime_graph_evidence_text_search_token_has_numeric(token));
+    let structural_separator_count =
+        query_text.chars().filter(|ch| !ch.is_alphanumeric() && !ch.is_whitespace()).count();
+    let has_structural_separator = structural_separator_count > 0;
+    let token_count = tokens.len();
+
+    let strict_short_name_phrase = !has_structural_separator
+        && !has_numeric
+        && token_count == 2
+        && alphanumeric_count >= 6
+        && alphanumeric_count <= 48
+        && char_count <= 64
+        && query_text
+            .split_whitespace()
+            .all(runtime_graph_evidence_literal_plain_token_has_name_shape);
+    let short_numeric_phrase = has_numeric
+        && token_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_TOKENS
+        && char_count <= 96;
+    let short_structural_phrase = has_structural_separator
+        && token_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_TOKENS
+        && char_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_CHARS;
+    let dense_structural_phrase = structural_separator_count >= 2
+        && structural_separator_count.saturating_mul(8) >= alphanumeric_count
+        && token_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_TOKENS
+        && char_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_CHARS;
+
+    strict_short_name_phrase
+        || short_numeric_phrase
+        || short_structural_phrase
+        || dense_structural_phrase
+}
+
+fn runtime_graph_evidence_literal_plain_token_has_name_shape(token: &str) -> bool {
+    let mut saw_first_cased = false;
+    let mut first_cased_is_upper = false;
+    let mut saw_later_lower = false;
+
+    for ch in token.chars().filter(|ch| ch.is_alphabetic()) {
+        if !saw_first_cased {
+            saw_first_cased = ch.is_uppercase() || ch.is_lowercase();
+            first_cased_is_upper = ch.is_uppercase();
+            continue;
+        }
+        saw_later_lower |= ch.is_lowercase();
+    }
+
+    saw_first_cased && first_cased_is_upper && saw_later_lower
+}
+
+fn runtime_graph_evidence_text_search_query(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| {
+            let prefix = runtime_graph_evidence_text_search_token_prefix(token);
+            if runtime_graph_evidence_text_search_token_has_numeric(token) {
+                format!("'{prefix}'")
+            } else {
+                format!("'{prefix}':*")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" & ")
+}
+
+fn runtime_graph_evidence_text_search_token_prefix(token: &str) -> String {
+    if runtime_graph_evidence_text_search_token_has_numeric(token) {
+        return token.to_string();
+    }
+    let char_count = token.chars().count();
+    if char_count <= RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_MIN_CHARS {
+        return token.to_string();
+    }
+    let suffix_budget = if char_count >= 7 { 2 } else { 1 };
+    let prefix_len = char_count
+        .saturating_sub(suffix_budget)
+        .max(RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_MIN_CHARS);
+    token.chars().take(prefix_len).collect()
+}
+
+fn runtime_graph_evidence_text_search_token_windows(tokens: &[String]) -> Vec<Vec<String>> {
+    let mut candidates = Vec::new();
+    if tokens.len() <= RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MAX_TOKENS {
+        let full_window = tokens.to_vec();
+        candidates.push((
+            usize::MAX,
+            0,
+            full_window.clone(),
+            runtime_graph_evidence_text_search_window_query(&full_window),
+        ));
+    } else if let Some(distinctive_window) =
+        runtime_graph_evidence_text_search_distinctive_window(tokens)
+    {
+        candidates.push((
+            usize::MAX,
+            0,
+            distinctive_window.clone(),
+            runtime_graph_evidence_text_search_window_query(&distinctive_window),
+        ));
+    }
+
+    for width in (RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MIN_TOKENS
+        ..=RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MAX_TOKENS)
+        .rev()
+    {
+        if width > tokens.len() {
+            continue;
+        }
+        for start in 0..=tokens.len().saturating_sub(width) {
+            let window = tokens[start..start + width].to_vec();
+            if !runtime_graph_evidence_text_search_tokens_are_selective(&window) {
+                continue;
+            }
+            let query = runtime_graph_evidence_text_search_window_query(&window);
+            candidates.push((
+                runtime_graph_evidence_text_search_window_score(&window),
+                start,
+                window,
+                query,
+            ));
+        }
+    }
+
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+    let mut seen_queries = BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter_map(|(_, _, window, query)| seen_queries.insert(query).then_some(window))
+        .collect()
+}
+
+fn runtime_graph_evidence_text_search_distinctive_window(tokens: &[String]) -> Option<Vec<String>> {
+    let mut indexed_tokens = tokens.iter().enumerate().collect::<Vec<_>>();
+    indexed_tokens.sort_by(|left, right| {
+        runtime_graph_evidence_text_search_token_score(right.1)
+            .cmp(&runtime_graph_evidence_text_search_token_score(left.1))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let mut selected = indexed_tokens
+        .into_iter()
+        .take(RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MAX_TOKENS)
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| left.0.cmp(&right.0));
+    let window = selected.into_iter().map(|(_, token)| token.clone()).collect::<Vec<_>>();
+    runtime_graph_evidence_text_search_tokens_are_selective(&window).then_some(window)
+}
+
+fn runtime_graph_evidence_text_search_window_query(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| runtime_graph_evidence_text_search_token_prefix(token))
+        .collect::<Vec<_>>()
+        .join("\u{0}")
+}
+
+fn runtime_graph_evidence_text_search_window_score(tokens: &[String]) -> usize {
+    let token_score = tokens
+        .iter()
+        .map(|token| runtime_graph_evidence_text_search_token_score(token))
+        .sum::<usize>();
+    let width_score =
+        tokens.len().saturating_mul(RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_MIN_CHARS);
+    token_score.saturating_add(width_score)
+}
+
+fn runtime_graph_evidence_text_search_token_score(token: &str) -> usize {
+    let numeric_bonus = runtime_graph_evidence_text_search_token_has_numeric(token) as usize
+        * RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_MIN_TOTAL_CHARS;
+    token.chars().count().saturating_add(numeric_bonus)
+}
+
+fn runtime_graph_evidence_text_search_tokens(query_text: &str) -> Vec<String> {
+    normalized_alnum_token_sequence_by(
+        query_text,
+        |token| {
+            runtime_graph_evidence_text_search_token_has_numeric(token)
+                || token.chars().count() >= RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_MIN_CHARS
+        },
+        Some(RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_CAP),
+    )
+}
+
+fn runtime_graph_evidence_text_search_tokens_are_selective(tokens: &[String]) -> bool {
+    if tokens.len() < 2 {
+        return false;
+    }
+    if tokens.len() >= 3 {
+        return true;
+    }
+    if tokens.iter().any(|token| runtime_graph_evidence_text_search_token_has_numeric(token)) {
+        return true;
+    }
+    let total_chars = tokens.iter().map(|token| token.chars().count()).sum::<usize>();
+    total_chars >= RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_MIN_TOTAL_CHARS
+}
+
+fn runtime_graph_evidence_text_search_token_has_numeric(token: &str) -> bool {
+    token.chars().any(char::is_numeric)
 }
 
 /// Lists active runtime graph evidence lifecycle rows for one target.
@@ -1332,7 +1970,7 @@ pub async fn list_active_runtime_graph_evidence_lifecycle_by_target(
          where library_id = $1
            and target_kind = $2
            and target_id = $3
-         order by created_at desc",
+         order by created_at desc, id desc",
     )
     .bind(library_id)
     .bind(target_kind)
@@ -1478,7 +2116,17 @@ pub async fn list_runtime_graph_document_links_by_target_ids(
     .await
 }
 
-/// Marks all active graph evidence for one document as inactive.
+/// Deletes graph evidence for the just-deleted document and self-heals any
+/// orphan rows still surviving in the library.
+///
+/// Canonical contract: every `runtime_graph_evidence` row points at an
+/// active `content_document`. The single-doc cleanup explicitly removes the
+/// just-deleted doc's rows AND sweeps any rows in the same library whose
+/// `document_id` is null (FK `ON DELETE SET NULL` legacy debris) or whose
+/// referenced document is in `deleted` state — for example, evidence rows
+/// stranded by an earlier delete whose graph-refresh failed soft and never
+/// retried. Without this sweep those rows keep nodes alive forever via the
+/// support-count recalculation.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while updating the evidence rows.
@@ -1488,8 +2136,18 @@ pub async fn deactivate_runtime_graph_evidence_by_document(
     document_id: Uuid,
 ) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
-        "delete from runtime_graph_evidence
-         where library_id = $1 and document_id = $2
+        "delete from runtime_graph_evidence as evidence
+         where evidence.library_id = $1
+           and (
+             evidence.document_id = $2
+             or evidence.document_id is null
+             or exists (
+                 select 1 from content_document as document
+                 where document.id = evidence.document_id
+                   and document.library_id = $1
+                   and (document.document_state = 'deleted' or document.deleted_at is not null)
+             )
+           )
          returning target_kind, target_id",
     )
     .bind(library_id)
@@ -1498,29 +2156,126 @@ pub async fn deactivate_runtime_graph_evidence_by_document(
     .await
 }
 
-/// Marks all graph evidence for a set of documents as inactive.
+/// Deletes graph evidence for a batch of just-deleted documents and self-heals
+/// any orphan rows still surviving in the library.
 ///
-/// Batch delete runs this after child deletes as a final guard against
-/// evidence admitted by work that was already in flight when deletion began.
+/// Same canonical contract as [`deactivate_runtime_graph_evidence_by_document`]:
+/// the orphan sweep makes batch delete idempotent against past failures so a
+/// once-stranded document cannot keep its supported nodes/edges visible.
 pub async fn deactivate_runtime_graph_evidence_by_documents(
     pool: &PgPool,
     library_id: Uuid,
     document_ids: &[Uuid],
 ) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
-    if document_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
     sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
-        "delete from runtime_graph_evidence
-         where library_id = $1
-           and document_id = any($2)
+        "delete from runtime_graph_evidence as evidence
+         where evidence.library_id = $1
+           and (
+             evidence.document_id = any($2)
+             or evidence.document_id is null
+             or exists (
+                 select 1 from content_document as document
+                 where document.id = evidence.document_id
+                   and document.library_id = $1
+                   and (document.document_state = 'deleted' or document.deleted_at is not null)
+             )
+           )
          returning target_kind, target_id",
     )
     .bind(library_id)
     .bind(document_ids)
     .fetch_all(pool)
     .await
+}
+
+/// Lists document graph nodes for soft-deleted documents, including nodes
+/// created before evidence was flushed.
+///
+/// Failed graph rebuilds can leave the source-document node without a
+/// corresponding `runtime_graph_evidence` row. Delete convergence still must
+/// target that node so the file leaves no graph trace.
+///
+/// Returns the document-typed nodes for the explicit `document_ids` AND any
+/// document-typed node in the library whose backing `content_document` is in
+/// `deleted` state. The latter self-heals stranded nodes from previously
+/// failed cleanup runs.
+pub async fn list_runtime_graph_document_node_targets_by_documents(
+    pool: &PgPool,
+    library_id: Uuid,
+    document_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
+        "select 'node'::text as target_kind, node.id as target_id
+         from runtime_graph_node as node
+         where node.library_id = $1
+           and node.node_type = 'document'
+           and (
+             node.document_id = any($2)
+             or exists (
+                 select 1 from content_document as document
+                 where document.id = node.document_id
+                   and document.library_id = $1
+                   and (document.document_state = 'deleted' or document.deleted_at is not null)
+             )
+           )",
+    )
+    .bind(library_id)
+    .bind(document_ids)
+    .fetch_all(pool)
+    .await
+}
+
+/// Deletes `runtime_graph_canonical_summary` rows whose target node or edge no
+/// longer exists in the canonical graph tables.
+///
+/// `runtime_graph_canonical_summary` has no FK back to `runtime_graph_node` /
+/// `runtime_graph_edge`, so node/edge prune does not cascade. Without this
+/// sweep, deleted libraries accumulate stale summary rows that drift from the
+/// graph projection (cf. the 15k summary / 27 node skew observed on prod
+/// after batch delete).
+///
+/// The query is bounded by the candidate `node_ids` / `edge_ids` set returned
+/// from the pruning pass, so it touches at most one row per pruned target.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while removing canonical summary rows.
+pub async fn delete_runtime_graph_canonical_summaries_for_orphan_targets(
+    pool: &PgPool,
+    library_id: Uuid,
+    node_ids: &[Uuid],
+    edge_ids: &[Uuid],
+) -> Result<u64, sqlx::Error> {
+    if node_ids.is_empty() && edge_ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "delete from runtime_graph_canonical_summary as summary
+         where summary.library_id = $1
+           and (
+             (
+                summary.target_kind = 'node'
+                and summary.target_id = any($2)
+                and not exists (
+                    select 1 from runtime_graph_node as node
+                    where node.id = summary.target_id
+                )
+             )
+             or (
+                summary.target_kind = 'edge'
+                and summary.target_id = any($3)
+                and not exists (
+                    select 1 from runtime_graph_edge as edge
+                    where edge.id = summary.target_id
+                )
+             )
+           )",
+    )
+    .bind(library_id)
+    .bind(node_ids)
+    .bind(edge_ids)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// Lists active graph evidence rows for one logical content revision.
@@ -1541,7 +2296,7 @@ pub async fn list_active_runtime_graph_evidence_by_content_revision(
          where library_id = $1
            and document_id = $2
            and (revision_id = $3 or revision_id is null)
-         order by created_at desc",
+         order by created_at desc, id desc",
     )
     .bind(library_id)
     .bind(document_id)
@@ -1624,6 +2379,11 @@ pub const RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_SQL: &str = "with target
          evidence_counts as (
             select evidence.target_id, count(*)::int as support_count
             from runtime_graph_evidence as evidence
+            join content_document as document
+              on document.id = evidence.document_id
+             and document.library_id = $1
+             and document.document_state = 'active'
+             and document.deleted_at is null
             where evidence.library_id = $1
               and evidence.target_kind = 'node'
             group by evidence.target_id
@@ -1650,6 +2410,11 @@ pub const RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_SQL: &str = "with target
          evidence_counts as (
             select evidence.target_id, count(*)::int as support_count
             from runtime_graph_evidence as evidence
+            join content_document as document
+              on document.id = evidence.document_id
+             and document.library_id = $1
+             and document.document_state = 'active'
+             and document.deleted_at is null
             where evidence.library_id = $1
               and evidence.target_kind = 'edge'
             group by evidence.target_id
@@ -1834,14 +2599,16 @@ fn admitted_runtime_graph_nodes_query(extra_filter: &str) -> String {
                 node.node_type = 'document'
                 or admitted.node_id is not null
            )
-         order by node.node_type asc, node.label asc, node.created_at asc"
+         order by node.node_type asc, node.label asc, node.created_at asc, node.id asc"
     )
 }
 
-/// Searches `runtime_graph_node` by keyword overlap against the node label.
+/// Searches `runtime_graph_node` by keyword overlap against graph node data.
 ///
-/// Words shorter than 4 characters are ignored to avoid noise. Returns up to
-/// `limit` nodes ordered by `support_count` descending.
+/// Words shorter than 3 characters are ignored to avoid noise. Returns up to
+/// `limit` non-document nodes ordered by `support_count` descending. The match
+/// surface is deliberately limited to data already attached to the node: label,
+/// canonical node type, summary, and extracted aliases.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised during the query.
@@ -1852,19 +2619,28 @@ pub async fn search_runtime_graph_nodes_by_query_text(
     limit: i64,
 ) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
     sqlx::query_as::<_, RuntimeGraphNodeRow>(
-        "select distinct on (n.id)
+        "select
             n.id, n.library_id, n.canonical_key, n.label, n.node_type,
             n.aliases_json, n.summary, n.metadata_json, n.support_count,
             n.projection_version, n.created_at, n.updated_at
          from runtime_graph_node n
          where n.library_id = $1
-           and n.node_type in ('entity', 'topic')
+           and n.node_type <> 'document'
            and exists (
                select 1 from unnest(string_to_array(lower($2), ' ')) as word
-               where length(word) > 3
-                 and lower(n.label) like '%' || word || '%'
+               where length(trim(word)) > 2
+                 and (
+                    lower(n.label) like '%' || trim(word) || '%'
+                    or lower(n.node_type) like '%' || trim(word) || '%'
+                    or coalesce(lower(n.summary), '') like '%' || trim(word) || '%'
+                    or exists (
+                        select 1
+                        from jsonb_array_elements_text(n.aliases_json) as alias(value)
+                        where lower(alias.value) like '%' || trim(word) || '%'
+                    )
+                 )
            )
-         order by n.id, n.support_count desc
+         order by n.support_count desc, n.label asc, n.id asc
          limit $3",
     )
     .bind(library_id)
@@ -1995,4 +2771,139 @@ fn admitted_runtime_graph_counts_query() -> String {
             from admitted_edges
         ) as edge_count"
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        runtime_graph_evidence_literal_search_queries, runtime_graph_evidence_text_search_queries,
+        runtime_graph_evidence_text_search_token_prefix, runtime_graph_evidence_text_search_tokens,
+    };
+
+    #[test]
+    fn evidence_text_search_tokens_keep_structural_literals_without_language_lists() {
+        let tokens = runtime_graph_evidence_text_search_tokens(
+            "Open alpha/report://needle?fontSize=12 and alpha.port=9407",
+        );
+
+        assert_eq!(
+            tokens,
+            vec![
+                "open".to_string(),
+                "alpha".to_string(),
+                "report".to_string(),
+                "needle".to_string(),
+                "fontsize".to_string(),
+                "12".to_string(),
+                "port".to_string(),
+                "9407".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn evidence_text_search_query_uses_selective_suffix_tolerant_windows() {
+        let queries = runtime_graph_evidence_text_search_queries(&[
+            "Which parameter links Alpha Module to control service?".to_string(),
+            "Alpha Module".to_string(),
+            "Alpha".to_string(),
+            "port 9407".to_string(),
+            "Which parameter links Alpha Module to control service?".to_string(),
+        ]);
+
+        assert_eq!(
+            queries.first().map(String::as_str),
+            Some("'paramet':* & 'modul':* & 'contr':* & 'servi':*"),
+        );
+        assert_eq!(queries.get(1).map(String::as_str), Some("'alph':* & 'modul':*"));
+        assert_eq!(queries.get(2).map(String::as_str), Some("'port':* & '9407'"));
+        assert!(queries.contains(&"'alph':* & 'modul':*".to_string()));
+        assert!(queries.contains(&"'port':* & '9407'".to_string()));
+        assert!(!queries.iter().any(|query| {
+            query.contains("'which':* & 'paramet':* & 'link':* & 'alph':* & 'modul':* & 'contr':*")
+        }));
+    }
+
+    #[test]
+    fn evidence_literal_search_queries_keep_exact_structural_spans() {
+        let queries = runtime_graph_evidence_literal_search_queries(&[
+            "Alpha".to_string(),
+            "Mono Sans".to_string(),
+            "alpha/report://needle?fontSize=12".to_string(),
+            "report://detail?out=display&title=Alpha%20Report%20%(shift.num[d])&font=Mono%20Sans&fontSize=12".to_string(),
+            "port 80".to_string(),
+        ]);
+
+        assert!(!queries.contains(&"alpha".to_string()));
+        assert!(queries.contains(&"mono sans".to_string()));
+        assert!(queries.contains(&"alpha/report://needle?fontsize=12".to_string()));
+        assert!(queries.contains(
+            &"report://detail?out=display&title=alpha%20report%20%(shift.num[d])&font=mono%20sans&fontsize=12".to_string()
+        ));
+        assert!(queries.contains(&"port 80".to_string()));
+    }
+
+    #[test]
+    fn evidence_literal_search_queries_reject_long_prose_without_dense_structure() {
+        let queries = runtime_graph_evidence_literal_search_queries(&[
+            "Find the configuration paragraph that explains how the terminal connects to the control service, include the source document, and keep this cache marker 2026-05-01.".to_string(),
+            "Which rare entity describes the escalation recipient, what fields are required in the message, and where is the source mentioned?".to_string(),
+            "recent project".to_string(),
+            "meeting notes".to_string(),
+            "Alpha Module".to_string(),
+        ]);
+
+        assert_eq!(queries, vec!["alpha module".to_string()]);
+    }
+
+    #[test]
+    fn evidence_text_search_token_prefix_preserves_numeric_literals() {
+        assert_eq!(runtime_graph_evidence_text_search_token_prefix("alpha"), "alph");
+        assert_eq!(runtime_graph_evidence_text_search_token_prefix("module"), "modul");
+        assert_eq!(runtime_graph_evidence_text_search_token_prefix("alphacases"), "alphacas");
+        assert_eq!(runtime_graph_evidence_text_search_token_prefix("9407"), "9407");
+        assert_eq!(runtime_graph_evidence_text_search_token_prefix("build42"), "build42");
+    }
+
+    #[test]
+    fn evidence_text_search_tokens_keep_short_numeric_literals_exact() {
+        let tokens = runtime_graph_evidence_text_search_tokens("port 80 status 404 build42");
+        let queries = runtime_graph_evidence_text_search_queries(&["port 80".to_string()]);
+
+        assert_eq!(
+            tokens,
+            vec![
+                "port".to_string(),
+                "80".to_string(),
+                "status".to_string(),
+                "404".to_string(),
+                "build42".to_string(),
+            ],
+        );
+        assert_eq!(queries, vec!["'port':* & '80'".to_string()]);
+    }
+
+    #[test]
+    fn evidence_text_search_query_includes_short_needle_windows() {
+        let queries = runtime_graph_evidence_text_search_queries(&[
+            "alphacases betagamma deltazeta epsilonkey zetaport thetakey".to_string(),
+        ]);
+
+        assert!(queries.contains(&"'deltaze':* & 'epsilonk':*".to_string()));
+        assert!(queries.contains(&"'alphacas':* & 'betagam':*".to_string()));
+    }
+
+    #[test]
+    fn evidence_text_search_query_expands_short_phrases_with_subwindows() {
+        let queries = runtime_graph_evidence_text_search_queries(&[
+            "alphacases betagamma deltazeta epsilonkey".to_string(),
+        ]);
+
+        assert_eq!(
+            queries.first().map(String::as_str),
+            Some("'alphacas':* & 'betagam':* & 'deltaze':* & 'epsilonk':*"),
+        );
+        assert!(queries.contains(&"'betagam':* & 'deltaze':*".to_string()));
+        assert!(queries.contains(&"'deltaze':* & 'epsilonk':*".to_string()));
+    }
 }

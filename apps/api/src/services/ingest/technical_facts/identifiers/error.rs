@@ -10,7 +10,7 @@ pub(crate) fn extract_error_code_candidates(
     line: &str,
 ) -> Vec<FactCandidate> {
     let lower = line.to_ascii_lowercase();
-    if !matches_any_substring(&lower, &["error", "code", "exception", "ошибк"]) {
+    if !matches_any_substring(&lower, &["error", "code", "exception"]) {
         return Vec::new();
     }
 

@@ -2,13 +2,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use uuid::Uuid;
 
+use crate::domains::query_ir::{QueryAct, QueryIR};
 use crate::shared::extraction::table_summary::{
     TableColumnSummary, TableSummaryValueKind, build_table_column_summaries, format_numeric_value,
     parse_table_column_summary, render_table_column_summary,
 };
 
 use super::{
-    focused_answer_document_id, question_prefers_russian,
+    focused_answer_document_id,
     retrieve::{excerpt_for, score_value},
     table_row_answer::{normalize_table_header, parse_table_row_chunk},
     types::RuntimeMatchedChunk,
@@ -24,9 +25,10 @@ struct ScoredTableSummary {
 
 pub(crate) fn build_table_summary_grounded_answer(
     question: &str,
+    ir: Option<&QueryIR>,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    if !question_asks_table_aggregation(question) {
+    if !question_asks_table_aggregation(question, ir) {
         return None;
     }
 
@@ -36,7 +38,7 @@ pub(crate) fn build_table_summary_grounded_answer(
         return None;
     }
 
-    if question_asks_average(question) {
+    if question_asks_average(ir) {
         let summary = select_best_table_summary(question, &summaries, |summary| {
             summary.value_kind == TableSummaryValueKind::Numeric
                 && summary.average.is_some()
@@ -45,7 +47,7 @@ pub(crate) fn build_table_summary_grounded_answer(
         return format_average_table_summary_answer(question, summary);
     }
 
-    if question_asks_most_frequent(question) {
+    if question_asks_most_frequent(ir) {
         let summary = select_best_table_summary(question, &summaries, |summary| {
             summary.value_kind == TableSummaryValueKind::Categorical
                 && summary.most_frequent_count > 0
@@ -233,19 +235,13 @@ fn format_average_table_summary_answer(
     question: &str,
     summary: &TableColumnSummary,
 ) -> Option<String> {
+    let _ = question;
     let average = summary.average?;
     let average_text = format_numeric_value(average);
-    if question_prefers_russian(question) {
-        Some(format!(
-            "Среднее значение `{}` — `{}` по `{}` строкам.",
-            summary.column_name, average_text, summary.non_empty_count
-        ))
-    } else {
-        Some(format!(
-            "The average `{}` is `{}` across `{}` rows.",
-            summary.column_name, average_text, summary.non_empty_count
-        ))
-    }
+    Some(format!(
+        "The average `{}` is `{}` across `{}` rows.",
+        summary.column_name, average_text, summary.non_empty_count
+    ))
 }
 
 fn format_most_frequent_table_summary_answer(
@@ -256,30 +252,16 @@ fn format_most_frequent_table_summary_answer(
         return None;
     }
     if summary.most_frequent_count <= 1 && summary.distinct_count > 1 {
-        return if question_prefers_russian(question) {
-            Some(format!(
-                "Для `{}` нет одного самого частого значения: все значения встречаются по одному разу.",
-                summary.column_name
-            ))
-        } else {
-            Some(format!(
-                "There is no single most frequent `{}` value: every value appears once.",
-                summary.column_name
-            ))
-        };
+        return Some(format!(
+            "There is no single most frequent `{}` value: every value appears once.",
+            summary.column_name
+        ));
     }
     if summary.most_frequent_tie_count > 5 {
-        return if question_prefers_russian(question) {
-            Some(format!(
-                "Для `{}` нет одного лидирующего значения: `{}` разных значений встречаются по `{}` строк каждый.",
-                summary.column_name, summary.most_frequent_tie_count, summary.most_frequent_count
-            ))
-        } else {
-            Some(format!(
-                "There is no single leading `{}` value: `{}` different values each appear in `{}` rows.",
-                summary.column_name, summary.most_frequent_tie_count, summary.most_frequent_count
-            ))
-        };
+        return Some(format!(
+            "There is no single leading `{}` value: `{}` different values each appear in `{}` rows.",
+            summary.column_name, summary.most_frequent_tie_count, summary.most_frequent_count
+        ));
     }
     let rendered_values = summary
         .most_frequent_values
@@ -287,19 +269,8 @@ fn format_most_frequent_table_summary_answer(
         .map(|value| format!("`{value}`"))
         .collect::<Vec<_>>()
         .join(", ");
-    if question_prefers_russian(question) {
-        if summary.most_frequent_tie_count == 1 {
-            Some(format!(
-                "Самое частое значение `{}` — {} (`{}` строк).",
-                summary.column_name, rendered_values, summary.most_frequent_count
-            ))
-        } else {
-            Some(format!(
-                "Самые частые значения `{}` — {} (по `{}` строк каждая).",
-                summary.column_name, rendered_values, summary.most_frequent_count
-            ))
-        }
-    } else if summary.most_frequent_tie_count == 1 {
+    let _ = question;
+    if summary.most_frequent_tie_count == 1 {
         Some(format!(
             "The most frequent `{}` value is {} (`{}` rows).",
             summary.column_name, rendered_values, summary.most_frequent_count
@@ -312,28 +283,34 @@ fn format_most_frequent_table_summary_answer(
     }
 }
 
-/// Detect questions that need table-level aggregation. Kept intentionally
-/// minimal: we no longer maintain a hardcoded multi-language phrase list.
-/// Pattern-matching is reserved for the two cases the LLM cannot infer from
-/// metadata alone — explicit "average / mean" arithmetic intent and explicit
-/// "most frequent" frequency intent. Everything else (popular, top, count,
-/// distribution) is handled semantically by the entity-type document
-/// targeting and the LLM's own grounding instructions.
-pub(crate) fn question_asks_table_aggregation(question: &str) -> bool {
-    question_asks_average(question) || question_asks_most_frequent(question)
+/// Detect questions that need table-level aggregation from the compiled IR.
+pub(crate) fn question_asks_table_aggregation(question: &str, ir: Option<&QueryIR>) -> bool {
+    let _ = question;
+    ir.is_some_and(|ir| {
+        question_asks_average(Some(ir))
+            || question_asks_most_frequent(Some(ir))
+            || (matches!(ir.act, QueryAct::RetrieveValue | QueryAct::Enumerate)
+                && ir.target_types.iter().any(|tag| {
+                    matches!(
+                        normalized_ir_tag(tag).as_str(),
+                        "table_summary" | "table_column_summary" | "table_aggregation"
+                    )
+                }))
+    })
 }
 
 pub(crate) fn render_table_summary_chunk_section(
     question: &str,
+    ir: Option<&QueryIR>,
     chunks: &[RuntimeMatchedChunk],
 ) -> String {
-    if !question_asks_table_aggregation(question) {
+    if !question_asks_table_aggregation(question, ir) {
         return String::new();
     }
     let mut summaries =
         collect_scored_table_summaries(chunks, focused_answer_document_id(question, chunks))
             .into_iter()
-            .filter(|entry| summary_matches_requested_aggregation(&entry.summary, question))
+            .filter(|entry| summary_matches_requested_aggregation(&entry.summary, ir))
             .collect::<Vec<_>>();
     if summaries.is_empty() {
         return String::new();
@@ -360,36 +337,42 @@ pub(crate) fn render_table_summary_chunk_section(
     format!("Table summaries\n{}", lines.join("\n"))
 }
 
-fn question_asks_average(question: &str) -> bool {
-    let lowered = question.to_lowercase();
-    ["average", "avg", "средн", "mean"].iter().any(|marker| lowered.contains(marker))
+fn question_asks_average(ir: Option<&QueryIR>) -> bool {
+    ir.is_some_and(|ir| {
+        ir.target_types.iter().any(|tag| {
+            matches!(
+                normalized_ir_tag(tag).as_str(),
+                "average" | "avg" | "mean" | "table_average" | "numeric_aggregate"
+            )
+        })
+    })
 }
 
-fn question_asks_most_frequent(question: &str) -> bool {
-    let lowered = question.to_lowercase();
-    [
-        "чаще всего",
-        "самый част",
-        "самая част",
-        "наиболее част",
-        "most frequent",
-        "most common",
-        "occurs most often",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
+fn question_asks_most_frequent(ir: Option<&QueryIR>) -> bool {
+    ir.is_some_and(|ir| {
+        ir.target_types.iter().any(|tag| {
+            matches!(
+                normalized_ir_tag(tag).as_str(),
+                "most_frequent" | "mode" | "frequency" | "table_frequency" | "categorical_mode"
+            )
+        })
+    })
 }
 
 pub(crate) fn summary_matches_requested_aggregation(
     summary: &TableColumnSummary,
-    question: &str,
+    ir: Option<&QueryIR>,
 ) -> bool {
-    if question_asks_average(question) {
+    if question_asks_average(ir) {
         return summary.value_kind == TableSummaryValueKind::Numeric && summary.average.is_some();
     }
-    if question_asks_most_frequent(question) {
+    if question_asks_most_frequent(ir) {
         return summary.value_kind == TableSummaryValueKind::Categorical
             && summary.most_frequent_count > 0;
     }
     false
+}
+
+fn normalized_ir_tag(tag: &str) -> String {
+    tag.trim().to_ascii_lowercase().replace('-', "_")
 }

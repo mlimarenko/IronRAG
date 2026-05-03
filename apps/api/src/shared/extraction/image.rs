@@ -13,7 +13,7 @@ use crate::{
     },
 };
 
-const IMAGE_OCR_PROMPT: &str = "Return only the text visible in this image as plain UTF-8 text, one logical flow with newlines where line breaks are visible. Do not add headings, explanations, summaries, entity lists, markdown fences, or wrapping quotes. If no readable text is visible, return an empty string.";
+const IMAGE_OCR_PROMPT: &str = "Return only the text visible in this image as plain UTF-8 text, one logical flow with newlines where line breaks are visible. Preserve the original writing system of every word verbatim. When a glyph could be read as either its native script form or as a visually similar character in another script, choose the script that matches the surrounding word — never homogenize a word's script by substituting confusable look-alikes across scripts. Treat each word as a single-script unit unless the source itself mixes scripts within one word. Do not transliterate, romanize, or normalize any character into a different writing system. Do not add headings, explanations, summaries, entity lists, markdown fences, or wrapping quotes. If no readable text is visible, return an empty string.";
 const IMAGE_DESCRIPTION_PROMPT: &str = "Describe this image in detail, including any text, data, tables, diagrams, charts, formulas, signage, and other visually meaningful content that is visible.";
 
 pub struct ImageVisionOutput {

@@ -12,13 +12,12 @@ use super::{RuntimeMatchedChunk, canonical_document_revision_id, map_chunk_hit, 
 
 pub(crate) fn requested_initial_table_row_count(question: &str) -> Option<usize> {
     let lowered = question.to_lowercase();
-    for marker in ["первые", "первых", "first"] {
+    for marker in ["first"] {
         let Some(start) = lowered.find(marker) else {
             continue;
         };
         let tail = &lowered[start + marker.len()..];
-        if !(tail.contains("строк") || tail.contains("строки") || tail.contains("rows"))
-        {
+        if !tail.contains("rows") {
             continue;
         }
         let count = tail

@@ -8,6 +8,7 @@ export {
 } from "./documents";
 export type {
   DocumentCostSummary,
+  WorkspaceCostSummary,
   LibrarySnapshotImportReport,
   DocumentListStatusFilter,
   DocumentListStatusCounts,
@@ -28,8 +29,10 @@ export { knowledgeApi } from "./knowledge";
 export { adminApi } from "./admin";
 export type {
   CatalogLibraryResponse,
-  WebIngestIgnorePattern,
+  WebIngestPattern,
   WebIngestPolicy,
+  WebIngestUrlFilter,
+  WebIngestUrlFilterMode,
 } from "./admin";
 export { versionApi } from "./version";
 export type { ReleaseUpdateResponse, ReleaseUpdateStatus } from "./version";

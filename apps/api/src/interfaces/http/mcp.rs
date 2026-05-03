@@ -27,10 +27,8 @@ use uuid::Uuid;
 /// `GET /v1/mcp` stream. 25 s sits comfortably below every proxy
 /// idle-read timeout we care about (nginx default 60 s, the gateway's
 /// default 75 s) so the connection stays warm without generating
-/// meaningful traffic. mcp-remote treats a cleanly kept-alive stream
-/// as healthy and stops its reconnect storm — previously it was
-/// reopening the GET every ~300 ms because our handshake closed
-/// immediately after emitting a single ready comment.
+/// meaningful traffic. mcp-remote only stops its reconnect loop when
+/// the stream stays alive past the handshake.
 const MCP_GET_STREAM_KEEPALIVE: Duration = Duration::from_secs(25);
 
 use crate::{
@@ -45,8 +43,6 @@ use crate::{
 
 mod audit;
 pub(crate) mod tools;
-
-pub mod agent_bridge;
 
 pub const MCP_JSONRPC_ROUTE: &str = "/mcp";
 pub const MCP_CAPABILITIES_ROUTE: &str = "/mcp/capabilities";

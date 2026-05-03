@@ -774,6 +774,7 @@ fn sample_revision_row(
         byte_size: 64,
         normalized_text: Some("content".to_string()),
         text_checksum: Some("text-checksum".to_string()),
+        image_checksum: None,
         text_state: text_state.to_string(),
         vector_state: vector_state.to_string(),
         graph_state: graph_state.to_string(),

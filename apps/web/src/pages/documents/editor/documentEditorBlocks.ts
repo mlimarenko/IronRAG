@@ -13,6 +13,7 @@ export type DocumentEditorBlockKind =
   | "code_block"
   | "quote_block"
   | "metadata_block"
+  | "source_unit"
   | "table";
 
 type BaseBlock = {
@@ -26,6 +27,7 @@ export type DocumentEditorBlock =
   | (BaseBlock & { kind: "code_block"; text: string; language?: string })
   | (BaseBlock & { kind: "quote_block"; text: string })
   | (BaseBlock & { kind: "metadata_block"; text: string })
+  | (BaseBlock & { kind: "source_unit"; text: string })
   | (BaseBlock & { kind: "table"; rows: string[][]; sheetName?: string });
 
 type NormalizedSegment = {
@@ -191,6 +193,7 @@ function normalizeBlockKind(
     case "code_block":
     case "quote_block":
     case "metadata_block":
+    case "source_unit":
     case "table":
     case "table_row":
       return blockKind;
@@ -233,6 +236,7 @@ function buildScalarBlock(
     case "quote_block":
       return { kind, text: stripQuoteMarkers(segment.text) };
     case "metadata_block":
+    case "source_unit":
       return { kind, text: segment.text.trim() };
     case "paragraph":
     default:
@@ -335,6 +339,7 @@ function renderBlock(block: DocumentEditorBlock): string {
       return `${"#".repeat(block.level)} ${block.text}`.trimEnd();
     case "paragraph":
     case "metadata_block":
+    case "source_unit":
       return block.text;
     case "code_block":
       return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;

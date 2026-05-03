@@ -1,5 +1,162 @@
 # Changelog
 
+
+## 0.4.0 — 2026-05-03
+
+### Highlights
+
+- Temporal hard-filter for `record_jsonl` chats and any document with
+  `occurred_at` headers — date-anchored questions now return only chunks
+  whose timestamp overlaps the requested window.
+- Ordered source-slice (`source_slice` head/tail/all) honours the same
+  temporal bounds, so "last 20 messages in March 2026" returns the
+  chronological tail within March, not the tail of the file.
+- Vector-row temporal mirror: ANN post-sieve filters directly on the
+  candidate without a per-row chunk lookup; `over_fetch` returns to 8×
+  default and gains a hard 8 192 cap.
+- Defence-in-depth tenant isolation on every cross-revision lookup:
+  `library_id` filter is now in the AQL itself, not just in the caller.
+- Disambiguation gate is bypassed when the question carries resolved
+  temporal bounds — date-scoped turns now return a grounded answer or a
+  clean refusal instead of the off-topic "could be one of: X, Y, Z" reply.
+
+### Retrieval and answer quality
+
+- `QueryIR.temporal_constraints` (compiled from natural language by the
+  LLM compiler, RFC3339 bounds) is consumed end-to-end: lexical lane,
+  vector lane, source-unit slice loader, and library-source-profile
+  fallback. Helper `QueryIR::resolved_temporal_bounds()` aggregates
+  `min(start)` / `max(end)`; structural RFC3339 parsing only — no NL
+  word lists.
+- AQL adds `FILTER ... occurred_at ... occurred_until ...` to all four
+  `search_chunks` lanes (text view, title-identity, title-soft, backstop)
+  and to `search_chunk_vectors_by_similarity`. RFC3339 strings sort
+  lexicographically equal to chronological order.
+- Source-unit slice (`apply_ordered_source_slice_context`) now resolves a
+  record-stream candidate at library scope when no top-K chunk is a
+  record stream, then filters head/tail blocks via AQL substring match
+  on `occurred_at=ISO` headers.
+- Search ranking uses generic, language-agnostic best-chunk and
+  top-chunk evidence-coverage signals; document-search no longer carries
+  corpus-specific query expansions or topic boosts.
+- Deterministic technical answers abstain unless the candidate covers
+  the typed technical facets requested by `QueryIR` and grounded in
+  evidence.
+- Document targeting normalizes filename separators and natural phrasing
+  to the same canonical document identity through deterministic
+  longest-match scoring.
+
+### Grounded-answer prompt and policy
+
+- Multi-entity disambiguation rule: the prompt now requires the LLM to
+  enumerate every distinct entity in context that matches the queried
+  name, including incidental references inside long chunks; collapsing
+  them or silently picking the most prominent one is forbidden.
+- Live ingest metadata is no longer injected into the answer prompt.
+  Recent-documents data with mutating `pipeline_state` and
+  `preview_excerpt` drifted between back-to-back identical calls and
+  produced divergent UI/MCP answers; the prompt is now a deterministic
+  function of `(query, retrieved evidence, library summary)`. Locked by
+  `assemble_answer_context_excludes_recent_documents_for_mcp_ui_parity`.
+- `grounded_answer` MCP and UI now use the same `top_k=24` default —
+  prior 8 vs 24 split was a constitutional §16 parity violation.
+
+### Multiformat ingestion
+
+- Spreadsheet extraction is native-only for `csv`, `tsv`, `xls`, `xlsx`,
+  `xlsb`, `ods`. Docling adapter is reserved for document-layout formats
+  and configured raster-image OCR.
+- Grounded multiformat benchmark covers PDF, DOCX, PPTX, XLSX with
+  sheet-level table questions.
+- Reprocess parses stored source bytes first and falls back to derived
+  text only when no source blob is available; record-stream reprocess
+  derives JSONL from prepared source-unit blocks instead of degrading to
+  plain text.
+- Append processing is diff-aware: persists a source blob for future
+  retries and reuses unchanged chunk embeddings and graph extraction
+  records by normalized chunk content.
+
+### Graph extraction quality
+
+- Script-preserving extract (v8): labels and endpoints are copied
+  verbatim from prepared chunk text; source writing is never converted
+  into another writing system; look-alike glyph substitution is
+  forbidden. Bumping the version invalidates older cache entries.
+- OCR text quality gate: structural quality score, low-confidence
+  blocks skipped from summaries, chunks downranked, graph extraction
+  drops or avoids low-confidence artifacts. Reuse and reconcile paths
+  apply the same eligibility policy.
+- Graph extraction reuse is keyed by rendered prompt + active
+  provider/model contract, not mutable database row ids. Storage-row
+  noise no longer invalidates legitimate reuse.
+- Coreference rule rewritten language-neutrally: short anaphoric
+  references resolve structurally to the previously named entity
+  without enumerating language-specific word lists.
+- Record-stream graph extraction is bounded structurally to source
+  profile + first/last + fact-supported + evenly spaced units.
+
+### Schema and operations
+
+- `content_chunk` gains `occurred_at TIMESTAMPTZ`, `occurred_until
+  TIMESTAMPTZ`, partial index `idx_content_chunk_occurred_at`, and a
+  range check constraint. PG and Arango chunk row mirror these fields;
+  ingest populates them from `record_jsonl::extract_chunk_temporal_bounds`.
+- `KnowledgeChunkVectorRow` mirrors `occurred_at` / `occurred_until` so
+  the ANN sieve operates on the candidate row directly.
+- `ironrag-backfill-chunk-temporal-bounds` binary: idempotent, cursor-
+  paginated, Arango-first then PG-flip so failed mirrors stay
+  retry-eligible; non-zero exit on partial completion.
+- `ironrag-gc-stale-chunks` rewrites the library-wide AQL into per-
+  document batches with `chunk.document_id == ?` and
+  `vector.revision_id IN @stale`, fitting comfortably under the Arango
+  per-query memory cap on libraries that previously OOMed.
+- Library-scoped record-stream fallback in
+  `first_record_stream_candidate_profile` finds canonical-revision
+  record-stream profiles even when no top-K chunk is record-stream.
+- `list_source_profile_chunks_by_revisions` AQL now filters by
+  `library_id` for defence-in-depth tenant isolation.
+- Single-bucket migration policy: post-release SQL collapses into the
+  consolidated `0004_canonical_graph_ingest_retrieval_baseline.sql`;
+  no `0005`/`0006` files in pre-release phase.
+
+### Reprocess and append
+
+- Concurrent answer cache fills are single-owner; identical grounded-
+  answer turns wait for the active fill instead of starting duplicate
+  canonical executions. Coordination failures fail loudly.
+- Embedding coverage is verified after reuse: partial-vector revisions
+  become explicit ingest failures instead of later retrieval misses.
+- Reprocess works for text-recoverable revisions without source blobs;
+  documents with neither stored source nor recoverable text fail loudly.
+- Ingest concurrency defaults are bounded for CPU-only hosts.
+
+### Webhooks and operations
+
+- Inbound webhook receiver removed; outbound delivery only. Outbound
+  pipeline hardened with retries, idempotency, and image_checksum on
+  delivered events.
+- Web-ingest runs carry a single `urlFilter` snapshot with explicit
+  `blocklist`/`allowlist` mode; documents UI rejects empty allowlists.
+- Workspace cost rollup, searchable workspace/library selectors, and
+  evidence-gated comparison answers landed.
+
+### Assistant transport
+
+- UI assistant uses one direct JSON `POST /v1/query/sessions/{id}/turns`
+  request — no SSE branch in the canonical lane. MCP streaming remains
+  isolated under `/v1/mcp`. Session history hydrates from
+  `{ session, messages }` so existing conversations restore correctly.
+
+### Tests
+
+- 959 lib tests (was 953 in 0.3.2). New unit coverage for
+  `resolved_temporal_bounds` (full-range, half-open start, half-open
+  end, mixed parseable/unparseable, empty), and rewritten orphan-only
+  contract for `map_chunk_hit` / `map_companion_chunk` (drops chunks
+  only when the document has no head pointer; runtime is now lenient
+  on revision-id mismatch since strict equality silently hid ~80% of
+  chunks for documents with overlapping incremental revisions).
+
 ## 0.3.2 — 2026-04-24
 
 ### Web ingest

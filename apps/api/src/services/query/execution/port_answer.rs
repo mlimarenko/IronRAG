@@ -7,11 +7,12 @@ use crate::shared::extraction::technical_facts::TechnicalFactKind;
 
 use super::concise_document_subject_label;
 use super::fact_lookup::{best_matching_fact, build_document_labels};
-use super::question_intent::question_mentions_port;
+use super::question_intent::{
+    QuestionIntent, classify_question_or_ir_intents, has_question_intent,
+};
 use super::technical_literals::{
-    question_mentions_protocol, technical_chunk_selection_score,
-    technical_literal_focus_keyword_segments, technical_literal_focus_keywords,
-    technical_literal_focus_segments_text,
+    technical_chunk_selection_score, technical_literal_focus_keyword_segments,
+    technical_literal_focus_keywords,
 };
 use super::types::RuntimeMatchedChunk;
 use super::{CanonicalAnswerEvidence, technical_answer::document_focus_preference};
@@ -184,20 +185,17 @@ pub(super) fn build_port_and_protocol_answer_from_facts(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    if !question_mentions_port(question)
-        || !question_mentions_protocol(question)
+    let intents = classify_question_or_ir_intents(question, query_ir);
+    if !has_question_intent(&intents, QuestionIntent::Port)
+        || !has_question_intent(&intents, QuestionIntent::Protocol)
         || chunks.is_empty()
     {
         return None;
     }
 
-    let focus_segments = technical_literal_focus_segments_text(question)
+    let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir))
         .into_iter()
-        .map(|segment| {
-            let keywords = technical_literal_focus_keywords(&segment, Some(query_ir));
-            (segment, keywords)
-        })
-        .filter(|(_, keywords)| !keywords.is_empty())
+        .filter(|keywords| !keywords.is_empty())
         .collect::<Vec<_>>();
     if focus_segments.len() < 2 {
         return None;
@@ -206,9 +204,11 @@ pub(super) fn build_port_and_protocol_answer_from_facts(
     let (ordered_document_ids, per_document_chunks) = chunks_by_document(chunks);
     let document_labels = build_document_labels(chunks);
     let mut port_line = None;
+    let mut port_document_id = None;
     let mut protocol_line = None;
+    let mut fallback_protocol_line = None;
 
-    for (segment_text, segment_keywords) in focus_segments {
+    for segment_keywords in focus_segments {
         let Some(document_id) =
             select_segment_document(&ordered_document_ids, &per_document_chunks, &segment_keywords)
         else {
@@ -218,23 +218,33 @@ pub(super) fn build_port_and_protocol_answer_from_facts(
             document_labels.get(&document_id).map(String::as_str).unwrap_or_default();
         let subject = concise_document_subject_label(document_label);
 
-        if port_line.is_none() && question_mentions_port(&segment_text) {
+        if port_line.is_none() {
             if let Some(port) =
                 collect_document_fact_values(evidence, document_id, TechnicalFactKind::Port)
                     .into_iter()
                     .next()
             {
                 port_line = Some(format!("{subject}: port `{port}`"));
+                port_document_id = Some(document_id);
             }
         }
 
-        if protocol_line.is_none() && question_mentions_protocol(&segment_text) {
+        if protocol_line.is_none() || Some(document_id) == port_document_id {
             if let Some(protocol) =
                 best_document_protocol(evidence, &document_labels, document_id, &segment_keywords)
             {
-                protocol_line = Some(format!("{subject}: protocol `{protocol}`"));
+                let line = format!("{subject}: protocol `{protocol}`");
+                if Some(document_id) == port_document_id {
+                    fallback_protocol_line.get_or_insert(line);
+                } else {
+                    protocol_line = Some(line);
+                }
             }
         }
+    }
+
+    if protocol_line.is_none() {
+        protocol_line = fallback_protocol_line;
     }
 
     match (port_line, protocol_line) {
@@ -249,8 +259,9 @@ pub(super) fn build_port_answer_from_facts(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    if !question_mentions_port(question)
-        || question_mentions_protocol(question)
+    let intents = classify_question_or_ir_intents(question, query_ir);
+    if !has_question_intent(&intents, QuestionIntent::Port)
+        || has_question_intent(&intents, QuestionIntent::Protocol)
         || technical_literal_focus_keyword_segments(question, Some(query_ir)).len() > 1
     {
         return None;
@@ -293,25 +304,15 @@ pub(super) fn build_port_answer_from_facts(
 
         let subject = concise_document_subject_label(document_label);
         if ports.is_empty() {
-            if !focus_segments.is_empty() {
-                return Some(format!(
-                    "Точный порт для {subject} не подтвержден в выбранных доказательствах."
-                ));
-            }
             continue;
         }
         if ports.len() == 1 {
-            return Some(format!(
-                "Для {subject} в активной библиотеке найден порт `{}`.",
-                ports[0]
-            ));
+            return Some(format!("{subject}: port `{}`.", ports[0]));
         }
 
         let rendered_ports =
             ports.iter().map(|port| format!("`{port}`")).collect::<Vec<_>>().join(", ");
-        return Some(format!(
-            "Для {subject} в активной библиотеке найдены порты {rendered_ports}."
-        ));
+        return Some(format!("{subject}: ports {rendered_ports}."));
     }
 
     None
@@ -344,7 +345,7 @@ pub(super) fn extract_port_literals(text: &str, limit: usize) -> Vec<String> {
 
     let cleaned = text.replace('\n', " ");
     for separator in [":", "="] {
-        for keyword in ["port", "tcp_port", "udp_port", "порт"] {
+        for keyword in ["port", "tcp_port", "udp_port"] {
             let pattern = format!("{keyword}{separator}");
             for fragment in cleaned.match_indices(&pattern) {
                 let value_start = fragment.0 + pattern.len();
@@ -367,7 +368,7 @@ pub(super) fn extract_port_literals(text: &str, limit: usize) -> Vec<String> {
     for window in tokens.windows(2) {
         let keyword = trim_literal_token(window[0]).trim_matches(':');
         let value = trim_literal_token(window[1]).trim_matches(':');
-        if ["port", "tcp_port", "udp_port", "порт"]
+        if ["port", "tcp_port", "udp_port"]
             .iter()
             .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
             && (2..=5).contains(&value.len())
@@ -390,21 +391,18 @@ pub(super) fn build_port_and_protocol_answer(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    if !question_mentions_port(question)
-        || !question_mentions_protocol(question)
+    let intents = classify_question_or_ir_intents(question, query_ir);
+    if !has_question_intent(&intents, QuestionIntent::Port)
+        || !has_question_intent(&intents, QuestionIntent::Protocol)
         || chunks.is_empty()
     {
         return None;
     }
 
     let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
-    let focus_segments = technical_literal_focus_segments_text(question)
+    let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir))
         .into_iter()
-        .map(|segment| {
-            let keywords = technical_literal_focus_keywords(&segment, Some(query_ir));
-            (segment, keywords)
-        })
-        .filter(|(_, keywords)| !keywords.is_empty())
+        .filter(|keywords| !keywords.is_empty())
         .collect::<Vec<_>>();
     if focus_segments.len() < 2 {
         return None;
@@ -454,9 +452,11 @@ pub(super) fn build_port_and_protocol_answer(
     };
 
     let mut port_line = None;
+    let mut port_document_id = None;
     let mut protocol_line = None;
+    let mut fallback_protocol_line = None;
 
-    for (segment_text, segment_keywords) in focus_segments {
+    for segment_keywords in focus_segments {
         let Some(document_id) = select_segment_document(&segment_keywords) else {
             continue;
         };
@@ -498,28 +498,36 @@ pub(super) fn build_port_and_protocol_answer(
             } else {
                 focused.as_str()
             };
-            if question_mentions_port(&segment_text) {
-                for port in extract_port_literals(literal_source, 2) {
-                    if seen_ports.insert(port.clone()) {
-                        ports.push(port);
-                    }
+            for port in extract_port_literals(literal_source, 2) {
+                if seen_ports.insert(port.clone()) {
+                    ports.push(port);
                 }
             }
-            if question_mentions_protocol(&segment_text) {
-                for protocol in extract_protocol_literals(literal_source, 2) {
-                    if seen_protocols.insert(protocol.clone()) {
-                        protocols.push(protocol);
-                    }
+            for protocol in extract_protocol_literals(literal_source, 2) {
+                if seen_protocols.insert(protocol.clone()) {
+                    protocols.push(protocol);
                 }
             }
         }
 
         if port_line.is_none() && !ports.is_empty() {
             port_line = Some(format!("{subject}: port `{}`", ports[0]));
+            port_document_id = Some(document_id);
         }
-        if protocol_line.is_none() && !protocols.is_empty() {
-            protocol_line = Some(format!("{subject}: protocol `{}`", protocols[0]));
+        if (protocol_line.is_none() || Some(document_id) == port_document_id)
+            && !protocols.is_empty()
+        {
+            let line = format!("{subject}: protocol `{}`", protocols[0]);
+            if Some(document_id) == port_document_id {
+                fallback_protocol_line.get_or_insert(line);
+            } else {
+                protocol_line = Some(line);
+            }
         }
+    }
+
+    if protocol_line.is_none() {
+        protocol_line = fallback_protocol_line;
     }
 
     match (port_line, protocol_line) {
@@ -534,8 +542,9 @@ pub(super) fn build_port_answer(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    if !question_mentions_port(question)
-        || question_mentions_protocol(question)
+    let intents = classify_question_or_ir_intents(question, query_ir);
+    if !has_question_intent(&intents, QuestionIntent::Port)
+        || has_question_intent(&intents, QuestionIntent::Protocol)
         || technical_literal_focus_keyword_segments(question, Some(query_ir)).len() > 1
         || chunks.is_empty()
     {
@@ -643,25 +652,15 @@ pub(super) fn build_port_answer(
 
         let subject = concise_document_subject_label(&document_chunks[0].document_label);
         if ports.is_empty() {
-            if !focus_segments.is_empty() {
-                return Some(format!(
-                    "Точный порт для {subject} не подтвержден в выбранных доказательствах."
-                ));
-            }
             continue;
         }
         if ports.len() == 1 {
-            return Some(format!(
-                "Для {subject} в активной библиотеке найден порт `{}`.",
-                ports[0]
-            ));
+            return Some(format!("{subject}: port `{}`.", ports[0]));
         }
 
         let rendered_ports =
             ports.iter().map(|port| format!("`{port}`")).collect::<Vec<_>>().join(", ");
-        return Some(format!(
-            "Для {subject} в активной библиотеке найдены порты {rendered_ports}."
-        ));
+        return Some(format!("{subject}: ports {rendered_ports}."));
     }
 
     None

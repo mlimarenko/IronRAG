@@ -13,8 +13,8 @@ use super::{
     document_target::{focused_answer_document_id, question_requests_multi_document_scope},
     fact_lookup::{best_matching_fact, build_document_labels},
     question_intent::{
-        QuestionIntent, classify_question_intents, has_question_intent,
-        question_blocks_endpoint_lookup,
+        QuestionIntent, classify_question_or_ir_intents, has_question_intent,
+        query_ir_blocks_endpoint_lookup,
     },
     technical_answer::document_focus_preference,
     technical_literals::{
@@ -30,14 +30,14 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_intents(question);
+    let intents = classify_question_or_ir_intents(question, query_ir);
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if !question_requests_multi_document_scope(question, None) {
+    if !question_requests_multi_document_scope(question, Some(query_ir)) {
         return None;
     }
-    if question_blocks_endpoint_lookup(question) {
+    if query_ir_blocks_endpoint_lookup(query_ir) {
         return None;
     }
 
@@ -89,10 +89,10 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
         let literal = method
             .map(|method| format!("`{method} {endpoint}`"))
             .unwrap_or_else(|| format!("`{endpoint}`"));
-        lines.push(format!("- для {subject} — {literal}"));
+        lines.push(format!("- {subject}: {literal}"));
     }
 
-    (lines.len() >= 2).then(|| format!("Нужны два endpoint'а:\n\n{}", lines.join("\n")))
+    (lines.len() >= 2).then(|| format!("Required endpoints:\n\n{}", lines.join("\n")))
 }
 
 pub(crate) fn build_single_endpoint_answer_from_facts(
@@ -101,12 +101,12 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_intents(question);
+    let intents = classify_question_or_ir_intents(question, query_ir);
     if !has_question_intent(&intents, QuestionIntent::Endpoint) {
         return None;
     }
-    if question_requests_multi_document_scope(question, None)
-        || question_blocks_endpoint_lookup(question)
+    if question_requests_multi_document_scope(question, Some(query_ir))
+        || query_ir_blocks_endpoint_lookup(query_ir)
     {
         return None;
     }
@@ -140,11 +140,7 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
         .map(|method| format!("`{method} {endpoint}`"))
         .unwrap_or_else(|| format!("`{endpoint}`"));
 
-    Some(if super::question_prefers_russian(question) {
-        format!("Нужен endpoint {literal}.")
-    } else {
-        format!("The endpoint is {literal}.")
-    })
+    Some(format!("The endpoint is {literal}."))
 }
 
 fn endpoint_fact_score(
