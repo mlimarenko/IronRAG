@@ -493,11 +493,19 @@ fn map_chunk_hit_drops_orphan_raptor_chunks_without_heads() {
 }
 
 #[test]
-fn retain_canonical_document_head_chunks_removes_stale_runtime_chunks() {
+fn retain_canonical_document_head_chunks_drops_orphan_documents_only() {
+    // Contract update mirrors `map_chunk_hit` relaxation (2026-05-03
+    // stage incident: 41% of chunks dropped by strict-equality gate).
+    // The function now drops chunks only when their document has no
+    // canonical head — strict revision-id mismatch is no longer a drop
+    // signal because partial incremental re-ingest leaves valid older
+    // chunks under non-head revisions. Downstream dedup handles
+    // cross-revision duplicates.
     let document = sample_document_row("records.jsonl", "records.jsonl");
     let canonical_revision_id = canonical_document_revision_id(&document).unwrap();
     let stale_revision_id = Uuid::now_v7();
     let document_index = HashMap::from([(document.document_id, document.clone())]);
+    let orphan_document_id = Uuid::now_v7();
     let mut chunks = vec![
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
@@ -506,10 +514,10 @@ fn retain_canonical_document_head_chunks_removes_stale_runtime_chunks() {
             chunk_kind: Some("paragraph".to_string()),
             document_id: document.document_id,
             document_label: "records.jsonl".to_string(),
-            excerpt: "stale".to_string(),
+            excerpt: "older revision".to_string(),
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(1.0),
-            source_text: "stale".to_string(),
+            source_text: "older revision".to_string(),
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
@@ -523,11 +531,24 @@ fn retain_canonical_document_head_chunks_removes_stale_runtime_chunks() {
             score: Some(0.9),
             source_text: "current".to_string(),
         },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: orphan_document_id,
+            document_label: "orphan.txt".to_string(),
+            excerpt: "orphan".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.5),
+            source_text: "orphan".to_string(),
+        },
     ];
 
+    // Orphan dropped, both document-with-head chunks kept.
     assert_eq!(retain_canonical_document_head_chunks(&mut chunks, &document_index), 1);
-    assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].revision_id, canonical_revision_id);
+    assert_eq!(chunks.len(), 2);
+    assert!(chunks.iter().all(|c| c.document_id == document.document_id));
 }
 
 fn runtime_chunk(label: &str, score: f32) -> RuntimeMatchedChunk {

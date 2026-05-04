@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "ironrag-backend"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2498,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "ironrag-contracts"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "rust_decimal",

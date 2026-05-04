@@ -1,278 +1,322 @@
 # Changelog
 
+## 0.4.1 — 2026-05-03
+
+### Ollama provider catalog: full library coverage
+
+- **68 Ollama models registered out of the box** across the major
+  families: Qwen3 (0.6B–32B + Coder), Qwen2.5 (0.5B–72B + Coder), QwQ
+  reasoning, Llama 3.1 / 3.2 / 3.3, Mistral / Mistral-Nemo, Mixtral
+  8x7B / 8x22B, Gemma 2 / Gemma 3, Phi 3 / 3.5 / 4 / 4-mini, DeepSeek-R1
+  (1.5B–70B reasoning), DeepSeek-Coder-V2, IBM Granite 3.3, plus
+  vision (Qwen2.5VL / Qwen3-VL, Llama 3.2-Vision, LLaVA, MiniCPM-V,
+  Moondream) and embedding (Qwen3-embedding, nomic-embed-text,
+  mxbai-embed-large, bge-m3, snowflake-arctic-embed2, all-minilm,
+  granite-embedding) families. Models not yet `ollama pull`-ed appear
+  in the UI dropdown anyway; selecting one and saving the binding
+  triggers `ollama pull` on first use.
+- **Default roles per model size and capability.** ≥4B chat models gain
+  the full set `extract_graph,query_answer,query_compile,utility,rerank`
+  so a single local model can serve every text purpose; <4B chat models
+  get `extract_graph,query_answer,utility` because they cannot reliably
+  emit the structured-JSON schemas used by `query_compile` and
+  `rerank`; reasoning models (DeepSeek-R1, QwQ) get
+  `query_answer,query_compile,utility`; vision models get
+  `extract_graph,query_answer,vision`; embedding models keep
+  `embed_chunk` only.
+- **Bootstrap presets.** Each registered model gets an instance-scoped
+  preset named `Ollama <model>`, so the UI binding picker shows a
+  ready-to-select option per model without operator setup. 75 Ollama
+  presets total after seeding (was 7 in 0.4.0).
+
+### Catalog parser hardening
+
+- The `defaultRoles` parser used by `resolve_active_runtime_binding`
+  no longer treats unknown role labels (e.g. forward-compatible
+  `rerank` / `utility` from new Ollama seeds) as fatal catalog
+  corruption. A single unmapped role used to silently return
+  `ApiError::Internal`, which propagated as a bare "internal server
+  error" through every binding lookup that listed the model catalog
+  — breaking embed_chunk and extract_graph for fresh ingest jobs and
+  surfacing in the admin AI tab as "failed to load AI configuration".
+  Unknown labels are now skipped.
+
+### Documents header cost summary
+
+- Library and workspace totals always render together when the cost
+  banner is shown, so a library with no billed executions yet (e.g.
+  attachments still queued) no longer looks like the library cost
+  field "disappeared" — both rows render with the canonical
+  `$0.000` placeholder while workspace totals remain visible.
 
 ## 0.4.0 — 2026-05-03
 
 ### Highlights
 
 - Temporal hard-filter for `record_jsonl` chats and any document with
-  `occurred_at` headers — date-anchored questions now return only chunks
-  whose timestamp overlaps the requested window.
+`occurred_at` headers — date-anchored questions now return only chunks
+whose timestamp overlaps the requested window.
 - Ordered source-slice (`source_slice` head/tail/all) honours the same
-  temporal bounds, so "last 20 messages in March 2026" returns the
-  chronological tail within March, not the tail of the file.
+temporal bounds, so "last 20 messages in March 2026" returns the
+chronological tail within March, not the tail of the file.
 - Vector-row temporal mirror: ANN post-sieve filters directly on the
-  candidate without a per-row chunk lookup; `over_fetch` returns to 8×
-  default and gains a hard 8 192 cap.
+candidate without a per-row chunk lookup; `over_fetch` returns to 8×
+default and gains a hard 8 192 cap.
 - Defence-in-depth tenant isolation on every cross-revision lookup:
-  `library_id` filter is now in the AQL itself, not just in the caller.
+`library_id` filter is now in the AQL itself, not just in the caller.
 - Disambiguation gate is bypassed when the question carries resolved
-  temporal bounds — date-scoped turns now return a grounded answer or a
-  clean refusal instead of the off-topic "could be one of: X, Y, Z" reply.
+temporal bounds — date-scoped turns now return a grounded answer or a
+clean refusal instead of the off-topic "could be one of: X, Y, Z" reply.
 
 ### Retrieval and answer quality
 
 - `QueryIR.temporal_constraints` (compiled from natural language by the
-  LLM compiler, RFC3339 bounds) is consumed end-to-end: lexical lane,
-  vector lane, source-unit slice loader, and library-source-profile
-  fallback. Helper `QueryIR::resolved_temporal_bounds()` aggregates
-  `min(start)` / `max(end)`; structural RFC3339 parsing only — no NL
-  word lists.
+LLM compiler, RFC3339 bounds) is consumed end-to-end: lexical lane,
+vector lane, source-unit slice loader, and library-source-profile
+fallback. Helper `QueryIR::resolved_temporal_bounds()` aggregates
+`min(start)` / `max(end)`; structural RFC3339 parsing only — no NL
+word lists.
 - AQL adds `FILTER ... occurred_at ... occurred_until ...` to all four
-  `search_chunks` lanes (text view, title-identity, title-soft, backstop)
-  and to `search_chunk_vectors_by_similarity`. RFC3339 strings sort
-  lexicographically equal to chronological order.
+`search_chunks` lanes (text view, title-identity, title-soft, backstop)
+and to `search_chunk_vectors_by_similarity`. RFC3339 strings sort
+lexicographically equal to chronological order.
 - Source-unit slice (`apply_ordered_source_slice_context`) now resolves a
-  record-stream candidate at library scope when no top-K chunk is a
-  record stream, then filters head/tail blocks via AQL substring match
-  on `occurred_at=ISO` headers.
+record-stream candidate at library scope when no top-K chunk is a
+record stream, then filters head/tail blocks via AQL substring match
+on `occurred_at=ISO` headers.
 - Search ranking uses generic, language-agnostic best-chunk and
-  top-chunk evidence-coverage signals; document-search no longer carries
-  corpus-specific query expansions or topic boosts.
+top-chunk evidence-coverage signals; document-search no longer carries
+corpus-specific query expansions or topic boosts.
 - Deterministic technical answers abstain unless the candidate covers
-  the typed technical facets requested by `QueryIR` and grounded in
-  evidence.
+the typed technical facets requested by `QueryIR` and grounded in
+evidence.
 - Document targeting normalizes filename separators and natural phrasing
-  to the same canonical document identity through deterministic
-  longest-match scoring.
+to the same canonical document identity through deterministic
+longest-match scoring.
 
 ### Grounded-answer prompt and policy
 
 - Multi-entity disambiguation rule: the prompt now requires the LLM to
-  enumerate every distinct entity in context that matches the queried
-  name, including incidental references inside long chunks; collapsing
-  them or silently picking the most prominent one is forbidden.
+enumerate every distinct entity in context that matches the queried
+name, including incidental references inside long chunks; collapsing
+them or silently picking the most prominent one is forbidden.
 - Live ingest metadata is no longer injected into the answer prompt.
-  Recent-documents data with mutating `pipeline_state` and
-  `preview_excerpt` drifted between back-to-back identical calls and
-  produced divergent UI/MCP answers; the prompt is now a deterministic
-  function of `(query, retrieved evidence, library summary)`. Locked by
-  `assemble_answer_context_excludes_recent_documents_for_mcp_ui_parity`.
+Recent-documents data with mutating `pipeline_state` and
+`preview_excerpt` drifted between back-to-back identical calls and
+produced divergent UI/MCP answers; the prompt is now a deterministic
+function of `(query, retrieved evidence, library summary)`. Locked by
+`assemble_answer_context_excludes_recent_documents_for_mcp_ui_parity`.
 - `grounded_answer` MCP and UI now use the same `top_k=24` default —
-  prior 8 vs 24 split was a constitutional §16 parity violation.
+prior 8 vs 24 split was a constitutional §16 parity violation.
 
 ### Multiformat ingestion
 
 - Spreadsheet extraction is native-only for `csv`, `tsv`, `xls`, `xlsx`,
-  `xlsb`, `ods`. Docling adapter is reserved for document-layout formats
-  and configured raster-image OCR.
+`xlsb`, `ods`. Docling adapter is reserved for document-layout formats
+and configured raster-image OCR.
 - Grounded multiformat benchmark covers PDF, DOCX, PPTX, XLSX with
-  sheet-level table questions.
+sheet-level table questions.
 - Reprocess parses stored source bytes first and falls back to derived
-  text only when no source blob is available; record-stream reprocess
-  derives JSONL from prepared source-unit blocks instead of degrading to
-  plain text.
+text only when no source blob is available; record-stream reprocess
+derives JSONL from prepared source-unit blocks instead of degrading to
+plain text.
 - Append processing is diff-aware: persists a source blob for future
-  retries and reuses unchanged chunk embeddings and graph extraction
-  records by normalized chunk content.
+retries and reuses unchanged chunk embeddings and graph extraction
+records by normalized chunk content.
 
 ### Graph extraction quality
 
 - Script-preserving extract (v8): labels and endpoints are copied
-  verbatim from prepared chunk text; source writing is never converted
-  into another writing system; look-alike glyph substitution is
-  forbidden. Bumping the version invalidates older cache entries.
+verbatim from prepared chunk text; source writing is never converted
+into another writing system; look-alike glyph substitution is
+forbidden. Bumping the version invalidates older cache entries.
 - OCR text quality gate: structural quality score, low-confidence
-  blocks skipped from summaries, chunks downranked, graph extraction
-  drops or avoids low-confidence artifacts. Reuse and reconcile paths
-  apply the same eligibility policy.
+blocks skipped from summaries, chunks downranked, graph extraction
+drops or avoids low-confidence artifacts. Reuse and reconcile paths
+apply the same eligibility policy.
 - Graph extraction reuse is keyed by rendered prompt + active
-  provider/model contract, not mutable database row ids. Storage-row
-  noise no longer invalidates legitimate reuse.
+provider/model contract, not mutable database row ids. Storage-row
+noise no longer invalidates legitimate reuse.
 - Coreference rule rewritten language-neutrally: short anaphoric
-  references resolve structurally to the previously named entity
-  without enumerating language-specific word lists.
+references resolve structurally to the previously named entity
+without enumerating language-specific word lists.
 - Record-stream graph extraction is bounded structurally to source
-  profile + first/last + fact-supported + evenly spaced units.
+profile + first/last + fact-supported + evenly spaced units.
 
 ### Schema and operations
 
-- `content_chunk` gains `occurred_at TIMESTAMPTZ`, `occurred_until
-  TIMESTAMPTZ`, partial index `idx_content_chunk_occurred_at`, and a
-  range check constraint. PG and Arango chunk row mirror these fields;
-  ingest populates them from `record_jsonl::extract_chunk_temporal_bounds`.
+- `content_chunk` gains `occurred_at TIMESTAMPTZ`, `occurred_until TIMESTAMPTZ`, partial index `idx_content_chunk_occurred_at`, and a
+range check constraint. PG and Arango chunk row mirror these fields;
+ingest populates them from `record_jsonl::extract_chunk_temporal_bounds`.
 - `KnowledgeChunkVectorRow` mirrors `occurred_at` / `occurred_until` so
-  the ANN sieve operates on the candidate row directly.
+the ANN sieve operates on the candidate row directly.
 - `ironrag-backfill-chunk-temporal-bounds` binary: idempotent, cursor-
-  paginated, Arango-first then PG-flip so failed mirrors stay
-  retry-eligible; non-zero exit on partial completion.
+paginated, Arango-first then PG-flip so failed mirrors stay
+retry-eligible; non-zero exit on partial completion.
 - `ironrag-gc-stale-chunks` rewrites the library-wide AQL into per-
-  document batches with `chunk.document_id == ?` and
-  `vector.revision_id IN @stale`, fitting comfortably under the Arango
-  per-query memory cap on libraries that previously OOMed.
+document batches with `chunk.document_id == ?` and
+`vector.revision_id IN @stale`, fitting comfortably under the Arango
+per-query memory cap on libraries that previously OOMed.
 - Library-scoped record-stream fallback in
-  `first_record_stream_candidate_profile` finds canonical-revision
-  record-stream profiles even when no top-K chunk is record-stream.
-- `list_source_profile_chunks_by_revisions` AQL now filters by
-  `library_id` for defence-in-depth tenant isolation.
-- Single-bucket migration policy: post-release SQL collapses into the
-  consolidated `0004_canonical_graph_ingest_retrieval_baseline.sql`;
-  no `0005`/`0006` files in pre-release phase.
+`first_record_stream_candidate_profile` finds canonical-revision
+record-stream profiles even when no top-K chunk is record-stream.
+- `list_source_profile_chunks_by_revisions` AQL now filters by  
+`library_id` for defence-in-depth tenant isolation.
 
 ### Reprocess and append
 
 - Concurrent answer cache fills are single-owner; identical grounded-
-  answer turns wait for the active fill instead of starting duplicate
-  canonical executions. Coordination failures fail loudly.
+answer turns wait for the active fill instead of starting duplicate
+canonical executions. Coordination failures fail loudly.
 - Embedding coverage is verified after reuse: partial-vector revisions
-  become explicit ingest failures instead of later retrieval misses.
+become explicit ingest failures instead of later retrieval misses.
 - Reprocess works for text-recoverable revisions without source blobs;
-  documents with neither stored source nor recoverable text fail loudly.
+documents with neither stored source nor recoverable text fail loudly.
 - Ingest concurrency defaults are bounded for CPU-only hosts.
 
 ### Webhooks and operations
 
 - Inbound webhook receiver removed; outbound delivery only. Outbound
-  pipeline hardened with retries, idempotency, and image_checksum on
-  delivered events.
+pipeline hardened with retries, idempotency, and image_checksum on
+delivered events.
 - Web-ingest runs carry a single `urlFilter` snapshot with explicit
-  `blocklist`/`allowlist` mode; documents UI rejects empty allowlists.
+`blocklist`/`allowlist` mode; documents UI rejects empty allowlists.
 - Workspace cost rollup, searchable workspace/library selectors, and
-  evidence-gated comparison answers landed.
+evidence-gated comparison answers landed.
 
 ### Assistant transport
 
 - UI assistant uses one direct JSON `POST /v1/query/sessions/{id}/turns`
-  request — no SSE branch in the canonical lane. MCP streaming remains
-  isolated under `/v1/mcp`. Session history hydrates from
-  `{ session, messages }` so existing conversations restore correctly.
+request — no SSE branch in the canonical lane. MCP streaming remains
+isolated under `/v1/mcp`. Session history hydrates from
+`{ session, messages }` so existing conversations restore correctly.
 
 ### Tests
 
 - 959 lib tests (was 953 in 0.3.2). New unit coverage for
-  `resolved_temporal_bounds` (full-range, half-open start, half-open
-  end, mixed parseable/unparseable, empty), and rewritten orphan-only
-  contract for `map_chunk_hit` / `map_companion_chunk` (drops chunks
-  only when the document has no head pointer; runtime is now lenient
-  on revision-id mismatch since strict equality silently hid ~80% of
-  chunks for documents with overlapping incremental revisions).
+`resolved_temporal_bounds` (full-range, half-open start, half-open
+end, mixed parseable/unparseable, empty), and rewritten orphan-only
+contract for `map_chunk_hit` / `map_companion_chunk` (drops chunks
+only when the document has no head pointer; runtime is now lenient
+on revision-id mismatch since strict equality silently hid ~80% of
+chunks for documents with overlapping incremental revisions).
 
 ## 0.3.2 — 2026-04-24
 
 ### Web ingest
 
 - **Library-owned web ingest ignore policy.** A new `web_ingest_policy`
-  JSONB column on `catalog_library` stores per-library ignore patterns
-  (`url_prefix`, `path_prefix`, `glob`). The hardcoded
-  `classify_confluence_system_page` helper is replaced by a dynamic
-  matcher in `shared/web/ingest.rs`. New endpoint:
-  `PUT /v1/catalog/libraries/{libraryId}/web-ingest-policy`.
+JSONB column on `catalog_library` stores per-library ignore patterns
+(`url_prefix`, `path_prefix`, `glob`). The hardcoded
+`classify_confluence_system_page` helper is replaced by a dynamic
+matcher in `shared/web/ingest.rs`. New endpoint:
+`PUT /v1/catalog/libraries/{libraryId}/web-ingest-policy`.
 - **Per-run extra ignore patterns.** Each ingest run can carry
-  additional patterns on top of the library default, stored in
-  `content_web_ingest_run.ignore_patterns` and merged at match time.
-- **`WebIngestRunSummary.ignorePatterns`** is a required field in the
-  OpenAPI contract; UI surfaces the active ignore policy in the
-  web-runs panel.
+additional patterns on top of the library default, stored in
+`content_web_ingest_run.ignore_patterns` and merged at match time.
+- `**WebIngestRunSummary.ignorePatterns`** is a required field in the
+OpenAPI contract; UI surfaces the active ignore policy in the
+web-runs panel.
 
 ### Reliability & operability
 
 - **Null-head recovery** (`ironrag-promote-null-heads`): idempotent CLI
-  that promotes `document_head` for any document whose head is NULL but
-  whose latest revision has persisted chunks.
+that promotes `document_head` for any document whose head is NULL but
+whose latest revision has persisted chunks.
 - **Fail-loud Postgres ↔ Arango head sync.** `promote_knowledge_document`
-  now returns `Result<(), ApiError>`; silent warn-on-fail is gone.
-  Regression test asserts the error path when Arango is unreachable.
+now returns `Result<(), ApiError>`; silent warn-on-fail is gone.
+Regression test asserts the error path when Arango is unreachable.
 - **Fail-soft post-answer reference hydration.** Transient Arango errors
-  during reference-panel lookups no longer flip a 200-answered turn
-  into a 500 after the answer body has streamed.
+during reference-panel lookups no longer flip a 200-answered turn
+into a 500 after the answer body has streamed.
 - **Reverse-proxy POST fix.** Dropped `proxy_request_buffering off`
-  from `nginx.conf.template`; POSTs on `/v1/query/sessions` and
-  `/v1/mcp` no longer hang for 15 s behind the proxy.
+from `nginx.conf.template`; POSTs on `/v1/query/sessions` and
+`/v1/mcp` no longer hang for 15 s behind the proxy.
 - **ArangoDB memory caps** pinned in compose and Helm
-  (`--query.memory-limit`, RocksDB caps separate) — eliminates the
-  5-parallel-turn OOM on small hosts.
+(`--query.memory-limit`, RocksDB caps separate) — eliminates the
+5-parallel-turn OOM on small hosts.
 - **Pool / threading tuning.** `TOKIO_WORKER_THREADS` default 2 → 8;
-  heartbeat pool 6 → 24 with 15 s acquire_timeout, removing the reaper
-  false-positive that was releasing healthy leases under merge load.
+heartbeat pool 6 → 24 with 15 s acquire_timeout, removing the reaper
+false-positive that was releasing healthy leases under merge load.
 
 ### Retrieval quality
 
 - **QueryIR routing.** `QueryCompilerService` compiles the
-  natural-language question into a typed `QueryIR` (act / scope /
-  target_types / literal_constraints / confidence); downstream stages
-  read routing signals from the IR instead of re-classifying the raw
-  string. Replaces scattered keyword classifiers.
+natural-language question into a typed `QueryIR` (act / scope /
+target_types / literal_constraints / confidence); downstream stages
+read routing signals from the IR instead of re-classifying the raw
+string. Replaces scattered keyword classifiers.
 - **Entity-bio fan-out for biographical queries.** When the IR carries a
-  named target entity (proper noun), retrieval fans out over graph
-  evidence plus a lexical pass by entity label, and post-filters to
-  keep only chunks that literally contain the label. Single-word
-  surname queries now surface every corpus mention rather than the
-  top BM25 hit. Capitalized mentions take precedence over common
-  concept nouns when both are present.
+named target entity (proper noun), retrieval fans out over graph
+evidence plus a lexical pass by entity label, and post-filters to
+keep only chunks that literally contain the label. Single-word
+surname queries now surface every corpus mention rather than the
+top BM25 hit. Capitalized mentions take precedence over common
+concept nouns when both are present.
 - **Title-aware BM25 boost + ngram fuzzy title match.** Typos in
-  product or proper-noun titles no longer shred recall; the ngram
-  analyzer on `title` / `file_name` plus a separate title-token
-  BM25 boost keeps the canonical document in top-K.
+product or proper-noun titles no longer shred recall; the ngram
+analyzer on `title` / `file_name` plus a separate title-token
+BM25 boost keeps the canonical document in top-K.
 - **Real chunk embedding in ingest** with library-wide vector filter.
-  Vector search no longer silently matches stale embeddings from
-  other libraries.
+Vector search no longer silently matches stale embeddings from
+other libraries.
 - **Lexical fallback scan only on view-lag**, bounded bind vars.
-  Full-scan triggers only when the ArangoSearch view is behind the
-  freshness budget.
+Full-scan triggers only when the ArangoSearch view is behind the
+freshness budget.
 - **Parallel tool dispatch + atomic topology prewarm.** The grounded-
-  answer tool loop dispatches independent calls in parallel; graph
-  topology cache is prewarmed atomically at boot.
+answer tool loop dispatches independent calls in parallel; graph
+topology cache is prewarmed atomically at boot.
 - **Revision-coherence gate hardened.** `map_chunk_hit` is strict on
-  canonical revision equality, backed by the null-head recovery above.
+canonical revision equality, backed by the null-head recovery above.
 
 ### Ingest performance
 
 - **Bulk-upsert in merge.** One-shot `list_runtime_graph_nodes_by_canonical_keys`
-  preload plus `bulk_upsert_runtime_graph_nodes` replace ~35 sequential
-  round-trips per chunk; +112 % throughput and −71 % slow statements
-  on an internal stress stack.
+preload plus `bulk_upsert_runtime_graph_nodes` replace ~35 sequential
+round-trips per chunk; +112 % throughput and −71 % slow statements
+on an internal stress stack.
 - **Stuck-document terminal marker** with extended backoff: the
-  stale-lease reaper stops reactivating revisions that have
-  deterministically failed extraction.
-- **`sub_type_hints` cache** (60 s TTL, per `(library_id, projection_version)`)
-  drops a per-batch Postgres aggregate from the slow-statement log.
+stale-lease reaper stops reactivating revisions that have
+deterministically failed extraction.
+- `**sub_type_hints` cache** (60 s TTL, per `(library_id, projection_version)`)
+drops a per-batch Postgres aggregate from the slow-statement log.
 - **Bulk chunk-vector UPSERT** per embedding batch replaces the
-  previous per-row round-trip.
+previous per-row round-trip.
 
 ### Assistant UX
 
 - **SSE transport fallback.** When the browser or proxy blocks SSE,
-  the UI falls back to non-streaming POST and shows an inline retry
-  alert instead of a NetworkError dead-end.
+the UI falls back to non-streaming POST and shows an inline retry
+alert instead of a NetworkError dead-end.
 - **Evidence panel relevance formatter** distinguishes normalized
-  probabilities (0..1 → percent) from raw BM25 scores (> 1 → decimal);
-  fixes the `6384 %` overflow for high-BM25 hits.
+probabilities (0..1 → percent) from raw BM25 scores (> 1 → decimal);
+fixes the `6384 %` overflow for high-BM25 hits.
 - **SSE keep-alive 15 s → 3 s.** The longer interval was racing with
-  Firefox Enhanced Tracking Protection's idle close on large-corpus
-  retrievals, producing `stream ended without a completed frame`.
+Firefox Enhanced Tracking Protection's idle close on large-corpus
+retrievals, producing `stream ended without a completed frame`.
 - **Assistant i18n.** Diagnosis and error strings moved into the
-  translation layer; no hardcoded locale text remains in the UI.
+translation layer; no hardcoded locale text remains in the UI.
 - **Operations admin panel simplified.** Noisy status badges, pill
-  banners, and verbose audit rows removed in favour of a compact
-  one-line-per-event view.
+banners, and verbose audit rows removed in favour of a compact
+one-line-per-event view.
 
 ### Miscellaneous
 
 - Optional `query_compile` and `vision` bindings.
 - Graph extraction parser accepts alternative field names from
-  smaller models.
+smaller models.
 - Billing, `/v1/content/web-runs`, and graph-cache perf fixes that
-  were causing concurrent-request timeouts.
+were causing concurrent-request timeouts.
 - Tuning knobs centralised in `services/query/execution/tuning.rs`.
 - Clippy-clean.
 
 ### Measured
 
 - Grounded-answer parity benchmark passes on both UI and MCP lanes
-  for clarify + provider follow-ups + release-history scenarios on
-  the internal stress corpus.
+for clarify + provider follow-ups + release-history scenarios on
+the internal stress corpus.
 - Concurrency stress (5 parallel turns): 5 / 5 × 200, p95 21 s;
-  previously 0 / 5 × 500 with ArangoDB OOM.
+previously 0 / 5 × 500 with ArangoDB OOM.
 
 ## 0.3.1 — 2026-04-17
 
@@ -550,7 +594,7 @@ Large-library performance release. On a 4900-document reference library the docu
 
 - **Schema reset**: the database baseline was consolidated to one canonical `0001_init.sql`; legacy execution and accounting paths were removed.
 - **Assistant/MCP cutover**: the standalone `ask` shortcut and parallel special-case assistant flow were removed; assistant Q&A now runs only through the canonical MCP tool loop.
-- **IRONRAG rename**: release-facing configuration now uses `IRONRAG`_* naming instead of `RUSTRAG`_*.
+- **IRONRAG rename**: release-facing configuration now uses `IRONRAG`** naming instead of `RUSTRAG`**.
 
 ### Platform
 
@@ -878,3 +922,4 @@ Large-library performance release. On a 4900-document reference library the docu
 ## 0.0.1
 
 - Initial release.
+

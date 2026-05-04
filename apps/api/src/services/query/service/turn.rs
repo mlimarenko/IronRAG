@@ -1785,7 +1785,13 @@ fn map_query_execution_error_message(
         return ApiError::ProviderFailure(formatted);
     }
 
-    ApiError::Internal
+    // Preserve the underlying execution failure message instead of
+    // collapsing to a bare `internal server error`. The classifier
+    // matches several known patterns above; everything else still
+    // belongs to "internal" but we keep the original chain so the
+    // 5xx log line carries enough context to diagnose without a
+    // separate trace dive.
+    ApiError::InternalMessage(formatted)
 }
 
 /// Record a billing row for the QueryCompiler LLM call that produced

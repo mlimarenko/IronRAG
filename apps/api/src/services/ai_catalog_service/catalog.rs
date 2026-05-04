@@ -273,20 +273,25 @@ fn map_price_row(row: ai_repository::AiPriceCatalogRow) -> PriceCatalogEntry {
 pub(super) fn parse_allowed_binding_purposes(
     metadata_json: &serde_json::Value,
 ) -> Result<Vec<AiBindingPurpose>, ApiError> {
-    let roles = metadata_json
-        .get("defaultRoles")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(ApiError::Internal)?;
-    if roles.is_empty() {
-        return Err(ApiError::Internal);
-    }
+    let Some(roles) =
+        metadata_json.get("defaultRoles").and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
 
     let mut allowed = Vec::with_capacity(roles.len());
     for role in roles {
-        let role = role.as_str().ok_or(ApiError::Internal)?;
-        let purpose = parse_binding_purpose(role)?;
-        if !allowed.contains(&purpose) {
-            allowed.push(purpose);
+        let Some(role_str) = role.as_str() else { continue };
+        // Catalog seeds carry forward-compatible role labels (e.g. `rerank`,
+        // `utility`) that aren't bound to AiBindingPurpose variants yet.
+        // Skip unknown labels instead of failing — otherwise a single
+        // unmapped role poisons every binding lookup that lists the
+        // catalog (the error path swallows the original message and
+        // surfaces as bare "internal server error").
+        if let Ok(purpose) = parse_binding_purpose(role_str) {
+            if !allowed.contains(&purpose) {
+                allowed.push(purpose);
+            }
         }
     }
     Ok(allowed)

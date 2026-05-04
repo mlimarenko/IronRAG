@@ -1685,22 +1685,18 @@ export default function DocumentsPage() {
           </div>
           {showCostSummary && (
             <div className="ml-auto mr-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              {libraryCost > 0 && (
-                <span>
-                  {t("documents.libraryCost")}:{" "}
-                  <span className="font-bold tabular-nums">
-                    ${libraryCost.toFixed(3)}
-                  </span>
+              <span>
+                {t("documents.libraryCost")}:{" "}
+                <span className="font-bold tabular-nums">
+                  ${libraryCost.toFixed(3)}
                 </span>
-              )}
-              {workspaceCost > 0 && (
-                <span>
-                  {t("documents.workspaceCost")}:{" "}
-                  <span className="font-bold tabular-nums">
-                    ${workspaceCost.toFixed(3)}
-                  </span>
+              </span>
+              <span>
+                {t("documents.workspaceCost")}:{" "}
+                <span className="font-bold tabular-nums">
+                  ${workspaceCost.toFixed(3)}
                 </span>
-              )}
+              </span>
             </div>
           )}
           <Button
