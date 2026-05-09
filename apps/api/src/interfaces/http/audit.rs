@@ -27,8 +27,9 @@ use crate::{
 const DEFAULT_AUDIT_LIMIT: u32 = 50;
 const MAX_AUDIT_LIMIT: u32 = 1000;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct AuditEventsQuery {
     pub actor_principal_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
@@ -49,7 +50,7 @@ pub struct AuditEventsQuery {
     pub include_assistant: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditEventSubjectResponse {
     pub audit_event_id: Uuid,
@@ -67,14 +68,14 @@ pub struct AuditEventSubjectResponse {
     pub async_operation_id: Option<Uuid>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditAssistantModelResponse {
     pub provider_kind: String,
     pub model_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditAssistantCallResponse {
     pub query_execution_id: Uuid,
@@ -86,7 +87,7 @@ pub struct AuditAssistantCallResponse {
     pub provider_call_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditEventResponse {
     pub id: Uuid,
@@ -105,7 +106,7 @@ pub struct AuditEventResponse {
     pub assistant_call: Option<AuditAssistantCallResponse>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditEventPageResponse {
     pub items: Vec<AuditEventResponse>,
@@ -118,13 +119,25 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/audit/events", get(list_audit_events))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/audit/events",
+    tag = "audit",
+    operation_id = "listAuditEvents",
+    params(AuditEventsQuery),
+    responses(
+        (status = 200, description = "Audit events page", body = AuditEventPageResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the requested scope"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_audit_events",
     skip_all,
     fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id, item_count)
 )]
-async fn list_audit_events(
+pub async fn list_audit_events(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AuditEventsQuery>,

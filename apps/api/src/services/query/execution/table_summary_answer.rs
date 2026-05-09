@@ -290,12 +290,10 @@ pub(crate) fn question_asks_table_aggregation(question: &str, ir: Option<&QueryI
         question_asks_average(Some(ir))
             || question_asks_most_frequent(Some(ir))
             || (matches!(ir.act, QueryAct::RetrieveValue | QueryAct::Enumerate)
-                && ir.target_types.iter().any(|tag| {
-                    matches!(
-                        normalized_ir_tag(tag).as_str(),
-                        "table_summary" | "table_column_summary" | "table_aggregation"
-                    )
-                }))
+                && ir
+                    .target_types
+                    .iter()
+                    .any(|tag| matches!(normalized_ir_tag(tag).as_str(), "table_summary")))
     })
 }
 
@@ -339,23 +337,15 @@ pub(crate) fn render_table_summary_chunk_section(
 
 fn question_asks_average(ir: Option<&QueryIR>) -> bool {
     ir.is_some_and(|ir| {
-        ir.target_types.iter().any(|tag| {
-            matches!(
-                normalized_ir_tag(tag).as_str(),
-                "average" | "avg" | "mean" | "table_average" | "numeric_aggregate"
-            )
-        })
+        ir.target_types.iter().any(|tag| matches!(normalized_ir_tag(tag).as_str(), "table_average"))
     })
 }
 
 fn question_asks_most_frequent(ir: Option<&QueryIR>) -> bool {
     ir.is_some_and(|ir| {
-        ir.target_types.iter().any(|tag| {
-            matches!(
-                normalized_ir_tag(tag).as_str(),
-                "most_frequent" | "mode" | "frequency" | "table_frequency" | "categorical_mode"
-            )
-        })
+        ir.target_types
+            .iter()
+            .any(|tag| matches!(normalized_ir_tag(tag).as_str(), "table_frequency"))
     })
 }
 
@@ -374,5 +364,5 @@ pub(crate) fn summary_matches_requested_aggregation(
 }
 
 fn normalized_ir_tag(tag: &str) -> String {
-    tag.trim().to_ascii_lowercase().replace('-', "_")
+    tag.trim().to_ascii_lowercase()
 }

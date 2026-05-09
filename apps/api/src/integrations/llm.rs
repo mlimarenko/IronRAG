@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use reqwest::Client;
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::time::Duration;
 
 mod openai_compatible;
@@ -14,21 +15,28 @@ use self::{
         OpenAiCompatibleContentPart, OpenAiCompatibleImageUrl, OpenAiCompatibleMessage,
         OpenAiCompatibleMessageContent, OpenAiCompatibleRequest, OpenAiCompatibleToolDef,
         OpenAiCompatibleToolUseChatRequest, OpenAiCompatibleToolUseMessage,
-        extract_message_content_text, is_retryable_upstream_json_parse_failure,
-        openai_compatible_token_limit_fields, retryable_openai_parse_failure_error,
+        extract_message_content_text, openai_compatible_token_limit_fields,
     },
-    streaming::{
-        drain_openai_compatible_stream, drain_tool_use_stream, is_retryable_transport_error,
-        is_retryable_upstream_status, transport_retry_delay,
-    },
+    streaming::{drain_openai_compatible_stream, drain_tool_use_stream},
 };
 
 #[cfg(test)]
-use self::streaming::{consume_openai_compatible_stream_frame, is_retryable_transport_error_text};
+use self::streaming::consume_openai_compatible_stream_frame;
 
-use crate::{app::config::Settings, shared::provider_base_url::resolve_runtime_provider_base_url};
+use crate::{
+    app::config::Settings,
+    domains::provider_profiles::{
+        OPENAI_COMPATIBLE_RUNTIME_KIND, ProviderAuthScheme, ProviderBaseUrlPolicy,
+        ProviderCredentialPolicy, ProviderRuntimeProfile, ProviderStructuredOutputMode,
+    },
+    integrations::retry::{ProviderCallError, RetryPolicy, provider_http_status_error, with_retry},
+    shared::provider_base_url::resolve_runtime_provider_base_url,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(test)]
+use crate::domains::provider_profiles::ProviderTokenLimitParameter;
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatRequest {
     pub provider_kind: String,
     pub model_name: String,
@@ -43,7 +51,7 @@ pub struct ChatRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatRequestSeed {
     pub provider_kind: String,
     pub model_name: String,
@@ -94,7 +102,7 @@ pub fn build_structured_chat_request(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatResponse {
     pub provider_kind: String,
     pub model_name: String,
@@ -107,7 +115,7 @@ pub struct ChatResponse {
 // =============================================================================
 
 /// JSON-schema description of a single tool the LLM may call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatToolDef {
     pub name: String,
     pub description: String,
@@ -115,7 +123,7 @@ pub struct ChatToolDef {
 }
 
 /// One tool invocation requested by the LLM in its response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatToolCall {
     pub id: String,
     pub name: String,
@@ -127,7 +135,7 @@ pub struct ChatToolCall {
 /// tool-capable agents. Mirrors the OpenAI chat.completions message shape
 /// so the same wire format works for every OpenAI-compatible provider
 /// (OpenAI, Qwen, DeepSeek, Ollama, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatMessage {
     /// One of: "system", "user", "assistant", "tool".
     pub role: String,
@@ -201,7 +209,7 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ToolUseRequest {
     pub provider_kind: String,
     pub model_name: String,
@@ -215,7 +223,7 @@ pub struct ToolUseRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ToolUseResponse {
     pub provider_kind: String,
     pub model_name: String,
@@ -228,7 +236,7 @@ pub struct ToolUseResponse {
     pub usage_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingRequest {
     pub provider_kind: String,
     pub model_name: String,
@@ -238,7 +246,7 @@ pub struct EmbeddingRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingBatchRequest {
     pub provider_kind: String,
     pub model_name: String,
@@ -248,7 +256,7 @@ pub struct EmbeddingBatchRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingResponse {
     pub provider_kind: String,
     pub model_name: String,
@@ -257,7 +265,7 @@ pub struct EmbeddingResponse {
     pub usage_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingBatchResponse {
     pub provider_kind: String,
     pub model_name: String,
@@ -266,7 +274,7 @@ pub struct EmbeddingBatchResponse {
     pub usage_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VisionRequest {
     pub provider_kind: String,
     pub model_name: String,
@@ -282,7 +290,7 @@ pub struct VisionRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VisionResponse {
     pub provider_kind: String,
     pub model_name: String,
@@ -334,11 +342,24 @@ pub trait LlmGateway: Send + Sync {
     async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse>;
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeProviderProfileEnvelope {
+    runtime: ProviderRuntimeProfile,
+    base_url: ProviderBaseUrlPolicy,
+    credentials: Option<ProviderCredentialPolicy>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedProviderRuntime {
+    api_key: Option<String>,
+    base_url: String,
+    runtime: ProviderRuntimeProfile,
+}
+
 #[derive(Clone)]
 pub struct UnifiedGateway {
     client: Client,
-    transport_retry_attempts: usize,
-    transport_retry_base_delay_ms: u64,
 }
 
 impl UnifiedGateway {
@@ -350,11 +371,7 @@ impl UnifiedGateway {
             .timeout(timeout)
             .build()
             .unwrap_or_else(|_| Client::new());
-        Self {
-            client,
-            transport_retry_attempts: settings.llm_transport_retry_attempts.max(1),
-            transport_retry_base_delay_ms: settings.llm_transport_retry_base_delay_ms.max(25),
-        }
+        Self { client }
     }
 
     async fn call_openai_compatible(
@@ -362,96 +379,72 @@ impl UnifiedGateway {
         request: OpenAiCompatibleRequest<'_>,
     ) -> Result<(String, serde_json::Value)> {
         let request_body = request.body()?;
-        let request_body_is_valid_json = true;
-        let max_attempts = self.transport_retry_attempts.max(1);
+        let endpoint_url =
+            provider_endpoint_url(request.provider_kind, request.base_url, &request.chat_path)?;
 
-        let mut last_error = None;
-        for attempt in 1..=max_attempts {
-            let request_builder = self
-                .client
-                .post(format!("{}/chat/completions", request.base_url))
-                .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "application/json");
-            let request_builder = if let Some(api_key) = request.api_key {
-                request_builder.bearer_auth(api_key)
-            } else {
-                request_builder
-            };
-            let response = match request_builder.body(request_body.clone()).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    if attempt < max_attempts && is_retryable_transport_error(&error) {
-                        last_error = Some(anyhow!(
-                            "provider transport failed: provider={} attempt={}/{} error={error}",
-                            request.provider_kind,
-                            attempt,
-                            max_attempts,
-                        ));
-                        tokio::time::sleep(transport_retry_delay(
-                            self.transport_retry_base_delay_ms,
-                            attempt,
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(error.into());
-                }
-            };
+        with_retry(
+            || async {
+                let request_builder = self
+                    .client
+                    .post(endpoint_url.clone())
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ACCEPT, "application/json");
+                let request_builder =
+                    apply_provider_auth(request_builder, request.auth_scheme, request.api_key);
+                let request_builder = crate::observability::inject_trace_context(request_builder);
+                let response =
+                    request_builder.body(request_body.clone()).send().await.map_err(|source| {
+                        ProviderCallError::transport(
+                            format!(
+                                "provider transport failed: provider={}",
+                                request.provider_kind
+                            ),
+                            source,
+                        )
+                    })?;
 
-            let status = response.status();
-            let body_text = response.text().await?;
-            let body = serde_json::from_str::<serde_json::Value>(&body_text)
-                .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body_text = response.text().await.map_err(|source| {
+                    ProviderCallError::response_body(
+                        format!(
+                            "failed to read provider response body: provider={}",
+                            request.provider_kind
+                        ),
+                        source,
+                    )
+                })?;
 
-            if !status.is_success() {
-                last_error = Some(anyhow!(
-                    "provider request failed: provider={} status={status} body={body}",
-                    request.provider_kind,
-                ));
-                let retryable_parse_failure = is_retryable_upstream_json_parse_failure(
-                    status.as_u16(),
-                    &body,
-                    request_body_is_valid_json,
-                );
-                let retryable_status = is_retryable_upstream_status(status.as_u16());
-                if attempt < max_attempts && (retryable_parse_failure || retryable_status) {
-                    tokio::time::sleep(transport_retry_delay(
-                        self.transport_retry_base_delay_ms,
-                        attempt,
-                    ))
-                    .await;
-                    continue;
-                }
-                if retryable_parse_failure {
-                    return Err(retryable_openai_parse_failure_error(
+                if !status.is_success() {
+                    return Err(provider_http_status_error(
                         request.provider_kind,
-                        attempt,
-                        last_error.as_ref(),
+                        status,
+                        &headers,
+                        &body_text,
                     ));
                 }
-                return Err(last_error.take().unwrap_or_else(|| {
-                    anyhow!("provider request failed: provider={}", request.provider_kind)
-                }));
-            }
 
-            let output_text = body
-                .get("choices")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("message"))
-                .and_then(|v| v.get("content"))
-                .map(extract_message_content_text)
-                .unwrap_or_default();
+                let body = serde_json::from_str::<serde_json::Value>(&body_text)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
 
-            let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let output_text = body
+                    .get("choices")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.get("message"))
+                    .and_then(|v| v.get("content"))
+                    .map(extract_message_content_text)
+                    .unwrap_or_default();
 
-            let _ = request.provider_kind;
-            return Ok((output_text, usage_json));
-        }
+                let usage_json =
+                    body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
 
-        Err(last_error.unwrap_or_else(|| {
-            anyhow!("provider request failed: provider={}", request.provider_kind)
-        }))
+                Ok((output_text, usage_json))
+            },
+            RetryPolicy::default(),
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn call_openai_compatible_stream(
@@ -460,83 +453,44 @@ impl UnifiedGateway {
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<(String, serde_json::Value)> {
         let request_body = request.body()?;
-        let request_body_is_valid_json = true;
-        let max_attempts = self.transport_retry_attempts.max(1);
+        let endpoint_url =
+            provider_endpoint_url(request.provider_kind, request.base_url, &request.chat_path)?;
 
-        let mut last_error = None;
-        for attempt in 1..=max_attempts {
-            let request_builder = self
-                .client
-                .post(format!("{}/chat/completions", request.base_url))
-                .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "text/event-stream");
-            let request_builder = if let Some(api_key) = request.api_key {
-                request_builder.bearer_auth(api_key)
-            } else {
-                request_builder
-            };
-            let response = match request_builder.body(request_body.clone()).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    if attempt < max_attempts && is_retryable_transport_error(&error) {
-                        last_error = Some(anyhow!(
-                            "provider transport failed: provider={} attempt={}/{} error={error}",
-                            request.provider_kind,
-                            attempt,
-                            max_attempts,
-                        ));
-                        tokio::time::sleep(transport_retry_delay(
-                            self.transport_retry_base_delay_ms,
-                            attempt,
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(error.into());
+        let response = with_retry(
+            || async {
+                let request_builder = self
+                    .client
+                    .post(endpoint_url.clone())
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ACCEPT, "text/event-stream");
+                let request_builder =
+                    apply_provider_auth(request_builder, request.auth_scheme, request.api_key);
+                let request_builder = crate::observability::inject_trace_context(request_builder);
+                let response =
+                    request_builder.body(request_body.clone()).send().await.map_err(|source| {
+                        ProviderCallError::transport(
+                            format!(
+                                "provider transport failed: provider={}",
+                                request.provider_kind
+                            ),
+                            source,
+                        )
+                    })?;
+
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(response);
                 }
-            };
 
-            let status = response.status();
-            if !status.is_success() {
-                let body_text = response.text().await?;
-                let body = serde_json::from_str::<serde_json::Value>(&body_text)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
-                last_error = Some(anyhow!(
-                    "provider request failed: provider={} status={status} body={body}",
-                    request.provider_kind,
-                ));
-                let retryable_parse_failure = is_retryable_upstream_json_parse_failure(
-                    status.as_u16(),
-                    &body,
-                    request_body_is_valid_json,
-                );
-                let retryable_status = is_retryable_upstream_status(status.as_u16());
-                if attempt < max_attempts && (retryable_parse_failure || retryable_status) {
-                    tokio::time::sleep(transport_retry_delay(
-                        self.transport_retry_base_delay_ms,
-                        attempt,
-                    ))
-                    .await;
-                    continue;
-                }
-                if retryable_parse_failure {
-                    return Err(retryable_openai_parse_failure_error(
-                        request.provider_kind,
-                        attempt,
-                        last_error.as_ref(),
-                    ));
-                }
-                return Err(last_error.take().unwrap_or_else(|| {
-                    anyhow!("provider request failed: provider={}", request.provider_kind)
-                }));
-            }
+                let headers = response.headers().clone();
+                let body_text = response.text().await.unwrap_or_default();
+                Err(provider_http_status_error(request.provider_kind, status, &headers, &body_text))
+            },
+            RetryPolicy::default(),
+        )
+        .await?;
 
-            return drain_openai_compatible_stream(response, on_delta).await;
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            anyhow!("provider request failed: provider={}", request.provider_kind)
-        }))
+        drain_openai_compatible_stream(response, on_delta).await
     }
 
     fn parse_embedding_vector(value: &serde_json::Value) -> Vec<f32> {
@@ -568,7 +522,7 @@ impl UnifiedGateway {
 
         if let Some(extra) = extra_parameters_json.as_object() {
             for (key, value) in extra {
-                if key == "model" || key == "input" {
+                if key == "model" || key == "input" || key.starts_with("_provider") {
                     continue;
                 }
                 body.insert(key.clone(), value.clone());
@@ -578,145 +532,329 @@ impl UnifiedGateway {
         serde_json::Value::Object(body)
     }
 
-    async fn embed_many_sequential(
-        &self,
-        request: EmbeddingBatchRequest,
-    ) -> Result<EmbeddingBatchResponse> {
-        let mut embeddings = Vec::with_capacity(request.inputs.len());
-        let mut prompt_tokens = 0_i64;
-        let mut total_tokens = 0_i64;
-        let mut completion_tokens = 0_i64;
-        let mut saw_prompt_tokens = false;
-        let mut saw_total_tokens = false;
-        let mut saw_completion_tokens = false;
-
-        for input in request.inputs {
-            let response = self
-                .embed(EmbeddingRequest {
-                    provider_kind: request.provider_kind.clone(),
-                    model_name: request.model_name.clone(),
-                    input,
-                    api_key_override: request.api_key_override.clone(),
-                    base_url_override: request.base_url_override.clone(),
-                    extra_parameters_json: request.extra_parameters_json.clone(),
-                })
-                .await?;
-            if let Some(value) =
-                response.usage_json.get("prompt_tokens").and_then(serde_json::Value::as_i64)
-            {
-                prompt_tokens += value;
-                saw_prompt_tokens = true;
-            }
-            if let Some(value) =
-                response.usage_json.get("total_tokens").and_then(serde_json::Value::as_i64)
-            {
-                total_tokens += value;
-                saw_total_tokens = true;
-            }
-            if let Some(value) =
-                response.usage_json.get("completion_tokens").and_then(serde_json::Value::as_i64)
-            {
-                completion_tokens += value;
-                saw_completion_tokens = true;
-            }
-            embeddings.push(response.embedding);
-        }
-
-        let dimensions = embeddings.first().map(Vec::len).unwrap_or_default();
-        Ok(EmbeddingBatchResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
-            dimensions,
-            embeddings,
-            usage_json: serde_json::json!({
-                "prompt_tokens": saw_prompt_tokens.then_some(prompt_tokens),
-                "completion_tokens": saw_completion_tokens.then_some(completion_tokens),
-                "total_tokens": saw_total_tokens.then_some(total_tokens),
-            }),
-        })
+    fn upstream_extra_parameters(extra_parameters_json: &serde_json::Value) -> serde_json::Value {
+        let Some(extra) = extra_parameters_json.as_object() else {
+            return serde_json::json!({});
+        };
+        let filtered = extra
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "model"
+                        | "messages"
+                        | "tools"
+                        | "tool_choice"
+                        | "temperature"
+                        | "top_p"
+                        | "max_completion_tokens"
+                        | "max_tokens"
+                        | "response_format"
+                        | "stream"
+                        | "stream_options"
+                ) && !key.starts_with("_provider")
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::Value::Object(filtered)
     }
 
     fn resolve_provider(
         provider_kind: &str,
         api_key_override: Option<&str>,
         base_url_override: Option<&str>,
-    ) -> Result<(Option<String>, String)> {
+        extra_parameters_json: &serde_json::Value,
+    ) -> Result<ResolvedProviderRuntime> {
+        let runtime_profile = resolve_runtime_profile(provider_kind, extra_parameters_json)?;
         let api_key = api_key_override
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(std::string::ToString::to_string);
-        match provider_kind {
-            "ollama" => Ok((
-                api_key,
-                resolve_runtime_provider_base_url(
-                    provider_kind,
-                    base_url_override.ok_or_else(|| anyhow!("missing provider base URL"))?,
-                ),
-            )),
-            "openai" => {
-                let api_key = api_key.ok_or_else(|| anyhow!("missing provider API key"))?;
-                Ok((
-                    Some(api_key),
-                    resolve_runtime_provider_base_url(
-                        provider_kind,
-                        base_url_override.unwrap_or("https://api.openai.com/v1"),
-                    ),
-                ))
-            }
-            "deepseek" => {
-                let api_key = api_key.ok_or_else(|| anyhow!("missing provider API key"))?;
-                Ok((
-                    Some(api_key),
-                    resolve_runtime_provider_base_url(
-                        provider_kind,
-                        base_url_override.unwrap_or("https://api.deepseek.com"),
-                    ),
-                ))
-            }
-            "qwen" => Ok((
-                Some(api_key.ok_or_else(|| anyhow!("missing provider API key"))?),
-                resolve_runtime_provider_base_url(
-                    provider_kind,
-                    base_url_override
-                        .unwrap_or("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
-                ),
-            )),
-            // Any OpenAI-compatible provider (Ollama, vLLM, llama.cpp, LM Studio, etc.)
-            // works when a custom base URL is configured.
-            _ => match base_url_override {
-                Some(url) => Ok((api_key, resolve_runtime_provider_base_url(provider_kind, url))),
-                None => Err(anyhow!(
-                    "unsupported provider kind without base_url_override: {provider_kind}"
-                )),
-            },
+        let base_url = base_url_override
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("missing provider base URL for provider={provider_kind}"))?;
+        validate_runtime_base_url(provider_kind, base_url, &runtime_profile.base_url)?;
+        if api_key.is_none()
+            && runtime_profile.credentials.as_ref().is_none_or(|policy| policy.api_key_required)
+        {
+            return Err(anyhow!("missing provider API key for provider={provider_kind}"));
+        }
+        Ok(ResolvedProviderRuntime {
+            api_key,
+            base_url: resolve_runtime_provider_base_url(
+                runtime_profile.base_url.allow_private_network,
+                base_url,
+            ),
+            runtime: runtime_profile.runtime,
+        })
+    }
+}
+
+fn resolve_runtime_profile(
+    provider_kind: &str,
+    extra_parameters_json: &serde_json::Value,
+) -> Result<RuntimeProviderProfileEnvelope> {
+    if let Some(value) = extra_parameters_json.get("_providerProfile") {
+        let profile = serde_json::from_value::<RuntimeProviderProfileEnvelope>(value.clone())
+            .with_context(|| {
+                format!("invalid runtime provider profile for provider={provider_kind}")
+            })?;
+        if profile.runtime.kind != OPENAI_COMPATIBLE_RUNTIME_KIND {
+            return Err(anyhow!("unsupported provider runtime kind for provider={provider_kind}"));
+        }
+        return Ok(profile);
+    }
+
+    Err(anyhow!("missing runtime provider profile for provider={provider_kind}"))
+}
+
+fn normalize_runtime_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("/{}", trimmed.trim_start_matches('/').trim_end_matches('/'))
+}
+
+fn provider_endpoint_url(provider_kind: &str, base_url: &str, path: &str) -> Result<Url> {
+    let mut url = Url::parse(base_url)
+        .with_context(|| format!("invalid provider base URL for provider={provider_kind}"))?;
+    reject_url_userinfo_query_fragment(provider_kind, &url)?;
+
+    let endpoint_path = normalize_runtime_path(path);
+    let base_path = url.path().trim_end_matches('/');
+    let joined_path = if endpoint_path.is_empty() {
+        if base_path.is_empty() { "/".to_string() } else { base_path.to_string() }
+    } else if base_path.is_empty() {
+        endpoint_path
+    } else {
+        format!("{base_path}{endpoint_path}")
+    };
+    url.set_path(&joined_path);
+    Ok(url)
+}
+
+fn reject_url_userinfo_query_fragment(provider_kind: &str, url: &Url) -> Result<()> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(anyhow!(
+            "provider base URL must not include userinfo for provider={provider_kind}"
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(anyhow!(
+            "provider base URL must not include query or fragment components for provider={provider_kind}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_base_url(
+    provider_kind: &str,
+    base_url: &str,
+    policy: &ProviderBaseUrlPolicy,
+) -> Result<()> {
+    let url = Url::parse(base_url)
+        .with_context(|| format!("invalid provider base URL for provider={provider_kind}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(anyhow!(
+            "provider base URL must use http or https for provider={provider_kind}"
+        ));
+    }
+    reject_url_userinfo_query_fragment(provider_kind, &url)?;
+    if policy.require_https && url.scheme() != "https" {
+        return Err(anyhow!("provider base URL must use https for provider={provider_kind}"));
+    }
+    if !policy.allow_private_network && is_private_runtime_url(&url) {
+        return Err(anyhow!(
+            "provider base URL must not target a private, loopback, or link-local network for provider={provider_kind}"
+        ));
+    }
+    Ok(())
+}
+
+fn is_private_runtime_url(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(host)) => is_private_runtime_ip(IpAddr::V4(host)),
+        Some(url::Host::Ipv6(host)) => is_private_runtime_ip(IpAddr::V6(host)),
+        None => false,
+    }
+}
+
+fn is_private_runtime_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(value) => {
+            value.is_private()
+                || value.is_loopback()
+                || value.is_link_local()
+                || value.is_broadcast()
+                || value.is_documentation()
+                || value.is_unspecified()
+        }
+        IpAddr::V6(value) => {
+            value.is_loopback()
+                || value.is_unique_local()
+                || value.is_unicast_link_local()
+                || value.is_unspecified()
         }
     }
+}
+
+fn apply_provider_auth(
+    request: reqwest::RequestBuilder,
+    auth_scheme: ProviderAuthScheme,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let Some(token) = api_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return request;
+    };
+    match auth_scheme {
+        ProviderAuthScheme::Bearer => request.bearer_auth(token),
+        ProviderAuthScheme::RawAuthorization => request.header(AUTHORIZATION, token),
+    }
+}
+
+fn parse_tool_use_response(
+    body: &serde_json::Value,
+) -> std::result::Result<
+    (String, Vec<ChatToolCall>, Option<String>, serde_json::Value),
+    ProviderCallError,
+> {
+    let choice =
+        body.get("choices").and_then(|v| v.as_array()).and_then(|arr| arr.first()).ok_or_else(
+            || ProviderCallError::protocol("tool-use response missing choices array"),
+        )?;
+
+    let message = choice
+        .get("message")
+        .ok_or_else(|| ProviderCallError::protocol("tool-use response choice missing message"))?;
+    let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str()).map(str::to_string);
+
+    let output_text = message.get("content").map(extract_message_content_text).unwrap_or_default();
+
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|raw| {
+                    let id = raw.get("id").and_then(|v| v.as_str())?.to_string();
+                    let function = raw.get("function")?;
+                    let name = function.get("name").and_then(|v| v.as_str())?.to_string();
+                    let arguments = function
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .or_else(|| function.get("arguments").map(|v| v.to_string()))
+                        .unwrap_or_default();
+                    Some(ChatToolCall { id, name, arguments_json: arguments })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
+    Ok((output_text, tool_calls, finish_reason, usage_json))
+}
+
+fn provider_response_format(
+    provider_kind: &str,
+    requested: Option<&serde_json::Value>,
+    mode: ProviderStructuredOutputMode,
+) -> Result<Option<serde_json::Value>> {
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+    match mode {
+        ProviderStructuredOutputMode::JsonSchema => Ok(Some(requested.clone())),
+        ProviderStructuredOutputMode::JsonObject => {
+            Ok(Some(serde_json::json!({ "type": "json_object" })))
+        }
+        ProviderStructuredOutputMode::Unsupported => {
+            Err(anyhow!("provider {provider_kind} does not support required structured output"))
+        }
+    }
+}
+
+fn provider_system_prompt(
+    provider_kind: &str,
+    requested_system_prompt: Option<&str>,
+    requested_response_format: Option<&serde_json::Value>,
+    mode: ProviderStructuredOutputMode,
+) -> Result<Option<String>> {
+    let Some(requested_response_format) = requested_response_format else {
+        return Ok(requested_system_prompt.map(ToOwned::to_owned));
+    };
+    if mode != ProviderStructuredOutputMode::JsonObject {
+        return Ok(requested_system_prompt.map(ToOwned::to_owned));
+    }
+
+    let schema = requested_response_format.pointer("/json_schema/schema").ok_or_else(|| {
+        anyhow!("provider {provider_kind} json_object mode requires a JSON schema")
+    })?;
+    let schema_json = serde_json::to_string(schema).with_context(|| {
+        format!("failed to serialize structured output schema for provider={provider_kind}")
+    })?;
+
+    let mut system_prompt = requested_system_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(String::new, ToOwned::to_owned);
+    if !system_prompt.is_empty() {
+        system_prompt.push_str("\n\n");
+    }
+    system_prompt.push_str(
+        "For runtimes that accept JSON object mode, this JSON Schema is the canonical output \
+contract. Return exactly one JSON object that conforms to it. Use only the field names defined by \
+this schema; do not invent alternate keys.\nJSON Schema:\n",
+    );
+    system_prompt.push_str(&schema_json);
+
+    Ok(Some(system_prompt))
 }
 
 #[async_trait]
 impl LlmGateway for UnifiedGateway {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let (api_key, base_url) = Self::resolve_provider(
+        let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
+            &request.extra_parameters_json,
+        )?;
+        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let response_format = provider_response_format(
+            &request.provider_kind,
+            request.response_format.as_ref(),
+            resolved.runtime.structured_output,
+        )?;
+        let system_prompt = provider_system_prompt(
+            &request.provider_kind,
+            request.system_prompt.as_deref(),
+            request.response_format.as_ref(),
+            resolved.runtime.structured_output,
         )?;
         let (output_text, usage_json) = self
             .call_openai_compatible(OpenAiCompatibleRequest {
                 provider_kind: &request.provider_kind,
-                api_key: api_key.as_deref(),
-                base_url: base_url.as_str(),
+                api_key: resolved.api_key.as_deref(),
+                base_url: resolved.base_url.as_str(),
+                auth_scheme: resolved.runtime.auth_scheme,
+                chat_path: resolved.runtime.chat_path.clone(),
                 model_name: &request.model_name,
                 messages: vec![OpenAiCompatibleMessage {
                     role: "user".to_string(),
                     content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
                 }],
-                system_prompt: request.system_prompt.as_deref(),
+                system_prompt: system_prompt.as_deref(),
                 temperature: request.temperature,
                 top_p: request.top_p,
                 max_output_tokens: request.max_output_tokens_override,
-                response_format: request.response_format.as_ref(),
-                extra_parameters_json: &request.extra_parameters_json,
+                token_limit_parameter: resolved.runtime.token_limit_parameter,
+                response_format: response_format.as_ref(),
+                extra_parameters_json: &upstream_extra,
                 stream: false,
             })
             .await?;
@@ -733,28 +871,44 @@ impl LlmGateway for UnifiedGateway {
         request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ChatResponse> {
-        let (api_key, base_url) = Self::resolve_provider(
+        let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
+            &request.extra_parameters_json,
+        )?;
+        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let response_format = provider_response_format(
+            &request.provider_kind,
+            request.response_format.as_ref(),
+            resolved.runtime.structured_output,
+        )?;
+        let system_prompt = provider_system_prompt(
+            &request.provider_kind,
+            request.system_prompt.as_deref(),
+            request.response_format.as_ref(),
+            resolved.runtime.structured_output,
         )?;
         let (output_text, usage_json) = self
             .call_openai_compatible_stream(
                 OpenAiCompatibleRequest {
                     provider_kind: &request.provider_kind,
-                    api_key: api_key.as_deref(),
-                    base_url: base_url.as_str(),
+                    api_key: resolved.api_key.as_deref(),
+                    base_url: resolved.base_url.as_str(),
+                    auth_scheme: resolved.runtime.auth_scheme,
+                    chat_path: resolved.runtime.chat_path.clone(),
                     model_name: &request.model_name,
                     messages: vec![OpenAiCompatibleMessage {
                         role: "user".to_string(),
                         content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
                     }],
-                    system_prompt: request.system_prompt.as_deref(),
+                    system_prompt: system_prompt.as_deref(),
                     temperature: request.temperature,
                     top_p: request.top_p,
                     max_output_tokens: request.max_output_tokens_override,
-                    response_format: request.response_format.as_ref(),
-                    extra_parameters_json: &request.extra_parameters_json,
+                    token_limit_parameter: resolved.runtime.token_limit_parameter,
+                    response_format: response_format.as_ref(),
+                    extra_parameters_json: &upstream_extra,
                     stream: true,
                 },
                 on_delta,
@@ -769,19 +923,22 @@ impl LlmGateway for UnifiedGateway {
     }
 
     async fn generate_with_tools(&self, request: ToolUseRequest) -> Result<ToolUseResponse> {
-        let (api_key, base_url) = Self::resolve_provider(
+        let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
+            &request.extra_parameters_json,
         )?;
 
         let messages =
             request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
         let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
         let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
-            &request.provider_kind,
+            resolved.runtime.token_limit_parameter,
             request.max_output_tokens_override,
         );
+        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let tool_choice = (!tools.is_empty()).then_some("auto");
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
@@ -791,129 +948,88 @@ impl LlmGateway for UnifiedGateway {
             top_p: request.top_p,
             max_completion_tokens,
             max_tokens,
-            tool_choice: Some("auto"),
+            tool_choice,
             stream: false,
-            extra: request.extra_parameters_json.clone(),
+            extra: upstream_extra,
         };
         let request_body =
             serde_json::to_vec(&payload).context("failed to serialize tool-use request body")?;
 
-        let max_attempts = self.transport_retry_attempts.max(1);
-        let mut last_error: Option<anyhow::Error> = None;
-        for attempt in 1..=max_attempts {
-            let request_builder = self
-                .client
-                .post(format!("{}/chat/completions", base_url))
-                .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "application/json");
-            let request_builder = if let Some(api_key) = api_key.as_deref() {
-                request_builder.bearer_auth(api_key)
-            } else {
-                request_builder
-            };
-            let response = match request_builder.body(request_body.clone()).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    if attempt < max_attempts && is_retryable_transport_error(&error) {
-                        last_error = Some(anyhow!(
-                            "tool-use transport failed: provider={} attempt={}/{}: {error}",
-                            request.provider_kind,
-                            attempt,
-                            max_attempts
-                        ));
-                        tokio::time::sleep(transport_retry_delay(
-                            self.transport_retry_base_delay_ms,
-                            attempt,
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(error.into());
-                }
-            };
+        let endpoint_url = provider_endpoint_url(
+            &request.provider_kind,
+            &resolved.base_url,
+            &resolved.runtime.chat_path,
+        )?;
 
-            let status = response.status();
-            let body_text = response.text().await?;
-            if !status.is_success() {
-                let body = serde_json::from_str::<serde_json::Value>(&body_text)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
-                last_error = Some(anyhow!(
-                    "tool-use request failed: provider={} status={status} body={body}",
-                    request.provider_kind
-                ));
-                if attempt < max_attempts && is_retryable_upstream_status(status.as_u16()) {
-                    tokio::time::sleep(transport_retry_delay(
-                        self.transport_retry_base_delay_ms,
-                        attempt,
-                    ))
-                    .await;
-                    continue;
-                }
-                return Err(last_error.take().unwrap_or_else(|| {
-                    anyhow!("tool-use request failed: provider={}", request.provider_kind)
-                }));
-            }
+        let (output_text, tool_calls, finish_reason, usage_json) = with_retry(
+            || async {
+                let request_builder = self
+                    .client
+                    .post(endpoint_url.clone())
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ACCEPT, "application/json");
+                let request_builder = apply_provider_auth(
+                    request_builder,
+                    resolved.runtime.auth_scheme,
+                    resolved.api_key.as_deref(),
+                );
+                let request_builder = crate::observability::inject_trace_context(request_builder);
+                let response =
+                    request_builder.body(request_body.clone()).send().await.map_err(|source| {
+                        ProviderCallError::transport(
+                            format!(
+                                "tool-use transport failed: provider={}",
+                                request.provider_kind
+                            ),
+                            source,
+                        )
+                    })?;
 
-            let body =
-                serde_json::from_str::<serde_json::Value>(&body_text).with_context(|| {
-                    format!(
-                        "failed to parse tool-use response from provider {}",
-                        request.provider_kind
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body_text = response.text().await.map_err(|source| {
+                    ProviderCallError::response_body(
+                        format!(
+                            "failed to read tool-use response body: provider={}",
+                            request.provider_kind
+                        ),
+                        source,
                     )
                 })?;
+                if !status.is_success() {
+                    return Err(provider_http_status_error(
+                        &request.provider_kind,
+                        status,
+                        &headers,
+                        &body_text,
+                    ));
+                }
 
-            let choice = body
-                .get("choices")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .ok_or_else(|| anyhow!("tool-use response missing choices array"))?;
+                let body =
+                    serde_json::from_str::<serde_json::Value>(&body_text).map_err(|source| {
+                        ProviderCallError::json(
+                            format!(
+                                "failed to parse tool-use response from provider {}",
+                                request.provider_kind
+                            ),
+                            source,
+                        )
+                    })?;
 
-            let message = choice
-                .get("message")
-                .ok_or_else(|| anyhow!("tool-use response choice missing message"))?;
-            let finish_reason =
-                choice.get("finish_reason").and_then(|v| v.as_str()).map(str::to_string);
+                parse_tool_use_response(&body)
+            },
+            RetryPolicy::default(),
+        )
+        .await?;
 
-            let output_text =
-                message.get("content").map(extract_message_content_text).unwrap_or_default();
-
-            let tool_calls = message
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .map(|calls| {
-                    calls
-                        .iter()
-                        .filter_map(|raw| {
-                            let id = raw.get("id").and_then(|v| v.as_str())?.to_string();
-                            let function = raw.get("function")?;
-                            let name = function.get("name").and_then(|v| v.as_str())?.to_string();
-                            let arguments = function
-                                .get("arguments")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string)
-                                .or_else(|| function.get("arguments").map(|v| v.to_string()))
-                                .unwrap_or_default();
-                            Some(ChatToolCall { id, name, arguments_json: arguments })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
-
-            return Ok(ToolUseResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
-                output_text,
-                tool_calls,
-                finish_reason,
-                usage_json,
-            });
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            anyhow!("tool-use request failed: provider={}", request.provider_kind)
-        }))
+        Ok(ToolUseResponse {
+            provider_kind: request.provider_kind,
+            model_name: request.model_name,
+            output_text,
+            tool_calls,
+            finish_reason,
+            usage_json,
+        })
     }
 
     async fn generate_with_tools_stream(
@@ -921,19 +1037,22 @@ impl LlmGateway for UnifiedGateway {
         request: ToolUseRequest,
         on_text_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ToolUseResponse> {
-        let (api_key, base_url) = Self::resolve_provider(
+        let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
+            &request.extra_parameters_json,
         )?;
 
         let messages =
             request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
         let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
         let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
-            &request.provider_kind,
+            resolved.runtime.token_limit_parameter,
             request.max_output_tokens_override,
         );
+        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let tool_choice = (!tools.is_empty()).then_some("auto");
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
@@ -943,117 +1062,146 @@ impl LlmGateway for UnifiedGateway {
             top_p: request.top_p,
             max_completion_tokens,
             max_tokens,
-            tool_choice: Some("auto"),
+            tool_choice,
             stream: true,
-            extra: request.extra_parameters_json.clone(),
+            extra: upstream_extra,
         };
         let request_body = serde_json::to_vec(&payload)
             .context("failed to serialize streaming tool-use request body")?;
 
-        let max_attempts = self.transport_retry_attempts.max(1);
-        let mut last_error: Option<anyhow::Error> = None;
-        for attempt in 1..=max_attempts {
-            let request_builder = self
-                .client
-                .post(format!("{}/chat/completions", base_url))
-                .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "text/event-stream");
-            let request_builder = if let Some(api_key) = api_key.as_deref() {
-                request_builder.bearer_auth(api_key)
-            } else {
-                request_builder
-            };
-            let response = match request_builder.body(request_body.clone()).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    if attempt < max_attempts && is_retryable_transport_error(&error) {
-                        last_error = Some(anyhow!(
-                            "tool-use stream transport failed: provider={} attempt={}/{}: {error}",
-                            request.provider_kind,
-                            attempt,
-                            max_attempts
-                        ));
-                        tokio::time::sleep(transport_retry_delay(
-                            self.transport_retry_base_delay_ms,
-                            attempt,
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(error.into());
+        let endpoint_url = provider_endpoint_url(
+            &request.provider_kind,
+            &resolved.base_url,
+            &resolved.runtime.chat_path,
+        )?;
+
+        let response = with_retry(
+            || async {
+                let request_builder = self
+                    .client
+                    .post(endpoint_url.clone())
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ACCEPT, "text/event-stream");
+                let request_builder = apply_provider_auth(
+                    request_builder,
+                    resolved.runtime.auth_scheme,
+                    resolved.api_key.as_deref(),
+                );
+                let request_builder = crate::observability::inject_trace_context(request_builder);
+                let response =
+                    request_builder.body(request_body.clone()).send().await.map_err(|source| {
+                        ProviderCallError::transport(
+                            format!(
+                                "tool-use stream transport failed: provider={}",
+                                request.provider_kind
+                            ),
+                            source,
+                        )
+                    })?;
+
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(response);
                 }
-            };
 
-            let status = response.status();
-            if !status.is_success() {
-                let body_text = response.text().await?;
-                let body = serde_json::from_str::<serde_json::Value>(&body_text)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw_body": body_text }));
-                last_error = Some(anyhow!(
-                    "tool-use stream request failed: provider={} status={status} body={body}",
-                    request.provider_kind
-                ));
-                if attempt < max_attempts && is_retryable_upstream_status(status.as_u16()) {
-                    tokio::time::sleep(transport_retry_delay(
-                        self.transport_retry_base_delay_ms,
-                        attempt,
-                    ))
-                    .await;
-                    continue;
-                }
-                return Err(last_error.take().unwrap_or_else(|| {
-                    anyhow!("tool-use stream request failed: provider={}", request.provider_kind)
-                }));
-            }
+                let headers = response.headers().clone();
+                let body_text = response.text().await.unwrap_or_default();
+                Err(provider_http_status_error(
+                    &request.provider_kind,
+                    status,
+                    &headers,
+                    &body_text,
+                ))
+            },
+            RetryPolicy::default(),
+        )
+        .await?;
 
-            let stream_state = drain_tool_use_stream(response, on_text_delta).await?;
-            let (output_text, finish_reason, usage_json, tool_calls) = stream_state.finalize();
-            return Ok(ToolUseResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
-                output_text,
-                tool_calls,
-                finish_reason,
-                usage_json,
-            });
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            anyhow!("tool-use stream request failed: provider={}", request.provider_kind)
-        }))
+        let stream_state = drain_tool_use_stream(response, on_text_delta).await?;
+        let (output_text, finish_reason, usage_json, tool_calls) = stream_state.finalize();
+        Ok(ToolUseResponse {
+            provider_kind: request.provider_kind,
+            model_name: request.model_name,
+            output_text,
+            tool_calls,
+            finish_reason,
+            usage_json,
+        })
     }
 
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        let (api_key, base_url) = Self::resolve_provider(
+        let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
+            &request.extra_parameters_json,
         )?;
+        let embeddings_path = resolved.runtime.embeddings_path.as_deref().ok_or_else(|| {
+            anyhow!("provider {} does not support embeddings", request.provider_kind)
+        })?;
 
-        let request_builder = self.client.post(format!("{base_url}/embeddings"));
-        let request_builder = if let Some(api_key) = api_key.as_deref() {
-            request_builder.bearer_auth(api_key)
-        } else {
-            request_builder
-        };
-        let response = request_builder
-            .json(&Self::embedding_request_body(
-                &request.model_name,
-                serde_json::Value::String(request.input),
-                &request.extra_parameters_json,
-            ))
-            .send()
-            .await?;
+        let endpoint_url =
+            provider_endpoint_url(&request.provider_kind, &resolved.base_url, embeddings_path)?;
 
-        let status = response.status();
-        let body: serde_json::Value = response.json().await?;
+        let body = with_retry(
+            || async {
+                let request_builder = self.client.post(endpoint_url.clone());
+                let request_builder = apply_provider_auth(
+                    request_builder,
+                    resolved.runtime.auth_scheme,
+                    resolved.api_key.as_deref(),
+                );
+                let request_builder = crate::observability::inject_trace_context(request_builder);
+                let response = request_builder
+                    .json(&Self::embedding_request_body(
+                        &request.model_name,
+                        serde_json::Value::String(request.input.clone()),
+                        &request.extra_parameters_json,
+                    ))
+                    .send()
+                    .await
+                    .map_err(|source| {
+                        ProviderCallError::transport(
+                            format!(
+                                "embedding transport failed: provider={}",
+                                request.provider_kind
+                            ),
+                            source,
+                        )
+                    })?;
 
-        if !status.is_success() {
-            return Err(anyhow!(
-                "embedding request failed: provider={} status={status} body={body}",
-                request.provider_kind,
-            ));
-        }
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body_text = response.text().await.map_err(|source| {
+                    ProviderCallError::response_body(
+                        format!(
+                            "failed to read embedding response body: provider={}",
+                            request.provider_kind
+                        ),
+                        source,
+                    )
+                })?;
+                if !status.is_success() {
+                    return Err(provider_http_status_error(
+                        &request.provider_kind,
+                        status,
+                        &headers,
+                        &body_text,
+                    ));
+                }
+                serde_json::from_str::<serde_json::Value>(&body_text).map_err(|source| {
+                    ProviderCallError::json(
+                        format!(
+                            "failed to parse embedding response from provider {}",
+                            request.provider_kind
+                        ),
+                        source,
+                    )
+                })
+            },
+            RetryPolicy::default(),
+        )
+        .await?;
 
         let embedding = body
             .get("data")
@@ -1105,37 +1253,77 @@ impl LlmGateway for UnifiedGateway {
             });
         }
 
-        let (api_key, base_url) = Self::resolve_provider(
+        let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
+            &request.extra_parameters_json,
         )?;
-        let request_builder = self.client.post(format!("{base_url}/embeddings"));
-        let request_builder = if let Some(api_key) = api_key.as_deref() {
-            request_builder.bearer_auth(api_key)
-        } else {
-            request_builder
-        };
-        let response = request_builder
-            .json(&Self::embedding_request_body(
-                &request.model_name,
-                serde_json::json!(request.inputs),
-                &request.extra_parameters_json,
-            ))
-            .send()
-            .await?;
+        let embeddings_path = resolved.runtime.embeddings_path.as_deref().ok_or_else(|| {
+            anyhow!("provider {} does not support embeddings", request.provider_kind)
+        })?;
+        let endpoint_url =
+            provider_endpoint_url(&request.provider_kind, &resolved.base_url, embeddings_path)?;
 
-        let status = response.status();
-        let body: serde_json::Value = response.json().await?;
+        let body = with_retry(
+            || async {
+                let request_builder = self.client.post(endpoint_url.clone());
+                let request_builder = apply_provider_auth(
+                    request_builder,
+                    resolved.runtime.auth_scheme,
+                    resolved.api_key.as_deref(),
+                );
+                let request_builder = crate::observability::inject_trace_context(request_builder);
+                let response = request_builder
+                    .json(&Self::embedding_request_body(
+                        &request.model_name,
+                        serde_json::json!(request.inputs.clone()),
+                        &request.extra_parameters_json,
+                    ))
+                    .send()
+                    .await
+                    .map_err(|source| {
+                        ProviderCallError::transport(
+                            format!(
+                                "embedding batch transport failed: provider={}",
+                                request.provider_kind
+                            ),
+                            source,
+                        )
+                    })?;
 
-        if !status.is_success() {
-            let provider_kind = request.provider_kind.clone();
-            return self.embed_many_sequential(request).await.map_err(|fallback_error| {
-                anyhow!(
-                    "embedding batch request failed: provider={provider_kind} status={status} body={body}; fallback_error={fallback_error:#}",
-                )
-            });
-        }
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body_text = response.text().await.map_err(|source| {
+                    ProviderCallError::response_body(
+                        format!(
+                            "failed to read embedding batch response body: provider={}",
+                            request.provider_kind
+                        ),
+                        source,
+                    )
+                })?;
+                if !status.is_success() {
+                    return Err(provider_http_status_error(
+                        &request.provider_kind,
+                        status,
+                        &headers,
+                        &body_text,
+                    ));
+                }
+                serde_json::from_str::<serde_json::Value>(&body_text).map_err(|source| {
+                    ProviderCallError::json(
+                        format!(
+                            "failed to parse embedding batch response from provider {}",
+                            request.provider_kind
+                        ),
+                        source,
+                    )
+                })
+            },
+            RetryPolicy::default(),
+        )
+        .await?;
 
         let embeddings = body
             .get("data")
@@ -1162,11 +1350,13 @@ impl LlmGateway for UnifiedGateway {
     }
 
     async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
-        let (api_key, base_url) = Self::resolve_provider(
+        let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
+            &request.extra_parameters_json,
         )?;
+        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
         let image_data_url = format!(
             "data:{};base64,{}",
             request.mime_type,
@@ -1175,8 +1365,10 @@ impl LlmGateway for UnifiedGateway {
         let (output_text, usage_json) = self
             .call_openai_compatible(OpenAiCompatibleRequest {
                 provider_kind: &request.provider_kind,
-                api_key: api_key.as_deref(),
-                base_url: base_url.as_str(),
+                api_key: resolved.api_key.as_deref(),
+                base_url: resolved.base_url.as_str(),
+                auth_scheme: resolved.runtime.auth_scheme,
+                chat_path: resolved.runtime.chat_path.clone(),
                 model_name: &request.model_name,
                 messages: vec![OpenAiCompatibleMessage {
                     role: "user".to_string(),
@@ -1191,8 +1383,9 @@ impl LlmGateway for UnifiedGateway {
                 temperature: request.temperature,
                 top_p: request.top_p,
                 max_output_tokens: request.max_output_tokens_override,
+                token_limit_parameter: resolved.runtime.token_limit_parameter,
                 response_format: None,
-                extra_parameters_json: &request.extra_parameters_json,
+                extra_parameters_json: &upstream_extra,
                 stream: false,
             })
             .await?;
@@ -1209,12 +1402,12 @@ impl LlmGateway for UnifiedGateway {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiCompatibleMessage, OpenAiCompatibleMessageContent, OpenAiCompatibleRequest,
+        ChatToolDef, OpenAiCompatibleMessage, OpenAiCompatibleMessageContent,
+        OpenAiCompatibleRequest, OpenAiCompatibleToolDef, OpenAiCompatibleToolUseChatRequest,
+        ProviderAuthScheme, ProviderStructuredOutputMode, ProviderTokenLimitParameter,
         UnifiedGateway, consume_openai_compatible_stream_frame, extract_message_content_text,
-        is_retryable_transport_error_text, is_retryable_upstream_json_parse_failure,
-        is_retryable_upstream_status, transport_retry_delay,
+        provider_response_format, provider_system_prompt,
     };
-    use std::time::Duration;
 
     #[test]
     fn extracts_plain_string_content() {
@@ -1237,6 +1430,8 @@ mod tests {
             provider_kind: "openai",
             api_key: Some("test"),
             base_url: "https://api.openai.com/v1",
+            auth_scheme: ProviderAuthScheme::Bearer,
+            chat_path: "/chat/completions".to_string(),
             model_name: "gpt-5.4-mini",
             messages: vec![OpenAiCompatibleMessage {
                 role: "user".to_string(),
@@ -1246,6 +1441,7 @@ mod tests {
             temperature: None,
             top_p: None,
             max_output_tokens: None,
+            token_limit_parameter: ProviderTokenLimitParameter::MaxCompletionTokens,
             response_format: None,
             extra_parameters_json: &serde_json::json!({}),
             stream: false,
@@ -1272,6 +1468,8 @@ mod tests {
             provider_kind: "openai",
             api_key: Some("test"),
             base_url: "https://api.openai.com/v1",
+            auth_scheme: ProviderAuthScheme::Bearer,
+            chat_path: "/chat/completions".to_string(),
             model_name: "gpt-5.4-mini",
             messages: vec![OpenAiCompatibleMessage {
                 role: "user".to_string(),
@@ -1281,6 +1479,7 @@ mod tests {
             temperature: None,
             top_p: None,
             max_output_tokens: None,
+            token_limit_parameter: ProviderTokenLimitParameter::MaxCompletionTokens,
             response_format: Some(&serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
@@ -1306,11 +1505,184 @@ mod tests {
     }
 
     #[test]
+    fn tool_use_request_omits_empty_tools_and_choice() {
+        let payload = OpenAiCompatibleToolUseChatRequest {
+            model: "provider-alpha-tool-model",
+            messages: vec![],
+            tools: vec![],
+            temperature: None,
+            top_p: None,
+            max_completion_tokens: None,
+            max_tokens: Some(16),
+            tool_choice: None,
+            stream: false,
+            extra: serde_json::json!({}),
+        };
+        let value =
+            serde_json::to_value(payload).expect("tool-use request should serialize to JSON");
+
+        assert!(value.get("tools").is_none());
+        assert!(value.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn tool_use_request_includes_tools_and_choice_when_present() {
+        let def = ChatToolDef {
+            name: "lookup".to_string(),
+            description: "Lookup structured facts".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"]
+            }),
+        };
+        let payload = OpenAiCompatibleToolUseChatRequest {
+            model: "provider-alpha-tool-model",
+            messages: vec![],
+            tools: vec![OpenAiCompatibleToolDef::from(&def)],
+            temperature: None,
+            top_p: None,
+            max_completion_tokens: Some(16),
+            max_tokens: None,
+            tool_choice: Some("auto"),
+            stream: false,
+            extra: serde_json::json!({}),
+        };
+        let value =
+            serde_json::to_value(payload).expect("tool-use request should serialize to JSON");
+
+        assert_eq!(value.get("tools").and_then(serde_json::Value::as_array).map(Vec::len), Some(1));
+        assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn json_object_runtime_lowers_structured_response_format() {
+        let requested = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "query_ir",
+                "strict": true,
+                "schema": {"type": "object"}
+            }
+        });
+        let lowered = provider_response_format(
+            "provider-alpha",
+            Some(&requested),
+            ProviderStructuredOutputMode::JsonObject,
+        )
+        .expect("json_object providers should lower structured output")
+        .expect("requested structured output should remain present");
+
+        assert_eq!(lowered.get("type").and_then(serde_json::Value::as_str), Some("json_object"));
+        assert!(lowered.get("json_schema").is_none());
+    }
+
+    #[test]
+    fn json_schema_runtime_keeps_structured_system_prompt_unchanged() {
+        let requested = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "query_ir",
+                "strict": true,
+                "schema": {"type": "object", "properties": {"target_entities": {"type": "array"}}}
+            }
+        });
+        let system_prompt = provider_system_prompt(
+            "provider-alpha",
+            Some("Base compiler prompt"),
+            Some(&requested),
+            ProviderStructuredOutputMode::JsonSchema,
+        )
+        .expect("json_schema prompt should remain valid")
+        .expect("prompt should remain present");
+
+        assert_eq!(system_prompt, "Base compiler prompt");
+    }
+
+    #[test]
+    fn json_object_runtime_injects_schema_into_system_prompt() {
+        let requested = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "query_ir",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "target_entities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "role": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let system_prompt = provider_system_prompt(
+            "provider-alpha",
+            Some("Base compiler prompt"),
+            Some(&requested),
+            ProviderStructuredOutputMode::JsonObject,
+        )
+        .expect("json_object prompt should be built")
+        .expect("prompt should remain present");
+
+        assert!(system_prompt.starts_with("Base compiler prompt\n\n"));
+        assert!(system_prompt.contains("JSON Schema:"));
+        assert!(system_prompt.contains("\"target_entities\""));
+        assert!(system_prompt.contains("\"label\""));
+        assert!(system_prompt.contains("\"role\""));
+    }
+
+    #[test]
+    fn json_object_runtime_requires_canonical_schema_for_prompt_injection() {
+        let requested = serde_json::json!({"type": "json_schema"});
+        let error = provider_system_prompt(
+            "provider-alpha",
+            Some("Base compiler prompt"),
+            Some(&requested),
+            ProviderStructuredOutputMode::JsonObject,
+        )
+        .expect_err("json_object structured output without schema must fail loud");
+
+        assert!(error.to_string().contains("requires a JSON schema"));
+    }
+
+    #[test]
+    fn unsupported_structured_output_fails_loud() {
+        let requested = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "query_ir",
+                "strict": true,
+                "schema": {"type": "object"}
+            }
+        });
+        let error = provider_response_format(
+            "unsupported-provider",
+            Some(&requested),
+            ProviderStructuredOutputMode::Unsupported,
+        )
+        .expect_err("unsupported structured output must fail loud");
+
+        assert!(error.to_string().contains("does not support required structured output"));
+    }
+
+    #[test]
     fn serializes_openai_token_limit_as_max_completion_tokens() {
         let body = OpenAiCompatibleRequest {
             provider_kind: "openai",
             api_key: Some("test"),
             base_url: "https://api.openai.com/v1",
+            auth_scheme: ProviderAuthScheme::Bearer,
+            chat_path: "/chat/completions".to_string(),
             model_name: "gpt-5.4-mini",
             messages: vec![OpenAiCompatibleMessage {
                 role: "user".to_string(),
@@ -1320,6 +1692,7 @@ mod tests {
             temperature: None,
             top_p: None,
             max_output_tokens: Some(16),
+            token_limit_parameter: ProviderTokenLimitParameter::MaxCompletionTokens,
             response_format: None,
             extra_parameters_json: &serde_json::json!({}),
             stream: false,
@@ -1341,6 +1714,8 @@ mod tests {
             provider_kind: "deepseek",
             api_key: Some("test"),
             base_url: "https://example.invalid/v1",
+            auth_scheme: ProviderAuthScheme::Bearer,
+            chat_path: "/chat/completions".to_string(),
             model_name: "deepseek-chat",
             messages: vec![OpenAiCompatibleMessage {
                 role: "user".to_string(),
@@ -1350,6 +1725,7 @@ mod tests {
             temperature: None,
             top_p: None,
             max_output_tokens: Some(16),
+            token_limit_parameter: ProviderTokenLimitParameter::MaxTokens,
             response_format: None,
             extra_parameters_json: &serde_json::json!({}),
             stream: false,
@@ -1364,11 +1740,221 @@ mod tests {
 
     #[test]
     fn allows_ollama_provider_without_api_key() {
-        let (api_key, base_url) =
-            UnifiedGateway::resolve_provider("ollama", None, Some("http://localhost:11434/v1"))
-                .expect("ollama should resolve without token");
-        assert!(api_key.is_none());
-        assert_eq!(base_url, "http://localhost:11434/v1");
+        let provider_profile = serde_json::json!({
+            "runtime": {
+                "kind": "openai_compatible",
+                "authScheme": "bearer",
+                "tokenLimitParameter": "max_tokens",
+                "structuredOutput": "json_schema",
+                "chatPath": "/chat/completions",
+                "embeddingsPath": "/embeddings",
+                "modelsPath": "/models"
+            },
+            "baseUrl": {
+                "allowOverride": true,
+                "requireHttps": false,
+                "allowPrivateNetwork": true,
+                "trimSuffixes": ["/v1"]
+            },
+            "credentials": {
+                "apiKeyRequired": false,
+                "baseUrlRequired": true,
+                "baseUrlMode": "required",
+                "validationMode": "model_list"
+            }
+        });
+        let extra_parameters_json = serde_json::json!({
+            "_providerProfile": provider_profile,
+        });
+
+        let resolved = UnifiedGateway::resolve_provider(
+            "ollama",
+            None,
+            Some("http://localhost:11434/v1"),
+            &extra_parameters_json,
+        )
+        .expect("ollama should resolve without token");
+        assert!(resolved.api_key.is_none());
+        assert_eq!(resolved.base_url, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn resolves_raw_authorization_runtime_profile() {
+        let resolved = UnifiedGateway::resolve_provider(
+            "synthetic-router",
+            Some("plain-secret"),
+            Some("https://router.example/v1"),
+            &serde_json::json!({
+                "_providerProfile": {
+                    "runtime": {
+                        "kind": "openai_compatible",
+                        "authScheme": "raw_authorization",
+                        "tokenLimitParameter": "max_tokens",
+                        "structuredOutput": "json_schema",
+                        "chatPath": "/chat/completions",
+                        "embeddingsPath": null,
+                        "modelsPath": "/models"
+                    },
+                    "baseUrl": {
+                        "allowOverride": false,
+                        "requireHttps": true,
+                        "allowPrivateNetwork": false,
+                        "trimSuffixes": []
+                    },
+                    "credentials": {
+                        "apiKeyRequired": true,
+                        "baseUrlRequired": false,
+                        "baseUrlMode": "fixed",
+                        "validationMode": "model_list"
+                    }
+                }
+            }),
+        )
+        .expect("raw authorization profile should resolve");
+        assert_eq!(resolved.api_key.as_deref(), Some("plain-secret"));
+        assert_eq!(resolved.runtime.auth_scheme, ProviderAuthScheme::RawAuthorization);
+        assert_eq!(resolved.base_url, "https://router.example/v1");
+    }
+
+    #[test]
+    fn runtime_profile_is_required() {
+        let error = UnifiedGateway::resolve_provider(
+            "synthetic-router",
+            Some("plain-secret"),
+            Some("https://router.example/v1"),
+            &serde_json::json!({}),
+        )
+        .expect_err("runtime must be catalog-profile driven");
+        assert!(error.to_string().contains("missing runtime provider profile"));
+    }
+
+    #[test]
+    fn runtime_profile_rejects_incomplete_provider_profile() {
+        let error = UnifiedGateway::resolve_provider(
+            "synthetic-router",
+            Some("plain-secret"),
+            Some("https://router.example/v1"),
+            &serde_json::json!({
+                "_providerProfile": {
+                    "runtime": {
+                        "kind": "openai_compatible",
+                        "authScheme": "bearer"
+                    }
+                }
+            }),
+        )
+        .expect_err("runtime profile must be the full canonical shape");
+
+        assert!(error.to_string().contains("invalid runtime provider profile"));
+    }
+
+    #[test]
+    fn runtime_profile_rejects_unsupported_runtime_kind() {
+        let error = UnifiedGateway::resolve_provider(
+            "synthetic-router",
+            Some("plain-secret"),
+            Some("https://router.example/v1"),
+            &serde_json::json!({
+                "_providerProfile": {
+                    "runtime": {
+                        "kind": "unsupported_runtime",
+                        "authScheme": "bearer",
+                        "tokenLimitParameter": "max_tokens",
+                        "structuredOutput": "json_schema",
+                        "chatPath": "/chat/completions",
+                        "embeddingsPath": "/embeddings",
+                        "modelsPath": "/models"
+                    },
+                    "baseUrl": {
+                        "allowOverride": false,
+                        "requireHttps": true,
+                        "allowPrivateNetwork": false,
+                        "trimSuffixes": []
+                    },
+                    "credentials": {
+                        "apiKeyRequired": true,
+                        "baseUrlRequired": false,
+                        "baseUrlMode": "fixed",
+                        "validationMode": "model_list"
+                    }
+                }
+            }),
+        )
+        .expect_err("runtime kind must stay canonical");
+
+        assert!(error.to_string().contains("unsupported provider runtime kind"));
+    }
+
+    #[test]
+    fn runtime_profile_rejects_private_hosted_base_url() {
+        let error = UnifiedGateway::resolve_provider(
+            "synthetic-router",
+            Some("plain-secret"),
+            Some("https://127.0.0.1/v1"),
+            &serde_json::json!({
+                "_providerProfile": {
+                    "runtime": {
+                        "kind": "openai_compatible",
+                        "authScheme": "bearer",
+                        "tokenLimitParameter": "max_tokens",
+                        "structuredOutput": "json_schema",
+                        "chatPath": "/chat/completions",
+                        "embeddingsPath": null,
+                        "modelsPath": "/models"
+                    },
+                    "baseUrl": {
+                        "allowOverride": false,
+                        "requireHttps": true,
+                        "allowPrivateNetwork": false,
+                        "trimSuffixes": []
+                    },
+                    "credentials": {
+                        "apiKeyRequired": true,
+                        "baseUrlRequired": false,
+                        "baseUrlMode": "fixed",
+                        "validationMode": "model_list"
+                    }
+                }
+            }),
+        )
+        .expect_err("hosted runtime must reject stale private base URLs");
+        assert!(error.to_string().contains("private"));
+    }
+
+    #[test]
+    fn runtime_profile_rejects_non_http_base_url() {
+        let error = UnifiedGateway::resolve_provider(
+            "synthetic-router",
+            Some("plain-secret"),
+            Some("file:///tmp/provider.sock"),
+            &serde_json::json!({
+                "_providerProfile": {
+                    "runtime": {
+                        "kind": "openai_compatible",
+                        "authScheme": "bearer",
+                        "tokenLimitParameter": "max_tokens",
+                        "structuredOutput": "json_schema",
+                        "chatPath": "/chat/completions",
+                        "embeddingsPath": null,
+                        "modelsPath": "/models"
+                    },
+                    "baseUrl": {
+                        "allowOverride": false,
+                        "requireHttps": true,
+                        "allowPrivateNetwork": false,
+                        "trimSuffixes": []
+                    },
+                    "credentials": {
+                        "apiKeyRequired": true,
+                        "baseUrlRequired": false,
+                        "baseUrlMode": "fixed",
+                        "validationMode": "model_list"
+                    }
+                }
+            }),
+        )
+        .expect_err("runtime must reject non-http provider URLs");
+        assert!(error.to_string().contains("http or https"));
     }
 
     #[test]
@@ -1380,7 +1966,8 @@ mod tests {
                 "dimensions": 1024,
                 "encoding_format": "float",
                 "model": "ignored",
-                "input": "ignored"
+                "input": "ignored",
+                "_providerProfile": {"runtime": {"authScheme": "bearer"}}
             }),
         );
 
@@ -1391,57 +1978,7 @@ mod tests {
         assert_eq!(body.get("input"), Some(&serde_json::json!(["alpha", "beta"])));
         assert_eq!(body.get("dimensions").and_then(serde_json::Value::as_i64), Some(1024));
         assert_eq!(body.get("encoding_format").and_then(serde_json::Value::as_str), Some("float"));
-    }
-
-    #[test]
-    fn retries_upstream_json_parse_failures_only_for_valid_local_json() {
-        let body = serde_json::json!({
-            "error": {
-                "message": "We could not parse the JSON body of your request. The OpenAI API expects a JSON payload."
-            }
-        });
-        assert!(is_retryable_upstream_json_parse_failure(400, &body, true));
-        assert!(!is_retryable_upstream_json_parse_failure(400, &body, false));
-        assert!(!is_retryable_upstream_json_parse_failure(422, &body, true));
-    }
-
-    #[test]
-    fn recognizes_retryable_upstream_status_codes() {
-        assert!(is_retryable_upstream_status(520));
-        assert!(is_retryable_upstream_status(429));
-        assert!(is_retryable_upstream_status(503));
-        assert!(!is_retryable_upstream_status(400));
-        assert!(!is_retryable_upstream_status(401));
-    }
-
-    #[test]
-    fn recognizes_retryable_transport_error_strings() {
-        assert!(is_retryable_transport_error_text(
-            "client error (SendRequest): connection closed before message completed"
-        ));
-        assert!(is_retryable_transport_error_text(
-            "error sending request for url (...): connection reset by peer"
-        ));
-        // Mid-response TLS shutdown — observed in production when LLM
-        // providers terminate the TLS session abruptly under load.
-        assert!(is_retryable_transport_error_text(
-            "error decoding response body: request or response body error: error reading a body from connection: peer closed connection without sending TLS close_notify"
-        ));
-        assert!(is_retryable_transport_error_text(
-            "peer closed connection without sending TLS close_notify"
-        ));
-        assert!(!is_retryable_transport_error_text("missing OpenAI API key"));
-    }
-
-    #[test]
-    fn transport_retry_delay_follows_fixed_schedule() {
-        assert_eq!(transport_retry_delay(0, 1), Duration::from_secs(1));
-        assert_eq!(transport_retry_delay(0, 2), Duration::from_secs(3));
-        assert_eq!(transport_retry_delay(0, 3), Duration::from_secs(10));
-        assert_eq!(transport_retry_delay(0, 4), Duration::from_secs(30));
-        assert_eq!(transport_retry_delay(0, 5), Duration::from_secs(90));
-        // Past-end saturates to the last step rather than looping.
-        assert_eq!(transport_retry_delay(0, 99), Duration::from_secs(90));
+        assert!(body.get("_providerProfile").is_none());
     }
 
     #[test]

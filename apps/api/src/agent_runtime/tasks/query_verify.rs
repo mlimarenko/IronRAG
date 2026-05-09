@@ -14,7 +14,7 @@ use crate::{
 
 const QUERY_VERIFY_STAGE_CATALOG: &[RuntimeStageKind] = &[RuntimeStageKind::Verify];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryVerifyTaskInput {
     pub question: String,
@@ -22,14 +22,14 @@ pub struct QueryVerifyTaskInput {
     pub grounded_context_text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryVerifyTaskSuccess {
     pub verification_state: QueryVerificationState,
     pub verification_warnings: Vec<QueryVerificationWarning>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryVerifyTaskFailure {
     pub code: String,

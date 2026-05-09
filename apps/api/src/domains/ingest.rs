@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::shared::web::ingest::WebIngestPattern;
+use crate::shared::web::ingest::{WebClassificationReason, WebIngestPattern, WebRunFailureCode};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IngestJob {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -23,7 +23,7 @@ pub struct IngestJob {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IngestAttempt {
     pub id: Uuid,
     pub job_id: Uuid,
@@ -41,7 +41,7 @@ pub struct IngestAttempt {
     pub retryable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IngestStageEvent {
     pub id: Uuid,
     pub attempt_id: Uuid,
@@ -53,7 +53,7 @@ pub struct IngestStageEvent {
     pub recorded_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebIngestRunReceipt {
     pub run_id: Uuid,
@@ -62,11 +62,12 @@ pub struct WebIngestRunReceipt {
     pub run_state: String,
     pub async_operation_id: Option<Uuid>,
     pub counts: WebRunCounts,
+    #[schema(value_type = Option<WebRunFailureCode>)]
     pub failure_code: Option<String>,
     pub cancel_requested_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebRunCounts {
     pub discovered: i64,
@@ -81,7 +82,7 @@ pub struct WebRunCounts {
     pub canceled: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebIngestRunSummary {
     pub run_id: Uuid,
@@ -98,7 +99,7 @@ pub struct WebIngestRunSummary {
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebIngestRun {
     pub run_id: Uuid,
@@ -118,13 +119,14 @@ pub struct WebIngestRun {
     pub requested_by_principal_id: Option<Uuid>,
     pub requested_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    #[schema(value_type = Option<WebRunFailureCode>)]
     pub failure_code: Option<String>,
     pub cancel_requested_at: Option<DateTime<Utc>>,
     pub counts: WebRunCounts,
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebDiscoveredPage {
     pub candidate_id: Uuid,
@@ -137,6 +139,7 @@ pub struct WebDiscoveredPage {
     pub referrer_candidate_id: Option<Uuid>,
     pub host_classification: String,
     pub candidate_state: String,
+    #[schema(value_type = Option<WebClassificationReason>)]
     pub classification_reason: Option<String>,
     pub classification_detail: Option<String>,
     pub content_type: Option<String>,

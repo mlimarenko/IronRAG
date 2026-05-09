@@ -20,7 +20,7 @@ use crate::{
 use super::embed::QuestionEmbeddingResult;
 use super::technical_literals::TechnicalLiteralIntent;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeMatchedEntity {
     pub node_id: Uuid,
     pub label: String,
@@ -28,7 +28,7 @@ pub(crate) struct RuntimeMatchedEntity {
     pub score: Option<f32>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeMatchedRelationship {
     pub edge_id: Uuid,
     pub relation_type: String,
@@ -81,7 +81,7 @@ impl RuntimeMatchedRelationship {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RuntimeChunkScoreKind {
     Relevance,
@@ -93,7 +93,7 @@ pub(crate) enum RuntimeChunkScoreKind {
     FocusedDocument,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeMatchedChunk {
     pub chunk_id: Uuid,
     pub document_id: Uuid,
@@ -118,7 +118,7 @@ pub(crate) struct RuntimeMatchedChunk {
     pub source_text: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeRetrievedDocumentBrief {
     pub(crate) title: String,
     pub(crate) preview_excerpt: String,
@@ -131,7 +131,7 @@ pub(crate) struct RuntimeRetrievedDocumentBrief {
     pub(crate) source_uri: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeStructuredQueryReferenceCounts {
     pub(crate) entity_count: usize,
     pub(crate) relationship_count: usize,
@@ -140,7 +140,7 @@ pub(crate) struct RuntimeStructuredQueryReferenceCounts {
     pub(crate) graph_edge_count: usize,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeStructuredQueryLibrarySummary {
     pub(crate) document_count: usize,
     pub(crate) graph_ready_count: usize,
@@ -150,7 +150,7 @@ pub(crate) struct RuntimeStructuredQueryLibrarySummary {
     pub(crate) recent_documents: Vec<RuntimeQueryRecentDocument>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeStructuredQueryDiagnostics {
     pub(crate) requested_mode: RuntimeQueryMode,
     pub(crate) planned_mode: RuntimeQueryMode,
@@ -170,7 +170,7 @@ pub(crate) struct RuntimeStructuredQueryDiagnostics {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub(crate) struct QueryExecutionReference {
     pub reference_id: uuid::Uuid,
     pub kind: String,
@@ -179,7 +179,7 @@ pub(crate) struct QueryExecutionReference {
     pub score: Option<f32>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub(crate) struct QueryExecutionEnrichment {
     pub planning: crate::domains::query::QueryPlanningMetadata,
     pub rerank: crate::domains::query::RerankMetadata,
@@ -222,6 +222,12 @@ pub(crate) struct RuntimeStructuredQueryResult {
     /// retrieval graph-evidence lane, so canonical answer assembly can render
     /// them without parsing the old bounded context string.
     pub(crate) graph_evidence_context_lines: Vec<String>,
+    /// Final ranked graph entities that shaped the answer context. These feed
+    /// the persisted context bundle so execution detail references stay aligned
+    /// with the evidence the answer actually saw.
+    pub(crate) graph_entity_references: Vec<RuntimeMatchedEntity>,
+    /// Final ranked graph relations that shaped the answer context.
+    pub(crate) graph_relation_references: Vec<RuntimeMatchedRelationship>,
 }
 
 /// Persisted chunk-to-execution reference snapshot. Mirrors the
@@ -285,7 +291,7 @@ pub(crate) struct CanonicalAnswerEvidence {
 
 /// Captures the billing-relevant fields of a live QueryCompiler LLM
 /// call. `None` at the call site means the compiler served the IR from
-/// cache or from a fallback path, so there is no token usage to bill.
+/// cache, so there is no token usage to bill.
 #[derive(Debug, Clone)]
 pub(crate) struct QueryCompileUsage {
     pub(crate) provider_kind: String,
@@ -308,10 +314,10 @@ pub(crate) struct PreparedAnswerQueryResult {
     /// of re-classifying the raw question with keyword lists.
     pub(crate) query_ir: crate::domains::query_ir::QueryIR,
     /// Billing-relevant usage from the QueryCompiler LLM call, if any.
-    /// `None` when the IR was served from cache or from a fallback
-    /// path. Captured separately from `embedding_usage` because the
-    /// two hit different bindings (`QueryCompile` vs `ExtractText`),
-    /// different models, and different per-call costs.
+    /// `None` when the IR was served from cache. Captured separately
+    /// from `embedding_usage` because the two hit different bindings
+    /// (`QueryCompile` vs `ExtractText`), different models, and
+    /// different per-call costs.
     pub(crate) query_compile_usage: Option<QueryCompileUsage>,
 }
 
@@ -320,6 +326,7 @@ pub(crate) struct QueryGraphIndex {
     projection: Arc<ActiveRuntimeGraphProjection>,
     node_positions: HashMap<Uuid, usize>,
     edge_positions: HashMap<Uuid, usize>,
+    incident_edge_ids: HashMap<Uuid, Vec<Uuid>>,
 }
 
 impl QueryGraphIndex {
@@ -329,7 +336,18 @@ impl QueryGraphIndex {
         node_positions: HashMap<Uuid, usize>,
         edge_positions: HashMap<Uuid, usize>,
     ) -> Self {
-        Self { projection, node_positions, edge_positions }
+        let mut incident_edge_ids = HashMap::<Uuid, Vec<Uuid>>::new();
+        for edge in &projection.edges {
+            if !edge_positions.contains_key(&edge.id)
+                || !node_positions.contains_key(&edge.from_node_id)
+                || !node_positions.contains_key(&edge.to_node_id)
+            {
+                continue;
+            }
+            incident_edge_ids.entry(edge.from_node_id).or_default().push(edge.id);
+            incident_edge_ids.entry(edge.to_node_id).or_default().push(edge.id);
+        }
+        Self { projection, node_positions, edge_positions, incident_edge_ids }
     }
 
     #[cfg(test)]
@@ -358,6 +376,17 @@ impl QueryGraphIndex {
 
     pub(crate) fn edges(&self) -> impl Iterator<Item = &RuntimeGraphEdgeRow> + '_ {
         self.projection.edges.iter().filter(|edge| self.edge_positions.contains_key(&edge.id))
+    }
+
+    pub(crate) fn incident_edges(
+        &self,
+        node_id: Uuid,
+    ) -> impl Iterator<Item = &RuntimeGraphEdgeRow> + '_ {
+        self.incident_edge_ids
+            .get(&node_id)
+            .into_iter()
+            .flat_map(|edge_ids| edge_ids.iter())
+            .filter_map(|edge_id| self.edge(*edge_id))
     }
 
     #[must_use]
@@ -393,7 +422,7 @@ pub(crate) struct RuntimeQueryLibrarySummary {
     pub(crate) graph_status: &'static str,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct RuntimeQueryRecentDocument {
     pub(crate) title: String,
     pub(crate) uploaded_at: String,

@@ -27,7 +27,7 @@ use super::retrieve::{
     score_value,
 };
 use super::technical_literals::{
-    question_mentions_pagination, select_document_balanced_chunks, technical_literal_focus_keywords,
+    select_document_balanced_chunks, technical_literal_focus_keywords,
 };
 use super::types::*;
 
@@ -275,7 +275,7 @@ fn order_bounded_context_chunks<'a>(
     if chunks.is_empty() {
         return Vec::new();
     }
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
     let selected = select_document_balanced_chunks(
         question,
         Some(query_ir),

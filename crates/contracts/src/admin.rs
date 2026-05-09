@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::auth::IamMe;
 use crate::diagnostics::OperatorWarning;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminSection {
     Access,
@@ -43,7 +43,7 @@ impl AdminSection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityGate {
     pub section: AdminSection,
@@ -52,7 +52,7 @@ pub struct CapabilityGate {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminCapabilityState {
     pub admin_enabled: bool,
@@ -62,7 +62,7 @@ pub struct AdminCapabilityState {
     pub can_manage_ai: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminViewerSummary {
     pub principal_id: Uuid,
@@ -71,7 +71,7 @@ pub struct AdminViewerSummary {
     pub is_admin: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminSectionSummary {
     pub section: AdminSection,
@@ -81,7 +81,7 @@ pub struct AdminSectionSummary {
     pub gate: CapabilityGate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminToken {
     pub principal_id: Uuid,
@@ -95,7 +95,7 @@ pub struct AdminToken {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminProvider {
     pub id: Uuid,
@@ -106,7 +106,7 @@ pub struct AdminProvider {
     pub credential_source: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminModel {
     pub id: Uuid,
@@ -119,7 +119,7 @@ pub struct AdminModel {
     pub max_output_tokens: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminCredential {
     pub id: Uuid,
@@ -132,7 +132,7 @@ pub struct AdminCredential {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminModelPreset {
     pub id: Uuid,
@@ -147,7 +147,7 @@ pub struct AdminModelPreset {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminBindingValidation {
     pub id: Uuid,
@@ -158,7 +158,7 @@ pub struct AdminBindingValidation {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminLibraryBinding {
     pub id: Uuid,
@@ -171,7 +171,7 @@ pub struct AdminLibraryBinding {
     pub latest_validation: Option<AdminBindingValidation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminPrice {
     pub id: Uuid,
@@ -188,7 +188,7 @@ pub struct AdminPrice {
     pub set_in_workspace: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminOpsSnapshot {
     pub library_id: Uuid,
@@ -204,7 +204,7 @@ pub struct AdminOpsSnapshot {
     pub knowledge_generation_count: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminAuditEvent {
     pub id: Uuid,
@@ -219,7 +219,7 @@ pub struct AdminAuditEvent {
     pub trace_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminConsoleData {
     pub viewer: IamMe,
@@ -235,7 +235,7 @@ pub struct AdminConsoleData {
     pub audit_events: Vec<AdminAuditEvent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminSurface {
     pub viewer: AdminViewerSummary,

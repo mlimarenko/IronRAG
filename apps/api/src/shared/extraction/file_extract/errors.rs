@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use super::{UploadFileKind, mime_detection::detect_declared_upload_file_kind};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadRejectionDetails {
     pub file_name: Option<String>,

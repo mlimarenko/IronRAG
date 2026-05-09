@@ -12,7 +12,7 @@ use crate::shared::extraction::{
     technical_facts::{TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeDocument {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -26,7 +26,7 @@ pub struct KnowledgeDocument {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRevision {
     pub id: Uuid,
     pub document_id: Uuid,
@@ -48,7 +48,7 @@ pub struct KnowledgeRevision {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeChunk {
     pub id: Uuid,
     pub revision_id: Uuid,
@@ -57,7 +57,7 @@ pub struct KnowledgeChunk {
     pub token_count: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeLibraryGeneration {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -68,7 +68,7 @@ pub struct KnowledgeLibraryGeneration {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeLibrarySummary {
     pub library_id: Uuid,
@@ -82,7 +82,7 @@ pub struct KnowledgeLibrarySummary {
     pub latest_generation: Option<KnowledgeLibraryGeneration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEntity {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -91,7 +91,7 @@ pub struct KnowledgeEntity {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRelation {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -100,7 +100,7 @@ pub struct KnowledgeRelation {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEvidence {
     pub id: Uuid,
     pub revision_id: Uuid,
@@ -109,7 +109,7 @@ pub struct KnowledgeEvidence {
     pub confidence_score: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeContextBundle {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -118,14 +118,14 @@ pub struct KnowledgeContextBundle {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleEdge {
     pub bundle_id: Uuid,
     pub target_kind: String,
     pub target_id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredDocumentRevision {
     pub revision_id: Uuid,
@@ -143,7 +143,7 @@ pub struct StructuredDocumentRevision {
     pub prepared_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredBlock {
     pub block_id: Uuid,
@@ -161,7 +161,7 @@ pub struct StructuredBlock {
     pub code_language: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TypedTechnicalFact {
     pub fact_id: Uuid,
@@ -181,7 +181,7 @@ pub struct TypedTechnicalFact {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphEvidenceLiteralSpan {
     pub start_offset: i32,
@@ -189,7 +189,7 @@ pub struct GraphEvidenceLiteralSpan {
     pub literal: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphEvidenceRecord {
     pub evidence_id: Uuid,
@@ -205,7 +205,7 @@ pub struct GraphEvidenceRecord {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedSegmentListItem {
     pub segment_id: Uuid,
@@ -218,7 +218,7 @@ pub struct PreparedSegmentListItem {
     pub excerpt: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedSegmentDetail {
     pub segment: PreparedSegmentListItem,

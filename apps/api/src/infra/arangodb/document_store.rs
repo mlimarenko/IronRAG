@@ -40,7 +40,7 @@ const KNOWLEDGE_CHUNK_REVISION_TERM_LIMIT: usize = 24;
 const KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS: usize = 128;
 
 /// Slim projection for the documents-page inspector counts.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct StructuredRevisionCounts {
     #[serde(default)]
@@ -52,7 +52,7 @@ pub struct StructuredRevisionCounts {
 /// Output of [`ArangoDocumentStore::aggregate_library_generation_signals`].
 /// Mirrors the per-state aggregates used to derive the synthetic library
 /// generation row — one AQL round-trip instead of per-document fetches.
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct LibraryGenerationSignals {
     #[serde(default)]
     pub active_text_generation: i64,
@@ -439,10 +439,9 @@ impl ArangoDocumentStore {
             .client
             .query_json(
                 "FOR revision IN @@collection
-                 FILTER revision.document_id == @document_id
-                 SORT revision.revision_number DESC, revision.revision_id DESC
-                 LIMIT 100
-                 RETURN revision",
+	                 FILTER revision.document_id == @document_id
+	                 SORT revision.revision_number DESC, revision.revision_id DESC
+	                 RETURN revision",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_REVISION_COLLECTION,
                     "document_id": document_id,
@@ -1014,7 +1013,7 @@ impl ArangoDocumentStore {
             }
         }
         let window_count = normalized_windows.len();
-        let rows_by_window = stream::iter(normalized_windows.into_iter())
+        let rows_by_window = stream::iter(normalized_windows)
             .map(|(min_index, max_index)| {
                 let store = self.clone();
                 async move {

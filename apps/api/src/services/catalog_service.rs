@@ -8,7 +8,7 @@ use crate::{
     domains::ai::AiBindingPurpose,
     domains::catalog::{
         CatalogLibrary, CatalogLibraryConnector, CatalogLibraryIngestionReadiness,
-        CatalogLifecycleState, CatalogWorkspace, ChunkingTemplate,
+        CatalogLibraryRuntimeReadiness, CatalogLifecycleState, CatalogWorkspace, ChunkingTemplate,
     },
     domains::recognition::{LibraryRecognitionPolicy, RecognitionEngine},
     infra::repositories::{ai_repository, catalog_repository},
@@ -19,8 +19,21 @@ use crate::{
     shared::web::ingest::{WebIngestPolicy, validate_web_ingest_policy},
 };
 
-const INGEST_REQUIRED_BINDINGS: &[(AiBindingPurpose, &str)] =
-    &[(AiBindingPurpose::ExtractGraph, "extract_graph")];
+const INGEST_REQUIRED_BINDINGS: &[AiBindingPurpose] =
+    &[AiBindingPurpose::ExtractGraph, AiBindingPurpose::EmbedChunk];
+const RUNTIME_REQUIRED_BINDINGS: &[AiBindingPurpose] = &[
+    AiBindingPurpose::ExtractGraph,
+    AiBindingPurpose::EmbedChunk,
+    AiBindingPurpose::QueryRetrieve,
+    AiBindingPurpose::QueryCompile,
+    AiBindingPurpose::QueryAnswer,
+];
+
+#[derive(Debug, Clone)]
+struct CatalogLibraryBindingReadiness {
+    ingestion: CatalogLibraryIngestionReadiness,
+    runtime: CatalogLibraryRuntimeReadiness,
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateWorkspaceCommand {
@@ -274,17 +287,15 @@ impl CatalogService {
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let policies_by_library = parse_library_policies(&rows)?;
         let readiness_by_library =
-            self.list_library_ingestion_readiness(state, &policies_by_library).await?;
+            self.list_library_binding_readiness(state, &policies_by_library).await?;
         rows.into_iter()
             .map(|row| {
                 let library_id = row.id;
-                map_library_row(
-                    row,
-                    readiness_by_library
-                        .get(&library_id)
-                        .cloned()
-                        .unwrap_or_else(default_ingestion_readiness),
-                )
+                let readiness = readiness_by_library
+                    .get(&library_id)
+                    .cloned()
+                    .unwrap_or_else(default_binding_readiness);
+                map_library_row(row, readiness.ingestion, readiness.runtime)
             })
             .collect()
     }
@@ -305,8 +316,8 @@ impl CatalogService {
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
         let policy = parse_library_policy(&row)?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
-        map_library_row(row, readiness)
+        let readiness = self.get_library_binding_readiness(state, row.id, &policy).await?;
+        map_library_row(row, readiness.ingestion, readiness.runtime)
     }
 
     /// Creates a library and provisions its runtime AI profile.
@@ -340,8 +351,8 @@ impl CatalogService {
         .await
         .map_err(|error| map_library_create_error(error, command.workspace_id, &slug))?;
         let policy = parse_library_policy(&row)?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
-        map_library_row(row, readiness)
+        let readiness = self.get_library_binding_readiness(state, row.id, &policy).await?;
+        map_library_row(row, readiness.ingestion, readiness.runtime)
     }
 
     /// Updates a library display payload, description, and lifecycle state.
@@ -374,8 +385,8 @@ impl CatalogService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
         let policy = parse_library_policy(&row)?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
-        map_library_row(row, readiness)
+        let readiness = self.get_library_binding_readiness(state, row.id, &policy).await?;
+        map_library_row(row, readiness.ingestion, readiness.runtime)
     }
 
     /// Updates the reusable web-ingest policy owned by one library.
@@ -402,8 +413,8 @@ impl CatalogService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
         let policy = parse_library_policy(&row)?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
-        map_library_row(row, readiness)
+        let readiness = self.get_library_binding_readiness(state, row.id, &policy).await?;
+        map_library_row(row, readiness.ingestion, readiness.runtime)
     }
 
     /// Updates the recognition policy owned by one library.
@@ -428,8 +439,8 @@ impl CatalogService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
         let policy = parse_library_policy(&row)?;
-        let readiness = self.get_library_ingestion_readiness(state, row.id, &policy).await?;
-        map_library_row(row, readiness)
+        let readiness = self.get_library_binding_readiness(state, row.id, &policy).await?;
+        map_library_row(row, readiness.ingestion, readiness.runtime)
     }
 
     /// Deletes a library and its stashed storage snapshot.
@@ -494,10 +505,22 @@ impl CatalogService {
         recognition_policy: &LibraryRecognitionPolicy,
     ) -> Result<CatalogLibraryIngestionReadiness, ApiError> {
         Ok(self
-            .list_library_ingestion_readiness(state, &[(library_id, recognition_policy.clone())])
+            .get_library_binding_readiness(state, library_id, recognition_policy)
+            .await?
+            .ingestion)
+    }
+
+    async fn get_library_binding_readiness(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        recognition_policy: &LibraryRecognitionPolicy,
+    ) -> Result<CatalogLibraryBindingReadiness, ApiError> {
+        Ok(self
+            .list_library_binding_readiness(state, &[(library_id, recognition_policy.clone())])
             .await?
             .remove(&library_id)
-            .unwrap_or_else(default_ingestion_readiness))
+            .unwrap_or_else(default_binding_readiness))
     }
 
     /// Derives ingestion readiness for a set of libraries from active AI bindings.
@@ -510,6 +533,24 @@ impl CatalogService {
         state: &AppState,
         library_policies: &[(Uuid, LibraryRecognitionPolicy)],
     ) -> Result<HashMap<Uuid, CatalogLibraryIngestionReadiness>, ApiError> {
+        Ok(self
+            .list_library_binding_readiness(state, library_policies)
+            .await?
+            .into_iter()
+            .map(|(library_id, readiness)| (library_id, readiness.ingestion))
+            .collect())
+    }
+
+    /// Derives canonical binding readiness for shell/library summaries from active AI bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Internal`] when the AI binding query fails.
+    async fn list_library_binding_readiness(
+        &self,
+        state: &AppState,
+        library_policies: &[(Uuid, LibraryRecognitionPolicy)],
+    ) -> Result<HashMap<Uuid, CatalogLibraryBindingReadiness>, ApiError> {
         if library_policies.is_empty() {
             return Ok(HashMap::new());
         }
@@ -531,13 +572,8 @@ impl CatalogService {
         let mut readiness = HashMap::with_capacity(library_policies.len());
         for (library_id, recognition_policy) in library_policies {
             let present = purposes_by_library.get(library_id);
-            let mut missing_binding_purposes = INGEST_REQUIRED_BINDINGS
-                .iter()
-                .filter_map(|(purpose, key)| {
-                    let has_binding = present.is_some_and(|bindings| bindings.contains(*key));
-                    (!has_binding).then_some(*purpose)
-                })
-                .collect::<Vec<_>>();
+            let mut missing_binding_purposes =
+                missing_required_purposes(present, INGEST_REQUIRED_BINDINGS);
             if recognition_policy.raster_image_engine == RecognitionEngine::Vision
                 && !present
                     .is_some_and(|bindings| bindings.contains(AiBindingPurpose::Vision.as_str()))
@@ -546,9 +582,12 @@ impl CatalogService {
             }
             readiness.insert(
                 *library_id,
-                CatalogLibraryIngestionReadiness {
-                    ready: missing_binding_purposes.is_empty(),
-                    missing_binding_purposes,
+                CatalogLibraryBindingReadiness {
+                    ingestion: CatalogLibraryIngestionReadiness {
+                        ready: missing_binding_purposes.is_empty(),
+                        missing_binding_purposes: missing_binding_purposes.clone(),
+                    },
+                    runtime: runtime_readiness(present, &missing_binding_purposes),
                 },
             );
         }
@@ -699,11 +738,41 @@ fn map_workspace_row(
 fn default_ingestion_readiness() -> CatalogLibraryIngestionReadiness {
     CatalogLibraryIngestionReadiness {
         ready: false,
-        missing_binding_purposes: INGEST_REQUIRED_BINDINGS
-            .iter()
-            .map(|(purpose, _)| *purpose)
-            .collect(),
+        missing_binding_purposes: INGEST_REQUIRED_BINDINGS.to_vec(),
     }
+}
+
+fn default_binding_readiness() -> CatalogLibraryBindingReadiness {
+    CatalogLibraryBindingReadiness {
+        ingestion: default_ingestion_readiness(),
+        runtime: runtime_readiness(None, INGEST_REQUIRED_BINDINGS),
+    }
+}
+
+fn runtime_readiness(
+    present: Option<&HashSet<String>>,
+    ingest_missing: &[AiBindingPurpose],
+) -> CatalogLibraryRuntimeReadiness {
+    let mut missing_binding_purposes = ingest_missing.to_vec();
+    for purpose in missing_required_purposes(present, RUNTIME_REQUIRED_BINDINGS) {
+        if !missing_binding_purposes.contains(&purpose) {
+            missing_binding_purposes.push(purpose);
+        }
+    }
+    CatalogLibraryRuntimeReadiness { missing_binding_purposes }
+}
+
+fn missing_required_purposes(
+    present: Option<&HashSet<String>>,
+    required: &[AiBindingPurpose],
+) -> Vec<AiBindingPurpose> {
+    required
+        .iter()
+        .filter_map(|purpose| {
+            let has_binding = present.is_some_and(|bindings| bindings.contains(purpose.as_str()));
+            (!has_binding).then_some(*purpose)
+        })
+        .collect()
 }
 
 fn parse_library_policy(
@@ -723,6 +792,7 @@ fn parse_library_policies(
 fn map_library_row(
     row: catalog_repository::CatalogLibraryRow,
     ingestion_readiness: CatalogLibraryIngestionReadiness,
+    runtime_readiness: CatalogLibraryRuntimeReadiness,
 ) -> Result<CatalogLibrary, ApiError> {
     let recognition_policy = LibraryRecognitionPolicy::from_json(row.recognition_policy)
         .map_err(|_| ApiError::Internal)?;
@@ -739,6 +809,7 @@ fn map_library_row(
         lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)
             .map_err(CatalogLifecycleError::into_persisted_error)?,
         chunking_template: ChunkingTemplate::from_db_str(&row.chunking_template),
+        runtime_readiness,
         ingestion_readiness,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -803,5 +874,61 @@ async fn purge_stashed_directory(
             error = ?purge_error,
             "failed to purge stashed content directory"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn present(purposes: &[AiBindingPurpose]) -> HashSet<String> {
+        purposes.iter().map(|purpose| purpose.as_str().to_string()).collect()
+    }
+
+    #[test]
+    fn runtime_readiness_preserves_distinct_missing_query_purposes() {
+        let present = present(&[AiBindingPurpose::ExtractGraph, AiBindingPurpose::EmbedChunk]);
+        let ingestion_readiness = CatalogLibraryIngestionReadiness {
+            ready: true,
+            missing_binding_purposes: missing_required_purposes(
+                Some(&present),
+                INGEST_REQUIRED_BINDINGS,
+            ),
+        };
+
+        let readiness =
+            runtime_readiness(Some(&present), &ingestion_readiness.missing_binding_purposes);
+
+        assert_eq!(
+            readiness.missing_binding_purposes,
+            vec![
+                AiBindingPurpose::QueryRetrieve,
+                AiBindingPurpose::QueryCompile,
+                AiBindingPurpose::QueryAnswer
+            ]
+        );
+    }
+
+    #[test]
+    fn ingestion_readiness_does_not_block_on_query_purposes() {
+        let present = present(&[AiBindingPurpose::ExtractGraph, AiBindingPurpose::EmbedChunk]);
+        let missing = missing_required_purposes(Some(&present), INGEST_REQUIRED_BINDINGS);
+
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn runtime_readiness_preserves_vision_when_ingest_requires_it() {
+        let ingestion_readiness = CatalogLibraryIngestionReadiness {
+            ready: false,
+            missing_binding_purposes: vec![AiBindingPurpose::Vision],
+        };
+
+        let readiness = runtime_readiness(None, &ingestion_readiness.missing_binding_purposes);
+
+        assert_eq!(readiness.missing_binding_purposes[0], AiBindingPurpose::Vision);
+        assert!(readiness.missing_binding_purposes.contains(&AiBindingPurpose::QueryRetrieve));
+        assert!(readiness.missing_binding_purposes.contains(&AiBindingPurpose::QueryCompile));
+        assert!(readiness.missing_binding_purposes.contains(&AiBindingPurpose::QueryAnswer));
     }
 }

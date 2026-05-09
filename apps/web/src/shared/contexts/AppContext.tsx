@@ -1,0 +1,256 @@
+import { useState, useCallback, useEffect, type ReactNode } from 'react';
+import { authApi, ApiError } from '@/shared/api';
+import i18n from '@/shared/i18n';
+import type { BootstrapSetup, SessionResolveResponse } from '@/shared/api/auth';
+import type { User, Workspace, Library, Locale } from '@/shared/types';
+import type { BootstrapBindingPurpose } from '@/shared/api/generated';
+import { AppContext, type AppContextValue } from './app-context';
+
+function preferredLocale(sessionLocale: Locale): Locale {
+  const savedLocale = localStorage.getItem('ironrag_locale');
+  return savedLocale || sessionLocale;
+}
+
+function localizedShellName(
+  slug: string,
+  fallbackName: string,
+  locale: Locale,
+): string {
+  if (slug === 'default') {
+    return i18n.t('shell.defaultWorkspaceLabel', { lng: locale });
+  }
+  if (slug === 'default-library') {
+    return i18n.t('shell.defaultLibraryLabel', { lng: locale });
+  }
+  return fallbackName;
+}
+
+const QUERY_READY_PURPOSES = new Set<BootstrapBindingPurpose>([
+  'query_retrieve',
+  'query_compile',
+  'query_answer',
+]);
+
+function libraryQueryReady(
+  ingestionReady: boolean,
+  queryReady: boolean | null | undefined,
+  missingBindingPurposes: BootstrapBindingPurpose[],
+): boolean {
+  return queryReady ?? (
+    ingestionReady && !missingBindingPurposes.some((purpose) => QUERY_READY_PURPOSES.has(purpose))
+  );
+}
+
+function mapSessionToState(session: SessionResolveResponse, locale: Locale) {
+  let user: User | null = null;
+  if (session.me) {
+    user = {
+      id: session.me.principal.id,
+      login: session.me.user?.login ?? session.me.principal.displayLabel,
+      displayName: session.me.user?.displayName ?? session.me.principal.displayLabel,
+      accessLabel: session.me.principal.displayLabel,
+      role: 'admin',
+    };
+  }
+
+  const workspaces: Workspace[] = (session.shellBootstrap?.workspaces ?? []).map(ws => ({
+    id: ws.id,
+    name: localizedShellName(ws.slug, ws.name, locale),
+    createdAt: '',
+  }));
+
+  const libraries: Library[] = (session.shellBootstrap?.libraries ?? []).map(lib => {
+    const missingBindingPurposes = lib.missingBindingPurposes;
+    return {
+      id: lib.id,
+      workspaceId: lib.workspaceId,
+      name: localizedShellName(lib.slug, lib.name, locale),
+      createdAt: '',
+      ingestionReady: lib.ingestionReady,
+      queryReady: libraryQueryReady(lib.ingestionReady, lib.queryReady, missingBindingPurposes),
+      missingBindingPurposes,
+    };
+  });
+
+  const isBootstrapRequired = session.mode === 'bootstrap_required' ||
+    (session.bootstrapStatus?.setupRequired ?? false);
+
+  return { user, workspaces, libraries, isBootstrapRequired, locale };
+}
+
+function resolveWorkspaceSelection(
+  workspaces: Workspace[],
+  savedWorkspaceId: string | null,
+): Workspace | null {
+  if (workspaces.length === 0) return null;
+  const savedWorkspace = savedWorkspaceId
+    ? workspaces.find((workspace) => workspace.id === savedWorkspaceId)
+    : null;
+  return savedWorkspace ?? workspaces[0] ?? null;
+}
+
+function resolveLibrarySelection(
+  libraries: Library[],
+  activeWorkspaceId: string | null,
+  savedLibraryId: string | null,
+): Library | null {
+  if (!activeWorkspaceId) return null;
+  const scopedLibraries = libraries.filter((library) => library.workspaceId === activeWorkspaceId);
+  if (scopedLibraries.length === 0) return null;
+  const savedLibrary = savedLibraryId
+    ? scopedLibraries.find((library) => library.id === savedLibraryId)
+    : null;
+  return savedLibrary ?? scopedLibraries[0] ?? null;
+}
+
+export function AppProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(null);
+  const [libraries, setLibraries] = useState<Library[]>([]);
+  const [activeLibrary, setActiveLibrary] = useState<Library | null>(null);
+  const [locale, setLocaleRaw] = useState<Locale>('en');
+  const setLocale = useCallback((l: Locale) => {
+    setLocaleRaw(l);
+    void i18n.changeLanguage(l);
+    localStorage.setItem('ironrag_locale', l);
+  }, []);
+  const [isBootstrapMode, setIsBootstrapMode] = useState(false);
+  const [isBootstrapRequired, setIsBootstrapRequired] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+
+  const applySession = useCallback((session: SessionResolveResponse) => {
+    const resolvedLocale = preferredLocale(session.locale || 'en');
+    const state = mapSessionToState(session, resolvedLocale);
+    setUser(state.user);
+    setWorkspaces(state.workspaces);
+    setLibraries(state.libraries);
+    setIsBootstrapRequired(state.isBootstrapRequired);
+    setLocale(state.locale);
+
+    const savedWsId = localStorage.getItem('ironrag_active_workspace');
+    const savedLibId = localStorage.getItem('ironrag_active_library');
+    const nextWorkspace = resolveWorkspaceSelection(state.workspaces, savedWsId);
+    const nextLibrary = resolveLibrarySelection(state.libraries, nextWorkspace?.id ?? null, savedLibId);
+
+    setActiveWorkspace(nextWorkspace);
+    setActiveLibrary(nextLibrary);
+
+    if (nextWorkspace) localStorage.setItem('ironrag_active_workspace', nextWorkspace.id);
+    else localStorage.removeItem('ironrag_active_workspace');
+
+    if (nextLibrary) localStorage.setItem('ironrag_active_library', nextLibrary.id);
+    else localStorage.removeItem('ironrag_active_library');
+  }, [setLocale]);
+
+  // Resolve session on mount. Bootstrap of the AppContext provider runs
+  // before the QueryClientProvider's tree exists for downstream consumers,
+  // so this single one-shot fetch stays on the imperative auth API facade
+  // intentionally. All other server-state reads flow through useQuery.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        // eslint-disable-next-line no-restricted-syntax -- AppContext bootstrap, see comment above
+        const session = await authApi.resolveSession();
+        if (!cancelled) {
+          applySession(session);
+          setSessionError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          if (err instanceof ApiError && err.status === 401) {
+            // Not authenticated — expected on first visit
+            setUser(null);
+          } else {
+            setSessionError(err instanceof Error ? err.message : 'Session resolve failed');
+          }
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [applySession]);
+
+  const login = useCallback(async (loginVal: string, password: string) => {
+    await authApi.login(loginVal, password);
+    const session = await authApi.resolveSession();
+    applySession(session);
+  }, [applySession]);
+
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout();
+    } catch {
+      // Ignore logout errors — clear local state regardless
+    }
+    setUser(null);
+    setWorkspaces([]);
+    setLibraries([]);
+    setActiveWorkspace(null);
+    setActiveLibrary(null);
+    setIsBootstrapRequired(false);
+  }, []);
+
+  const bootstrapSetup = useCallback(async (data: BootstrapSetup) => {
+    await authApi.bootstrapSetup(data);
+    const session = await authApi.resolveSession();
+    applySession(session);
+    setIsBootstrapRequired(false);
+  }, [applySession]);
+
+  const refreshSession = useCallback(async () => {
+    const session = await authApi.resolveSession();
+    applySession(session);
+  }, [applySession]);
+
+  const filteredLibraries = libraries.filter(l => l.workspaceId === activeWorkspace?.id);
+
+  const persistedSetActiveWorkspace = useCallback((ws: Workspace | null) => {
+    setActiveWorkspace(ws);
+    if (ws) localStorage.setItem('ironrag_active_workspace', ws.id);
+    else localStorage.removeItem('ironrag_active_workspace');
+    setActiveLibrary(prev => {
+      const nextLibrary = prev && ws && prev.workspaceId === ws.id ? prev : null;
+      if (nextLibrary) localStorage.setItem('ironrag_active_library', nextLibrary.id);
+      else localStorage.removeItem('ironrag_active_library');
+      return nextLibrary;
+    });
+  }, []);
+
+  const persistedSetActiveLibrary = useCallback((lib: Library | null) => {
+    setActiveLibrary(lib);
+    if (lib) localStorage.setItem('ironrag_active_library', lib.id);
+    else localStorage.removeItem('ironrag_active_library');
+  }, []);
+
+  const value: AppContextValue = {
+    user,
+    workspaces,
+    activeWorkspace,
+    libraries: filteredLibraries,
+    activeLibrary,
+    locale,
+    isAuthenticated: !!user,
+    isBootstrapMode,
+    isBootstrapRequired,
+    isLoading,
+    sessionError,
+    setUser,
+    setWorkspaces,
+    setActiveWorkspace: persistedSetActiveWorkspace,
+    setLibraries,
+    setActiveLibrary: persistedSetActiveLibrary,
+    setLocale,
+    setIsBootstrapMode,
+    setIsBootstrapRequired,
+    login,
+    logout,
+    bootstrapSetup,
+    refreshSession,
+  };
+
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}

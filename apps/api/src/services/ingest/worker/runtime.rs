@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use tokio::{sync::broadcast, task::JoinSet, time};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -29,6 +30,7 @@ pub(super) async fn run_ingestion_worker_pool(
     } else {
         "disabled"
     };
+    let shutdown_cancellation_token = CancellationToken::new();
     let mut next_worker_index = 0usize;
     let mut active_jobs = JoinSet::new();
 
@@ -81,12 +83,14 @@ pub(super) async fn run_ingestion_worker_pool(
             workspace_limit,
             library_limit,
             memory_soft_limit_mib,
+            &shutdown_cancellation_token,
         )
         .await;
         sync_worker_runtime_snapshot(&state, active_jobs.len()).await;
 
         tokio::select! {
             _ = shutdown.recv() => {
+                shutdown_cancellation_token.cancel();
                 info!("stopping canonical ingestion dispatcher");
                 break;
             }
@@ -140,6 +144,7 @@ async fn fill_available_job_slots(
     workspace_limit: usize,
     library_limit: usize,
     memory_soft_limit_mib: u64,
+    shutdown_cancellation_token: &CancellationToken,
 ) {
     while active_jobs.len() < global_limit {
         // Memory-aware backpressure. The static parallelism limits above are
@@ -188,8 +193,15 @@ async fn fill_available_job_slots(
                 active_jobs.spawn({
                     let state = state.clone();
                     let worker_id = worker_id.clone();
+                    let job_cancellation_token = shutdown_cancellation_token.child_token();
                     async move {
-                        let result = execute_canonical_ingest_job(state, &worker_id, job).await;
+                        let result = execute_canonical_ingest_job(
+                            state,
+                            &worker_id,
+                            job,
+                            job_cancellation_token,
+                        )
+                        .await;
                         CanonicalJobOutcome {
                             job_id,
                             worker_id,

@@ -10,7 +10,7 @@ use crate::{
         IntentKeywords, QueryIntentCacheStatus, QueryPlanningMetadata, RerankMetadata,
         RerankStatus, RuntimeQueryMode,
     },
-    services::query::planner::extract_keywords,
+    services::query::{error::QueryServiceError, planner::extract_keywords},
 };
 
 #[derive(Debug, Clone)]
@@ -21,7 +21,7 @@ pub struct IntentResolutionRequest {
     pub source_truth_version: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RerankRequest {
     pub question: String,
@@ -31,7 +31,7 @@ pub struct RerankRequest {
     pub result_limit: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RerankCandidate {
     pub id: String,
@@ -39,7 +39,7 @@ pub struct RerankCandidate {
     pub score: Option<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RerankOutcome {
     pub entities: Vec<String>,
@@ -48,7 +48,7 @@ pub struct RerankOutcome {
     pub metadata: RerankMetadata,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryRerankTaskInput {
     pub request: RerankRequest,
@@ -57,7 +57,7 @@ pub struct QueryRerankTaskInput {
     pub chunk_candidates: Vec<RerankCandidate>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryRerankFailureCode {
     InvalidResultLimit,
@@ -74,14 +74,14 @@ impl QueryRerankFailureCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryRerankFailure {
     pub code: String,
     pub summary: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextAssemblyRequest {
     pub requested_mode: RuntimeQueryMode,
@@ -102,7 +102,7 @@ pub struct GroupedReferenceCandidate {
 pub async fn invalidate_library_source_truth(
     state: &crate::app::state::AppState,
     library_id: Uuid,
-) -> anyhow::Result<i64> {
+) -> Result<i64, QueryServiceError> {
     let source_truth_version = crate::infra::repositories::touch_library_source_truth_version(
         &state.persistence.postgres,
         library_id,

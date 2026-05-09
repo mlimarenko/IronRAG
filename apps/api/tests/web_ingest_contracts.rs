@@ -4,6 +4,7 @@
 mod greenfield_contracts;
 
 use serde_json::json;
+use serde_yaml::Value;
 use uuid::Uuid;
 
 use ironrag_backend::{
@@ -18,9 +19,47 @@ use ironrag_backend::{
     },
 };
 
+fn openapi_contract() -> Value {
+    serde_yaml::from_str(&greenfield_contracts::load_openapi_contract_text())
+        .expect("OpenAPI contract must be valid YAML")
+}
+
+fn mapping_child<'a>(value: &'a Value, key: &str) -> &'a Value {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(Value::String(key.to_string())))
+        .expect("OpenAPI mapping key must exist")
+}
+
+fn component_schema<'a>(contract: &'a Value, name: &str) -> &'a Value {
+    mapping_child(mapping_child(mapping_child(contract, "components"), "schemas"), name)
+}
+
+fn property_schema<'a>(schema: &'a Value, name: &str) -> &'a Value {
+    mapping_child(mapping_child(schema, "properties"), name)
+}
+
+fn string_array(value: &Value) -> Vec<String> {
+    value
+        .as_sequence()
+        .expect("OpenAPI value must be an array")
+        .iter()
+        .map(|item| item.as_str().expect("OpenAPI array item must be a string").to_string())
+        .collect()
+}
+
+fn string_array_child(value: &Value, key: &str) -> Vec<String> {
+    string_array(mapping_child(value, key))
+}
+
+fn string_array_from<const N: usize>(values: [&str; N]) -> Vec<String> {
+    values.into_iter().map(str::to_string).collect()
+}
+
 #[test]
 fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
     let contract = greenfield_contracts::load_openapi_contract_text();
+    let openapi = openapi_contract();
 
     for path in [
         "/v1/content/web-runs:",
@@ -31,13 +70,23 @@ fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
         assert!(contract.contains(path), "missing web ingest REST path `{path}`");
     }
 
-    assert!(
-        contract.contains("required: [libraryId, seedUrl, mode, urlFilter]"),
-        "CreateWebIngestRunRequest must keep canonical required fields"
+    let request_schema = component_schema(&openapi, "CreateWebIngestRunRequest");
+    assert_eq!(
+        string_array_child(request_schema, "required"),
+        ["libraryId", "seedUrl", "mode", "urlFilter"],
+        "CreateWebIngestRunRequest must keep canonical required fields",
     );
-    assert!(
-        contract.contains("enum: [single_page, recursive_crawl]"),
-        "web ingest mode enum must stay canonical in OpenAPI"
+    assert_eq!(
+        mapping_child(property_schema(request_schema, "mode"), "$ref")
+            .as_str()
+            .expect("mode must reference WebIngestMode"),
+        "#/components/schemas/WebIngestMode",
+        "CreateWebIngestRunRequest.mode must use the canonical mode enum",
+    );
+    assert_eq!(
+        string_array_child(component_schema(&openapi, "WebIngestMode"), "enum"),
+        ["single_page", "recursive_crawl"],
+        "web ingest mode enum must stay canonical in OpenAPI",
     );
 
     let single_page_defaults = validate_web_run_settings("single_page", None, Some(9), None)
@@ -57,30 +106,48 @@ fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
 
 #[test]
 fn web_ingest_contract_enums_cover_runtime_vocabulary_and_partial_count_grammar() {
-    let contract = greenfield_contracts::load_openapi_contract_text();
+    let openapi = openapi_contract();
 
-    assert!(
-        contract.contains("enum: [accepted, discovering, processing, completed, completed_partial, failed, canceled]"),
-        "run state enum must keep completed_partial in OpenAPI"
+    assert_eq!(
+        string_array_child(component_schema(&openapi, "WebIngestRunState"), "enum"),
+        [
+            "accepted",
+            "discovering",
+            "processing",
+            "completed",
+            "completed_partial",
+            "failed",
+            "canceled"
+        ],
+        "run state enum must keep completed_partial in OpenAPI",
     );
-    assert!(
-        contract.contains("[discovered, eligible, processed, queued, processing, duplicates, excluded, blocked, failed, canceled]"),
-        "WebRunCounts must keep queued and processing grammar"
+    assert_eq!(
+        string_array_child(component_schema(&openapi, "WebRunCounts"), "required"),
+        [
+            "discovered",
+            "eligible",
+            "processed",
+            "queued",
+            "processing",
+            "duplicates",
+            "excluded",
+            "blocked",
+            "failed",
+            "canceled"
+        ],
+        "WebRunCounts must keep queued and processing grammar",
     );
 
-    for reason in WebClassificationReason::ALL.map(WebClassificationReason::as_str) {
-        assert!(
-            contract.contains(&format!("- {reason}")),
-            "missing classification reason `{reason}` in OpenAPI"
-        );
-    }
-
-    for failure_code in WebRunFailureCode::ALL.map(WebRunFailureCode::as_str) {
-        assert!(
-            contract.contains(&format!("- {failure_code}")),
-            "missing failure code `{failure_code}` in OpenAPI"
-        );
-    }
+    assert_eq!(
+        string_array_child(component_schema(&openapi, "WebClassificationReason"), "enum"),
+        string_array_from(WebClassificationReason::ALL.map(WebClassificationReason::as_str)),
+        "classification reason enum must cover the runtime vocabulary",
+    );
+    assert_eq!(
+        string_array_child(component_schema(&openapi, "WebRunFailureCode"), "enum"),
+        string_array_from(WebRunFailureCode::ALL.map(WebRunFailureCode::as_str)),
+        "failure code enum must cover the runtime vocabulary",
+    );
 
     let completed_partial = derive_terminal_run_state(&WebRunCounts {
         processed: 2,

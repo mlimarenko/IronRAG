@@ -15,8 +15,8 @@ use crate::infra::arangodb::{
     graph_store::KnowledgeEvidenceRow,
 };
 use crate::services::query::execution::technical_literals::{
-    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
-    extract_url_literals,
+    detect_technical_literal_intent_from_query_ir, extract_explicit_path_literals,
+    extract_http_methods, extract_parameter_literals, extract_url_literals,
 };
 use crate::services::query::{
     assistant_grounding::AssistantGroundingEvidence,
@@ -33,10 +33,9 @@ mod preflight_tests;
 mod technical_literal_tests;
 mod verification_tests;
 
-/// Descriptive/lenient fallback IR for test callsites that don't care about
-/// IR-driven filtering. Matches the fallback IR produced by the
-/// `QueryCompilerService` when the model call fails.
-fn fallback_query_ir() -> QueryIR {
+/// Descriptive/lenient QueryIR for test callsites that don't care about
+/// IR-driven filtering.
+fn generic_query_ir() -> QueryIR {
     QueryIR {
         act: QueryAct::Describe,
         scope: QueryScope::MultiDocument,
@@ -61,7 +60,7 @@ fn query_ir_with_scope_and_target_types<const N: usize>(
     QueryIR {
         scope,
         target_types: target_types.into_iter().map(str::to_string).collect(),
-        ..fallback_query_ir()
+        ..generic_query_ir()
     }
 }
 
@@ -101,7 +100,7 @@ fn query_ir_with_scope_literals_and_target_types<const L: usize, const T: usize>
             .collect(),
         target_types: target_types.into_iter().map(str::to_string).collect(),
         scope,
-        ..fallback_query_ir()
+        ..generic_query_ir()
     }
 }
 

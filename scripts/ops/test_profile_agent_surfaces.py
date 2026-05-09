@@ -13,6 +13,66 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AgentSurfaceProfileTests(unittest.TestCase):
+    def test_probe_mcp_tool_uses_diagnostics_surface_for_raw_tools(self) -> None:
+        class FakeSession:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def request_json(self, method, uri, **kwargs):
+                self.calls.append((method, uri, kwargs))
+                return MODULE.CurlSample(
+                    status_code=200,
+                    time_total_s=0.01,
+                    size_download_bytes=2,
+                    payload={"jsonrpc": "2.0", "result": {}},
+                )
+
+        session = FakeSession()
+
+        MODULE.probe_mcp_tool(
+            session,
+            bearer_token=None,
+            tool_name="search_entities",
+            arguments={"library": "workspace/library", "query": "orion"},
+        )
+
+        self.assertEqual(session.calls[0][1], MODULE.MCP_DIAGNOSTICS_ROUTE)
+
+    def test_document_search_arguments_use_canonical_library_refs(self) -> None:
+        arguments = MODULE.build_document_search_arguments("workspace/library", "alpha", 5)
+
+        self.assertEqual(arguments["libraries"], ["workspace/library"])
+        self.assertEqual(arguments["query"], "alpha")
+        self.assertEqual(arguments["limit"], 5)
+        self.assertTrue(arguments["includeReferences"])
+        self.assertNotIn("libraryIds", arguments)
+
+    def test_probe_mcp_tool_can_target_answer_surface_explicitly(self) -> None:
+        class FakeSession:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def request_json(self, method, uri, **kwargs):
+                self.calls.append((method, uri, kwargs))
+                return MODULE.CurlSample(
+                    status_code=200,
+                    time_total_s=0.01,
+                    size_download_bytes=2,
+                    payload={"jsonrpc": "2.0", "result": {}},
+                )
+
+        session = FakeSession()
+
+        MODULE.probe_mcp_tool(
+            session,
+            bearer_token=None,
+            tool_name="grounded_answer",
+            arguments={"library": "workspace/library", "query": "What is Orion?"},
+            route=MODULE.MCP_ANSWER_ROUTE,
+        )
+
+        self.assertEqual(session.calls[0][1], MODULE.MCP_ANSWER_ROUTE)
+
     def test_summarize_graph_quality_detects_document_coverage_and_duplicates(self) -> None:
         summary = MODULE.summarize_graph_quality(
             {
@@ -118,6 +178,84 @@ class AgentSurfaceProfileTests(unittest.TestCase):
         self.assertEqual(summary.unknown_label_count, 0)
         self.assertEqual(summary.duplicate_signature_count, 0)
 
+    def test_summarize_grounded_answer_extracts_core_fields(self) -> None:
+        summary = MODULE.summarize_grounded_answer(
+            {
+                "executionDetail": {
+                    "responseTurn": {
+                        "contentText": "Orion connects to Atlas using JSON-RPC.",
+                    },
+                    "verificationState": "verified",
+                    "execution": {
+                        "runtimeExecutionId": "runtime-grounded-1",
+                    },
+                    "chunkReferences": [{"chunkId": "chunk-1"}],
+                    "preparedSegmentReferences": [{"segmentId": "segment-2"}],
+                    "technicalFactReferences": [{"factId": "fact-2"}],
+                    "entityReferences": [{"nodeId": "node-1"}],
+                    "relationReferences": [{"edgeId": "rel-3"}],
+                }
+            }
+        )
+
+        self.assertEqual(summary.answer_text, "Orion connects to Atlas using JSON-RPC.")
+        self.assertEqual(summary.verifier_level, "verified")
+        self.assertEqual(summary.runtime_execution_id, "runtime-grounded-1")
+        self.assertEqual(
+            summary.references,
+            (
+                "chunk|chunk-1",
+                "entity|node-1",
+                "fact|fact-2",
+                "relation|rel-3",
+                "segment|segment-2",
+            ),
+        )
+
+    def test_summarize_assistant_turn_artifacts_captures_text_and_references(self) -> None:
+        summary = MODULE.summarize_assistant_turn_artifacts(
+            {
+                "responseTurn": {
+                    "contentText": "System reports Orion status and Atlas state.",
+                },
+                "chunkReferences": [
+                    {"chunkId": "chunk-1"},
+                    {"chunkId": "chunk-2"},
+                ],
+                "entityReferences": [
+                    {"nodeId": "node-1"},
+                ],
+                "relationReferences": [
+                    {"edgeId": "rel-1"},
+                ],
+                "preparedSegmentReferences": [
+                    {"segmentId": "segment-1"},
+                ],
+                "technicalFactReferences": [
+                    {"factId": "fact-1"},
+                ],
+                "verificationState": "verified",
+                "execution": {
+                    "runtimeExecutionId": "runtime-ui-1",
+                },
+            }
+        )
+
+        self.assertEqual(summary.answer_text, "System reports Orion status and Atlas state.")
+        self.assertEqual(summary.verifier_level, "verified")
+        self.assertEqual(summary.runtime_execution_id, "runtime-ui-1")
+        self.assertEqual(
+            summary.references,
+            (
+                "chunk|chunk-1",
+                "chunk|chunk-2",
+                "entity|node-1",
+                "fact|fact-1",
+                "relation|rel-1",
+                "segment|segment-1",
+            ),
+        )
+
     def test_gate_checks_fail_on_graph_and_document_alignment_regressions(self) -> None:
         checks = MODULE.build_gate_checks(
             entity_search_summary=MODULE.EntitySearchSummary(
@@ -188,10 +326,8 @@ class AgentSurfaceProfileTests(unittest.TestCase):
             assistant_expected_verification="verified",
             assistant_require_all=[],
             assistant_forbid_any=[],
-            assistant_max_tool_starts=None,
             expected_search_top_label=None,
             max_tool_latency_ms=None,
-            max_first_delta_ms=None,
             max_completed_ms=None,
             tool_samples=[],
         )
@@ -274,16 +410,238 @@ class AgentSurfaceProfileTests(unittest.TestCase):
             assistant_expected_verification="verified",
             assistant_require_all=[],
             assistant_forbid_any=[],
-            assistant_max_tool_starts=None,
             expected_search_top_label=None,
             max_tool_latency_ms=None,
-            max_first_delta_ms=None,
             max_completed_ms=None,
             tool_samples=[],
         )
 
         by_label = {check.label: check for check in checks}
         self.assertEqual(by_label["graph.search_alignment"].status, "pass")
+
+    def test_gate_checks_pass_when_grounded_answer_matches_ui_turn(self) -> None:
+        checks = MODULE.build_gate_checks(
+            entity_search_summary=MODULE.EntitySearchSummary(
+                hit_count=1,
+                top_label="Orion",
+                top_score=10.0,
+            ),
+            document_search_summary=MODULE.DocumentSearchSummary(
+                hit_count=1,
+                readable_hit_count=1,
+                top_document_id="doc-1",
+                top_document_title="Primary",
+                top_suggested_start_offset=0,
+                top_excerpt_length=120,
+                top_chunk_reference_count=1,
+                top_score=5.0,
+            ),
+            document_read_summary=MODULE.DocumentReadSummary(
+                document_id="doc-1",
+                document_title="Primary",
+                readability_state="readable",
+                content_length=300,
+                total_reference_count=2,
+                has_more=False,
+                slice_start_offset=0,
+                slice_end_offset=300,
+            ),
+            graph_quality=MODULE.McpQualitySummary(
+                entity_count=1,
+                relation_count=1,
+                document_count=1,
+                document_link_count=1,
+                orphan_relation_count=0,
+                orphan_link_count=0,
+                orphan_document_count=0,
+                entity_rank_monotonic=True,
+                relation_rank_monotonic=True,
+                document_rank_monotonic=True,
+                duplicate_entity_label_count=0,
+                duplicate_relation_signature_count=0,
+                top_entity_label="Orion",
+                visible_entity_labels_normalized=("orion",),
+            ),
+            relation_list_summary=MODULE.RelationListSummary(
+                row_count=1,
+                unknown_label_count=0,
+                duplicate_signature_count=0,
+            ),
+            community_summary=MODULE.CommunitySummary(
+                count=1,
+                communities_with_summary=1,
+                top_entity_count=1,
+            ),
+            assistant_summaries=[
+                MODULE.AssistantTurnSummary(
+                    time_to_completed_s=0.5,
+                    answer_length=21,
+                    answer_text="System reports Orion",
+                    total_reference_count=1,
+                    verification_state="verified",
+                    completion_state="completed",
+                    query_execution_id="query-1",
+                    runtime_execution_id="runtime-1",
+                    references=("chunk|chunk-1",),
+                )
+            ],
+            runtime_execution_summary=MODULE.RuntimeExecutionProbeSummary(
+                runtime_execution_id="runtime-1",
+                lifecycle_state="completed",
+                active_stage="verification",
+            ),
+            runtime_trace_summary=MODULE.RuntimeTraceProbeSummary(
+                runtime_execution_id="runtime-1",
+                stage_count=1,
+                action_count=1,
+                policy_decision_count=0,
+            ),
+            legacy_runtime_execution_error=MODULE.ToolErrorSummary(
+                error_kind="invalid_mcp_tool_call",
+                message="invalid request: expected runtimeExecutionId",
+            ),
+            grounded_answer_summary=MODULE.GroundedAnswerSummary(
+                answer_text="System reports Orion",
+                verifier_level="verified",
+                runtime_execution_id="runtime-1",
+                references=("chunk|chunk-1",),
+            ),
+            graph_min_entities=1,
+            graph_min_relations=1,
+            graph_min_documents=1,
+            community_min_count=1,
+            entity_search_min_hits=1,
+            search_min_hits=1,
+            search_min_readable_hits=1,
+            read_min_content_chars=100,
+            read_min_references=1,
+            assistant_min_references=1,
+            assistant_expected_verification="verified",
+            assistant_require_all=[],
+            assistant_forbid_any=[],
+            expected_search_top_label=None,
+            max_tool_latency_ms=None,
+            max_completed_ms=None,
+            tool_samples=[],
+        )
+
+        by_label = {check.label: check for check in checks}
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_text"].status, "pass")
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_verifier"].status, "pass")
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_runtime_execution_id"].status, "pass")
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_references"].status, "pass")
+
+    def test_gate_checks_fail_when_grounded_answer_is_off_parity(self) -> None:
+        checks = MODULE.build_gate_checks(
+            entity_search_summary=MODULE.EntitySearchSummary(
+                hit_count=1,
+                top_label="Orion",
+                top_score=10.0,
+            ),
+            document_search_summary=MODULE.DocumentSearchSummary(
+                hit_count=1,
+                readable_hit_count=1,
+                top_document_id="doc-1",
+                top_document_title="Primary",
+                top_suggested_start_offset=0,
+                top_excerpt_length=120,
+                top_chunk_reference_count=1,
+                top_score=5.0,
+            ),
+            document_read_summary=MODULE.DocumentReadSummary(
+                document_id="doc-1",
+                document_title="Primary",
+                readability_state="readable",
+                content_length=300,
+                total_reference_count=2,
+                has_more=False,
+                slice_start_offset=0,
+                slice_end_offset=300,
+            ),
+            graph_quality=MODULE.McpQualitySummary(
+                entity_count=1,
+                relation_count=1,
+                document_count=1,
+                document_link_count=1,
+                orphan_relation_count=0,
+                orphan_link_count=0,
+                orphan_document_count=0,
+                entity_rank_monotonic=True,
+                relation_rank_monotonic=True,
+                document_rank_monotonic=True,
+                duplicate_entity_label_count=0,
+                duplicate_relation_signature_count=0,
+                top_entity_label="Orion",
+                visible_entity_labels_normalized=("orion",),
+            ),
+            relation_list_summary=MODULE.RelationListSummary(
+                row_count=1,
+                unknown_label_count=0,
+                duplicate_signature_count=0,
+            ),
+            community_summary=MODULE.CommunitySummary(
+                count=1,
+                communities_with_summary=1,
+                top_entity_count=1,
+            ),
+            assistant_summaries=[
+                MODULE.AssistantTurnSummary(
+                    time_to_completed_s=0.5,
+                    answer_length=21,
+                    answer_text="System reports Orion",
+                    total_reference_count=1,
+                    verification_state="verified",
+                    completion_state="completed",
+                    query_execution_id="query-1",
+                    runtime_execution_id="runtime-1",
+                    references=("chunk|chunk-1",),
+                )
+            ],
+            runtime_execution_summary=MODULE.RuntimeExecutionProbeSummary(
+                runtime_execution_id="runtime-1",
+                lifecycle_state="completed",
+                active_stage="verification",
+            ),
+            runtime_trace_summary=MODULE.RuntimeTraceProbeSummary(
+                runtime_execution_id="runtime-1",
+                stage_count=1,
+                action_count=1,
+                policy_decision_count=0,
+            ),
+            legacy_runtime_execution_error=MODULE.ToolErrorSummary(
+                error_kind="invalid_mcp_tool_call",
+                message="invalid request: expected runtimeExecutionId",
+            ),
+            grounded_answer_summary=MODULE.GroundedAnswerSummary(
+                answer_text="Different text from UI",
+                verifier_level="partially_supported",
+                runtime_execution_id="runtime-2",
+                references=("chunk|chunk-2",),
+            ),
+            graph_min_entities=1,
+            graph_min_relations=1,
+            graph_min_documents=1,
+            community_min_count=1,
+            entity_search_min_hits=1,
+            search_min_hits=1,
+            search_min_readable_hits=1,
+            read_min_content_chars=100,
+            read_min_references=1,
+            assistant_min_references=1,
+            assistant_expected_verification="verified",
+            assistant_require_all=[],
+            assistant_forbid_any=[],
+            expected_search_top_label=None,
+            max_tool_latency_ms=None,
+            max_completed_ms=None,
+            tool_samples=[],
+        )
+
+        by_label = {check.label: check for check in checks}
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_text"].status, "fail")
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_verifier"].status, "fail")
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_runtime_execution_id"].status, "fail")
+        self.assertEqual(by_label["assistant.run_1.grounded_answer_references"].status, "fail")
 
     def test_runtime_and_community_summaries_capture_canonical_fields(self) -> None:
         communities = MODULE.summarize_communities(
@@ -375,14 +733,8 @@ class AgentSurfaceProfileTests(unittest.TestCase):
                 top_entity_count=1,
             ),
             assistant_summaries=[
-                MODULE.SseSummary(
-                    time_to_first_frame_s=0.1,
-                    time_to_first_delta_s=0.2,
-                    time_to_first_tool_call_s=None,
+                MODULE.AssistantTurnSummary(
                     time_to_completed_s=0.5,
-                    delta_event_count=2,
-                    tool_call_started_count=0,
-                    tool_call_completed_count=0,
                     answer_length=42,
                     answer_text="GET /system/info",
                     total_reference_count=2,
@@ -420,10 +772,8 @@ class AgentSurfaceProfileTests(unittest.TestCase):
             assistant_expected_verification="verified",
             assistant_require_all=["/system/info"],
             assistant_forbid_any=["/serverinfo"],
-            assistant_max_tool_starts=0,
             expected_search_top_label=None,
             max_tool_latency_ms=None,
-            max_first_delta_ms=None,
             max_completed_ms=None,
             tool_samples=[],
         )
@@ -431,7 +781,6 @@ class AgentSurfaceProfileTests(unittest.TestCase):
         by_label = {check.label: check for check in checks}
         self.assertEqual(by_label["graph.communities"].status, "pass")
         self.assertEqual(by_label["assistant.runtime_execution_id"].status, "pass")
-        self.assertEqual(by_label["assistant.run_1.tool_start_budget"].status, "pass")
         self.assertEqual(by_label["mcp.get_runtime_execution_alignment"].status, "pass")
         self.assertEqual(by_label["mcp.get_runtime_execution_trace_stages"].status, "pass")
         self.assertEqual(

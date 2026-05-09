@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Canonical MCP + assistant streaming probe.
+Canonical MCP + assistant turn probe.
 
 Measures two agent-facing surfaces that `profile-ui-endpoints.py` does not cover:
 
 1. MCP graph/search tools (latency, payload size, and semantic coherence)
-2. Assistant SSE turn streaming (TTFB, first delta, tool-call phase timing,
-   completion timing, and grounding/reference presence)
+2. Assistant JSON turn execution (completion timing and grounding/reference presence)
 
 Writes a markdown report to `tmp/agent-surface-profile-<timestamp>.md`.
 """
@@ -19,12 +18,10 @@ import json
 import os
 import pathlib
 import re
-import select
 import statistics
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -33,12 +30,13 @@ from urllib import error as urllib_error
 
 DEFAULT_BASE_URL = "http://127.0.0.1:19000"
 DEFAULT_LOGIN = "admin"
-DEFAULT_PASSWORD = "rustrag123"
+PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
 DEFAULT_ENTITY_QUERY = "Orion"
 DEFAULT_ASSISTANT_QUESTION = "What does this library say about Orion?"
 DEFAULT_DOCUMENT_QUERY = DEFAULT_ASSISTANT_QUESTION
 DEFAULT_DOCUMENT_LIMIT = 5
 DEFAULT_READ_LENGTH = 4000
+DEFAULT_ASSISTANT_TOP_K = 8
 DEFAULT_GRAPH_MIN_ENTITIES = 1
 DEFAULT_GRAPH_MIN_RELATIONS = 1
 DEFAULT_GRAPH_MIN_DOCUMENTS = 1
@@ -50,6 +48,8 @@ DEFAULT_READ_MIN_CONTENT_CHARS = 200
 DEFAULT_READ_MIN_REFERENCES = 1
 DEFAULT_ASSISTANT_MIN_REFERENCES = 1
 DEFAULT_ASSISTANT_EXPECTED_VERIFICATION = "verified"
+MCP_ANSWER_ROUTE = "/v1/mcp"
+MCP_DIAGNOSTICS_ROUTE = "/v1/mcp/diagnostics"
 
 
 @dataclass(frozen=True)
@@ -163,14 +163,8 @@ class ToolErrorSummary:
 
 
 @dataclass(frozen=True)
-class SseSummary:
-    time_to_first_frame_s: float | None
-    time_to_first_delta_s: float | None
-    time_to_first_tool_call_s: float | None
-    time_to_completed_s: float | None
-    delta_event_count: int
-    tool_call_started_count: int
-    tool_call_completed_count: int
+class AssistantTurnSummary:
+    time_to_completed_s: float
     answer_length: int
     answer_text: str
     total_reference_count: int
@@ -178,6 +172,15 @@ class SseSummary:
     completion_state: str | None
     query_execution_id: str | None
     runtime_execution_id: str | None
+    references: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class GroundedAnswerSummary:
+    answer_text: str
+    verifier_level: str | None
+    runtime_execution_id: str | None
+    references: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -215,10 +218,11 @@ class CurlSession:
                 "POST",
                 "-H",
                 "Content-Type: application/json",
-                "--data",
-                payload,
+                "--data-binary",
+                "@-",
                 f"{self.base_url}/v1/iam/session/login",
             ],
+            input=payload,
             capture_output=True,
             check=False,
             text=True,
@@ -311,6 +315,31 @@ def discover_workspace_id(session: CurlSession, library_id: str) -> str:
     raise RuntimeError(f"failed to discover workspaceId for library {library_id}")
 
 
+def discover_library_catalog_ref(session: CurlSession, library_id: str) -> str:
+    library = session.request_json("GET", f"/v1/catalog/libraries/{library_id}")
+    if library.status_code != 200:
+        raise RuntimeError(f"get catalog library returned HTTP {library.status_code}")
+    library_payload = library.payload
+    if not isinstance(library_payload, dict):
+        raise RuntimeError("get catalog library returned non-dict payload")
+    workspace_id = library_payload.get("workspaceId")
+    library_slug = library_payload.get("slug")
+    if not isinstance(workspace_id, str) or not isinstance(library_slug, str):
+        raise RuntimeError("catalog library payload missing workspaceId or slug")
+
+    workspace = session.request_json("GET", f"/v1/catalog/workspaces/{workspace_id}")
+    if workspace.status_code != 200:
+        raise RuntimeError(f"get catalog workspace returned HTTP {workspace.status_code}")
+    workspace_payload = workspace.payload
+    if not isinstance(workspace_payload, dict):
+        raise RuntimeError("get catalog workspace returned non-dict payload")
+    workspace_slug = workspace_payload.get("slug")
+    if not isinstance(workspace_slug, str):
+        raise RuntimeError("catalog workspace payload missing slug")
+
+    return f"{workspace_slug}/{library_slug}"
+
+
 def create_query_session(session: CurlSession, workspace_id: str, library_id: str) -> str:
     sample = session.request_json(
         "POST",
@@ -342,10 +371,11 @@ def probe_mcp_tool(
     bearer_token: str | None,
     tool_name: str,
     arguments: dict[str, Any],
+    route: str = MCP_DIAGNOSTICS_ROUTE,
 ) -> CurlSample:
     return session.request_json(
         "POST",
-        "/v1/mcp",
+        route,
         body={
             "jsonrpc": "2.0",
             "id": f"agent-probe-{tool_name}",
@@ -356,6 +386,15 @@ def probe_mcp_tool(
         bearer_token=bearer_token,
         timeout_seconds=120,
     )
+
+
+def build_document_search_arguments(library_ref: str, query: str, limit: int) -> dict[str, Any]:
+    return {
+        "query": query,
+        "libraries": [library_ref],
+        "limit": limit,
+        "includeReferences": True,
+    }
 
 
 def normalize_quality_text(value: Any) -> str:
@@ -661,143 +700,49 @@ def summarize_document_read(payload: dict[str, Any]) -> DocumentReadSummary:
     )
 
 
-def stream_assistant_turn(
+def execute_assistant_turn(
     session: CurlSession,
     session_id: str,
     question: str,
     *,
+    top_k: int,
     timeout_seconds: int,
-) -> SseSummary:
-    args = [
-        "curl",
-        "-sN",
-        "-b",
-        session.cookie_jar,
-        "-X",
+) -> AssistantTurnSummary:
+    sample = session.request_json(
         "POST",
-        "-H",
-        "Content-Type: application/json",
-        "-H",
-        "Accept: text/event-stream",
-        "--data",
-        json.dumps({"contentText": question}),
-        f"{session.base_url}/v1/query/sessions/{session_id}/turns",
-    ]
-    started_at = time.monotonic()
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
+        f"/v1/query/sessions/{session_id}/turns",
+        body={"contentText": question, "topK": top_k},
+        headers={"Content-Type": "application/json"},
+        timeout_seconds=timeout_seconds,
     )
-    assert proc.stdout is not None
+    if sample.status_code != 200:
+        raise RuntimeError(f"assistant turn returned HTTP {sample.status_code}")
+    if not isinstance(sample.payload, dict):
+        raise RuntimeError("assistant turn returned non-object payload")
 
-    first_frame_at: float | None = None
-    first_delta_at: float | None = None
-    first_tool_call_at: float | None = None
-    completed_at: float | None = None
-    delta_count = 0
-    tool_call_started_count = 0
-    tool_call_completed_count = 0
-    completed_payload: dict[str, Any] | None = None
-    stream_error: str | None = None
-    current_event = "message"
-    current_data_lines: list[str] = []
+    total_refs = total_reference_count(sample.payload)
+    completion_state = (
+        (sample.payload.get("execution") or {}).get("lifecycleState")
+        if isinstance(sample.payload.get("execution"), dict)
+        else None
+    )
+    query_execution_id = (
+        (sample.payload.get("execution") or {}).get("id")
+        if isinstance(sample.payload.get("execution"), dict)
+        else None
+    )
+    artifacts = summarize_assistant_turn_artifacts(sample.payload)
 
-    while True:
-        if time.monotonic() - started_at > timeout_seconds:
-            proc.kill()
-            raise TimeoutError(f"assistant SSE probe timed out after {timeout_seconds}s")
-        if proc.poll() is not None and not select.select([proc.stdout], [], [], 0.0)[0]:
-            break
-        ready, _, _ = select.select([proc.stdout], [], [], 0.25)
-        if not ready:
-            continue
-        line = proc.stdout.readline()
-        if line == "":
-            if proc.poll() is not None:
-                break
-            continue
-        stripped = line.rstrip("\n")
-        if stripped == "":
-            if not current_data_lines:
-                current_event = "message"
-                continue
-            if first_frame_at is None:
-                first_frame_at = time.monotonic() - started_at
-            event_data = "".join(current_data_lines)
-            try:
-                payload = json.loads(event_data)
-            except json.JSONDecodeError:
-                payload = {}
-            if current_event == "delta":
-                delta_count += 1
-                if first_delta_at is None:
-                    first_delta_at = time.monotonic() - started_at
-            elif current_event == "tool_call_started":
-                tool_call_started_count += 1
-                if first_tool_call_at is None:
-                    first_tool_call_at = time.monotonic() - started_at
-            elif current_event == "tool_call_completed":
-                tool_call_completed_count += 1
-            elif current_event == "completed":
-                completed_at = time.monotonic() - started_at
-                completed_payload = payload if isinstance(payload, dict) else {}
-                break
-            elif current_event == "error":
-                stream_error = payload.get("error") if isinstance(payload, dict) else event_data
-                break
-            current_event = "message"
-            current_data_lines = []
-            continue
-        if stripped.startswith("event:"):
-            current_event = stripped[6:].strip()
-        elif stripped.startswith("data:"):
-            current_data_lines.append(stripped[5:].strip())
-
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    stderr = ""
-    if proc.stderr is not None:
-        stderr = proc.stderr.read().strip()
-    if stream_error:
-        raise RuntimeError(f"assistant SSE returned error frame: {stream_error}")
-    if proc.returncode not in (0, None):
-        raise RuntimeError(f"assistant SSE curl exited with {proc.returncode}: {stderr[:200]}")
-    if completed_payload is None:
-        raise RuntimeError("assistant SSE ended without a completed frame")
-
-    response_turn = completed_payload.get("responseTurn") or {}
-    answer_text = response_turn.get("contentText") or ""
-    total_refs = total_reference_count(completed_payload)
-    verification_state = completed_payload.get("verificationState")
-    execution = completed_payload.get("execution") or {}
-    completion_state = execution.get("lifecycleState")
-    query_execution_id = execution.get("id")
-    runtime_execution_id = execution.get("runtimeExecutionId")
-
-    return SseSummary(
-        time_to_first_frame_s=first_frame_at,
-        time_to_first_delta_s=first_delta_at,
-        time_to_first_tool_call_s=first_tool_call_at,
-        time_to_completed_s=completed_at,
-        delta_event_count=delta_count,
-        tool_call_started_count=tool_call_started_count,
-        tool_call_completed_count=tool_call_completed_count,
-        answer_length=len(answer_text),
-        answer_text=answer_text,
+    return AssistantTurnSummary(
+        time_to_completed_s=sample.time_total_s,
+        answer_length=len(artifacts.answer_text),
+        answer_text=artifacts.answer_text,
         total_reference_count=total_refs,
-        verification_state=verification_state if isinstance(verification_state, str) else None,
+        verification_state=artifacts.verifier_level,
         completion_state=completion_state if isinstance(completion_state, str) else None,
         query_execution_id=query_execution_id if isinstance(query_execution_id, str) else None,
-        runtime_execution_id=(
-            runtime_execution_id if isinstance(runtime_execution_id, str) else None
-        ),
+        runtime_execution_id=artifacts.runtime_execution_id,
+        references=artifacts.references,
     )
 
 
@@ -822,6 +767,92 @@ def format_preview(text: str, limit: int = 280) -> str:
     return f"{collapsed[: limit - 3].rstrip()}..."
 
 
+def normalize_text_for_comparison(value: str) -> str:
+    return " ".join(value.replace("\r\n", "\n").split())
+
+
+def _coerce_reference_token(*parts: Any) -> str | None:
+    values = [str(part).strip() for part in parts if str(part).strip()]
+    if not values:
+        return None
+    return "|".join(values)
+
+
+def summarize_assistant_turn_artifacts(payload: dict[str, Any]) -> GroundedAnswerSummary:
+    response_turn = payload.get("responseTurn") or {}
+    execution = payload.get("execution") or {}
+    answer_text = response_turn.get("contentText") if isinstance(response_turn.get("contentText"), str) else ""
+    verifier_level = payload.get("verificationState")
+    if not isinstance(verifier_level, str):
+        verifier_level = None
+    runtime_execution_id = execution.get("runtimeExecutionId")
+    if not isinstance(runtime_execution_id, str):
+        runtime_execution_id = None
+    references = tuple(
+        sorted(
+            {
+                value
+                for row in (payload.get("chunkReferences") or [])
+                if isinstance(row, dict)
+                for value in [_coerce_reference_token("chunk", row.get("chunkId"))]
+                if value is not None
+            }
+            | {
+                value
+                for row in (payload.get("entityReferences") or [])
+                if isinstance(row, dict)
+                for value in [_coerce_reference_token("entity", row.get("nodeId"))]
+                if value is not None
+            }
+            | {
+                value
+                for row in (payload.get("relationReferences") or [])
+                if isinstance(row, dict)
+                for value in [
+                    _coerce_reference_token(
+                        "relation",
+                        row.get("edgeId"),
+                    )
+                ]
+                if value is not None
+            }
+            | {
+                value
+                for row in (payload.get("preparedSegmentReferences") or [])
+                if isinstance(row, dict)
+                for value in [_coerce_reference_token("segment", row.get("segmentId"))]
+                if value is not None
+            }
+            | {
+                value
+                for row in (payload.get("technicalFactReferences") or [])
+                if isinstance(row, dict)
+                for value in [_coerce_reference_token("fact", row.get("factId"))]
+                if value is not None
+            }
+        )
+    )
+
+    return GroundedAnswerSummary(
+        answer_text=answer_text,
+        verifier_level=verifier_level,
+        runtime_execution_id=runtime_execution_id,
+        references=references,
+    )
+
+
+def summarize_grounded_answer(payload: dict[str, Any]) -> GroundedAnswerSummary:
+    execution_detail = payload.get("executionDetail")
+    if not isinstance(execution_detail, dict):
+        return GroundedAnswerSummary(
+            answer_text="",
+            verifier_level=None,
+            runtime_execution_id=None,
+            references=(),
+        )
+    return summarize_assistant_turn_artifacts(execution_detail)
+
+
 def parse_csv_terms(value: str) -> list[str]:
     return [term.strip() for term in value.split(",") if term.strip()]
 
@@ -844,10 +875,11 @@ def build_gate_checks(
     graph_quality: McpQualitySummary,
     relation_list_summary: RelationListSummary,
     community_summary: CommunitySummary,
-    assistant_summaries: list[SseSummary],
+    assistant_summaries: list[AssistantTurnSummary],
     runtime_execution_summary: RuntimeExecutionProbeSummary | None,
     runtime_trace_summary: RuntimeTraceProbeSummary | None,
     legacy_runtime_execution_error: ToolErrorSummary | None,
+    grounded_answer_summary: GroundedAnswerSummary | None = None,
     graph_min_entities: int,
     graph_min_relations: int,
     graph_min_documents: int,
@@ -861,10 +893,8 @@ def build_gate_checks(
     assistant_expected_verification: str,
     assistant_require_all: list[str],
     assistant_forbid_any: list[str],
-    assistant_max_tool_starts: int | None,
     expected_search_top_label: str | None,
     max_tool_latency_ms: int | None,
-    max_first_delta_ms: int | None,
     max_completed_ms: int | None,
     tool_samples: list[tuple[str, CurlSample]],
 ) -> list[GateCheck]:
@@ -1152,24 +1182,9 @@ def build_gate_checks(
         )
         checks.append(
             GateCheck(
-                label=f"assistant.run_{idx}.delta",
-                status="pass" if summary.time_to_first_delta_s is not None else "fail",
-                detail=(
-                    f"first_delta={format_seconds(summary.time_to_first_delta_s)}"
-                    if summary.time_to_first_delta_s is not None
-                    else "missing first delta"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
                 label=f"assistant.run_{idx}.completed",
-                status="pass" if summary.time_to_completed_s is not None else "fail",
-                detail=(
-                    f"completed={format_seconds(summary.time_to_completed_s)}"
-                    if summary.time_to_completed_s is not None
-                    else "missing completion"
-                ),
+                status="pass",
+                detail=f"completed={format_seconds(summary.time_to_completed_s)}",
             )
         )
         if assistant_require_all:
@@ -1196,56 +1211,15 @@ def build_gate_checks(
                     detail=f"forbidden={assistant_forbid_any}",
                 )
             )
-        if max_first_delta_ms is not None:
-            first_delta_ms = (
-                int(summary.time_to_first_delta_s * 1000)
-                if summary.time_to_first_delta_s is not None
-                else None
-            )
-            checks.append(
-                GateCheck(
-                    label=f"assistant.run_{idx}.first_delta_budget",
-                    status=(
-                        "pass"
-                        if first_delta_ms is not None and first_delta_ms <= max_first_delta_ms
-                        else "fail"
-                    ),
-                    detail=f"first_delta_ms={first_delta_ms} max={max_first_delta_ms}",
-                )
-            )
         if max_completed_ms is not None:
-            completed_ms = (
-                int(summary.time_to_completed_s * 1000)
-                if summary.time_to_completed_s is not None
-                else None
-            )
+            completed_ms = int(summary.time_to_completed_s * 1000)
             checks.append(
                 GateCheck(
                     label=f"assistant.run_{idx}.completed_budget",
-                    status=(
-                        "pass"
-                        if completed_ms is not None and completed_ms <= max_completed_ms
-                        else "fail"
-                    ),
+                    status="pass" if completed_ms <= max_completed_ms else "fail",
                     detail=f"completed_ms={completed_ms} max={max_completed_ms}",
                 )
             )
-        if assistant_max_tool_starts is not None:
-            checks.append(
-                GateCheck(
-                    label=f"assistant.run_{idx}.tool_start_budget",
-                    status=(
-                        "pass"
-                        if summary.tool_call_started_count <= assistant_max_tool_starts
-                        else "fail"
-                    ),
-                    detail=(
-                        f"tool_starts={summary.tool_call_started_count} "
-                        f"max={assistant_max_tool_starts}"
-                    ),
-                )
-            )
-
     runtime_ids = [
         summary.runtime_execution_id for summary in assistant_summaries if summary.runtime_execution_id
     ]
@@ -1349,6 +1323,83 @@ def build_gate_checks(
             )
         )
 
+    if grounded_answer_summary is None:
+        checks.append(
+            GateCheck(
+                label="assistant.run_1.grounded_answer",
+                status="fail",
+                detail="grounded_answer probe missing",
+            )
+        )
+    elif not assistant_summaries:
+        checks.append(
+            GateCheck(
+                label="assistant.run_1.grounded_answer",
+                status="fail",
+                detail="assistant run missing for parity comparison",
+            )
+        )
+    else:
+        ui_summary = assistant_summaries[0]
+        checks.append(
+            GateCheck(
+                label="assistant.run_1.grounded_answer_text",
+                status=(
+                    "pass"
+                    if normalize_text_for_comparison(ui_summary.answer_text)
+                    == normalize_text_for_comparison(grounded_answer_summary.answer_text)
+                    else "fail"
+                ),
+                detail=(
+                    f"ui='{format_preview(ui_summary.answer_text)}' "
+                    f"grounded='{format_preview(grounded_answer_summary.answer_text)}'"
+                ),
+            )
+        )
+        checks.append(
+            GateCheck(
+                label="assistant.run_1.grounded_answer_verifier",
+                status=(
+                    "pass"
+                    if ui_summary.verification_state == grounded_answer_summary.verifier_level
+                    else "fail"
+                ),
+                detail=(
+                    f"ui_verifier={ui_summary.verification_state or 'n/a'} "
+                    f"grounded_verifier={grounded_answer_summary.verifier_level or 'n/a'}"
+                ),
+            )
+        )
+        checks.append(
+            GateCheck(
+                label="assistant.run_1.grounded_answer_runtime_execution_id",
+                status=(
+                    "pass"
+                    if ui_summary.runtime_execution_id
+                    == grounded_answer_summary.runtime_execution_id
+                    else "fail"
+                ),
+                detail=(
+                    f"ui_runtime={ui_summary.runtime_execution_id or 'n/a'} "
+                    f"grounded_runtime={grounded_answer_summary.runtime_execution_id or 'n/a'}"
+                ),
+            )
+        )
+        checks.append(
+            GateCheck(
+                label="assistant.run_1.grounded_answer_references",
+                status=(
+                    "pass"
+                    if ui_summary.references == grounded_answer_summary.references
+                    else "fail"
+                ),
+                detail=(
+                    f"ui_references={len(ui_summary.references)} "
+                    f"grounded_references={len(grounded_answer_summary.references)}"
+                ),
+            )
+        )
+
     if max_tool_latency_ms is not None:
         for name, sample in tool_samples:
             tool_ms = int(sample.time_total_s * 1000)
@@ -1386,16 +1437,15 @@ def render_report(
     runtime_trace_summary: RuntimeTraceProbeSummary | None,
     legacy_runtime_execution_probe: CurlSample | None,
     legacy_runtime_execution_error: ToolErrorSummary | None,
+    grounded_answer: CurlSample | None,
+    grounded_answer_summary: GroundedAnswerSummary | None,
     graph_quality: McpQualitySummary,
     relation_list_summary: RelationListSummary,
-    assistant_summaries: list[SseSummary],
+    assistant_summaries: list[AssistantTurnSummary],
     gate_checks: list[GateCheck],
 ) -> None:
     avg_completed = statistics.mean(
         summary.time_to_completed_s or 0.0 for summary in assistant_summaries
-    )
-    avg_first_delta = statistics.mean(
-        summary.time_to_first_delta_s or 0.0 for summary in assistant_summaries
     )
     report = f"""# Agent surface profile
 
@@ -1418,6 +1468,7 @@ def render_report(
 | `get_runtime_execution` | {(runtime_execution.status_code if runtime_execution else "n/a")} | {(format_seconds(runtime_execution.time_total_s) if runtime_execution else "n/a")} | {(format_bytes(runtime_execution.size_download_bytes) if runtime_execution else "n/a")} | lifecycle={(runtime_execution_summary.lifecycle_state if runtime_execution_summary else "n/a")} |
 | `get_runtime_execution_trace` | {(runtime_trace.status_code if runtime_trace else "n/a")} | {(format_seconds(runtime_trace.time_total_s) if runtime_trace else "n/a")} | {(format_bytes(runtime_trace.size_download_bytes) if runtime_trace else "n/a")} | stages={(runtime_trace_summary.stage_count if runtime_trace_summary else 0)} actions={(runtime_trace_summary.action_count if runtime_trace_summary else 0)} |
 | `get_runtime_execution (legacy executionId)` | {(legacy_runtime_execution_probe.status_code if legacy_runtime_execution_probe else "n/a")} | {(format_seconds(legacy_runtime_execution_probe.time_total_s) if legacy_runtime_execution_probe else "n/a")} | {(format_bytes(legacy_runtime_execution_probe.size_download_bytes) if legacy_runtime_execution_probe else "n/a")} | error={(legacy_runtime_execution_error.error_kind if legacy_runtime_execution_error else "n/a")} |
+| `grounded_answer` | {(grounded_answer.status_code if grounded_answer else "n/a")} | {(format_seconds(grounded_answer.time_total_s) if grounded_answer else "n/a")} | {(format_bytes(grounded_answer.size_download_bytes) if grounded_answer else "n/a")} | verifier={(grounded_answer_summary.verifier_level if grounded_answer_summary else "n/a")} runtime={(grounded_answer_summary.runtime_execution_id if grounded_answer_summary else "n/a")} references={len(grounded_answer_summary.references) if grounded_answer_summary else 0} |
 
 ### Graph quality checks
 
@@ -1465,22 +1516,16 @@ def render_report(
 
 ## Assistant and runtime probes
 
-| Runs | Avg first delta | Avg completed | Avg references | Avg tool starts |
-|---:|---:|---:|---:|---:|
-| {len(assistant_summaries)} | {format_seconds(avg_first_delta)} | {format_seconds(avg_completed)} | {statistics.mean(summary.total_reference_count for summary in assistant_summaries):.1f} | {statistics.mean(summary.tool_call_started_count for summary in assistant_summaries):.1f} |
+| Runs | Avg completed | Avg references |
+|---:|---:|---:|
+| {len(assistant_summaries)} | {format_seconds(avg_completed)} | {statistics.mean(summary.total_reference_count for summary in assistant_summaries):.1f} |
 
-| Run | First frame | First delta | First tool call | Completed | Deltas | Tool starts | Tool completes | Answer chars | References | Verification | Query execution | Runtime execution | Lifecycle |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|
+| Run | Completed | Answer chars | References | Verification | Query execution | Runtime execution | Lifecycle |
+|---|---:|---:|---:|---|---|---|---|
 """
     for idx, summary in enumerate(assistant_summaries, start=1):
         report += (
-            f"| {idx} | {format_seconds(summary.time_to_first_frame_s)}"
-            f" | {format_seconds(summary.time_to_first_delta_s)}"
-            f" | {format_seconds(summary.time_to_first_tool_call_s)}"
-            f" | {format_seconds(summary.time_to_completed_s)}"
-            f" | {summary.delta_event_count}"
-            f" | {summary.tool_call_started_count}"
-            f" | {summary.tool_call_completed_count}"
+            f"| {idx} | {format_seconds(summary.time_to_completed_s)}"
             f" | {summary.answer_length}"
             f" | {summary.total_reference_count}"
             f" | {summary.verification_state or 'n/a'}"
@@ -1512,6 +1557,26 @@ def render_report(
         report += f"| {idx} | {preview} |\n"
     report += """
 
+### MCP grounded_answer answer preview
+
+| Answer preview | Verifier | Runtime execution id | References |
+|---|---|---|---|
+"""
+    grounded_preview = "n/a"
+    grounded_verifier = "n/a"
+    grounded_runtime = "n/a"
+    grounded_references = "0"
+    if grounded_answer_summary is not None:
+        grounded_preview = format_preview(grounded_answer_summary.answer_text).replace("|", "\\|")
+        grounded_verifier = grounded_answer_summary.verifier_level or "n/a"
+        grounded_runtime = grounded_answer_summary.runtime_execution_id or "n/a"
+        grounded_references = str(len(grounded_answer_summary.references))
+    report += (
+        f"| {grounded_preview} | {grounded_verifier} | {grounded_runtime} | "
+        f"{grounded_references} |\n"
+    )
+    report += """
+
 ## Release gate
 
 | Check | Status | Detail |
@@ -1523,10 +1588,9 @@ def render_report(
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Profile MCP graph and assistant SSE surfaces.")
+    parser = argparse.ArgumentParser(description="Profile MCP graph and assistant turn surfaces.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--login", default=DEFAULT_LOGIN)
-    parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--library-id", required=True)
     parser.add_argument("--workspace-id")
     parser.add_argument("--mcp-token", default=os.environ.get("IRONRAG_MCP_TOKEN"))
@@ -1536,7 +1600,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--graph-limit", type=int, default=50)
     parser.add_argument("--read-length", type=int, default=DEFAULT_READ_LENGTH)
     parser.add_argument("--question", default=DEFAULT_ASSISTANT_QUESTION)
-    parser.add_argument("--sse-runs", type=int, default=2)
+    parser.add_argument("--assistant-top-k", type=int, default=DEFAULT_ASSISTANT_TOP_K)
+    parser.add_argument("--assistant-runs", type=int, default=2)
     parser.add_argument("--graph-min-entities", type=int, default=DEFAULT_GRAPH_MIN_ENTITIES)
     parser.add_argument("--graph-min-relations", type=int, default=DEFAULT_GRAPH_MIN_RELATIONS)
     parser.add_argument("--graph-min-documents", type=int, default=DEFAULT_GRAPH_MIN_DOCUMENTS)
@@ -1559,26 +1624,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--assistant-require-all", default="")
     parser.add_argument("--assistant-forbid-any", default="")
-    parser.add_argument("--assistant-max-tool-starts", type=int)
     parser.add_argument("--expected-search-top-label")
     parser.add_argument("--max-tool-latency-ms", type=int)
-    parser.add_argument("--max-first-delta-ms", type=int)
     parser.add_argument("--max-completed-ms", type=int)
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--output-path")
     return parser.parse_args(argv)
 
 
+def resolve_probe_password() -> str:
+    password = os.environ.get(PROBE_PASSWORD_ENV)
+    if not password:
+        raise SystemExit(f"{PROBE_PASSWORD_ENV} is required")
+    return password
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     session = CurlSession(args.base_url)
     try:
-        session.login(args.login, args.password)
+        session.login(args.login, resolve_probe_password())
         workspace_id = args.workspace_id or discover_workspace_id(session, args.library_id)
+        library_catalog_ref = discover_library_catalog_ref(session, args.library_id)
 
         tools_list = session.request_json(
             "POST",
-            "/v1/mcp",
+            MCP_DIAGNOSTICS_ROUTE,
             body={
                 "jsonrpc": "2.0",
                 "id": "agent-probe-tools-list",
@@ -1595,7 +1666,7 @@ def main(argv: list[str]) -> int:
             session,
             bearer_token=args.mcp_token,
             tool_name="search_entities",
-            arguments={"libraryId": args.library_id, "query": args.entity_query, "limit": 10},
+            arguments={"library": library_catalog_ref, "query": args.entity_query, "limit": 10},
         )
         entity_search_result = ensure_jsonrpc_result(entity_search, "search_entities")
         if entity_search_result.get("isError"):
@@ -1608,12 +1679,9 @@ def main(argv: list[str]) -> int:
             session,
             bearer_token=args.mcp_token,
             tool_name="search_documents",
-            arguments={
-                "query": args.document_query,
-                "libraryIds": [args.library_id],
-                "limit": args.document_limit,
-                "includeReferences": True,
-            },
+            arguments=build_document_search_arguments(
+                library_catalog_ref, args.document_query, args.document_limit
+            ),
         )
         document_search_result = ensure_jsonrpc_result(document_search, "search_documents")
         if document_search_result.get("isError"):
@@ -1652,7 +1720,7 @@ def main(argv: list[str]) -> int:
             session,
             bearer_token=args.mcp_token,
             tool_name="get_graph_topology",
-            arguments={"libraryId": args.library_id, "limit": args.graph_limit},
+            arguments={"library": library_catalog_ref, "limit": args.graph_limit},
         )
         topology_result = ensure_jsonrpc_result(graph_topology, "get_graph_topology")
         if topology_result.get("isError"):
@@ -1663,7 +1731,7 @@ def main(argv: list[str]) -> int:
             session,
             bearer_token=args.mcp_token,
             tool_name="list_relations",
-            arguments={"libraryId": args.library_id, "limit": args.graph_limit},
+            arguments={"library": library_catalog_ref, "limit": args.graph_limit},
         )
         list_relations_result = ensure_jsonrpc_result(list_relations, "list_relations")
         relation_list_summary = summarize_relation_list(
@@ -1674,7 +1742,7 @@ def main(argv: list[str]) -> int:
             session,
             bearer_token=args.mcp_token,
             tool_name="get_communities",
-            arguments={"libraryId": args.library_id, "limit": args.graph_limit},
+            arguments={"library": library_catalog_ref, "limit": args.graph_limit},
         )
         communities_result = ensure_jsonrpc_result(communities, "get_communities")
         if communities_result.get("isError"):
@@ -1683,14 +1751,35 @@ def main(argv: list[str]) -> int:
             communities_result.get("structuredContent") or {}
         )
 
-        assistant_summaries: list[SseSummary] = []
-        for _ in range(args.sse_runs):
+        grounded_answer: CurlSample | None = None
+        grounded_answer_summary: GroundedAnswerSummary | None = None
+        grounded_answer = probe_mcp_tool(
+            session,
+            bearer_token=args.mcp_token,
+            tool_name="grounded_answer",
+            arguments={
+                "library": library_catalog_ref,
+                "query": args.question,
+                "topK": args.assistant_top_k,
+            },
+            route=MCP_ANSWER_ROUTE,
+        )
+        grounded_answer_result = ensure_jsonrpc_result(grounded_answer, "grounded_answer")
+        if grounded_answer_result.get("isError"):
+            raise RuntimeError(f"grounded_answer returned tool error: {grounded_answer_result!r}")
+        grounded_answer_summary = summarize_grounded_answer(
+            grounded_answer_result.get("structuredContent") or {}
+        )
+
+        assistant_summaries: list[AssistantTurnSummary] = []
+        for _ in range(args.assistant_runs):
             query_session_id = create_query_session(session, workspace_id, args.library_id)
             assistant_summaries.append(
-                stream_assistant_turn(
+                execute_assistant_turn(
                     session,
                     query_session_id,
                     args.question,
+                    top_k=args.assistant_top_k,
                     timeout_seconds=args.timeout_seconds,
                 )
             )
@@ -1770,6 +1859,7 @@ def main(argv: list[str]) -> int:
             runtime_execution_summary=runtime_execution_summary,
             runtime_trace_summary=runtime_trace_summary,
             legacy_runtime_execution_error=legacy_runtime_execution_error,
+            grounded_answer_summary=grounded_answer_summary,
             graph_min_entities=args.graph_min_entities,
             graph_min_relations=args.graph_min_relations,
             graph_min_documents=args.graph_min_documents,
@@ -1783,10 +1873,8 @@ def main(argv: list[str]) -> int:
             assistant_expected_verification=args.assistant_expected_verification,
             assistant_require_all=parse_csv_terms(args.assistant_require_all),
             assistant_forbid_any=parse_csv_terms(args.assistant_forbid_any),
-            assistant_max_tool_starts=args.assistant_max_tool_starts,
             expected_search_top_label=args.expected_search_top_label,
             max_tool_latency_ms=args.max_tool_latency_ms,
-            max_first_delta_ms=args.max_first_delta_ms,
             max_completed_ms=args.max_completed_ms,
             tool_samples=[
                 ("tools_list", tools_list),
@@ -1799,6 +1887,7 @@ def main(argv: list[str]) -> int:
                 *((("get_runtime_execution", runtime_execution),) if runtime_execution is not None else ()),
                 *((("get_runtime_execution_trace", runtime_trace),) if runtime_trace is not None else ()),
                 *((("get_runtime_execution_legacy_field", legacy_runtime_execution_probe),) if legacy_runtime_execution_probe is not None else ()),
+                *((("grounded_answer", grounded_answer),) if grounded_answer is not None else ()),
             ],
         )
 
@@ -1831,6 +1920,8 @@ def main(argv: list[str]) -> int:
             runtime_trace_summary=runtime_trace_summary,
             legacy_runtime_execution_probe=legacy_runtime_execution_probe,
             legacy_runtime_execution_error=legacy_runtime_execution_error,
+            grounded_answer=grounded_answer,
+            grounded_answer_summary=grounded_answer_summary,
             graph_quality=graph_quality,
             relation_list_summary=relation_list_summary,
             assistant_summaries=assistant_summaries,

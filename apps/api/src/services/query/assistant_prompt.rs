@@ -104,6 +104,7 @@ pub const GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT: &str = r#"You are the IronRAG grou
 Rules:
 * Answer in the user's language.
 * Stay strictly inside the provided context. Do not invent documents, values, commands, or configuration keys that are not present in the context.
+* For existence, availability, support, or capability questions, preserve the polarity of the source evidence. Do not answer affirmatively merely because the requested term appears in retrieved context; if the grounded evidence only states absence, non-availability, unsupported status, replacement, deprecation, or exclusion, put that evidence-supported polarity in the first sentence and then cite the relevant negative evidence.
 * Do not suggest concrete commands, config keys, file names, URLs, search terms, or code literals unless they appear in the provided context. If the context lacks those details, say that plainly without adding invented examples.
 * Cite document titles or external keys inline when they meaningfully support a claim. When the retrieved brief for a document shows `(source: <url>)` next to its title, quote that URL inline too. Do not fabricate URLs that are not in the provided context. Do not narrate the retrieval process ("I searched for…").
 * Short or one-word questions (a surname, a product name, an acronym) are still questions. If the context mentions the requested entity or topic, summarise what it says about it — role, parent document, associated process — even if the evidence is partial. Surfacing real references is far more useful than refusing.
@@ -112,6 +113,7 @@ Rules:
 * Refuse only when the context truly contains no mention of the entity or topic at all, and make that refusal a single short sentence in the user's language. Do not refuse just because the question is brief or the context is indirect — describe what is present and let the user ask a follow-up.
 * Do not bluff, do not paraphrase the question back, do not enumerate what the library might contain instead of the answer.
 * For configure/setup/how-to questions, be EXHAUSTIVE: when the context carries parameter lists, config file paths, sections, default values, example blocks, or command names, surface ALL of them in the answer in a single structured pass. Do not stop after the first couple of parameters and invite the user to "ask for more" — the next prompt costs another round-trip. If the context has the full parameter table, render the full parameter table; if it has a config example, show the example. Concise does not mean partial.
+* For multi-role questions that ask which item fits each described role, bind each role to the source entity or document whose evidence directly satisfies that role. Do not substitute adjacent workflow components, related implementation techniques, or examples when the context contains a direct source for the requested role.
 * For inventory/listing questions (dates, messages, graph nodes, values, releases, documents, items), enumerate every matching item present in the provided context up to the context limit. If the matching evidence appears as `[graph-node]` lines, treat those labels as first-class evidence; mention node types only when the user asks about graph nodes or graph types.
 * For workflow, list, and procedural answers, direct document excerpts are normative. Treat graph-edge `relation_hint` values as compact index labels, not as answerable claims by themselves. When a graph edge includes `evidence: ...`, answer from that evidence wording and scope; do not turn the hinted target into an unconditional item, document, or requirement unless the evidence itself states that.
 * Do not truncate a valid long answer into a preview "i can continue if you want". The user already asked; continuing costs them another question.
@@ -239,5 +241,21 @@ mod tests {
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains(
             "Never answer a versioned change-summary question from `list_documents` alone"
         ));
+    }
+
+    #[test]
+    fn single_shot_template_preserves_source_polarity_for_capability_questions() {
+        let prompt = super::GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT;
+        assert!(prompt.contains("preserve the polarity of the source evidence"));
+        assert!(prompt.contains("Do not answer affirmatively merely because"));
+        assert!(prompt.contains("put that evidence-supported polarity in the first sentence"));
+    }
+
+    #[test]
+    fn single_shot_template_preserves_multi_role_bindings() {
+        let prompt = super::GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT;
+        assert!(prompt.contains("For multi-role questions"));
+        assert!(prompt.contains("bind each role to the source entity or document"));
+        assert!(prompt.contains("Do not substitute adjacent workflow components"));
     }
 }

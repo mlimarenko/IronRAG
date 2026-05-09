@@ -1,15 +1,16 @@
-mod batch;
-mod multipart;
-mod snapshot;
-mod source_download;
-mod types;
-mod web_runs;
+pub mod batch;
+pub mod multipart;
+pub mod snapshot;
+pub mod source_download;
+pub mod types;
+pub mod web_runs;
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State, multipart::Multipart},
     routing::{get, post},
 };
+use ironrag_contracts::documents::DocumentStatus;
 use uuid::Uuid;
 
 use self::{
@@ -97,7 +98,19 @@ pub fn router() -> Router<AppState> {
     skip_all,
     fields(library_id = ?query.library_id, include_deleted, limit, document_count, elapsed_ms)
 )]
-async fn list_documents(
+#[utoipa::path(
+    get,
+    path = "/v1/content/documents",
+    tag = "content",
+    operation_id = "listContentDocuments",
+    params(crate::interfaces::http::content::types::ListDocumentsQuery),
+    responses(
+        (status = 200, description = "Document list page", body = DocumentListPageResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn list_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListDocumentsQuery>,
@@ -149,22 +162,9 @@ async fn list_documents(
     // be one of the 5 derived_status buckets. An empty / absent parameter
     // means "no filter". Unknown values are rejected up front so clients
     // get a clear 400 instead of a silent no-op.
-    const ALLOWED_STATUSES: &[&str] = &["canceled", "failed", "processing", "queued", "ready"];
-    let status_filter: Vec<String> = match query.status.as_deref() {
+    let status_filter: Vec<DocumentStatus> = match query.status.as_deref() {
         None => Vec::new(),
-        Some(raw) => {
-            let mut out = Vec::new();
-            for token in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                if !ALLOWED_STATUSES.contains(&token) {
-                    return Err(ApiError::BadRequest(format!(
-                        "unknown status filter value `{token}`; allowed: {}",
-                        ALLOWED_STATUSES.join(", ")
-                    )));
-                }
-                out.push(token.to_string());
-            }
-            out
-        }
+        Some(raw) => parse_document_status_filter(raw)?,
     };
 
     let result = state
@@ -256,13 +256,45 @@ fn map_document_list_entry(entry: ContentDocumentListEntry) -> ContentDocumentLi
     }
 }
 
+fn parse_document_status_filter(raw: &str) -> Result<Vec<DocumentStatus>, ApiError> {
+    let mut out = Vec::new();
+    for token in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let status = match token {
+            "canceled" => DocumentStatus::Canceled,
+            "failed" => DocumentStatus::Failed,
+            "processing" => DocumentStatus::Processing,
+            "queued" => DocumentStatus::Queued,
+            "ready" => DocumentStatus::Ready,
+            _ => {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown status filter value `{token}`; allowed: canceled, failed, processing, queued, ready"
+                )));
+            }
+        };
+        out.push(status);
+    }
+    Ok(out)
+}
+
 #[tracing::instrument(
     level = "info",
     name = "http.list_chunks",
     skip_all,
     fields(document_id = ?query.document_id, item_count)
 )]
-async fn list_chunks(
+#[utoipa::path(
+    get,
+    path = "/v1/chunks",
+    tag = "content",
+    operation_id = "listChunks",
+    params(crate::interfaces::http::content::types::ChunksQuery),
+    responses(
+        (status = 200, description = "Chunks for the requested revision", body = [ChunkSummary]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+    ),
+)]
+pub async fn list_chunks(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ChunksQuery>,
@@ -305,7 +337,20 @@ async fn list_chunks(
     skip_all,
     fields(library_id = ?payload.library_id)
 )]
-async fn create_document(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents",
+    tag = "content",
+    operation_id = "createContentDocument",
+    request_body = CreateDocumentRequest,
+    responses(
+        (status = 200, description = "Newly created document", body = CreateDocumentResponse),
+        (status = 400, description = "Invalid request payload"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn create_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(payload): Json<CreateDocumentRequest>,
@@ -344,7 +389,19 @@ async fn create_document(
 }
 
 #[tracing::instrument(level = "info", name = "http.upload_document", skip_all)]
-async fn upload_document(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/upload",
+    tag = "content",
+    operation_id = "uploadContentDocument",
+    request_body(content_type = "multipart/form-data", description = "Multipart upload with metadata + file part"),
+    responses(
+        (status = 200, description = "Document accepted for ingest", body = CreateDocumentResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn upload_document(
     auth: AuthContext,
     State(state): State<AppState>,
     multipart: Multipart,
@@ -389,7 +446,20 @@ async fn upload_document(
     skip_all,
     fields(document_id = %document_id)
 )]
-async fn get_document(
+#[utoipa::path(
+    get,
+    path = "/v1/content/documents/{documentId}",
+    tag = "content",
+    operation_id = "getContentDocument",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    responses(
+        (status = 200, description = "Content document detail", body = ContentDocumentDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn get_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -416,7 +486,20 @@ async fn get_document(
     skip_all,
     fields(document_id = %document_id)
 )]
-async fn get_document_head(
+#[utoipa::path(
+    get,
+    path = "/v1/content/documents/{documentId}/head",
+    tag = "content",
+    operation_id = "getContentDocumentHead",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    responses(
+        (status = 200, description = "Active head revision summary for the document", body = ContentDocumentHead),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document or head revision not found"),
+    ),
+)]
+pub async fn get_document_head(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -433,7 +516,23 @@ async fn get_document_head(
     skip_all,
     fields(document_id = %document_id, item_count)
 )]
-async fn get_document_prepared_segments(
+#[utoipa::path(
+    get,
+    path = "/v1/content/documents/{documentId}/prepared-segments",
+    tag = "content",
+    operation_id = "listContentPreparedSegments",
+    params(
+        ("documentId" = uuid::Uuid, Path, description = "Document identifier"),
+        crate::interfaces::http::content::types::PreparedDataQuery,
+    ),
+    responses(
+        (status = 200, description = "Prepared segments for the document", body = PreparedSegmentsPageResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn get_document_prepared_segments(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -464,7 +563,23 @@ async fn get_document_prepared_segments(
     skip_all,
     fields(document_id = %document_id, item_count)
 )]
-async fn get_document_technical_facts(
+#[utoipa::path(
+    get,
+    path = "/v1/content/documents/{documentId}/technical-facts",
+    tag = "content",
+    operation_id = "listContentTechnicalFacts",
+    params(
+        ("documentId" = uuid::Uuid, Path, description = "Document identifier"),
+        crate::interfaces::http::content::types::PreparedDataQuery,
+    ),
+    responses(
+        (status = 200, description = "Technical facts extracted from the document", body = TechnicalFactsPageResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn get_document_technical_facts(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -499,7 +614,20 @@ async fn get_document_technical_facts(
     skip_all,
     fields(document_id = %document_id)
 )]
-async fn delete_document(
+#[utoipa::path(
+    delete,
+    path = "/v1/content/documents/{documentId}",
+    tag = "content",
+    operation_id = "deleteContentDocument",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    responses(
+        (status = 200, description = "Mutation that captures the deletion", body = ContentMutationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn delete_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -539,7 +667,21 @@ async fn delete_document(
     skip_all,
     fields(document_id = %document_id)
 )]
-async fn append_document(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/{documentId}/append",
+    tag = "content",
+    operation_id = "appendContentDocument",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    request_body = AppendDocumentBodyRequest,
+    responses(
+        (status = 200, description = "Mutation describing the append", body = ContentMutationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn append_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -578,7 +720,21 @@ async fn append_document(
     skip_all,
     fields(document_id = %document_id)
 )]
-async fn edit_document(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/{documentId}/edit",
+    tag = "content",
+    operation_id = "editContentDocument",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    request_body = EditDocumentRequest,
+    responses(
+        (status = 200, description = "Mutation describing the edit", body = ContentMutationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn edit_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -617,7 +773,21 @@ async fn edit_document(
     skip_all,
     fields(document_id = %document_id)
 )]
-async fn replace_document(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/{documentId}/replace",
+    tag = "content",
+    operation_id = "replaceContentDocument",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    request_body(content_type = "multipart/form-data", description = "Multipart payload that replaces the latest revision"),
+    responses(
+        (status = 200, description = "Mutation describing the replacement", body = ContentMutationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn replace_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -659,7 +829,19 @@ async fn replace_document(
     skip_all,
     fields(document_id = %document_id, item_count)
 )]
-async fn list_revisions(
+#[utoipa::path(
+    get,
+    path = "/v1/content/documents/{documentId}/revisions",
+    tag = "content",
+    operation_id = "listContentRevisions",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    responses(
+        (status = 200, description = "Revisions for the document", body = [ContentRevision]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+    ),
+)]
+pub async fn list_revisions(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -678,7 +860,19 @@ async fn list_revisions(
     skip_all,
     fields(document_id = ?payload.document_id, library_id = ?payload.library_id)
 )]
-async fn create_mutation(
+#[utoipa::path(
+    post,
+    path = "/v1/content/mutations",
+    tag = "content",
+    operation_id = "createContentMutation",
+    request_body = CreateMutationRequest,
+    responses(
+        (status = 200, description = "Newly created mutation", body = ContentMutationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+    ),
+)]
+pub async fn create_mutation(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(payload): Json<CreateMutationRequest>,
@@ -737,7 +931,19 @@ async fn create_mutation(
     skip_all,
     fields(library_id = ?query.library_id, item_count)
 )]
-async fn list_mutations(
+#[utoipa::path(
+    get,
+    path = "/v1/content/mutations",
+    tag = "content",
+    operation_id = "listContentMutations",
+    params(crate::interfaces::http::content::types::ListMutationsQuery),
+    responses(
+        (status = 200, description = "Mutations visible to the caller", body = [ContentMutationDetailResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized"),
+    ),
+)]
+pub async fn list_mutations(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListMutationsQuery>,
@@ -764,7 +970,20 @@ async fn list_mutations(
     skip_all,
     fields(mutation_id = %mutation_id)
 )]
-async fn get_mutation(
+#[utoipa::path(
+    get,
+    path = "/v1/content/mutations/{mutationId}",
+    tag = "content",
+    operation_id = "getContentMutation",
+    params(("mutationId" = uuid::Uuid, Path, description = "Mutation identifier")),
+    responses(
+        (status = 200, description = "Mutation detail", body = ContentMutationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the mutation"),
+        (status = 404, description = "Mutation not found"),
+    ),
+)]
+pub async fn get_mutation(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(mutation_id): Path<Uuid>,
@@ -786,7 +1005,21 @@ async fn get_mutation(
     skip_all,
     fields(document_id = %document_id)
 )]
-async fn reprocess_document(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/{documentId}/reprocess",
+    tag = "content",
+    operation_id = "reprocessContentDocument",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    request_body = ReprocessDocumentRequest,
+    responses(
+        (status = 200, description = "Mutation describing the reprocess", body = ContentMutationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn reprocess_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,

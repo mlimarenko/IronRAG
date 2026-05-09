@@ -18,14 +18,15 @@ use crate::{
     },
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct ListIngestJobsQuery {
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestJobResponse {
     pub job: IngestJob,
@@ -36,7 +37,7 @@ pub struct IngestJobResponse {
     pub readiness: IngestReadinessResponse,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestAttemptResponse {
     pub job: IngestJob,
@@ -46,7 +47,7 @@ pub struct IngestAttemptResponse {
     pub readiness: IngestReadinessResponse,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestStageTimelineResponse {
     pub job: IngestJob,
@@ -57,7 +58,7 @@ pub struct IngestStageTimelineResponse {
     pub stages: Vec<IngestStageEvent>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestReadinessResponse {
     pub knowledge_document_id: Option<Uuid>,
@@ -80,13 +81,26 @@ pub fn router() -> Router<AppState> {
         .route("/ingest/attempts/{attempt_id}/stages", get(list_stage_events))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ingest/jobs",
+    tag = "ingest",
+    operation_id = "listIngestJobs",
+    params(ListIngestJobsQuery),
+    responses(
+        (status = 200, description = "Ingest jobs visible to the caller for the requested library", body = [IngestJobResponse]),
+        (status = 400, description = "libraryId is required"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_jobs",
     skip_all,
     fields(library_id = ?query.library_id, item_count)
 )]
-async fn list_jobs(
+pub async fn list_jobs(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListIngestJobsQuery>,
@@ -117,13 +131,26 @@ async fn list_jobs(
     Ok(Json(responses))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ingest/jobs/{jobId}",
+    tag = "ingest",
+    operation_id = "getIngestJob",
+    params(("jobId" = uuid::Uuid, Path, description = "Ingest job identifier")),
+    responses(
+        (status = 200, description = "Ingest job with latest attempt and async operation", body = IngestJobResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the job's library"),
+        (status = 404, description = "Job not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_job",
     skip_all,
     fields(job_id = %job_id)
 )]
-async fn get_job(
+pub async fn get_job(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
@@ -138,13 +165,26 @@ async fn get_job(
     Ok(Json(map_job_handle(&state, handle).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ingest/attempts/{attemptId}",
+    tag = "ingest",
+    operation_id = "getIngestAttempt",
+    params(("attemptId" = uuid::Uuid, Path, description = "Ingest attempt identifier")),
+    responses(
+        (status = 200, description = "Ingest attempt detail with parent job and async operation", body = IngestAttemptResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the attempt's library"),
+        (status = 404, description = "Attempt not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_attempt",
     skip_all,
     fields(attempt_id = %attempt_id)
 )]
-async fn get_attempt(
+pub async fn get_attempt(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(attempt_id): Path<Uuid>,
@@ -159,13 +199,26 @@ async fn get_attempt(
     Ok(Json(map_attempt_handle(&state, handle).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ingest/attempts/{attemptId}/stages",
+    tag = "ingest",
+    operation_id = "listIngestStageEvents",
+    params(("attemptId" = uuid::Uuid, Path, description = "Ingest attempt identifier")),
+    responses(
+        (status = 200, description = "Stage timeline for the attempt", body = IngestStageTimelineResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the attempt's library"),
+        (status = 404, description = "Attempt not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_stage_events",
     skip_all,
     fields(attempt_id = %attempt_id)
 )]
-async fn list_stage_events(
+pub async fn list_stage_events(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(attempt_id): Path<Uuid>,

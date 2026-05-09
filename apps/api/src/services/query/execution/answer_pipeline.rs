@@ -9,12 +9,14 @@ use crate::{
         query_ir::{EntityRole, QueryAct, QueryIR},
     },
     infra::arangodb::document_store::KnowledgeDocumentRow,
+    interfaces::http::router_support::ApiError,
     services::query::{
         compiler::{CompileHistoryTurn, CompileQueryCommand, QueryCompilerService},
         latest_versions::query_requests_latest_versions,
     },
 };
 
+use super::question_intent::query_ir_has_focused_document_answer_intent;
 use super::technical_literals::{
     TechnicalLiteralIntent, detect_technical_literal_intent_from_query_ir,
     extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
@@ -62,8 +64,8 @@ pub(crate) async fn prepare_answer_query(
     let planning_future = crate::agent_runtime::pipeline::try_op::run_async_try_op((), |_| {
         super::plan_structured_query(state, library_id, &question, mode, top_k)
     });
-    let ((query_ir, query_compile_usage), planning_result) =
-        tokio::join!(compile_future, planning_future);
+    let (compile_result, planning_result) = tokio::join!(compile_future, planning_future);
+    let (query_ir, query_compile_usage) = compile_result?;
     let planning_stage = planning_result?;
     let query_ir_for_retrieval = query_ir.clone();
     let retrieval_question = question.clone();
@@ -150,21 +152,11 @@ pub(crate) async fn prepare_answer_query(
         && bundle_temporal_end.is_some()
         && !rerank_stage.retrieval.bundle.chunks.is_empty()
     {
-        let chunk_ids: Vec<uuid::Uuid> = rerank_stage
-            .retrieval
-            .bundle
-            .chunks
-            .iter()
-            .map(|c| c.chunk_id)
-            .collect();
-        let rows = state
-            .arango_document_store
-            .list_chunks_by_ids(&chunk_ids)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to look up chunks for bundle-temporal post-filter: {error}"
-                )
+        let chunk_ids: Vec<uuid::Uuid> =
+            rerank_stage.retrieval.bundle.chunks.iter().map(|c| c.chunk_id).collect();
+        let rows =
+            state.arango_document_store.list_chunks_by_ids(&chunk_ids).await.map_err(|error| {
+                anyhow::anyhow!("failed to look up chunks for bundle-temporal post-filter: {error}")
             })?;
         let allowed: std::collections::HashSet<uuid::Uuid> = rows
             .into_iter()
@@ -187,11 +179,7 @@ pub(crate) async fn prepare_answer_query(
             .map(|row| row.chunk_id)
             .collect();
         let before = rerank_stage.retrieval.bundle.chunks.len();
-        rerank_stage
-            .retrieval
-            .bundle
-            .chunks
-            .retain(|c| allowed.contains(&c.chunk_id));
+        rerank_stage.retrieval.bundle.chunks.retain(|c| allowed.contains(&c.chunk_id));
         tracing::info!(
             stage = "answer.bundle_temporal_post_filter",
             library_id = %library_id,
@@ -344,19 +332,15 @@ pub(crate) async fn prepare_answer_query(
     })
 }
 
-/// Runs the NL→IR compiler for the current question + conversation history.
-///
-/// On any failure — missing binding, provider outage, malformed model output
-/// — we log a warning and return the fallback IR (`QueryAct::Describe` /
-/// `confidence: 0.0`). The rest of the pipeline degrades gracefully: a
-/// fallback IR has `VerificationLevel::Lenient`, so answers still reach the
-/// user while we fix the upstream problem.
+/// Runs the NL->IR compiler for the current question + conversation history.
+/// Compile failures are terminal for the turn: retrieval must not continue
+/// from a synthetic IR because that would hide binding/provider regressions.
 async fn compile_query_ir(
     state: &AppState,
     library_id: Uuid,
     question: &str,
     conversation_history: Option<&str>,
-) -> (QueryIR, Option<QueryCompileUsage>) {
+) -> Result<(QueryIR, Option<QueryCompileUsage>), ApiError> {
     let started_at = std::time::Instant::now();
     let history = history_turns_from_serialized(conversation_history);
     match QueryCompilerService
@@ -373,55 +357,27 @@ async fn compile_query_ir(
                 %library_id,
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 served_from_cache = outcome.served_from_cache,
-                fallback_reason = outcome.fallback_reason.as_deref().unwrap_or(""),
                 provider_kind = %outcome.provider_kind,
                 model_name = %outcome.model_name,
                 "query.compile.ir"
             );
-            if let Some(reason) = outcome.fallback_reason.as_deref() {
-                tracing::warn!(
-                    %library_id,
-                    reason,
-                    "query compile produced fallback IR"
-                );
-            }
             // Capture usage only when the LLM actually ran. Cache hits
-            // and fallbacks reuse the `usage_json` of the original
-            // call, so billing them here would double-charge (cache
-            // hit) or invent phantom tokens (fallback usage_json is
-            // a sentinel `{aggregation:"none",call_count:0}`).
-            let billable_usage = (!outcome.served_from_cache && outcome.fallback_reason.is_none())
-                .then(|| QueryCompileUsage {
-                    provider_kind: outcome.provider_kind.clone(),
-                    model_name: outcome.model_name.clone(),
-                    usage_json: outcome.usage_json.clone(),
-                });
-            (outcome.ir, billable_usage)
+            // reuse the `usage_json` of the original call, so billing
+            // them here would double-charge repeat questions.
+            let billable_usage = (!outcome.served_from_cache).then(|| QueryCompileUsage {
+                provider_kind: outcome.provider_kind.clone(),
+                model_name: outcome.model_name.clone(),
+                usage_json: outcome.usage_json.clone(),
+            });
+            Ok((outcome.ir, billable_usage))
         }
         Err(error) => {
-            tracing::warn!(
+            tracing::error!(
                 %library_id,
                 ?error,
-                "query compile dispatch failed — using fallback IR"
+                "query compile failed"
             );
-            // Safe default: descriptive / lenient verification so the user
-            // still gets an answer rather than a stub.
-            let fallback_ir = QueryIR {
-                act: crate::domains::query_ir::QueryAct::Describe,
-                scope: crate::domains::query_ir::QueryScope::SingleDocument,
-                language: crate::domains::query_ir::QueryLanguage::Auto,
-                target_types: Vec::new(),
-                target_entities: Vec::new(),
-                literal_constraints: Vec::new(),
-                temporal_constraints: Vec::new(),
-                comparison: None,
-                document_focus: None,
-                conversation_refs: Vec::new(),
-                needs_clarification: None,
-                source_slice: None,
-                confidence: 0.0,
-            };
-            (fallback_ir, None)
+            Err(error)
         }
     }
 }
@@ -482,7 +438,7 @@ pub(crate) async fn generate_answer_query(
                 )
             })?;
         crate::domains::provider_profiles::ProviderModelSelection {
-            provider_kind: binding.provider_kind.parse().unwrap_or_default(),
+            provider_kind: binding.provider_kind.clone(),
             model_name: binding.model_name.clone(),
         }
     };
@@ -1393,6 +1349,9 @@ fn classify_answer_disposition_from_evidence(
     //    clarifying question could plausibly help?
     let act_can_clarify =
         matches!(ir.act, QueryAct::ConfigureHow | QueryAct::Describe | QueryAct::RetrieveValue);
+    if query_ir_carries_answerable_focus(ir, user_question) {
+        return AnswerDisposition::Answer;
+    }
     let target_entities_allow_clarify = ir.target_entities.len() <= 1
         || compiler_requested_clarification
         || (matches!(ir.act, QueryAct::RetrieveValue)
@@ -1493,7 +1452,53 @@ fn classify_answer_disposition_from_evidence(
         }
     }
 
+    // If evidence counts are noisy but one query-aligned variant is
+    // clearly closer to the user wording than the runner-up, answer
+    // directly from that dominant topic path.
+    if has_query_dominant_topic_match(user_question, &topic_ranked) {
+        return AnswerDisposition::Answer;
+    }
+
     AnswerDisposition::Clarify { variants }
+}
+
+fn has_query_dominant_topic_match(user_question: &str, topic_ranked: &[(usize, String)]) -> bool {
+    if topic_ranked.len() < 2 {
+        return false;
+    }
+
+    let question_tokens = clarification_topic_tokens(user_question);
+    if question_tokens.is_empty() {
+        return false;
+    }
+
+    let overlap_with_question = |label: &str| -> usize {
+        let label_tokens = crate::services::query::text_match::normalized_alnum_tokens(label, 3);
+        crate::services::query::text_match::near_token_overlap_count(
+            &question_tokens,
+            &label_tokens,
+        )
+    };
+
+    let top_overlap = overlap_with_question(&topic_ranked[0].1);
+    let second_overlap = overlap_with_question(&topic_ranked[1].1);
+    if top_overlap <= second_overlap || top_overlap == 0 {
+        return false;
+    }
+
+    top_overlap >= 2 || second_overlap == 0
+}
+
+fn query_ir_carries_answerable_focus(ir: &QueryIR, user_question: &str) -> bool {
+    if query_ir_has_focused_document_answer_intent(ir) {
+        return true;
+    }
+    if detect_technical_literal_intent_from_query_ir(user_question, ir).any() {
+        return true;
+    }
+    matches!(ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
+        && !ir.target_entities.is_empty()
+        && !question_is_terse_variant_selector(user_question)
 }
 
 fn structural_clarify_allowed_without_compiler(ir: &QueryIR, user_question: &str) -> bool {
@@ -1867,6 +1872,12 @@ fn should_use_single_shot_answer(
     conversation_history: Option<&str>,
 ) -> bool {
     let _ = question;
+    if query_ir_has_focused_document_answer_intent(&prepared.query_ir) {
+        return false;
+    }
+    if prepared.query_ir.requests_source_coverage_context() {
+        return false;
+    }
     // Only hard requirement: the prepared context must carry *something*
     // the model can ground an answer in. Even when structured retrieval
     // returned zero chunks, `answer_context` still packs the library
@@ -2488,6 +2499,8 @@ mod tests {
                 context_chunks: Vec::new(),
                 ordered_source_units: Vec::new(),
                 graph_evidence_context_lines: Vec::new(),
+                graph_entity_references: Vec::new(),
+                graph_relation_references: Vec::new(),
             },
             answer_context: "context-fragment-a".to_string(),
             embedding_usage: None,
@@ -2500,7 +2513,7 @@ mod tests {
     #[test]
     fn latest_version_enumeration_uses_single_shot_when_context_is_prepared() {
         let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.8, None);
-        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir.target_types = vec!["version".to_string()];
         ir.literal_constraints.push(crate::domains::query_ir::LiteralSpan {
             text: "5".to_string(),
             kind: crate::domains::query_ir::LiteralKind::NumericCode,
@@ -2564,6 +2577,25 @@ mod tests {
     }
 
     #[test]
+    fn literal_free_retrieve_value_waits_for_source_coverage_preflight() {
+        let mut ir = sample_ir_with_act(QueryAct::RetrieveValue, 0.8, None);
+        ir.target_entities = vec![EntityMention {
+            label: "sample service policy".to_string(),
+            role: EntityRole::Subject,
+        }];
+        let prepared = prepared_for_single_shot(ir);
+
+        assert!(
+            !super::should_use_single_shot_answer(
+                "What renewal policy applies to the sample service?",
+                &prepared,
+                None,
+            ),
+            "literal-free value lookups need source coverage before the model decides facts are missing"
+        );
+    }
+
+    #[test]
     fn conversation_refs_with_history_wait_for_canonical_preflight() {
         let mut ir = sample_ir_with_act(QueryAct::RetrieveValue, 0.55, None);
         ir.conversation_refs.push(UnresolvedRef {
@@ -2575,6 +2607,22 @@ mod tests {
         assert!(
             !super::should_use_single_shot_answer("q", &prepared, Some("user: earlier topic")),
             "real prior conversation should skip only the initial fast path; canonical preflight still answers from fixed evidence"
+        );
+    }
+
+    #[test]
+    fn focused_document_answer_intent_waits_for_canonical_preflight() {
+        let mut ir = sample_ir_with_act(QueryAct::RetrieveValue, 0.8, None);
+        ir.target_types = vec!["secondary_heading".to_string()];
+        let prepared = prepared_for_single_shot(ir);
+
+        assert!(
+            !super::should_use_single_shot_answer(
+                "What report name appears in the runtime PDF upload check?",
+                &prepared,
+                None,
+            ),
+            "focused document literals need canonical chunks before final answer selection"
         );
     }
 
@@ -2823,6 +2871,348 @@ mod tests {
             }
             AnswerDisposition::Answer => {
                 panic!("expected clarify disposition for explicit compiler clarification")
+            }
+        }
+    }
+
+    #[test]
+    fn disposition_answers_technical_ir_when_compiler_requested_clarification() {
+        let mut ir = sample_ir_with_act(
+            QueryAct::RetrieveValue,
+            0.4,
+            Some(ClarificationReason::MultipleInterpretations),
+        );
+        ir.target_types = vec!["endpoint".to_string()];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "which provider endpoint handles payment module status?",
+            &ir,
+            &[],
+            &sample_groups(),
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "exact technical IR must proceed to answer/preflight instead of asking for variants"
+        );
+    }
+
+    #[test]
+    fn disposition_answers_non_terse_retrieve_value_with_target_entity() {
+        let mut ir = sample_ir_with_act(
+            QueryAct::RetrieveValue,
+            0.4,
+            Some(ClarificationReason::MultipleInterpretations),
+        );
+        ir.target_types = vec!["attribute".to_string()];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "which provider configuration owns the payment module state?",
+            &ir,
+            &[],
+            &sample_groups(),
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "a non-terse retrieve-value question with a structured target entity is already anchored"
+        );
+    }
+
+    #[test]
+    fn disposition_answers_with_two_variants_when_top_variant_dominates() {
+        let groups = vec![
+            GroupedReference {
+                id: "document:1".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 1,
+                title: "TargetName Provider Alpha Manual".to_string(),
+                excerpt: None,
+                evidence_count: 9,
+                support_ids: vec!["chunk:1".to_string()],
+            },
+            GroupedReference {
+                id: "document:2".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 2,
+                title: "TargetName Provider Beta Manual".to_string(),
+                excerpt: None,
+                evidence_count: 2,
+                support_ids: vec!["chunk:2".to_string()],
+            },
+            GroupedReference {
+                id: "document:3".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 3,
+                title: "Ancillary Reference Guide".to_string(),
+                excerpt: None,
+                evidence_count: 4,
+                support_ids: vec!["chunk:3".to_string()],
+            },
+        ];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "targetname configure",
+            &sample_ir(0.4, Some(ClarificationReason::MultipleInterpretations)),
+            &[],
+            &groups,
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "dominant top query variant in compiler clarification mode should use direct answer"
+        );
+    }
+
+    #[test]
+    fn disposition_answers_with_dominant_topic_match_for_checkout_query() {
+        let groups = vec![
+            GroupedReference {
+                id: "document:1".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 1,
+                title: "checkout_runtime_contract.md".to_string(),
+                excerpt: None,
+                evidence_count: 2,
+                support_ids: vec!["chunk:1".to_string()],
+            },
+            GroupedReference {
+                id: "document:2".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 2,
+                title: "sample_rust_http_server.rs".to_string(),
+                excerpt: None,
+                evidence_count: 4,
+                support_ids: vec!["chunk:2".to_string()],
+            },
+            GroupedReference {
+                id: "document:3".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 3,
+                title: "websocket_protocol.md".to_string(),
+                excerpt: None,
+                evidence_count: 4,
+                support_ids: vec!["chunk:3".to_string()],
+            },
+        ];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "Which endpoint in checkout runtime returns current server info?",
+            &sample_ir(0.4, Some(ClarificationReason::AmbiguousTooShort)),
+            &[],
+            &groups,
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "query-word-dominant checkout intent should answer directly over broad evidence counts"
+        );
+    }
+
+    #[test]
+    fn disposition_answers_with_dominant_topic_match_for_inventory_wsdl() {
+        let groups = vec![
+            GroupedReference {
+                id: "document:1".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 1,
+                title: "inventory_soap_api_contract.md".to_string(),
+                excerpt: None,
+                evidence_count: 2,
+                support_ids: vec!["chunk:1".to_string()],
+            },
+            GroupedReference {
+                id: "document:2".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 2,
+                title: "rewards_accounts_api_contract.md".to_string(),
+                excerpt: None,
+                evidence_count: 4,
+                support_ids: vec!["chunk:2".to_string()],
+            },
+            GroupedReference {
+                id: "document:3".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 3,
+                title: "api_design_guidelines.docx".to_string(),
+                excerpt: None,
+                evidence_count: 4,
+                support_ids: vec!["chunk:3".to_string()],
+            },
+        ];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "Which WSDL does the inventory API use?",
+            &sample_ir_with_act(
+                QueryAct::RetrieveValue,
+                0.4,
+                Some(ClarificationReason::MultipleInterpretations),
+            ),
+            &[],
+            &groups,
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "single strongly matching inventory variant should answer directly"
+        );
+    }
+
+    #[test]
+    fn disposition_answers_with_dominant_topic_match_for_react_hooks() {
+        let groups = vec![
+            GroupedReference {
+                id: "document:1".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 1,
+                title: "react_dashboard.txt".to_string(),
+                excerpt: None,
+                evidence_count: 3,
+                support_ids: vec!["chunk:1".to_string()],
+            },
+            GroupedReference {
+                id: "document:2".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 2,
+                title: "rust_state_machine.rs".to_string(),
+                excerpt: None,
+                evidence_count: 5,
+                support_ids: vec!["chunk:2".to_string()],
+            },
+            GroupedReference {
+                id: "document:3".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 3,
+                title: "monitoring_dashboard.pdf".to_string(),
+                excerpt: None,
+                evidence_count: 5,
+                support_ids: vec!["chunk:3".to_string()],
+            },
+        ];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "What React hooks are used in the dashboard component and what state do they manage?",
+            &sample_ir_with_act(
+                QueryAct::ConfigureHow,
+                0.4,
+                Some(ClarificationReason::MultipleInterpretations),
+            ),
+            &[],
+            &groups,
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "dominant topic overlap should override noisy title-level evidence split"
+        );
+    }
+
+    #[test]
+    fn disposition_clarifies_with_two_variants_when_top_two_are_balanced() {
+        let groups = vec![
+            GroupedReference {
+                id: "document:1".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 1,
+                title: "TargetName Provider Alpha Manual".to_string(),
+                excerpt: None,
+                evidence_count: 8,
+                support_ids: vec!["chunk:1".to_string()],
+            },
+            GroupedReference {
+                id: "document:2".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 2,
+                title: "TargetName Provider Beta Manual".to_string(),
+                excerpt: None,
+                evidence_count: 7,
+                support_ids: vec!["chunk:2".to_string()],
+            },
+            GroupedReference {
+                id: "document:3".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 3,
+                title: "Ancillary Reference Guide".to_string(),
+                excerpt: None,
+                evidence_count: 4,
+                support_ids: vec!["chunk:3".to_string()],
+            },
+        ];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "targetname configure",
+            &sample_ir(0.4, Some(ClarificationReason::MultipleInterpretations)),
+            &[],
+            &groups,
+        );
+
+        match disposition {
+            AnswerDisposition::Clarify { variants } => {
+                assert_eq!(
+                    variants,
+                    vec![
+                        "TargetName Provider Alpha Manual".to_string(),
+                        "TargetName Provider Beta Manual".to_string()
+                    ]
+                );
+            }
+            AnswerDisposition::Answer => {
+                panic!("expected clarification when two variants are competitively balanced")
+            }
+        }
+    }
+
+    #[test]
+    fn disposition_clarifies_two_variants_without_absolute_evidence_gap() {
+        let groups = vec![
+            GroupedReference {
+                id: "document:1".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 1,
+                title: "TargetName Provider Alpha Manual".to_string(),
+                excerpt: None,
+                evidence_count: 2,
+                support_ids: vec!["chunk:1".to_string()],
+            },
+            GroupedReference {
+                id: "document:2".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 2,
+                title: "TargetName Provider Beta Manual".to_string(),
+                excerpt: None,
+                evidence_count: 1,
+                support_ids: vec!["chunk:2".to_string()],
+            },
+            GroupedReference {
+                id: "document:3".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 3,
+                title: "Ancillary Reference Guide".to_string(),
+                excerpt: None,
+                evidence_count: 1,
+                support_ids: vec!["chunk:3".to_string()],
+            },
+        ];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "targetname configure",
+            &sample_ir(0.4, Some(ClarificationReason::MultipleInterpretations)),
+            &[],
+            &groups,
+        );
+
+        match disposition {
+            AnswerDisposition::Clarify { variants } => {
+                assert_eq!(
+                    variants,
+                    vec![
+                        "TargetName Provider Alpha Manual".to_string(),
+                        "TargetName Provider Beta Manual".to_string()
+                    ]
+                );
+            }
+            AnswerDisposition::Answer => {
+                panic!("compiler clarification should not answer on a weak 2:1 evidence split")
             }
         }
     }

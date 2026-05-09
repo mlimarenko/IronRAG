@@ -16,7 +16,7 @@ use crate::shared::text_tokens::normalized_alnum_token_sequence_by;
 pub use coordination::*;
 pub use snapshot::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphNodeRow {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -32,7 +32,7 @@ pub struct RuntimeGraphNodeRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphEdgeRow {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -49,7 +49,7 @@ pub struct RuntimeGraphEdgeRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphEvidenceRow {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -64,13 +64,13 @@ pub struct RuntimeGraphEvidenceRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphEvidenceTargetRow {
     pub target_kind: String,
     pub target_id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphEvidenceLifecycleRow {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -87,7 +87,7 @@ pub struct RuntimeGraphEvidenceLifecycleRow {
     pub created_at: DateTime<Utc>,
 }
 
-const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP: usize = 16;
+const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP: usize = 6;
 const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_QUERY_CAP: usize = 8;
 const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_CAP: usize = 16;
 const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_MIN_CHARS: usize = 4;
@@ -99,13 +99,13 @@ const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_TOKENS: usize = 20;
 const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_CHARS: usize = 128;
 const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_CHARS: usize = 220;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphProjectionCountsRow {
     pub node_count: i64,
     pub edge_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphDocumentLinkRow {
     pub document_id: Uuid,
     pub target_node_id: Uuid,
@@ -114,7 +114,7 @@ pub struct RuntimeGraphDocumentLinkRow {
     pub support_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphSubTypeHintRow {
     pub node_type: String,
     pub sub_type: String,
@@ -1505,8 +1505,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                 evidence.body_key,
                 evidence.first_query_ordinal,
                 evidence.body_match,
-                evidence.literal_match,
-                evidence.body_rank
+                evidence.literal_match
              from requested_text_query
              cross join lateral (
                  select
@@ -1524,23 +1523,15 @@ pub async fn search_runtime_graph_evidence_by_text(
                     md5(lower(regexp_replace(btrim(evidence.evidence_text), '[[:space:]]+', ' ', 'g'))) as body_key,
                     requested_text_query.ordinal as first_query_ordinal,
                     true as body_match,
-                    false as literal_match,
-                    ts_rank_cd(
-                        to_tsvector(
-                            'simple',
-                            evidence.evidence_text || ' ' || coalesce(evidence.source_file_name, '')
-                        ),
-                        requested_text_query.ts_query
-                    ) as body_rank
+                    false as literal_match
                  from runtime_graph_evidence as evidence
                  where evidence.library_id = $1
                    and btrim(evidence.evidence_text) <> ''
                    and to_tsvector(
-                        'simple',
+                        'simple'::regconfig,
                         evidence.evidence_text || ' ' || coalesce(evidence.source_file_name, '')
                    ) @@ requested_text_query.ts_query
                  order by
-                    body_rank desc,
                     evidence.confidence_score desc nulls last,
                     evidence.created_at desc,
                     evidence.id desc
@@ -1563,8 +1554,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                 evidence.body_key,
                 evidence.first_query_ordinal,
                 evidence.body_match,
-                evidence.literal_match,
-                evidence.body_rank
+                evidence.literal_match
              from requested_literal_query
              cross join lateral (
                  select
@@ -1582,8 +1572,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                     md5(lower(regexp_replace(btrim(evidence.evidence_text), '[[:space:]]+', ' ', 'g'))) as body_key,
                     requested_literal_query.ordinal as first_query_ordinal,
                     false as body_match,
-                    true as literal_match,
-                    0::real as body_rank
+                    true as literal_match
                  from runtime_graph_evidence as evidence
                  where evidence.library_id = $1
                    and btrim(evidence.evidence_text) <> ''
@@ -1612,8 +1601,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                 evidence.body_key,
                 evidence.first_query_ordinal,
                 evidence.body_match,
-                evidence.literal_match,
-                evidence.body_rank
+                evidence.literal_match
              from (
                  select * from text_matched
                  union all
@@ -1623,7 +1611,6 @@ pub async fn search_runtime_graph_evidence_by_text(
                 evidence.id,
                 evidence.first_query_ordinal asc,
                 evidence.literal_match desc,
-                evidence.body_rank desc,
                 evidence.body_match desc
          ),
          deduped as (
@@ -1641,14 +1628,12 @@ pub async fn search_runtime_graph_evidence_by_text(
                 created_at,
                 first_query_ordinal,
                 body_match,
-                literal_match,
-                body_rank
+                literal_match
              from matched
              order by
                 body_key,
                 first_query_ordinal asc,
                 literal_match desc,
-                body_rank desc,
                 body_match desc,
                 confidence_score desc nulls last,
                 created_at desc,
@@ -1670,7 +1655,6 @@ pub async fn search_runtime_graph_evidence_by_text(
          order by
             first_query_ordinal asc,
             literal_match desc,
-            body_rank desc,
             body_match desc,
             confidence_score desc nulls last,
             created_at desc,
@@ -1761,8 +1745,7 @@ fn runtime_graph_evidence_literal_search_query_is_selective(query_text: &str) ->
     let strict_short_name_phrase = !has_structural_separator
         && !has_numeric
         && token_count == 2
-        && alphanumeric_count >= 6
-        && alphanumeric_count <= 48
+        && (6..=48).contains(&alphanumeric_count)
         && char_count <= 64
         && query_text
             .split_whitespace()
@@ -1894,7 +1877,7 @@ fn runtime_graph_evidence_text_search_distinctive_window(tokens: &[String]) -> O
         .into_iter()
         .take(RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MAX_TOKENS)
         .collect::<Vec<_>>();
-    selected.sort_by(|left, right| left.0.cmp(&right.0));
+    selected.sort_by_key(|left| left.0);
     let window = selected.into_iter().map(|(_, token)| token.clone()).collect::<Vec<_>>();
     runtime_graph_evidence_text_search_tokens_are_selective(&window).then_some(window)
 }
@@ -1938,14 +1921,15 @@ fn runtime_graph_evidence_text_search_tokens_are_selective(tokens: &[String]) ->
     if tokens.len() < 2 {
         return false;
     }
+    if tokens.len() == 2 {
+        return tokens
+            .iter()
+            .any(|token| runtime_graph_evidence_text_search_token_has_numeric(token));
+    }
     if tokens.len() >= 3 {
         return true;
     }
-    if tokens.iter().any(|token| runtime_graph_evidence_text_search_token_has_numeric(token)) {
-        return true;
-    }
-    let total_chars = tokens.iter().map(|token| token.chars().count()).sum::<usize>();
-    total_chars >= RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_MIN_TOTAL_CHARS
+    false
 }
 
 fn runtime_graph_evidence_text_search_token_has_numeric(token: &str) -> bool {
@@ -2122,7 +2106,7 @@ pub async fn list_runtime_graph_document_links_by_target_ids(
 /// Canonical contract: every `runtime_graph_evidence` row points at an
 /// active `content_document`. The single-doc cleanup explicitly removes the
 /// just-deleted doc's rows AND sweeps any rows in the same library whose
-/// `document_id` is null (FK `ON DELETE SET NULL` legacy debris) or whose
+/// `document_id` is null (FK `ON DELETE SET NULL` orphan debris) or whose
 /// referenced document is in `deleted` state — for example, evidence rows
 /// stranded by an earlier delete whose graph-refresh failed soft and never
 /// retried. Without this sweep those rows keep nodes alive forever via the
@@ -2776,6 +2760,7 @@ fn admitted_runtime_graph_counts_query() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP,
         runtime_graph_evidence_literal_search_queries, runtime_graph_evidence_text_search_queries,
         runtime_graph_evidence_text_search_token_prefix, runtime_graph_evidence_text_search_tokens,
     };
@@ -2815,13 +2800,13 @@ mod tests {
             queries.first().map(String::as_str),
             Some("'paramet':* & 'modul':* & 'contr':* & 'servi':*"),
         );
-        assert_eq!(queries.get(1).map(String::as_str), Some("'alph':* & 'modul':*"));
-        assert_eq!(queries.get(2).map(String::as_str), Some("'port':* & '9407'"));
-        assert!(queries.contains(&"'alph':* & 'modul':*".to_string()));
+        assert_eq!(queries.get(1).map(String::as_str), Some("'port':* & '9407'"));
+        assert!(!queries.contains(&"'alph':* & 'modul':*".to_string()));
         assert!(queries.contains(&"'port':* & '9407'".to_string()));
         assert!(!queries.iter().any(|query| {
             query.contains("'which':* & 'paramet':* & 'link':* & 'alph':* & 'modul':* & 'contr':*")
         }));
+        assert!(queries.len() <= RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP);
     }
 
     #[test]
@@ -2889,8 +2874,8 @@ mod tests {
             "alphacases betagamma deltazeta epsilonkey zetaport thetakey".to_string(),
         ]);
 
-        assert!(queries.contains(&"'deltaze':* & 'epsilonk':*".to_string()));
-        assert!(queries.contains(&"'alphacas':* & 'betagam':*".to_string()));
+        assert!(queries.iter().any(|query| query.contains("'deltaze':* & 'epsilonk':*")));
+        assert!(!queries.contains(&"'alphacas':* & 'betagam':*".to_string()));
     }
 
     #[test]
@@ -2903,7 +2888,7 @@ mod tests {
             queries.first().map(String::as_str),
             Some("'alphacas':* & 'betagam':* & 'deltaze':* & 'epsilonk':*"),
         );
-        assert!(queries.contains(&"'betagam':* & 'deltaze':*".to_string()));
-        assert!(queries.contains(&"'deltaze':* & 'epsilonk':*".to_string()));
+        assert!(queries.contains(&"'betagam':* & 'deltaze':* & 'epsilonk':*".to_string()));
+        assert!(!queries.contains(&"'betagam':* & 'deltaze':*".to_string()));
     }
 }

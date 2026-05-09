@@ -7,7 +7,7 @@ use axum::{
 use serde::Serialize;
 use sqlx::Error as SqlxError;
 use thiserror::Error;
-use tracing::{error, warn};
+use tracing::{Span, error, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -16,6 +16,11 @@ use crate::{
         RuntimeActionRecord, RuntimeExecution, RuntimePolicyDecision, RuntimeStageRecord,
     },
     infra::repositories::runtime_repository,
+    services::{
+        content::error::ContentServiceError, graph::error::GraphServiceError,
+        ingest::error::IngestServiceError, knowledge::error::KnowledgeServiceError,
+        query::error::QueryServiceError, webhook::error::WebhookServiceError,
+    },
     shared::extraction::file_extract::{UploadAdmissionError, UploadRejectionDetails},
 };
 
@@ -29,7 +34,7 @@ pub const FORBIDDEN_VOCABULARY_TOKENS: [(&str, &str); 6] = [
     ("model_profile", "model preset"),
 ];
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiErrorBody {
     pub error: String,
@@ -41,7 +46,7 @@ pub struct ApiErrorBody {
     pub request_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiWarningBody {
     pub warning: String,
@@ -67,9 +72,9 @@ pub enum ApiError {
     #[error("conflict: {0}")]
     BootstrapAlreadyClaimed(String),
     #[error(
-        "bad request: legacy vocabulary '{legacy}' is not allowed for {field}; use '{canonical}'"
+        "bad request: forbidden vocabulary '{rejected}' is not allowed for {field}; use '{canonical}'"
     )]
-    ForbiddenVocabulary { field: &'static str, legacy: &'static str, canonical: &'static str },
+    ForbiddenVocabulary { field: &'static str, rejected: &'static str, canonical: &'static str },
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("conflict: {0}")]
@@ -170,10 +175,10 @@ impl ApiError {
     #[must_use]
     pub fn forbidden_vocabulary(
         field: &'static str,
-        legacy: &'static str,
+        rejected: &'static str,
         canonical: &'static str,
     ) -> Self {
-        Self::ForbiddenVocabulary { field, legacy, canonical }
+        Self::ForbiddenVocabulary { field, rejected, canonical }
     }
 
     fn status_code(&self) -> StatusCode {
@@ -196,8 +201,8 @@ impl ApiError {
             | Self::KnowledgeNotReady(_)
             | Self::GraphWriteContention(_)
             | Self::GraphPersistenceIntegrity(_)
-            | Self::SettlementRefreshFailed(_)
-            | Self::ProviderFailure(_) => StatusCode::CONFLICT,
+            | Self::SettlementRefreshFailed(_) => StatusCode::CONFLICT,
+            Self::ProviderFailure(_) => StatusCode::BAD_GATEWAY,
             Self::ArangoBootstrapFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal | Self::InternalMessage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -244,6 +249,148 @@ impl ApiError {
             message: error.message().to_string(),
             error_kind: error.error_kind(),
             details: Box::new(error.details().clone()),
+        }
+    }
+}
+
+pub(crate) fn record_error_kind(error_kind: &'static str) {
+    Span::current().record("error.kind", error_kind);
+}
+
+impl From<ContentServiceError> for ApiError {
+    fn from(error: ContentServiceError) -> Self {
+        record_error_kind(error.kind());
+        match error {
+            ContentServiceError::NotFound { message } => Self::NotFound(message),
+            ContentServiceError::InvalidRequest { message } => Self::BadRequest(message),
+            ContentServiceError::StateConflict { message } => Self::Conflict(message),
+            ContentServiceError::StorageUnavailable { message } => {
+                Self::ArangoBootstrapFailed(message)
+            }
+            ContentServiceError::ProviderUnavailable { message } => Self::ProviderFailure(message),
+            ContentServiceError::Cancelled => {
+                Self::Conflict("content operation cancelled".to_string())
+            }
+            ContentServiceError::Repository(error) => {
+                Self::internal_with_log(error, "content service repository failure")
+            }
+            ContentServiceError::Internal(error) => {
+                Self::internal_with_log(error, "content service internal failure")
+            }
+        }
+    }
+}
+
+impl From<GraphServiceError> for ApiError {
+    fn from(error: GraphServiceError) -> Self {
+        record_error_kind(error.kind());
+        match error {
+            GraphServiceError::LibraryNotFound { library_id } => {
+                Self::resource_not_found("library", library_id)
+            }
+            GraphServiceError::NotFound { message } => Self::NotFound(message),
+            GraphServiceError::StateConflict { message } => Self::Conflict(message),
+            GraphServiceError::WriteContention { message } => Self::GraphWriteContention(message),
+            GraphServiceError::PersistenceIntegrity { message } => {
+                Self::GraphPersistenceIntegrity(message)
+            }
+            GraphServiceError::ProviderUnavailable { message } => Self::ProviderFailure(message),
+            GraphServiceError::Cancelled => Self::Conflict("graph operation cancelled".to_string()),
+            GraphServiceError::Repository(error) => {
+                Self::internal_with_log(error, "graph service repository failure")
+            }
+            GraphServiceError::Internal(error) => {
+                Self::internal_with_log(error, "graph service internal failure")
+            }
+        }
+    }
+}
+
+impl From<IngestServiceError> for ApiError {
+    fn from(error: IngestServiceError) -> Self {
+        record_error_kind(error.kind());
+        match error {
+            IngestServiceError::LibraryNotFound { library_id } => {
+                Self::resource_not_found("library", library_id)
+            }
+            IngestServiceError::BindingNotConfigured { message }
+            | IngestServiceError::StateConflict { message } => Self::Conflict(message),
+            IngestServiceError::ProviderUnavailable { message } => Self::ProviderFailure(message),
+            IngestServiceError::Cancelled => {
+                Self::Conflict("ingest operation cancelled".to_string())
+            }
+            IngestServiceError::Repository(error) => {
+                Self::internal_with_log(error, "ingest service repository failure")
+            }
+            IngestServiceError::Internal(error) => {
+                Self::internal_with_log(error, "ingest service internal failure")
+            }
+        }
+    }
+}
+
+impl From<KnowledgeServiceError> for ApiError {
+    fn from(error: KnowledgeServiceError) -> Self {
+        record_error_kind(error.kind());
+        match error {
+            KnowledgeServiceError::LibraryNotFound { library_id } => {
+                Self::resource_not_found("library", library_id)
+            }
+            KnowledgeServiceError::NotFound { message } => Self::NotFound(message),
+            KnowledgeServiceError::GraphNotReady { message } => Self::KnowledgeNotReady(message),
+            KnowledgeServiceError::CacheUnavailable { message } => {
+                Self::ArangoBootstrapFailed(message)
+            }
+            KnowledgeServiceError::Repository(error) => {
+                Self::internal_with_log(error, "knowledge service repository failure")
+            }
+            KnowledgeServiceError::Internal(error) => {
+                Self::internal_with_log(error, "knowledge service internal failure")
+            }
+        }
+    }
+}
+
+impl From<QueryServiceError> for ApiError {
+    fn from(error: QueryServiceError) -> Self {
+        record_error_kind(error.kind());
+        match error {
+            QueryServiceError::LibraryNotFound { library_id } => {
+                Self::resource_not_found("library", library_id)
+            }
+            QueryServiceError::NotFound { message } => Self::NotFound(message),
+            QueryServiceError::BindingNotConfigured { message }
+            | QueryServiceError::StateConflict { message } => Self::Conflict(message),
+            QueryServiceError::ProviderUnavailable { message } => Self::ProviderFailure(message),
+            QueryServiceError::CacheUnavailable { message } => Self::ArangoBootstrapFailed(message),
+            QueryServiceError::Cancelled => Self::Conflict("query operation cancelled".to_string()),
+            QueryServiceError::Repository(error) => {
+                Self::internal_with_log(error, "query service repository failure")
+            }
+            QueryServiceError::Internal(error) => {
+                Self::internal_with_log(error, "query service internal failure")
+            }
+        }
+    }
+}
+
+impl From<WebhookServiceError> for ApiError {
+    fn from(error: WebhookServiceError) -> Self {
+        record_error_kind(error.kind());
+        match error {
+            WebhookServiceError::DeliveryAttemptNotFound { job_id } => {
+                Self::resource_not_found("webhook_delivery_attempt_for_job", job_id)
+            }
+            WebhookServiceError::SubscriptionNotFound { subscription_id } => {
+                Self::resource_not_found("webhook_subscription", subscription_id)
+            }
+            WebhookServiceError::StateConflict { message } => Self::Conflict(message),
+            WebhookServiceError::Repository(error) => {
+                Self::internal_with_log(error, "webhook service repository failure")
+            }
+            WebhookServiceError::Internal(error) => {
+                Self::internal_with_log(error, "webhook service internal failure")
+            }
         }
     }
 }
@@ -541,12 +688,12 @@ pub fn detect_forbidden_vocabulary(value: &str) -> Option<(&'static str, &'stati
     FORBIDDEN_VOCABULARY_TOKENS
         .iter()
         .copied()
-        .find(|(legacy, _canonical)| normalized.contains(legacy))
+        .find(|(rejected, _canonical)| normalized.contains(rejected))
 }
 
 pub fn ensure_canonical_vocabulary(field: &'static str, value: &str) -> Result<(), ApiError> {
-    if let Some((legacy, canonical)) = detect_forbidden_vocabulary(value) {
-        return Err(ApiError::forbidden_vocabulary(field, legacy, canonical));
+    if let Some((rejected, canonical)) = detect_forbidden_vocabulary(value) {
+        return Err(ApiError::forbidden_vocabulary(field, rejected, canonical));
     }
     Ok(())
 }

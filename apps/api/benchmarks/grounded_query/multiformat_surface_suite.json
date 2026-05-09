@@ -64,7 +64,7 @@
       "searchQuery": "runtime DOCX upload check canonical pipeline validation",
       "expectedDocumentsContains": ["runtime_upload_check"],
       "searchRequiredAll": ["Canonical pipeline validation"],
-      "answerRequiredAll": ["Canonical pipeline validation"],
+      "answerRequiredAll": ["extraction", "chunking", "vector ready", "graph ready"],
       "answerForbiddenAny": ["borrow checker"],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 1,

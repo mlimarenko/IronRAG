@@ -147,7 +147,8 @@ fn build_multi_document_endpoint_answer_handles_english_checkout_rewards_questio
 
     let answer = build_multi_document_endpoint_answer_from_chunks(
             "If an agent needs the current Checkout Server status and then the Rewards Accounts list, which two endpoints should it call?",
-            &query_ir_with_scope_literals_and_target_types(
+            &query_ir_with_act_scope_literals_and_target_types(
+                QueryAct::RetrieveValue,
                 QueryScope::MultiDocument,
                 ["current Checkout Server status", "Rewards Accounts list"],
                 ["endpoint"],
@@ -210,7 +211,12 @@ fn build_single_endpoint_answer_from_chunks_prefers_system_info_over_adjacent_no
 
     let answer = build_single_endpoint_answer_from_chunks(
         "Which endpoint returns the current information for the checkout server?",
-        &query_ir_with_literals_and_target_types(["current information", "checkout server"], ["endpoint"]),
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["current information", "checkout server"],
+            ["endpoint"],
+        ),
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
@@ -255,7 +261,9 @@ fn build_single_endpoint_answer_from_chunks_prefers_question_matched_document_ov
 
     let answer = build_single_endpoint_answer_from_chunks(
         "Which endpoint returns the current information for the checkout server?",
-        &query_ir_with_literals_and_target_types(
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
             ["current information", "checkout server"],
             ["endpoint"],
         ),
@@ -302,7 +310,9 @@ fn build_single_endpoint_answer_falls_back_to_full_source_when_focus_excerpt_ski
     let document_id = Uuid::now_v7();
     let answer = build_single_endpoint_answer_from_chunks(
         "Which endpoint returns the current information for the checkout server?",
-        &query_ir_with_literals_and_target_types(
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
             ["current information", "checkout server"],
             ["endpoint"],
         ),
@@ -332,7 +342,8 @@ fn build_multi_document_endpoint_answer_from_chunks_prefers_current_info_for_cas
     let rewards_document_id = Uuid::now_v7();
     let answer = build_multi_document_endpoint_answer_from_chunks(
             "If an agent needs the current Checkout Server status and separately the Rewards Service account list, which two endpoints are needed?",
-            &query_ir_with_scope_literals_and_target_types(
+            &query_ir_with_act_scope_literals_and_target_types(
+                QueryAct::RetrieveValue,
                 QueryScope::MultiDocument,
                 ["current status checkout server", "account list rewards service"],
                 ["endpoint"],
@@ -396,7 +407,8 @@ fn build_multi_document_endpoint_answer_from_chunks_handles_live_checkout_server
     let wsdl_document_id = Uuid::now_v7();
     let answer = build_multi_document_endpoint_answer_from_chunks(
             "If an agent needs the current Checkout Server status and separately the Rewards Service account list, which two endpoints are needed?",
-            &query_ir_with_scope_literals_and_target_types(
+            &query_ir_with_act_scope_literals_and_target_types(
+                QueryAct::RetrieveValue,
                 QueryScope::MultiDocument,
                 ["current status checkout server", "account list rewards service"],
                 ["endpoint"],
@@ -488,7 +500,12 @@ fn build_deterministic_grounded_answer_uses_exact_wsdl_literal_without_agent_loo
     };
     let answer = build_deterministic_grounded_answer(
         "Which WSDL does the inventory SOAP API use?",
-        &query_ir_with_literals_and_target_types(["inventory soap api"], ["url", "wsdl"]),
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["inventory soap api"],
+            ["url", "wsdl"],
+        ),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -521,7 +538,9 @@ fn build_deterministic_grounded_answer_uses_endpoint_fact_without_chunk_parsing(
 
     let answer = build_deterministic_grounded_answer(
         "Which endpoint returns the current information for the checkout server?",
-        &query_ir_with_literals_and_target_types(
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
             ["checkout server", "current information"],
             ["endpoint"],
         ),
@@ -547,13 +566,231 @@ fn build_deterministic_grounded_answer_uses_endpoint_fact_without_chunk_parsing(
 }
 
 #[test]
+fn build_deterministic_grounded_answer_abstains_when_endpoint_fact_lacks_query_focus_support() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Which response window applies to SevOne incidents?",
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["SevOne incidents", "response window"],
+            ["endpoint"],
+        ),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "endpoint_path".to_string(),
+                canonical_value_text: "/health".to_string(),
+                canonical_value_exact: "/health".to_string(),
+                canonical_value_json: json!("/health"),
+                display_value: "/health".to_string(),
+                qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id,
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id,
+                document_label: "incident_response.md".to_string(),
+                excerpt: "GET /health returns service status.".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.97),
+                source_text: repair_technical_layout_noise(
+                    "Health Check\nGET /health returns service status.",
+                ),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id,
+                chunk_index: 1,
+                chunk_kind: None,
+                document_id,
+                document_label: "incident_response.md".to_string(),
+                excerpt: "SevOne incidents use a 15 minute response window.".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.95),
+                source_text: repair_technical_layout_noise(
+                    "Incident Matrix\nSevOne incidents use a 15 minute response window.",
+                ),
+            },
+        ],
+    );
+
+    assert!(answer.is_none());
+}
+
+#[test]
+fn build_deterministic_grounded_answer_skips_graph_namespace_endpoint_for_graph_route_literal_signal()
+ {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::RetrieveValue,
+        QueryScope::SingleDocument,
+        ["route"],
+    );
+    query_ir
+        .literal_constraints
+        .push(LiteralSpan { text: "/system/info".to_string(), kind: LiteralKind::Path });
+
+    let answer = build_deterministic_grounded_answer(
+        "Which route path handles the status check?",
+        &query_ir,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![
+                KnowledgeTechnicalFactRow {
+                    fact_kind: "endpoint_path".to_string(),
+                    canonical_value_text: "/wiki/Knowledge_graph".to_string(),
+                    canonical_value_exact: "/wiki/Knowledge_graph".to_string(),
+                    canonical_value_json: json!("/wiki/Knowledge_graph"),
+                    display_value: "/wiki/Knowledge_graph".to_string(),
+                    qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                    ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                },
+                KnowledgeTechnicalFactRow {
+                    fact_kind: "endpoint_path".to_string(),
+                    canonical_value_text: "/system/info".to_string(),
+                    canonical_value_exact: "/system/info".to_string(),
+                    canonical_value_json: json!("/system/info"),
+                    display_value: "/system/info".to_string(),
+                    qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                    ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+                },
+            ],
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "entity_route_graph.md".to_string(),
+            excerpt: "Entity route reference".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.98),
+            source_text: repair_technical_layout_noise(
+                "Entity routing table includes /wiki/Knowledge_graph and GET /system/info references.",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert_eq!(answer, "The endpoint is `GET /system/info`.");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_abstains_from_graph_namespace_endpoint_when_only_generic_endpoint_target_is_present()
+ {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Which endpoint handles this entity route?",
+        &query_ir_with_act_scope_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["endpoint", "entity"],
+        ),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "endpoint_path".to_string(),
+                canonical_value_text: "/wiki/Knowledge_graph".to_string(),
+                canonical_value_exact: "/wiki/Knowledge_graph".to_string(),
+                canonical_value_json: json!("/wiki/Knowledge_graph"),
+                display_value: "/wiki/Knowledge_graph".to_string(),
+                qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "entity_route_graph.md".to_string(),
+            excerpt: "Entity route reference".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.98),
+            source_text: repair_technical_layout_noise(
+                "Entity routing table includes GET /wiki/Knowledge_graph for canonical metadata.",
+            ),
+        }],
+    );
+
+    assert!(answer.is_none());
+}
+
+#[test]
+fn build_deterministic_grounded_answer_keeps_graph_namespace_endpoint_for_url_target() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+
+    let answer = build_deterministic_grounded_answer(
+        "Which API endpoint handles this entity route?",
+        &query_ir_with_act_scope_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["url", "entity"],
+        ),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![KnowledgeTechnicalFactRow {
+                fact_kind: "endpoint_path".to_string(),
+                canonical_value_text: "/wiki/Knowledge_graph".to_string(),
+                canonical_value_exact: "/wiki/Knowledge_graph".to_string(),
+                canonical_value_json: json!("/wiki/Knowledge_graph"),
+                display_value: "/wiki/Knowledge_graph".to_string(),
+                qualifiers_json: json!([{ "key": "method", "value": "GET" }]),
+                ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "entity_route_graph.md".to_string(),
+            excerpt: "Entity route API reference".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.98),
+            source_text: repair_technical_layout_noise(
+                "Entity route API reference includes GET /wiki/Knowledge_graph for canonical metadata.",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert_eq!(answer, "The endpoint is `GET /wiki/Knowledge_graph`.");
+}
+
+#[test]
 fn build_deterministic_grounded_answer_abstains_when_endpoint_candidate_misses_parameter_facet() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();
 
     let answer = build_deterministic_grounded_answer(
         "What pagination approach is recommended, and what query parameters are used?",
-        &query_ir_with_literals_and_target_types(
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
             ["pagination query parameters"],
             ["endpoint", "parameter"],
         ),
@@ -873,7 +1110,12 @@ fn build_deterministic_grounded_answer_prefers_exact_wsdl_document_over_foreign_
 
     let answer = build_deterministic_grounded_answer(
         "Which WSDL does the inventory SOAP API use?",
-        &query_ir_with_literals_and_target_types(["inventory soap api"], ["endpoint", "wsdl"]),
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["inventory soap api"],
+            ["endpoint", "wsdl"],
+        ),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1098,7 +1340,7 @@ fn build_deterministic_grounded_answer_does_not_infer_wsdl_from_chunks_without_f
 
     let answer = build_deterministic_grounded_answer(
         "Which WSDL does the inventory SOAP API use?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1130,7 +1372,7 @@ fn build_deterministic_grounded_answer_does_not_infer_single_endpoint_from_chunk
 
     let answer = build_deterministic_grounded_answer(
         "Which endpoint returns current information for the checkout server?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1165,7 +1407,7 @@ fn build_deterministic_grounded_answer_does_not_infer_multi_document_endpoints_f
 
     let answer = build_deterministic_grounded_answer(
         "If an agent needs the current Checkout Server status and separately the Rewards Service account list, which two endpoints are needed?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1217,7 +1459,7 @@ fn build_deterministic_grounded_answer_does_not_infer_parameter_from_chunks_with
 
     let answer = build_deterministic_grounded_answer(
         "Does a withCards parameter exist?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),

@@ -44,12 +44,14 @@ use crate::{
 use prompt::{build_graph_extraction_prompt_plan, normalized_downgrade_level};
 use recovery::{
     append_graph_runtime_policy_audit, begin_graph_runtime_stage, graph_async_operation_status,
-    graph_extraction_execution_error, graph_failure_code_from_outcome,
-    make_graph_runtime_failure_summary, make_graph_terminal_failure_outcome,
-    map_graph_runtime_execution_error, record_graph_runtime_stage,
+    graph_extraction_cancelled_error, graph_extraction_execution_error,
+    graph_failure_code_from_outcome, make_graph_runtime_failure_summary,
+    make_graph_terminal_failure_outcome, map_graph_runtime_execution_error,
+    record_graph_runtime_stage,
 };
 use session::build_raw_output_json;
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use types::{GraphExtractionFailureOutcome, GraphExtractionPromptVariant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,7 +177,15 @@ pub async fn extract_chunk_graph_candidates(
     state: &AppState,
     runtime_context: &RuntimeTaskExecutionContext,
     request: &GraphExtractionRequest,
+    cancellation_token: &CancellationToken,
 ) -> std::result::Result<GraphExtractionOutcome, GraphExtractionExecutionError> {
+    if cancellation_token.is_cancelled() {
+        return Err(graph_extraction_cancelled_error(
+            request,
+            "graph_extract_v8:cancelled",
+            request.chunk.content.len(),
+        ));
+    }
     let extraction_record_id = uuid::Uuid::now_v7();
     let mut runtime_session =
         seed_graph_extract_runtime_session(state, extraction_record_id, request, runtime_context)
@@ -234,6 +244,7 @@ pub async fn extract_chunk_graph_candidates(
         request,
         extraction_record_id,
         &mut runtime_session,
+        cancellation_token,
     )
     .await;
 
@@ -325,6 +336,7 @@ pub async fn extract_chunk_graph_candidates(
                 recovery_summary: error.recovery_summary.clone(),
                 recovery_attempts: error.recovery_attempts.clone(),
                 resume_state: error.resume_state.clone(),
+                cancelled: error.cancelled,
             })?;
             repositories::update_runtime_graph_extraction_record(
                 &state.persistence.postgres,
@@ -360,6 +372,7 @@ pub async fn extract_chunk_graph_candidates(
                 recovery_summary: error.recovery_summary.clone(),
                 recovery_attempts: error.recovery_attempts.clone(),
                 resume_state: error.resume_state.clone(),
+                cancelled: error.cancelled,
             })?
             .ok_or_else(|| GraphExtractionExecutionError {
                 message: format!(
@@ -372,6 +385,7 @@ pub async fn extract_chunk_graph_candidates(
                 recovery_summary: error.recovery_summary.clone(),
                 recovery_attempts: error.recovery_attempts.clone(),
                 resume_state: error.resume_state.clone(),
+                cancelled: error.cancelled,
             })?;
             append_graph_runtime_policy_audit(
                 state,
@@ -423,6 +437,7 @@ async fn run_graph_extraction_runtime(
     request: &GraphExtractionRequest,
     graph_extraction_id: uuid::Uuid,
     runtime_session: &mut RuntimeExecutionSession,
+    cancellation_token: &CancellationToken,
 ) -> std::result::Result<
     (
         RuntimeTerminalOutcome<
@@ -471,7 +486,29 @@ async fn run_graph_extraction_runtime(
         return Err((make_graph_terminal_failure_outcome(failure.clone()), error));
     }
 
-    match resolve_graph_extraction(state, provider_profile, request).await {
+    if cancellation_token.is_cancelled() {
+        let error = graph_extraction_cancelled_error(
+            request,
+            "graph_extract_v8:cancelled",
+            request.chunk.content.len(),
+        );
+        let failure = GraphExtractionTaskFailure {
+            code: "ingest_stage_cancelled".to_string(),
+            summary: error.message.clone(),
+        };
+        record_graph_runtime_stage(
+            state.agent_runtime.executor(),
+            runtime_session,
+            RuntimeStageKind::ExtractGraph,
+            RuntimeStageState::Canceled,
+            false,
+            Some(&failure),
+            None,
+        );
+        return Err((make_graph_terminal_failure_outcome(failure), error));
+    }
+
+    match resolve_graph_extraction(state, provider_profile, request, cancellation_token).await {
         Ok(resolved) => {
             record_graph_runtime_stage(
                 state.agent_runtime.executor(),
@@ -589,11 +626,16 @@ async fn run_graph_extraction_runtime(
             }
         }
         Err(failure) => {
+            let stage_state = if failure.cancelled {
+                RuntimeStageState::Canceled
+            } else {
+                RuntimeStageState::Failed
+            };
             record_graph_runtime_stage(
                 state.agent_runtime.executor(),
                 runtime_session,
                 RuntimeStageKind::ExtractGraph,
-                RuntimeStageState::Failed,
+                stage_state,
                 false,
                 Some(&GraphExtractionTaskFailure {
                     code: graph_failure_code_from_outcome(&failure).to_string(),
@@ -623,6 +665,7 @@ async fn run_graph_extraction_runtime(
                             .unwrap_or(1),
                         downgrade_level: normalized_downgrade_level(request),
                     },
+                    cancelled: failure.cancelled,
                 },
             ))
         }
@@ -633,6 +676,7 @@ async fn resolve_graph_extraction(
     state: &AppState,
     provider_profile: &crate::domains::provider_profiles::EffectiveProviderProfile,
     request: &GraphExtractionRequest,
+    cancellation_token: &CancellationToken,
 ) -> std::result::Result<types::ResolvedGraphExtraction, GraphExtractionFailureOutcome> {
     let library_id = request.library_id;
     let runtime_binding = state
@@ -656,6 +700,7 @@ async fn resolve_graph_extraction(
         provider_profile,
         &runtime_binding,
         request,
+        cancellation_token,
         state.retrieval_intelligence.extraction_recovery_enabled,
         state
             .retrieval_intelligence

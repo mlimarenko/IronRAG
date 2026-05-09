@@ -3,7 +3,7 @@
 /// Header format:  `X-Ironrag-Signature: t=<unix_ts>,v1=<hex_hmac>`
 /// HMAC input:     `<unix_ts>.<raw_body_bytes>`
 /// Replay window:  configurable, default 300 seconds (5 minutes).
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 

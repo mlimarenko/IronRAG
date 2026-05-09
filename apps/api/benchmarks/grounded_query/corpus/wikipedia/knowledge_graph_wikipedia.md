@@ -232,4 +232,3 @@ Large linked open data sets include DBpedia, Wikibase, Wikidata and Open ICEcat.
 
 
 === 5-star linked open data ===
-

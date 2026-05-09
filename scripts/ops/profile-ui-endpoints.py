@@ -12,11 +12,12 @@ Writes a markdown report to `tmp/ui-endpoint-profile-<timestamp>.md`.
 Usage:
     make perf-probe
     # or
+    IRONRAG_PROBE_PASSWORD=... \\
     python3 scripts/ops/profile-ui-endpoints.py \\
         --base-url http://localhost:19000 \\
         --metrics-url http://localhost:9464 \\
         --library-id <library-uuid> \\
-        --login admin --password rustrag123 \\
+        --login admin \\
         --runs 5
 
 The script is READ-ONLY: it never calls POST/PUT/DELETE endpoints. Mutating
@@ -45,6 +46,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable
+
+PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
 
 # --- Probe target definition ----------------------------------------------
 #
@@ -238,10 +241,10 @@ class CurlClient:
             "curl", "-s", "-c", self.cookie_jar,
             "-X", "POST",
             "-H", "Content-Type: application/json",
-            "--data", body,
+            "--data-binary", "@-",
             f"{self.base_url}/v1/iam/session/login",
         ]
-        proc = subprocess.run(args, capture_output=True, check=False)
+        proc = subprocess.run(args, input=body.encode(), capture_output=True, check=False)
         if proc.returncode != 0 or b"sessionId" not in proc.stdout:
             raise RuntimeError(
                 f"login failed: exit={proc.returncode} body={proc.stdout[:200]!r}"
@@ -537,6 +540,13 @@ def write_report(
 
 # --- Entry point -----------------------------------------------------------
 
+def require_probe_password() -> str:
+    password = os.environ.get(PROBE_PASSWORD_ENV)
+    if not password:
+        raise SystemExit(f"{PROBE_PASSWORD_ENV} is required")
+    return password
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://localhost:19000")
@@ -547,7 +557,6 @@ def main() -> int:
         help="Reference library UUID to probe against (env: IRONRAG_PROBE_LIBRARY_ID)",
     )
     parser.add_argument("--login", default="admin")
-    parser.add_argument("--password", default=os.environ.get("IRONRAG_PROBE_PASSWORD", "rustrag123"))
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument(
         "--out",
@@ -570,7 +579,7 @@ def main() -> int:
 
     client = CurlClient(args.base_url)
     print(f"-> logging in as {args.login}")
-    client.login(args.login, args.password)
+    client.login(args.login, require_probe_password())
 
     print(f"-> resolving probe context for library {args.library_id}")
     ctx = resolve_probe_context(client, args.library_id)

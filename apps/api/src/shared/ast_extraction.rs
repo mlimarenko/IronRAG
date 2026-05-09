@@ -215,13 +215,13 @@ fn parse_source(source: &str, language: &str) -> Option<Tree> {
     let mut parser = Parser::new();
     if parser.set_language(&ts_language).is_err() {
         #[cfg(test)]
-        eprintln!("[tree-sitter] set_language failed for {language}");
+        tracing::warn!("[tree-sitter] set_language failed for {language}");
         return None;
     }
     let tree = parser.parse(source, None);
     if tree.is_none() {
         #[cfg(test)]
-        eprintln!("[tree-sitter] parse returned None for {language}");
+        tracing::warn!("[tree-sitter] parse returned None for {language}");
     }
     tree
 }

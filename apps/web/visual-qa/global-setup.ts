@@ -6,13 +6,15 @@ import { chromium, type FullConfig } from '@playwright/test';
  * talk through the vite dev server (which proxies `/v1` to the backend
  * at 127.0.0.1:19000) so the cookie domain matches the test's baseURL.
  *
- * Credentials are injected via `QA_LOGIN` / `QA_PASSWORD` env vars. The
- * release 0.3.1 dev default is `admin` / `rustrag123`.
+ * Credentials are injected via `QA_LOGIN` / `QA_PASSWORD` env vars.
  */
 async function globalSetup(_config: FullConfig) {
   const login = process.env.QA_LOGIN ?? 'admin';
-  const password = process.env.QA_PASSWORD ?? 'rustrag123';
+  const password = process.env.QA_PASSWORD;
   const baseURL = process.env.QA_BASE_URL ?? 'http://127.0.0.1:4173';
+  if (!password) {
+    throw new Error('QA_PASSWORD is required for visual QA login');
+  }
 
   const browser = await chromium.launch();
   try {

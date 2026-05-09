@@ -1,4 +1,6 @@
+use super::provider_validation::fetch_provider_model_names_for_capabilities;
 use super::*;
+use serde::Deserialize;
 
 /// Default `temperature` for generative (non-embedding) bootstrap presets.
 const DEFAULT_BOOTSTRAP_TEMPERATURE: f64 = 0.3;
@@ -70,28 +72,11 @@ pub(super) fn bootstrap_provider_credential_map(
     credentials
 }
 
-pub(super) fn bootstrap_bundle_has_required_fallback_credentials(
-    bundle: &BootstrapAiProviderPresetBundle,
-    providers: &[ProviderCatalogEntry],
-    configured_ai: Option<&crate::app::config::UiBootstrapAiSetup>,
-) -> bool {
+pub(super) fn bootstrap_bundle_is_self_contained(bundle: &BootstrapAiProviderPresetBundle) -> bool {
     bundle
         .presets
         .iter()
-        .map(|preset| preset.owner_provider_kind.as_str())
-        .filter(|provider_kind| *provider_kind != bundle.provider_kind)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .all(|provider_kind| {
-            let Some(provider) =
-                providers.iter().find(|entry| entry.provider_kind == provider_kind)
-            else {
-                return false;
-            };
-            !provider.api_key_required
-                || bootstrap_credential_source(configured_ai, provider_kind)
-                    == BootstrapAiCredentialSource::Env
-        })
+        .all(|preset| preset.owner_provider_catalog_id == bundle.provider_catalog_id)
 }
 
 fn configured_binding_default_for_purpose<'a>(
@@ -112,34 +97,29 @@ fn select_configured_bootstrap_model<'a>(
     providers: &[ProviderCatalogEntry],
     models: &'a [ModelCatalogEntry],
 ) -> Result<Option<&'a ModelCatalogEntry>, ApiError> {
-    let provider_catalog_id = binding_default
+    let configured_provider = binding_default
         .provider_kind
         .as_deref()
         .map(|provider_kind| {
-            provider_id_for_kind(providers, provider_kind).ok_or_else(|| {
-                ApiError::BadRequest(format!(
-                    "configured bootstrap provider `{provider_kind}` is not available"
-                ))
-            })
+            providers.iter().find(|provider| provider.provider_kind == provider_kind).ok_or_else(
+                || {
+                    ApiError::BadRequest(format!(
+                        "configured bootstrap provider `{provider_kind}` is not available"
+                    ))
+                },
+            )
         })
         .transpose()?;
     let model_name = binding_default.model_name.as_deref();
 
-    match (provider_catalog_id, model_name) {
-        (Some(provider_catalog_id), Some(model_name)) => Ok(models.iter().find(|model| {
-            model.provider_catalog_id == provider_catalog_id
+    match (configured_provider, model_name) {
+        (Some(provider), Some(model_name)) => Ok(models.iter().find(|model| {
+            model.provider_catalog_id == provider.id
                 && model.model_name == model_name
                 && model.allowed_binding_purposes.contains(&purpose)
         })),
-        (Some(provider_catalog_id), None) => {
-            Ok(binding_default.provider_kind.as_deref().and_then(|provider_kind| {
-                select_bootstrap_suggested_model_for_provider(
-                    provider_catalog_id,
-                    provider_kind,
-                    purpose,
-                    models,
-                )
-            }))
+        (Some(provider), None) => {
+            Ok(select_bootstrap_suggested_model_for_provider(provider, purpose, models))
         }
         (None, Some(model_name)) => Ok(models.iter().find(|model| {
             model.model_name == model_name && model.allowed_binding_purposes.contains(&purpose)
@@ -149,16 +129,16 @@ fn select_configured_bootstrap_model<'a>(
 }
 
 fn select_bootstrap_suggested_model_for_provider<'a>(
-    provider_catalog_id: Uuid,
-    provider_kind: &str,
+    provider: &ProviderCatalogEntry,
     purpose: AiBindingPurpose,
     models: &'a [ModelCatalogEntry],
 ) -> Option<&'a ModelCatalogEntry> {
-    if let Some(preferred_model_name) = bootstrap_preset_profile_for_purpose(provider_kind, purpose)
-        .map(|profile| profile.model_name)
+    if let Some(preferred_model_name) =
+        bootstrap_preset_profile_for_provider_purpose(provider, purpose)
+            .map(|profile| profile.model_name)
     {
         return models.iter().find(|model| {
-            model.provider_catalog_id == provider_catalog_id
+            model.provider_catalog_id == provider.id
                 && model.model_name == preferred_model_name
                 && model.allowed_binding_purposes.contains(&purpose)
         });
@@ -167,7 +147,7 @@ fn select_bootstrap_suggested_model_for_provider<'a>(
     models
         .iter()
         .filter(|model| {
-            model.provider_catalog_id == provider_catalog_id
+            model.provider_catalog_id == provider.id
                 && model.allowed_binding_purposes.contains(&purpose)
         })
         .min_by(|left, right| {
@@ -175,187 +155,132 @@ fn select_bootstrap_suggested_model_for_provider<'a>(
         })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct BootstrapProviderPresetProfile {
     pub(super) purpose: AiBindingPurpose,
-    pub(super) model_name: &'static str,
+    pub(super) model_name: String,
     pub(super) temperature: Option<f64>,
     pub(super) top_p: Option<f64>,
     pub(super) max_output_tokens_override: Option<i32>,
-    /// For providers that do not natively support a binding purpose (e.g.
-    /// DeepSeek has no embedding or vision models), pin the model to a
-    /// different provider's catalog by `provider_kind`. When `None` the
-    /// preset uses a model from the active provider itself.
-    pub(super) fallback_provider_kind: Option<&'static str>,
 }
 
-const OPENAI_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::ExtractGraph,
-        model_name: "gpt-5.4-nano",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::EmbedChunk,
-        model_name: "text-embedding-3-large",
-        temperature: None,
-        top_p: None,
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::QueryAnswer,
-        model_name: "gpt-5.4-mini",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::Vision,
-        model_name: "gpt-5.4-mini",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-];
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapProviderMetadata {
+    #[serde(default)]
+    bootstrap_presets: Vec<BootstrapProviderPresetMetadata>,
+}
 
-const QWEN_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::ExtractGraph,
-        model_name: "qwen-flash",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::EmbedChunk,
-        model_name: "text-embedding-v4",
-        temperature: None,
-        top_p: None,
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::QueryAnswer,
-        model_name: "qwen3-max",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::Vision,
-        model_name: "qwen-vl-max",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-];
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapProviderPresetMetadata {
+    purpose: String,
+    model_name: String,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    max_output_tokens_override: Option<i32>,
+}
 
-const OLLAMA_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::ExtractGraph,
-        model_name: "qwen3:0.6b",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::EmbedChunk,
-        model_name: "qwen3-embedding:0.6b",
-        temperature: None,
-        top_p: None,
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::QueryAnswer,
-        model_name: "qwen3:0.6b",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::Vision,
-        model_name: "qwen3-vl:2b",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-];
+fn bootstrap_provider_metadata(
+    provider: &ProviderCatalogEntry,
+) -> Result<BootstrapProviderMetadata, ApiError> {
+    serde_json::from_value(provider.capability_flags_json.clone())
+        .map_err(|error| ApiError::internal_with_log(error, "invalid provider capability flags"))
+}
 
-// DeepSeek does not ship embedding or vision models, so the embed_chunk and
-// vision presets borrow models from OpenAI's catalog (operators can swap them
-// later via Admin → AI). Setup still requires an OpenAI credential to be
-// present in the environment for these fallback purposes to resolve.
-const DEEPSEEK_BOOTSTRAP_PRESET_PROFILE: [BootstrapProviderPresetProfile; 4] = [
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::ExtractGraph,
-        model_name: "deepseek-chat",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::EmbedChunk,
-        model_name: "text-embedding-3-large",
-        temperature: None,
-        top_p: None,
-        max_output_tokens_override: None,
-        fallback_provider_kind: Some("openai"),
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::QueryAnswer,
-        model_name: "deepseek-chat",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: None,
-    },
-    BootstrapProviderPresetProfile {
-        purpose: AiBindingPurpose::Vision,
-        model_name: "gpt-5.4-mini",
-        temperature: Some(DEFAULT_BOOTSTRAP_TEMPERATURE),
-        top_p: Some(DEFAULT_BOOTSTRAP_TOP_P),
-        max_output_tokens_override: None,
-        fallback_provider_kind: Some("openai"),
-    },
-];
-
-/// All provider kinds that have a bootstrap preset profile. Used by
-/// `seed_all_provider_presets` to create presets for every provider at
-/// startup, even before the operator has configured a credential.
-pub(super) const BOOTSTRAPPED_PROVIDER_KINDS: &[&str] = &["openai", "ollama", "qwen", "deepseek"];
+fn bootstrap_provider_ui_hints(
+    provider: &ProviderCatalogEntry,
+) -> Result<serde_json::Value, ApiError> {
+    Ok(provider.ui_hints.clone())
+}
 
 fn bootstrap_provider_preset_profile(
-    provider_kind: &str,
-) -> Option<&'static [BootstrapProviderPresetProfile]> {
-    match provider_kind {
-        "openai" => Some(&OPENAI_BOOTSTRAP_PRESET_PROFILE),
-        "ollama" => Some(&OLLAMA_BOOTSTRAP_PRESET_PROFILE),
-        "qwen" => Some(&QWEN_BOOTSTRAP_PRESET_PROFILE),
-        "deepseek" => Some(&DEEPSEEK_BOOTSTRAP_PRESET_PROFILE),
-        _ => None,
-    }
+    provider: &ProviderCatalogEntry,
+) -> Result<Vec<BootstrapProviderPresetProfile>, ApiError> {
+    bootstrap_provider_metadata(provider)?
+        .bootstrap_presets
+        .into_iter()
+        .map(|preset| {
+            let purpose = parse_binding_purpose(preset.purpose.trim()).map_err(|_| {
+                ApiError::internal_with_log(
+                    format!("invalid bootstrap binding purpose {}", preset.purpose),
+                    "invalid provider capability flags",
+                )
+            })?;
+            let model_name = normalize_non_empty(&preset.model_name, "bootstrapPreset.modelName")?;
+            let is_embedding =
+                matches!(purpose, AiBindingPurpose::EmbedChunk | AiBindingPurpose::QueryRetrieve);
+            Ok(BootstrapProviderPresetProfile {
+                purpose,
+                model_name,
+                temperature: preset
+                    .temperature
+                    .or((!is_embedding).then_some(DEFAULT_BOOTSTRAP_TEMPERATURE)),
+                top_p: preset.top_p.or((!is_embedding).then_some(DEFAULT_BOOTSTRAP_TOP_P)),
+                max_output_tokens_override: preset.max_output_tokens_override,
+            })
+        })
+        .collect()
 }
 
-pub(super) fn bootstrap_preset_profile_for_purpose(
-    provider_kind: &str,
+fn bootstrap_preset_descriptors_from_profile(
+    provider: &ProviderCatalogEntry,
+    providers: &[ProviderCatalogEntry],
+    models: &[ModelCatalogEntry],
+    profile: Vec<BootstrapProviderPresetProfile>,
+) -> Vec<BootstrapAiPresetDescriptor> {
+    profile
+        .into_iter()
+        .filter_map(|preset_profile| {
+            let model = models.iter().find(|model| {
+                model.provider_catalog_id == provider.id
+                    && model.model_name == preset_profile.model_name
+                    && model.allowed_binding_purposes.contains(&preset_profile.purpose)
+            })?;
+            let model_owner = providers
+                .iter()
+                .find(|entry| entry.id == model.provider_catalog_id)
+                .unwrap_or(provider);
+            Some(BootstrapAiPresetDescriptor {
+                binding_purpose: preset_profile.purpose,
+                owner_provider_catalog_id: model_owner.id,
+                owner_provider_kind: model_owner.provider_kind.clone(),
+                model_catalog_id: model.id,
+                model_name: model.model_name.clone(),
+                preset_name: canonical_runtime_preset_name(
+                    &model_owner.display_name,
+                    preset_profile.purpose,
+                    &model.model_name,
+                ),
+                system_prompt: None,
+                temperature: preset_profile.temperature,
+                top_p: preset_profile.top_p,
+                max_output_tokens_override: preset_profile.max_output_tokens_override,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn bootstrap_preset_profile_for_provider_purpose(
+    provider: &ProviderCatalogEntry,
     purpose: AiBindingPurpose,
 ) -> Option<BootstrapProviderPresetProfile> {
-    bootstrap_provider_preset_profile(provider_kind)
-        .and_then(|profiles| profiles.iter().find(|profile| profile.purpose == purpose).copied())
+    bootstrap_provider_preset_profile(provider)
+        .ok()
+        .and_then(|profiles| profiles.into_iter().find(|profile| profile.purpose == purpose))
+}
+
+pub(super) fn resolve_bootstrap_provider_preset_descriptors(
+    provider: &ProviderCatalogEntry,
+    providers: &[ProviderCatalogEntry],
+    models: &[ModelCatalogEntry],
+) -> Result<Vec<BootstrapAiPresetDescriptor>, ApiError> {
+    Ok(bootstrap_preset_descriptors_from_profile(
+        provider,
+        providers,
+        models,
+        bootstrap_provider_preset_profile(provider)?,
+    ))
 }
 
 pub(super) fn resolve_bootstrap_provider_preset_bundle(
@@ -364,60 +289,20 @@ pub(super) fn resolve_bootstrap_provider_preset_bundle(
     models: &[ModelCatalogEntry],
     credential_source: BootstrapAiCredentialSource,
 ) -> Result<Option<BootstrapAiProviderPresetBundle>, ApiError> {
-    let Some(profile) = bootstrap_provider_preset_profile(&provider.provider_kind) else {
+    let profile = bootstrap_provider_preset_profile(provider)?;
+    if !CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
+        .iter()
+        .all(|purpose| profile.iter().any(|preset| preset.purpose == *purpose))
+    {
         return Ok(None);
-    };
+    }
 
-    let mut presets = Vec::with_capacity(profile.len());
-    for preset_profile in profile {
-        // For purposes the chosen provider does not natively support
-        // (e.g. DeepSeek has no embedding models), the profile pins the
-        // model to a different provider's catalog via
-        // `fallback_provider_kind`. Resolve which provider id to look in.
-        let lookup_provider_id = match preset_profile.fallback_provider_kind {
-            Some(kind) => match providers.iter().find(|p| p.provider_kind == kind) {
-                Some(fallback) => fallback.id,
-                None => return Ok(None),
-            },
-            None => provider.id,
-        };
-        let Some(model) = models.iter().find(|model| {
-            model.provider_catalog_id == lookup_provider_id
-                && model.model_name == preset_profile.model_name
-        }) else {
-            return Ok(None);
-        };
-        if !model.allowed_binding_purposes.contains(&preset_profile.purpose) {
-            return Ok(None);
-        }
-        // Preset display name uses the provider that owns the model so the
-        // operator can see "OpenAI Embed Chunk · text-embedding-3-large"
-        // even when they pick the DeepSeek bundle.
-        let model_owner = providers.iter().find(|entry| entry.id == model.provider_catalog_id);
-        let model_owner_display = model_owner
-            .map(|entry| entry.display_name.as_str())
-            .unwrap_or(provider.display_name.as_str());
-        let model_owner_provider_kind = model_owner
-            .map(|entry| entry.provider_kind.clone())
-            .unwrap_or_else(|| provider.provider_kind.clone());
-        let model_owner_provider_catalog_id =
-            model_owner.map(|entry| entry.id).unwrap_or(provider.id);
-        presets.push(BootstrapAiPresetDescriptor {
-            binding_purpose: preset_profile.purpose,
-            owner_provider_catalog_id: model_owner_provider_catalog_id,
-            owner_provider_kind: model_owner_provider_kind,
-            model_catalog_id: model.id,
-            model_name: model.model_name.clone(),
-            preset_name: canonical_runtime_preset_name(
-                model_owner_display,
-                preset_profile.purpose,
-                &model.model_name,
-            ),
-            system_prompt: None,
-            temperature: preset_profile.temperature,
-            top_p: preset_profile.top_p,
-            max_output_tokens_override: preset_profile.max_output_tokens_override,
-        });
+    let presets = bootstrap_preset_descriptors_from_profile(provider, providers, models, profile);
+    if !CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
+        .iter()
+        .all(|purpose| presets.iter().any(|preset| preset.binding_purpose == *purpose))
+    {
+        return Ok(None);
     }
 
     Ok(Some(BootstrapAiProviderPresetBundle {
@@ -428,6 +313,12 @@ pub(super) fn resolve_bootstrap_provider_preset_bundle(
         default_base_url: provider.default_base_url.clone(),
         api_key_required: provider.api_key_required,
         base_url_required: provider.base_url_required,
+        credential_policy: provider.credential_policy.clone(),
+        base_url_policy: provider.base_url_policy.clone(),
+        model_discovery: provider.model_discovery.clone(),
+        capabilities: provider.capabilities.clone(),
+        runtime: provider.runtime.clone(),
+        ui_hints: bootstrap_provider_ui_hints(provider)?,
         presets,
     }))
 }
@@ -460,7 +351,7 @@ fn build_bootstrap_preset_input(
     model: &ModelCatalogEntry,
     purpose: AiBindingPurpose,
 ) -> BootstrapAiPresetInput {
-    let preset_profile = bootstrap_preset_profile_for_purpose(&provider.provider_kind, purpose)
+    let preset_profile = bootstrap_preset_profile_for_provider_purpose(provider, purpose)
         .filter(|profile| profile.model_name == model.model_name);
     BootstrapAiPresetInput {
         binding_purpose: purpose,
@@ -472,9 +363,10 @@ fn build_bootstrap_preset_input(
             &model.model_name,
         ),
         system_prompt: None,
-        temperature: preset_profile.and_then(|profile| profile.temperature),
-        top_p: preset_profile.and_then(|profile| profile.top_p),
+        temperature: preset_profile.as_ref().and_then(|profile| profile.temperature),
+        top_p: preset_profile.as_ref().and_then(|profile| profile.top_p),
         max_output_tokens_override: preset_profile
+            .as_ref()
             .and_then(|profile| profile.max_output_tokens_override),
         extra_parameters_json: json!({}),
     }
@@ -491,7 +383,10 @@ pub(super) fn resolve_configured_bootstrap_preset_inputs(
         .map(|secret| secret.provider_kind.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let mut selections = Vec::new();
-    for purpose in CANONICAL_RUNTIME_BINDING_PURPOSES {
+    for purpose in CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
+        .into_iter()
+        .chain(std::iter::once(AiBindingPurpose::Vision))
+    {
         if let Some(binding_default) =
             configured_binding_default_for_purpose(Some(configured_ai), purpose)
         {
@@ -518,7 +413,7 @@ pub(super) fn resolve_configured_bootstrap_preset_inputs(
             }
         }
 
-        let bundled_fallback = providers
+        let bundled_selection = providers
             .iter()
             .filter(|provider| env_provider_kinds.contains(provider.provider_kind.as_str()))
             .filter_map(|provider| {
@@ -547,45 +442,64 @@ pub(super) fn resolve_configured_bootstrap_preset_inputs(
                 })
             })
             .min_by(|left, right| left.provider_kind.cmp(&right.provider_kind));
-        if let Some(fallback) = bundled_fallback {
-            selections.push(fallback);
+        if let Some(selection) = bundled_selection {
+            selections.push(selection);
             continue;
         }
 
-        let fallback = providers
+        let suggested_selection = providers
             .iter()
             .filter(|provider| env_provider_kinds.contains(provider.provider_kind.as_str()))
             .filter_map(|provider| {
-                select_bootstrap_suggested_model_for_provider(
-                    provider.id,
-                    &provider.provider_kind,
-                    purpose,
-                    models,
-                )
-                .map(|model| build_bootstrap_preset_input(provider, model, purpose))
+                select_bootstrap_suggested_model_for_provider(provider, purpose, models)
+                    .map(|model| build_bootstrap_preset_input(provider, model, purpose))
             })
             .min_by(|left, right| left.provider_kind.cmp(&right.provider_kind));
-        if let Some(fallback) = fallback {
-            selections.push(fallback);
+        if let Some(selection) = suggested_selection {
+            selections.push(selection);
         }
     }
     Ok(selections)
 }
 
-pub(super) fn bootstrap_preset_inputs_cover_canonical_purposes(
+pub(super) fn bootstrap_preset_inputs_cover_required_purposes(
     inputs: &[BootstrapAiPresetInput],
 ) -> bool {
-    CANONICAL_RUNTIME_BINDING_PURPOSES
+    CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
         .iter()
         .all(|purpose| inputs.iter().any(|selection| selection.binding_purpose == *purpose))
 }
 
-pub(super) fn validate_bootstrap_preset_inputs_complete(
+pub(super) fn validate_bootstrap_preset_inputs_cover_required_purposes(
     inputs: &[BootstrapAiPresetInput],
 ) -> Result<(), ApiError> {
-    if !bootstrap_preset_inputs_cover_canonical_purposes(inputs) {
+    if !bootstrap_preset_inputs_cover_required_purposes(inputs) {
         return Err(ApiError::BadRequest(
-            "bootstrap preset bundle must cover extract_graph, embed_chunk, query_answer, and vision"
+            "bootstrap preset bundle must cover extract_graph, embed_chunk, query_retrieve, query_compile, and query_answer"
+                .to_string(),
+        ));
+    }
+    validate_bootstrap_vector_index_model_catalog_ids(inputs)?;
+    Ok(())
+}
+
+fn validate_bootstrap_vector_index_model_catalog_ids(
+    inputs: &[BootstrapAiPresetInput],
+) -> Result<(), ApiError> {
+    let embed_chunk_model_id = inputs
+        .iter()
+        .find(|input| input.binding_purpose == AiBindingPurpose::EmbedChunk)
+        .map(|input| input.model_catalog_id);
+    let query_retrieve_model_id = inputs
+        .iter()
+        .find(|input| input.binding_purpose == AiBindingPurpose::QueryRetrieve)
+        .map(|input| input.model_catalog_id);
+    if let (Some(embed_chunk_model_id), Some(query_retrieve_model_id)) =
+        (embed_chunk_model_id, query_retrieve_model_id)
+        && embed_chunk_model_id != query_retrieve_model_id
+    {
+        return Err(ApiError::BadRequest(
+            "bootstrap embed_chunk and query_retrieve bindings must use the same model catalog entry"
                 .to_string(),
         ));
     }
@@ -641,6 +555,101 @@ pub(super) fn normalize_bootstrap_preset_inputs(
     Ok(normalized)
 }
 
+pub(super) fn missing_bootstrap_model_list_models(
+    provider: &ProviderCatalogEntry,
+    preset_inputs: &[BootstrapAiPresetInput],
+    models: &[ModelCatalogEntry],
+    discovered_model_names: &[String],
+) -> Result<Vec<String>, ApiError> {
+    let discovered = discovered_model_names
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut selected = std::collections::BTreeSet::new();
+    for input in preset_inputs.iter().filter(|input| input.provider_kind == provider.provider_kind)
+    {
+        let model = models
+            .iter()
+            .find(|model| model.id == input.model_catalog_id)
+            .ok_or_else(|| ApiError::resource_not_found("model_catalog", input.model_catalog_id))?;
+        if model.provider_catalog_id != provider.id {
+            return Err(ApiError::BadRequest(
+                "bootstrap model selection must belong to the selected provider".to_string(),
+            ));
+        }
+        selected.insert(model.model_name.as_str());
+    }
+
+    Ok(selected
+        .into_iter()
+        .filter(|model_name| !discovered.contains(model_name))
+        .map(ToString::to_string)
+        .collect())
+}
+
+fn bootstrap_model_list_capability_kinds(
+    provider: &ProviderCatalogEntry,
+    preset_inputs: &[BootstrapAiPresetInput],
+    models: &[ModelCatalogEntry],
+) -> Result<std::collections::BTreeSet<String>, ApiError> {
+    let mut capability_kinds = std::collections::BTreeSet::new();
+    for input in preset_inputs.iter().filter(|input| input.provider_kind == provider.provider_kind)
+    {
+        let model = models
+            .iter()
+            .find(|model| model.id == input.model_catalog_id)
+            .ok_or_else(|| ApiError::resource_not_found("model_catalog", input.model_catalog_id))?;
+        if model.provider_catalog_id != provider.id {
+            return Err(ApiError::BadRequest(
+                "bootstrap model selection must belong to the selected provider".to_string(),
+            ));
+        }
+        capability_kinds.insert(model.capability_kind.clone());
+    }
+    Ok(capability_kinds)
+}
+
+pub(super) async fn validate_bootstrap_model_list_preset_inputs(
+    provider: &ProviderCatalogEntry,
+    credential: &ProviderCredential,
+    preset_inputs: &[BootstrapAiPresetInput],
+    models: &[ModelCatalogEntry],
+) -> Result<(), ApiError> {
+    if provider.credential_policy.validation_mode != ProviderCredentialValidationMode::ModelList {
+        return Ok(());
+    }
+    let Some(base_url) = runtime_provider_base_url(provider, credential.base_url.as_deref())?
+    else {
+        return Err(ApiError::BadRequest(format!(
+            "provider {} requires a baseUrl",
+            provider.provider_kind
+        )));
+    };
+    let capability_kinds = bootstrap_model_list_capability_kinds(provider, preset_inputs, models)?;
+    let discovered_model_names = fetch_provider_model_names_for_capabilities(
+        provider,
+        credential.api_key.as_deref(),
+        &base_url,
+        &capability_kinds,
+    )
+    .await?;
+    let missing_model_names = missing_bootstrap_model_list_models(
+        provider,
+        preset_inputs,
+        models,
+        &discovered_model_names,
+    )?;
+    if missing_model_names.is_empty() {
+        return Ok(());
+    }
+
+    Err(ApiError::BadRequest(format!(
+        "bootstrap provider {} selected preset model(s) not returned by provider model discovery: {}",
+        provider.provider_kind,
+        missing_model_names.join(", ")
+    )))
+}
+
 pub(super) async fn ensure_bootstrap_provider_credential(
     service: &AiCatalogService,
     state: &AppState,
@@ -656,10 +665,8 @@ pub(super) async fn ensure_bootstrap_provider_credential(
         bootstrap_resolve_provider_credential(&canonical_label, &provider_credentials);
     let api_key =
         credential_input.as_ref().and_then(|input| normalize_optional(input.api_key.as_deref()));
-    let base_url = resolve_provider_base_url(
-        provider,
-        credential_input.as_ref().and_then(|input| input.base_url.as_deref()),
-    )?;
+    let base_url =
+        credential_input.as_ref().and_then(|input| normalize_optional(input.base_url.as_deref()));
     if api_key.is_some() || base_url.is_some() {
         if let Some(existing) = canonical_credential {
             return match service

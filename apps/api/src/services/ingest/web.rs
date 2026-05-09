@@ -244,9 +244,12 @@ impl WebIngestService {
                 "web document has no source_uri to re-fetch".to_string(),
             ));
         }
-        let response = self.http.get(trimmed).send().await.map_err(|error| {
-            ApiError::BadRequest(format!("failed to re-fetch {trimmed}: {error}"))
-        })?;
+        let response = crate::observability::inject_trace_context(self.http.get(trimmed))
+            .send()
+            .await
+            .map_err(|error| {
+                ApiError::BadRequest(format!("failed to re-fetch {trimmed}: {error}"))
+            })?;
         let http_status = response.status();
         if !http_status.is_success() {
             return Err(ApiError::BadRequest(format!(

@@ -15,7 +15,7 @@ fn lifecycle_total_cost_fields(
     (Some(total), Some(currency.to_string()))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentLifecycleDetail {
     pub total_cost: Option<Decimal>,
@@ -23,7 +23,7 @@ pub struct DocumentLifecycleDetail {
     pub attempts: Vec<DocumentAttempt>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentAttempt {
     pub job_id: Uuid,
@@ -37,7 +37,7 @@ pub struct DocumentAttempt {
     pub stage_events: Vec<DocumentStageEvent>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentStageEvent {
     pub stage: String,

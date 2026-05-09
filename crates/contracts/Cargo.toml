@@ -23,10 +23,14 @@ todo = "deny"
 unimplemented = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+# utoipa-gen emits `if let Some(v) = ... else ...` inside ToSchema impls; the
+# style preference does not apply to derive-macro-generated code.
+option_if_let_else = "allow"
 
 [dependencies]
 chrono.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+utoipa.workspace = true
 uuid.workspace = true

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from typing import Any
 
 DEFAULT_BASE_URL = "http://127.0.0.1:19000"
 DEFAULT_LOGIN = "admin"
-DEFAULT_PASSWORD = "rustrag123"
+PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 DEFAULT_SUITE_PATH = SCRIPT_DIR / "agent-surface-suite.json"
@@ -47,7 +48,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--suite-path", default=str(DEFAULT_SUITE_PATH))
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--login", default=DEFAULT_LOGIN)
-    parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--library-id", required=True)
     parser.add_argument("--workspace-id")
     parser.add_argument("--mcp-token")
@@ -70,7 +70,6 @@ def build_case_command(
     *,
     base_url: str,
     login: str,
-    password: str,
     library_id: str,
     workspace_id: str | None,
     mcp_token: str | None,
@@ -84,8 +83,6 @@ def build_case_command(
         base_url,
         "--login",
         login,
-        "--password",
-        password,
         "--library-id",
         library_id,
         "--output-path",
@@ -103,7 +100,8 @@ def build_case_command(
         "graphLimit": "--graph-limit",
         "readLength": "--read-length",
         "question": "--question",
-        "sseRuns": "--sse-runs",
+        "assistantTopK": "--assistant-top-k",
+        "assistantRuns": "--assistant-runs",
         "graphMinEntities": "--graph-min-entities",
         "graphMinRelations": "--graph-min-relations",
         "graphMinDocuments": "--graph-min-documents",
@@ -114,11 +112,9 @@ def build_case_command(
         "readMinReferences": "--read-min-references",
         "assistantMinReferences": "--assistant-min-references",
         "assistantExpectedVerification": "--assistant-expected-verification",
-        "assistantMaxToolStarts": "--assistant-max-tool-starts",
         "expectedSearchTopLabel": "--expected-search-top-label",
         "communityMinCount": "--community-min-count",
         "maxToolLatencyMs": "--max-tool-latency-ms",
-        "maxFirstDeltaMs": "--max-first-delta-ms",
         "maxCompletedMs": "--max-completed-ms",
         "timeoutSeconds": "--timeout-seconds",
     }
@@ -144,7 +140,6 @@ def run_case(
     *,
     base_url: str,
     login: str,
-    password: str,
     library_id: str,
     workspace_id: str | None,
     mcp_token: str | None,
@@ -156,7 +151,6 @@ def run_case(
     command = build_case_command(
         base_url=base_url,
         login=login,
-        password=password,
         library_id=library_id,
         workspace_id=workspace_id,
         mcp_token=mcp_token,
@@ -219,6 +213,8 @@ def render_suite_report(
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if not os.environ.get(PROBE_PASSWORD_ENV):
+        raise SystemExit(f"{PROBE_PASSWORD_ENV} is required")
     suite_path = pathlib.Path(args.suite_path)
     suite_data = json.loads(suite_path.read_text(encoding="utf-8"))
     cases = suite_data.get("cases")
@@ -237,7 +233,6 @@ def main(argv: list[str]) -> int:
         run_case(
             base_url=args.base_url,
             login=args.login,
-            password=args.password,
             library_id=args.library_id,
             workspace_id=args.workspace_id,
             mcp_token=args.mcp_token,

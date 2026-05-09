@@ -36,7 +36,7 @@ struct NullHeadCandidate {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
-    ironrag_backend::shared::telemetry::init(&settings.log_filter);
+    ironrag_backend::observability::init_tracing()?;
     let state = AppState::new(settings).await?;
 
     let mut args = std::env::args().skip(1);
@@ -142,5 +142,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!(total_promoted, total_skipped_no_chunks, "null-head promotion finished");
+    ironrag_backend::observability::shutdown_tracing().await;
     Ok(())
 }

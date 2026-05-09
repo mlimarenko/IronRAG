@@ -8,16 +8,15 @@ use super::{
     document_target::{focused_answer_document_id, question_requests_multi_document_scope},
     endpoint_answer::select_multi_document_scope_ids,
     question_intent::{
-        QuestionIntent, classify_question_or_ir_intents, has_question_intent,
-        query_ir_blocks_endpoint_lookup,
+        query_ir_allows_deterministic_endpoint_lookup,
+        query_ir_disallows_graph_id_like_endpoint_candidate,
     },
     retrieve::{focused_excerpt_for, score_value},
     technical_answer::prioritized_technical_chunk_score,
     technical_literal_context::{TechnicalLiteralDocumentGroup, infer_endpoint_subject_label},
     technical_literals::{
         document_local_focus_keywords, extract_explicit_path_literals, extract_http_methods,
-        extract_url_literals, question_mentions_pagination, technical_chunk_selection_score,
-        technical_literal_focus_keywords,
+        extract_url_literals, technical_chunk_selection_score, technical_literal_focus_keywords,
     },
     types::RuntimeMatchedChunk,
 };
@@ -27,14 +26,10 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_or_ir_intents(question, query_ir);
-    if !has_question_intent(&intents, QuestionIntent::Endpoint) {
+    if !query_ir_allows_deterministic_endpoint_lookup(query_ir) {
         return None;
     }
     if !question_requests_multi_document_scope(question, Some(query_ir)) {
-        return None;
-    }
-    if query_ir_blocks_endpoint_lookup(query_ir) {
         return None;
     }
 
@@ -42,7 +37,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
     if question_keywords.is_empty() {
         return None;
     }
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
 
     let per_document_chunks = chunks_by_document(chunks);
     let mut ordered_document_ids = Vec::<Uuid>::new();
@@ -93,8 +88,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
             } else {
                 focused.as_str()
             };
-            !extract_explicit_path_literals(literal_source, 6).is_empty()
-                || !extract_url_literals(literal_source, 4).is_empty()
+            extract_allowed_endpoint_literal(query_ir, literal_source).is_some()
         }) else {
             continue;
         };
@@ -105,10 +99,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_chunks(
         } else {
             focused.as_str()
         };
-        let endpoint = extract_explicit_path_literals(literal_source, 6)
-            .into_iter()
-            .next()
-            .or_else(|| extract_url_literals(literal_source, 4).into_iter().next())?;
+        let endpoint = extract_allowed_endpoint_literal(query_ir, literal_source)?;
         let subject = infer_endpoint_subject_label(&TechnicalLiteralDocumentGroup {
             document_label: best_chunk.document_label.clone(),
             ..TechnicalLiteralDocumentGroup::default()
@@ -128,13 +119,10 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_or_ir_intents(question, query_ir);
-    if !has_question_intent(&intents, QuestionIntent::Endpoint) {
+    if !query_ir_allows_deterministic_endpoint_lookup(query_ir) {
         return None;
     }
-    if question_requests_multi_document_scope(question, Some(query_ir))
-        || query_ir_blocks_endpoint_lookup(query_ir)
-    {
+    if question_requests_multi_document_scope(question, Some(query_ir)) {
         return None;
     }
     if chunks.is_empty() {
@@ -152,7 +140,7 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
         return None;
     }
 
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
     let local_keywords = document_local_focus_keywords(
         question,
         Some(query_ir),
@@ -183,30 +171,35 @@ pub(crate) fn build_single_endpoint_answer_from_chunks(
     let best_chunk = ranked_chunks.into_iter().find(|chunk| {
         let focused = focused_excerpt_for(&chunk.source_text, &local_keywords, 900);
         let focused_literals_present = !focused.trim().is_empty()
-            && (!extract_explicit_path_literals(&focused, 6).is_empty()
-                || !extract_url_literals(&focused, 4).is_empty());
+            && extract_allowed_endpoint_literal(query_ir, &focused).is_some();
         let literal_source =
             if focused_literals_present { focused.as_str() } else { chunk.source_text.as_str() };
-        !extract_explicit_path_literals(literal_source, 6).is_empty()
-            || !extract_url_literals(literal_source, 4).is_empty()
+        extract_allowed_endpoint_literal(query_ir, literal_source).is_some()
     })?;
 
     let focused = focused_excerpt_for(&best_chunk.source_text, &local_keywords, 900);
     let focused_literals_present = !focused.trim().is_empty()
-        && (!extract_explicit_path_literals(&focused, 6).is_empty()
-            || !extract_url_literals(&focused, 4).is_empty());
+        && extract_allowed_endpoint_literal(query_ir, &focused).is_some();
     let literal_source =
         if focused_literals_present { focused.as_str() } else { best_chunk.source_text.as_str() };
-    let endpoint = extract_explicit_path_literals(literal_source, 6)
-        .into_iter()
-        .next()
-        .or_else(|| extract_url_literals(literal_source, 4).into_iter().next())?;
+    let endpoint = extract_allowed_endpoint_literal(query_ir, literal_source)?;
     let literal = extract_http_methods(literal_source, 3)
         .into_iter()
         .next()
         .map_or_else(|| format!("`{endpoint}`"), |method| format!("`{method} {endpoint}`"));
 
     Some(format!("The endpoint is {literal}."))
+}
+
+fn extract_allowed_endpoint_literal(query_ir: &QueryIR, source_text: &str) -> Option<String> {
+    extract_explicit_path_literals(source_text, 6)
+        .into_iter()
+        .find(|literal| !query_ir_disallows_graph_id_like_endpoint_candidate(query_ir, literal))
+        .or_else(|| {
+            extract_url_literals(source_text, 4).into_iter().find(|literal| {
+                !query_ir_disallows_graph_id_like_endpoint_candidate(query_ir, literal)
+            })
+        })
 }
 
 fn chunks_by_document(chunks: &[RuntimeMatchedChunk]) -> HashMap<Uuid, Vec<&RuntimeMatchedChunk>> {

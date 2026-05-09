@@ -119,7 +119,7 @@ pub fn sanitize_graph_view_writes(
     (ordered_nodes, ordered_edges, skipped_edge_count)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEntityCandidateRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -144,7 +144,7 @@ pub struct KnowledgeEntityCandidateRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRelationCandidateRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -172,7 +172,7 @@ pub struct KnowledgeRelationCandidateRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEntityRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -197,7 +197,7 @@ pub struct KnowledgeEntityRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRelationRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -219,7 +219,7 @@ pub struct KnowledgeRelationRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEvidenceRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -254,7 +254,7 @@ pub struct KnowledgeEvidenceRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeGraphTraversalRow {
     pub path_length: i64,
     pub vertex_kind: String,
@@ -267,7 +267,7 @@ pub struct KnowledgeGraphTraversalRow {
     pub vertex: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRelationEvidenceLookupRow {
     pub relation: KnowledgeRelationRow,
     pub evidence: KnowledgeEvidenceRow,
@@ -279,7 +279,7 @@ pub struct KnowledgeRelationEvidenceLookupRow {
     pub source_chunk: Option<KnowledgeChunkRow>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRelationTopologyRow {
     #[serde(flatten)]
     pub relation: KnowledgeRelationRow,
@@ -287,7 +287,7 @@ pub struct KnowledgeRelationTopologyRow {
     pub object_entity_id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeDocumentGraphLinkRow {
     pub document_id: Uuid,
     pub target_node_id: Uuid,

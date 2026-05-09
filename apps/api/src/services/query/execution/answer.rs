@@ -24,8 +24,8 @@ use super::retrieve::{excerpt_for, focused_excerpt_for};
 use super::technical_answer::build_exact_technical_literal_answer;
 use super::technical_literals::{
     extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
-    extract_prefix_literals, extract_url_literals, question_mentions_pagination,
-    select_document_balanced_chunks, technical_literal_focus_keywords,
+    extract_prefix_literals, extract_url_literals, select_document_balanced_chunks,
+    technical_literal_focus_keywords,
 };
 use super::types::*;
 use super::{
@@ -33,8 +33,8 @@ use super::{
     question_asks_table_aggregation,
 };
 
-const SOURCE_COVERAGE_MAX_TOTAL_CHUNKS: usize = 14;
-const SOURCE_COVERAGE_MAX_CHUNKS_PER_DOCUMENT: usize = 8;
+const SOURCE_COVERAGE_MAX_TOTAL_CHUNKS: usize = 24;
+const SOURCE_COVERAGE_MAX_CHUNKS_PER_DOCUMENT: usize = 12;
 const EVIDENCE_CHUNK_EXCERPT_CHARS: usize = 560;
 const STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS: usize = 4_000;
 
@@ -84,6 +84,7 @@ Do not import examples, use cases, lists, or entities from neighboring documents
 When the user asks for one example or one use case from a specific document, choose an example grounded in that same document.\n\
 When the user asks for one example, one use case, or one named item besides an explicitly excluded item from a grounded list, choose a different grounded item from that same list and prefer the next distinct item after the excluded one when the list order is available.\n\
 When the user asks for examples across categories joined by \"and\", include grounded representatives from each requested category when they appear in the same grounded document.\n\
+For multi-role questions that ask which item fits each described role, bind each role to the source entity or document whose evidence directly satisfies that role. Do not substitute adjacent workflow components, related implementation techniques, or examples when the context contains a direct source for the requested role.\n\
 When the context includes a library summary, trust those summary counts and readiness facts over individual chunk snippets for totals and overall status.\n\
 When Context includes AGGREGATE_PROFILE blocks, treat them as source-level aggregate metadata for counts, time ranges, formats, roles, and unit distribution.\n\
 Treat EVIDENCE_CHUNK blocks as sampled excerpts. Do not make whole-source frequency, ranking, or coverage claims from EVIDENCE_CHUNK blocks unless an AGGREGATE_PROFILE block supports the claim.\n\
@@ -600,7 +601,7 @@ pub(crate) fn render_canonical_chunk_section(
         return section;
     }
     let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
     let (max_total_chunks, max_chunks_per_document) = if query_ir.requests_source_coverage_context()
     {
         (SOURCE_COVERAGE_MAX_TOTAL_CHUNKS, SOURCE_COVERAGE_MAX_CHUNKS_PER_DOCUMENT)

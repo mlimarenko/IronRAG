@@ -20,6 +20,7 @@ use crate::{
         ingest::web::RefetchedWebDocumentSource,
     },
 };
+use ironrag_contracts::documents::{DocumentReadiness, DocumentStatus};
 
 // ============================================================================
 // Canonical document-list surface.
@@ -34,9 +35,11 @@ use crate::{
 // under 3 MB instead of 26 MB.
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ListDocumentsQuery {
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListDocumentsQuery {
     pub library_id: Option<Uuid>,
     pub include_deleted: Option<bool>,
     pub cursor: Option<String>,
@@ -52,9 +55,9 @@ pub(super) struct ListDocumentsQuery {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum DocumentListSortKey {
+pub enum DocumentListSortKey {
     UploadedAt,
     FileName,
     FileType,
@@ -62,16 +65,16 @@ pub(super) enum DocumentListSortKey {
     Status,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum DocumentListSortOrder {
+pub enum DocumentListSortOrder {
     Asc,
     Desc,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ContentDocumentListItem {
+pub struct ContentDocumentListItem {
     pub id: Uuid,
     pub library_id: Uuid,
     pub workspace_id: Uuid,
@@ -80,14 +83,10 @@ pub(super) struct ContentDocumentListItem {
     pub file_size: Option<i64>,
     pub uploaded_at: DateTime<Utc>,
     pub document_state: String,
-    /// Canonical status derived server-side. Mirrors the DocumentStatus enum
-    /// in apps/web/src/types/index.ts:
-    /// queued | processing | retrying | blocked | stalled | canceled |
-    /// ready | ready_no_graph | failed.
-    pub status: String,
-    /// Canonical readiness derived server-side. Mirrors DocumentReadiness:
-    /// processing | readable | graph_sparse | graph_ready | failed.
-    pub readiness: String,
+    /// Canonical status bucket derived server-side.
+    pub status: DocumentStatus,
+    /// Canonical readiness bucket derived server-side.
+    pub readiness: DocumentReadiness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,9 +111,9 @@ pub(super) struct ContentDocumentListItem {
     pub cost_currency_code: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct DocumentListPageResponse {
+pub struct DocumentListPageResponse {
     pub items: Vec<ContentDocumentListItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -130,9 +129,9 @@ pub(super) struct DocumentListPageResponse {
     pub status_counts: Option<DocumentListStatusCounts>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct DocumentListStatusCounts {
+pub struct DocumentListStatusCounts {
     pub total: i64,
     pub ready: i64,
     pub processing: i64,
@@ -141,28 +140,34 @@ pub(super) struct DocumentListStatusCounts {
     pub canceled: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ListMutationsQuery {
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListMutationsQuery {
     pub library_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ChunksQuery {
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ChunksQuery {
     pub document_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PreparedDataQuery {
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PreparedDataQuery {
     pub offset: Option<usize>,
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CreateDocumentRequest {
+pub struct CreateDocumentRequest {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: Option<String>,
@@ -177,9 +182,9 @@ pub(super) struct CreateDocumentRequest {
     pub storage_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CreateMutationRequest {
+pub struct CreateMutationRequest {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub document_id: Uuid,
@@ -195,29 +200,29 @@ pub(super) struct CreateMutationRequest {
     pub storage_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct AppendDocumentBodyRequest {
+pub struct AppendDocumentBodyRequest {
     pub appended_text: String,
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct EditDocumentRequest {
+pub struct EditDocumentRequest {
     pub markdown: String,
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ReprocessDocumentRequest {
+pub struct ReprocessDocumentRequest {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ContentDocumentDetailResponse {
+pub struct ContentDocumentDetailResponse {
     pub document: ContentDocument,
     pub file_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,9 +247,9 @@ pub(super) struct ContentDocumentDetailResponse {
     pub lifecycle: Option<DocumentLifecycleDetail>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ContentMutationDetailResponse {
+pub struct ContentMutationDetailResponse {
     pub mutation: ContentMutation,
     pub items: Vec<ContentMutationItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -253,16 +258,16 @@ pub(super) struct ContentMutationDetailResponse {
     pub async_operation_id: Option<Uuid>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CreateDocumentResponse {
+pub struct CreateDocumentResponse {
     pub document: ContentDocumentDetailResponse,
     pub mutation: ContentMutationDetailResponse,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ChunkSummary {
+pub struct ChunkSummary {
     pub id: Uuid,
     pub document_id: Uuid,
     pub library_id: Uuid,
@@ -271,9 +276,9 @@ pub(super) struct ChunkSummary {
     pub token_count: Option<i32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PreparedSegmentsPageResponse {
+pub struct PreparedSegmentsPageResponse {
     pub document_id: Uuid,
     pub revision_id: Option<Uuid>,
     pub total: usize,
@@ -282,9 +287,9 @@ pub(super) struct PreparedSegmentsPageResponse {
     pub items: Vec<PreparedSegmentDetail>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct TechnicalFactsPageResponse {
+pub struct TechnicalFactsPageResponse {
     pub document_id: Uuid,
     pub revision_id: Option<Uuid>,
     pub total: usize,
@@ -415,8 +420,8 @@ pub(super) fn paginate_items<T>(items: Vec<T>, offset: usize, limit: usize) -> V
 // the top instead of pretending the page succeeded.
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct DocumentListCursor {
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DocumentListCursor {
     #[serde(rename = "t")]
     pub created_at: DateTime<Utc>,
     #[serde(rename = "i")]

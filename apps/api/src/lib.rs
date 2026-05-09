@@ -3,6 +3,7 @@
 // on Send/Sync resolution is not enough for them. 512 is the
 // canonical escape hatch — same value the tokio ecosystem uses for
 // comparable nested async builders.
+#![allow(missing_docs)]
 #![recursion_limit = "512"]
 #![cfg_attr(
     test,
@@ -23,5 +24,7 @@ pub mod infra;
 pub mod integrations;
 pub mod interfaces;
 pub mod mcp_types;
+pub mod observability;
+pub mod openapi;
 pub mod services;
 pub mod shared;

@@ -54,6 +54,42 @@ def contains_any(haystack: str | None, needles: list[str]) -> bool:
     return any(canonical_match_text(needle) in normalized for needle in needles)
 
 
+def first_answer_sentence(answer: str | None) -> str:
+    text = (answer or "").strip()
+    if not text:
+        return ""
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    match = re.search(r"(?<=[.!?。！？])\s+", first_line)
+    if match:
+        return first_line[: match.start()].strip()
+    return first_line[:240].strip()
+
+
+def references_contain_all_labels(references: list[dict[str, Any]], labels: list[str]) -> bool:
+    if not labels:
+        return True
+    reference_text = "\n".join(
+        str(reference.get("label") or reference.get("entityType") or "")
+        for reference in references
+    )
+    return contains_all(reference_text, labels)
+
+
+def relation_references_contain_all_text(
+    references: list[dict[str, Any]], expected_text: list[str]
+) -> bool:
+    if not expected_text:
+        return True
+    reference_text = "\n".join(
+        "\n".join(
+            str(reference.get(field) or "")
+            for field in ("predicate", "normalizedAssertion", "normalized_assertion")
+        )
+        for reference in references
+    )
+    return contains_all(reference_text, expected_text)
+
+
 def append_failure_if(condition: bool, failures: list[str], failure_code: str) -> None:
     if condition:
         failures.append(failure_code)
@@ -149,25 +185,46 @@ class BenchmarkCase:
     search_required_all: list[str]
     answer_required_all: list[str]
     answer_required_any: list[str]
+    answer_opening_required_any: list[str]
     answer_forbidden_any: list[str]
     min_chunk_reference_count: int
     min_prepared_segment_reference_count: int
     min_technical_fact_reference_count: int
     min_entity_reference_count: int
     min_relation_reference_count: int
+    expected_entity_reference_labels_contains: list[str]
+    expected_relation_reference_text_contains: list[str]
     allowed_verification_states: list[str]
 
 
 class BenchmarkClient:
     def __init__(self, base_url: str, session_cookie: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self.http = requests.Session()
-        self.http.cookies.set("ironrag_ui_session", session_cookie, path="/")
+        self.session_cookie = session_cookie
+        self.http = self._new_session()
+
+    def _new_session(self) -> requests.Session:
+        http = requests.Session()
+        http.cookies.set("ironrag_ui_session", self.session_cookie, path="/")
+        return http
+
+    def _refresh_session(self) -> None:
+        self.http = self._new_session()
 
     def get_json(self, path: str, **kwargs: Any) -> Any:
-        response = self.http.get(f"{self.base_url}{path}", timeout=120, **kwargs)
-        response.raise_for_status()
-        return response.json()
+        last_error: requests.ConnectionError | None = None
+        for attempt in range(3):
+            try:
+                response = self.http.get(f"{self.base_url}{path}", timeout=120, **kwargs)
+                response.raise_for_status()
+                return response.json()
+            except requests.ConnectionError as error:
+                last_error = error
+                self._refresh_session()
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     def post_json(self, path: str, payload: dict[str, Any], **kwargs: Any) -> Any:
         response = self.http.post(
@@ -211,6 +268,7 @@ def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, A
             search_required_all=item.get("searchRequiredAll", []),
             answer_required_all=item.get("answerRequiredAll", []),
             answer_required_any=item.get("answerRequiredAny", []),
+            answer_opening_required_any=item.get("answerOpeningRequiredAny", []),
             answer_forbidden_any=item.get("answerForbiddenAny", []),
             min_chunk_reference_count=item.get("minChunkReferenceCount", 0),
             min_prepared_segment_reference_count=item.get(
@@ -219,6 +277,12 @@ def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, A
             min_technical_fact_reference_count=item.get("minTechnicalFactReferenceCount", 0),
             min_entity_reference_count=item.get("minEntityReferenceCount", 0),
             min_relation_reference_count=item.get("minRelationReferenceCount", 0),
+            expected_entity_reference_labels_contains=item.get(
+                "expectedEntityReferenceLabelsContains", []
+            ),
+            expected_relation_reference_text_contains=item.get(
+                "expectedRelationReferenceTextContains", []
+            ),
             allowed_verification_states=item.get("allowedVerificationStates", ["verified"]),
         )
         for item in payload["cases"]
@@ -431,13 +495,29 @@ def run_case(
     answer_has_required = contains_all(answer_text, case.answer_required_all) and (
         True if not case.answer_required_any else contains_any(answer_text, case.answer_required_any)
     )
+    answer_opening = first_answer_sentence(answer_text)
+    answer_opening_has_required = (
+        True
+        if not case.answer_opening_required_any
+        else contains_any(answer_opening, case.answer_opening_required_any)
+    )
     answer_has_forbidden = contains_any(answer_text, case.answer_forbidden_any)
 
     chunk_reference_count = len(execution_detail.get("chunkReferences", []))
     prepared_segment_reference_count = len(execution_detail.get("preparedSegmentReferences", []))
     technical_fact_reference_count = len(execution_detail.get("technicalFactReferences", []))
-    entity_reference_count = len(execution_detail.get("entityReferences", []))
-    relation_reference_count = len(execution_detail.get("relationReferences", []))
+    entity_references = execution_detail.get("entityReferences", [])
+    relation_references = execution_detail.get("relationReferences", [])
+    entity_reference_count = len(entity_references)
+    relation_reference_count = len(relation_references)
+    entity_reference_labels_pass = references_contain_all_labels(
+        entity_references,
+        case.expected_entity_reference_labels_contains,
+    )
+    relation_reference_text_pass = relation_references_contain_all_text(
+        relation_references,
+        case.expected_relation_reference_text_contains,
+    )
     verification_state = execution_detail.get("verificationState") or "not_run"
     verification_warnings = execution_detail.get("verificationWarnings", [])
 
@@ -455,6 +535,11 @@ def run_case(
     append_failure_if(not top_document_ok, failed_checks, "top_document")
     append_failure_if(not retrieval_contains_required, failed_checks, "retrieval_contains_required")
     append_failure_if(not answer_has_required, failed_checks, "answer_required")
+    append_failure_if(
+        not answer_opening_has_required,
+        failed_checks,
+        "answer_opening_required",
+    )
     append_failure_if(answer_has_forbidden, failed_checks, "answer_forbidden")
     append_failure_if(chunk_reference_count < case.min_chunk_reference_count, failed_checks, "chunk_references")
     append_failure_if(
@@ -477,13 +562,26 @@ def run_case(
         failed_checks,
         "relation_references",
     )
+    append_failure_if(
+        not entity_reference_labels_pass,
+        failed_checks,
+        "entity_reference_labels",
+    )
+    append_failure_if(
+        not relation_reference_text_pass,
+        failed_checks,
+        "relation_reference_text",
+    )
     append_failure_if(not verification_pass, failed_checks, "verification_state")
     strict_case_pass = (
         top_document_ok
         and retrieval_contains_required
         and answer_has_required
+        and answer_opening_has_required
         and not answer_has_forbidden
         and graph_usage_pass
+        and entity_reference_labels_pass
+        and relation_reference_text_pass
         and structured_evidence_pass
         and verification_pass
     )
@@ -496,9 +594,13 @@ def run_case(
         "topSearchDocumentOk": top_document_ok,
         "retrievalContainsRequired": retrieval_contains_required,
         "answerHasRequired": answer_has_required,
+        "answerOpening": answer_opening,
+        "answerOpeningHasRequired": answer_opening_has_required,
         "answerHasForbidden": answer_has_forbidden,
-        "answerPass": answer_has_required and not answer_has_forbidden,
+        "answerPass": answer_has_required and answer_opening_has_required and not answer_has_forbidden,
         "graphUsagePass": graph_usage_pass,
+        "entityReferenceLabelsPass": entity_reference_labels_pass,
+        "relationReferenceTextPass": relation_reference_text_pass,
         "structuredEvidencePass": structured_evidence_pass,
         "verificationState": verification_state,
         "verificationWarnings": verification_warnings,
@@ -516,11 +618,15 @@ def run_case(
         "technicalFactReferenceCount": technical_fact_reference_count,
         "entityReferenceCount": entity_reference_count,
         "relationReferenceCount": relation_reference_count,
+        "entityReferences": entity_references,
+        "relationReferences": relation_references,
         "minChunkReferenceCount": case.min_chunk_reference_count,
         "minPreparedSegmentReferenceCount": case.min_prepared_segment_reference_count,
         "minTechnicalFactReferenceCount": case.min_technical_fact_reference_count,
         "minEntityReferenceCount": case.min_entity_reference_count,
         "minRelationReferenceCount": case.min_relation_reference_count,
+        "expectedEntityReferenceLabelsContains": case.expected_entity_reference_labels_contains,
+        "expectedRelationReferenceTextContains": case.expected_relation_reference_text_contains,
         "allowedVerificationStates": case.allowed_verification_states,
     }
 
@@ -531,6 +637,8 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
     retrieval_pass = sum(1 for item in case_results if item["retrievalContainsRequired"])
     answer_pass = sum(1 for item in case_results if item["answerPass"])
     graph_usage_pass = sum(1 for item in case_results if item["graphUsagePass"])
+    entity_label_pass = sum(1 for item in case_results if item["entityReferenceLabelsPass"])
+    relation_text_pass = sum(1 for item in case_results if item["relationReferenceTextPass"])
     structured_evidence_pass = sum(1 for item in case_results if item["structuredEvidencePass"])
     verification_pass = sum(1 for item in case_results if item["verificationPass"])
     strict_case_pass = sum(1 for item in case_results if item["strictCasePass"])
@@ -546,6 +654,8 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
         "retrievalPassCount": retrieval_pass,
         "answerPassCount": answer_pass,
         "graphUsagePassCount": graph_usage_pass,
+        "entityReferenceLabelsPassCount": entity_label_pass,
+        "relationReferenceTextPassCount": relation_text_pass,
         "structuredEvidencePassCount": structured_evidence_pass,
         "verificationPassCount": verification_pass,
         "strictCasePassCount": strict_case_pass,
@@ -553,6 +663,8 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
         "retrievalPassRate": round(retrieval_pass / total, 3) if total else 0.0,
         "answerPassRate": round(answer_pass / total, 3) if total else 0.0,
         "graphUsagePassRate": round(graph_usage_pass / total, 3) if total else 0.0,
+        "entityReferenceLabelsPassRate": round(entity_label_pass / total, 3) if total else 0.0,
+        "relationReferenceTextPassRate": round(relation_text_pass / total, 3) if total else 0.0,
         "structuredEvidencePassRate": round(structured_evidence_pass / total, 3) if total else 0.0,
         "verificationPassRate": round(verification_pass / total, 3) if total else 0.0,
         "strictCasePassRate": round(strict_case_pass / total, 3) if total else 0.0,

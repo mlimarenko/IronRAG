@@ -27,6 +27,7 @@ pub(crate) fn unconfigured_graph_extraction_failure(
             warning: None,
         },
         recovery_attempts: Vec::new(),
+        cancelled: false,
     }
 }
 
@@ -79,6 +80,32 @@ pub(crate) fn graph_extraction_execution_error(
             replay_count: request.resume_hint.as_ref().map(|hint| hint.replay_count).unwrap_or(0),
             downgrade_level: normalized_downgrade_level(request),
         },
+        cancelled: false,
+    }
+}
+
+pub(crate) fn graph_extraction_cancelled_error(
+    request: &GraphExtractionRequest,
+    request_shape_key: impl Into<String>,
+    request_size_bytes: usize,
+) -> GraphExtractionExecutionError {
+    GraphExtractionExecutionError {
+        message: crate::services::ingest::cancellation::StageError::Cancelled.to_string(),
+        request_shape_key: request_shape_key.into(),
+        request_size_bytes,
+        provider_failure: None,
+        recovery_summary: ExtractionRecoverySummary {
+            status: ExtractionOutcomeStatus::Failed,
+            second_pass_applied: false,
+            warning: None,
+        },
+        recovery_attempts: Vec::new(),
+        resume_state: GraphExtractionResumeState {
+            resumed_from_checkpoint: false,
+            replay_count: request.resume_hint.as_ref().map(|hint| hint.replay_count).unwrap_or(0),
+            downgrade_level: normalized_downgrade_level(request),
+        },
+        cancelled: true,
     }
 }
 
@@ -88,7 +115,10 @@ pub(crate) fn make_graph_terminal_failure_outcome(
     let summary = make_graph_runtime_failure_summary(&failure.code, &failure.summary);
     if matches!(
         failure.code.as_str(),
-        "runtime_policy_rejected" | "runtime_policy_terminated" | "runtime_policy_blocked"
+        "runtime_policy_rejected"
+            | "runtime_policy_terminated"
+            | "runtime_policy_blocked"
+            | "ingest_stage_cancelled"
     ) {
         RuntimeTerminalOutcome::Canceled { failure, summary }
     } else {
@@ -111,6 +141,9 @@ pub(crate) fn graph_async_operation_status(
 pub(crate) fn graph_failure_code_from_outcome(
     failure: &GraphExtractionFailureOutcome,
 ) -> &'static str {
+    if failure.cancelled {
+        return "ingest_stage_cancelled";
+    }
     match failure.provider_failure.as_ref().map(|value| value.failure_class.clone()) {
         Some(RuntimeProviderFailureClass::InvalidModelOutput) => {
             GraphExtractionTaskFailureCode::MalformedOutput.as_str()

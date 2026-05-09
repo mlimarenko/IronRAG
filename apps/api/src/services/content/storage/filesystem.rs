@@ -8,6 +8,7 @@ use super::{
     StashedContentDirectory,
     types::{ContentStorageProbe, ContentStorageProbeStatus},
 };
+use crate::services::content::error::ContentServiceError;
 
 /// Subdirectory under storage root used to stash deleted documents
 /// before permanent removal.
@@ -24,7 +25,7 @@ impl FilesystemContentStorageProvider {
         Self { root: root.into() }
     }
 
-    pub async fn prepare_and_validate(&self) -> anyhow::Result<ContentStorageProbe> {
+    pub async fn prepare_and_validate(&self) -> Result<ContentStorageProbe, ContentServiceError> {
         fs::create_dir_all(&self.root).await.with_context(|| {
             format!("failed to create content storage root {}", self.root.display())
         })?;
@@ -53,7 +54,11 @@ impl FilesystemContentStorageProvider {
         }
     }
 
-    pub async fn persist(&self, storage_key: &str, file_bytes: &[u8]) -> anyhow::Result<()> {
+    pub async fn persist(
+        &self,
+        storage_key: &str,
+        file_bytes: &[u8],
+    ) -> Result<(), ContentServiceError> {
         let target_path = self.resolve_storage_path(storage_key)?;
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).await.with_context(|| {
@@ -81,24 +86,24 @@ impl FilesystemContentStorageProvider {
         Ok(())
     }
 
-    pub async fn has(&self, storage_key: &str) -> anyhow::Result<bool> {
+    pub async fn has(&self, storage_key: &str) -> Result<bool, ContentServiceError> {
         let path = self.resolve_storage_path(storage_key)?;
-        fs::try_exists(&path)
-            .await
-            .with_context(|| format!("failed to inspect stored content source {}", path.display()))
+        Ok(fs::try_exists(&path).await.with_context(|| {
+            format!("failed to inspect stored content source {}", path.display())
+        })?)
     }
 
-    pub async fn read(&self, storage_key: &str) -> anyhow::Result<Vec<u8>> {
+    pub async fn read(&self, storage_key: &str) -> Result<Vec<u8>, ContentServiceError> {
         let path = self.resolve_storage_path(storage_key)?;
-        fs::read(&path)
+        Ok(fs::read(&path)
             .await
-            .with_context(|| format!("failed to read stored content source {}", path.display()))
+            .with_context(|| format!("failed to read stored content source {}", path.display()))?)
     }
 
     pub async fn stash_prefix(
         &self,
         relative_directory: &str,
-    ) -> anyhow::Result<Option<StashedContentDirectory>> {
+    ) -> Result<Option<StashedContentDirectory>, ContentServiceError> {
         let original_path = self.resolve_storage_path(relative_directory)?;
         if !fs::try_exists(&original_path)
             .await
@@ -126,7 +131,7 @@ impl FilesystemContentStorageProvider {
     pub async fn restore_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContentServiceError> {
         if let Some(parent) = stashed_directory.original_path.parent() {
             fs::create_dir_all(parent)
                 .await
@@ -147,7 +152,7 @@ impl FilesystemContentStorageProvider {
     pub async fn purge_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContentServiceError> {
         if fs::try_exists(&stashed_directory.stashed_path).await.with_context(|| {
             format!("failed to inspect {}", stashed_directory.stashed_path.display())
         })? {
@@ -158,7 +163,7 @@ impl FilesystemContentStorageProvider {
                 )
             })?;
         }
-        self.prune_empty_content_parents(&stashed_directory.original_path).await
+        self.prune_empty_content_parents(&stashed_directory.original_path).await.map_err(Into::into)
     }
 
     fn resolve_storage_path(&self, storage_key: &str) -> anyhow::Result<PathBuf> {

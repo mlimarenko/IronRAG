@@ -31,6 +31,7 @@ pub async fn extract_image_with_provider(
     model_name: &str,
     api_key: &str,
     base_url: Option<&str>,
+    extra_parameters_json: &serde_json::Value,
     mime_type: &str,
     file_bytes: &[u8],
 ) -> Result<ExtractionOutput> {
@@ -40,6 +41,7 @@ pub async fn extract_image_with_provider(
         model_name,
         api_key,
         base_url,
+        extra_parameters_json,
         mime_type,
         file_bytes,
         IMAGE_OCR_PROMPT,
@@ -75,6 +77,7 @@ pub async fn describe_image_with_provider(
     model_name: &str,
     api_key: &str,
     base_url: Option<&str>,
+    extra_parameters_json: &serde_json::Value,
     mime_type: &str,
     file_bytes: &[u8],
 ) -> Result<ImageVisionOutput> {
@@ -84,6 +87,7 @@ pub async fn describe_image_with_provider(
         model_name,
         api_key,
         base_url,
+        extra_parameters_json,
         mime_type,
         file_bytes,
         IMAGE_DESCRIPTION_PROMPT,
@@ -97,6 +101,7 @@ async fn run_vision_image_request(
     model_name: &str,
     api_key: &str,
     base_url: Option<&str>,
+    extra_parameters_json: &serde_json::Value,
     mime_type: &str,
     file_bytes: &[u8],
     prompt: &str,
@@ -121,7 +126,7 @@ async fn run_vision_image_request(
             temperature: None,
             top_p: None,
             max_output_tokens_override: None,
-            extra_parameters_json: serde_json::json!({}),
+            extra_parameters_json: extra_parameters_json.clone(),
         })
         .await?;
 
@@ -325,6 +330,7 @@ mod tests {
             "gpt-5.4-mini",
             "test-key",
             None,
+            &serde_json::json!({"_providerProfile": {"runtime": {"kind": "openai_compatible"}}}),
             "image/png",
             &valid_png_bytes(),
         )
@@ -346,6 +352,7 @@ mod tests {
             "gpt-5.4-mini",
             "test-key",
             None,
+            &serde_json::json!({"_providerProfile": {"runtime": {"kind": "openai_compatible"}}}),
             "image/webp",
             &valid_png_bytes(),
         )
@@ -365,6 +372,7 @@ mod tests {
             "gpt-5.4-mini",
             "test-key",
             None,
+            &serde_json::json!({"_providerProfile": {"runtime": {"kind": "openai_compatible"}}}),
             "image/webp",
             &valid_png_bytes(),
         )

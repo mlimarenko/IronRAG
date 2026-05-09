@@ -1,4 +1,6 @@
 pub(crate) mod activity;
+pub mod cancellation;
+pub mod error;
 pub mod extract;
 pub(crate) mod extraction_recovery;
 pub(super) mod runtime;

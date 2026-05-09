@@ -7,7 +7,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::app::config::Settings;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 struct ArangoIndexRow {
     name: String,
     #[serde(rename = "type")]
@@ -73,15 +73,19 @@ impl ArangoClient {
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, self.database_api_url(path))
-            .basic_auth(&self.username, Some(&self.password))
+        crate::observability::inject_trace_context(
+            self.http
+                .request(method, self.database_api_url(path))
+                .basic_auth(&self.username, Some(&self.password)),
+        )
     }
 
     fn system_request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, self.system_api_url(path))
-            .basic_auth(&self.username, Some(&self.password))
+        crate::observability::inject_trace_context(
+            self.http
+                .request(method, self.system_api_url(path))
+                .basic_auth(&self.username, Some(&self.password)),
+        )
     }
 
     pub async fn ensure_database(&self) -> anyhow::Result<()> {

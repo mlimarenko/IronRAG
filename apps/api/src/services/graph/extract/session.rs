@@ -1,26 +1,25 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    agent_runtime::{
-        request::build_provider_request, task::RuntimeTask, tasks::graph_extract::GraphExtractTask,
-    },
     domains::{
         graph_quality::ExtractionRecoverySummary,
         provider_profiles::EffectiveProviderProfile,
         runtime_ingestion::{RuntimeProviderFailureClass, RuntimeProviderFailureDetail},
     },
-    integrations::llm::{ChatRequestSeed, LlmGateway},
+    integrations::llm::{LlmGateway, build_structured_chat_request},
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
+        ingest::cancellation::{StageError, anyhow_is_cancelled, ensure_not_cancelled},
         ingest::extraction_recovery::ExtractionRecoveryService,
     },
 };
 
 use super::graph_extraction_cache_hash;
 use super::parse::{normalize_graph_extraction_output, sanitize_graph_extraction_candidate_set};
-use super::prompt::build_graph_extraction_prompt_plan;
+use super::prompt::{build_graph_extraction_prompt_plan, graph_extraction_response_format};
 use super::types::*;
 
 pub(crate) async fn resolve_graph_extraction_with_gateway(
@@ -30,10 +29,18 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
     provider_profile: &EffectiveProviderProfile,
     runtime_binding: &ResolvedRuntimeBinding,
     request: &GraphExtractionRequest,
+    cancellation_token: &CancellationToken,
     recovery_enabled: bool,
     max_provider_attempts: usize,
     provider_timeout_retry_limit: usize,
 ) -> std::result::Result<ResolvedGraphExtraction, GraphExtractionFailureOutcome> {
+    if cancellation_token.is_cancelled() {
+        return Err(cancelled_graph_extraction_failure(
+            request,
+            "graph_extract_v8:cancelled",
+            request.chunk.content.len(),
+        ));
+    }
     let provider_kind = runtime_binding.provider_kind.clone();
     let model_name = runtime_binding.model_name.clone();
     let lifecycle = GraphExtractionLifecycle {
@@ -51,6 +58,13 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
 
     let max_provider_attempts = if recovery_enabled { max_provider_attempts.max(1) } else { 1 };
     for provider_attempt_no in 1..=max_provider_attempts {
+        if cancellation_token.is_cancelled() {
+            return Err(cancelled_graph_extraction_failure(
+                request,
+                "graph_extract_v8:cancelled",
+                request.chunk.content.len(),
+            ));
+        }
         let retry_decision = (provider_attempt_no > 1).then_some("retrying_provider_call");
         let prompt_plan = match pending_follow_up.take() {
             None => build_graph_extraction_prompt_plan(
@@ -92,11 +106,19 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
             runtime_binding,
             &prompt_plan,
             lifecycle.clone(),
+            cancellation_token,
         )
         .await
         {
             Ok(raw) => raw,
             Err(error) => {
+                if anyhow_is_cancelled(&error) {
+                    return Err(cancelled_graph_extraction_failure(
+                        request,
+                        prompt_plan.request_shape_key,
+                        prompt_plan.request_size_bytes,
+                    ));
+                }
                 let error_context = format!("{error:#}");
                 let provider_failure = provider_failure_classification.classify_failure(
                     &provider_kind,
@@ -211,9 +233,17 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
                         &pending_recovery_records,
                         &recovery_summary,
                     ),
+                    cancelled: false,
                 });
             }
         };
+        if cancellation_token.is_cancelled() {
+            return Err(cancelled_graph_extraction_failure(
+                request,
+                raw.request_shape_key,
+                raw.request_size_bytes,
+            ));
+        }
         usage_samples.push(raw.usage_json.clone());
         usage_calls.push(GraphExtractionUsageCall {
             provider_call_no: i32::try_from(usage_calls.len() + 1).unwrap_or(i32::MAX),
@@ -445,6 +475,7 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
                             &pending_recovery_records,
                             &recovery_summary,
                         ),
+                        cancelled: false,
                     });
                 }
             }
@@ -471,6 +502,7 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
                 true,
             ),
         ),
+        cancelled: false,
     })
 }
 
@@ -480,30 +512,26 @@ pub(crate) async fn request_graph_extraction_with_prompt_plan(
     runtime_binding: &ResolvedRuntimeBinding,
     prompt_plan: &GraphExtractionPromptPlan,
     lifecycle: GraphExtractionLifecycle,
+    cancellation_token: &CancellationToken,
 ) -> Result<RawGraphExtractionResponse> {
+    ensure_not_cancelled(cancellation_token)?;
     let prompt_hash = graph_extraction_cache_hash(&prompt_plan.prompt, runtime_binding);
     let provider_kind = runtime_binding.provider_kind.clone();
     let model_name = runtime_binding.model_name.clone();
     let started_at = Utc::now();
     let started = Instant::now();
-    let task_spec = GraphExtractTask::spec();
-    let request = build_provider_request(
-        &task_spec,
-        ChatRequestSeed {
-            provider_kind: runtime_binding.provider_kind.clone(),
-            model_name: runtime_binding.model_name.clone(),
-            api_key_override: runtime_binding.api_key.clone(),
-            base_url_override: runtime_binding.provider_base_url.clone(),
-            system_prompt: runtime_binding.system_prompt.clone(),
-            temperature: runtime_binding.temperature,
-            top_p: runtime_binding.top_p,
-            max_output_tokens_override: runtime_binding.max_output_tokens_override,
-            extra_parameters_json: runtime_binding.extra_parameters_json.clone(),
-        },
+    let request = build_structured_chat_request(
+        runtime_binding.chat_request_seed(),
         prompt_plan.prompt.clone(),
+        graph_extraction_response_format(),
     );
-    let response =
-        gateway.generate(request).await.context("graph extraction provider call failed")?;
+    let response = tokio::select! {
+        _ = cancellation_token.cancelled() => {
+            return Err(anyhow::Error::new(StageError::Cancelled));
+        }
+        result = gateway.generate(request) => result.context("graph extraction provider call failed")?,
+    };
+    ensure_not_cancelled(cancellation_token)?;
     let finished_at = Utc::now();
     let output_text = response.output_text;
     let usage_json = build_provider_usage_json(&provider_kind, &model_name, response.usage_json);
@@ -526,6 +554,26 @@ pub(crate) async fn request_graph_extraction_with_prompt_plan(
             &usage_json,
         ),
     })
+}
+
+fn cancelled_graph_extraction_failure(
+    _request: &GraphExtractionRequest,
+    request_shape_key: impl Into<String>,
+    request_size_bytes: usize,
+) -> GraphExtractionFailureOutcome {
+    GraphExtractionFailureOutcome {
+        request_shape_key: request_shape_key.into(),
+        request_size_bytes,
+        error_message: StageError::Cancelled.to_string(),
+        provider_failure: None,
+        recovery_summary: ExtractionRecoverySummary {
+            status: crate::domains::graph_quality::ExtractionOutcomeStatus::Failed,
+            second_pass_applied: false,
+            warning: None,
+        },
+        recovery_attempts: Vec::new(),
+        cancelled: true,
+    }
 }
 
 pub(crate) fn build_raw_output_json(

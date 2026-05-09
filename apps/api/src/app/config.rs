@@ -12,9 +12,14 @@ use crate::domains::{
 
 const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "ironrag.local";
 const DEFAULT_UI_BOOTSTRAP_ADMIN_NAME: &str = "Admin";
-const BOOTSTRAP_PROVIDER_ENV_OPENAI: &str = "IRONRAG_OPENAI_API_KEY";
-const BOOTSTRAP_PROVIDER_ENV_DEEPSEEK: &str = "IRONRAG_DEEPSEEK_API_KEY";
-const BOOTSTRAP_PROVIDER_ENV_QWEN: &str = "IRONRAG_QWEN_API_KEY";
+const BOOTSTRAP_PROVIDER_SECRET_ENVS: &[(&str, &str)] = &[
+    ("openai", "IRONRAG_OPENAI_API_KEY"),
+    ("deepseek", "IRONRAG_DEEPSEEK_API_KEY"),
+    ("qwen", "IRONRAG_QWEN_API_KEY"),
+    ("openrouter", "IRONRAG_OPENROUTER_API_KEY"),
+    ("gptunnel", "IRONRAG_GPTUNNEL_API_KEY"),
+    ("routerai", "IRONRAG_ROUTERAI_API_KEY"),
+];
 pub const DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES: usize = 32_768;
 pub const DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS: usize = 2_000;
 
@@ -60,6 +65,7 @@ pub struct BootstrapSettings {
 pub struct PublicOriginSettings {
     pub raw_frontend_origin: String,
     pub allowed_origins: Vec<String>,
+    pub session_cookie_secure: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +90,7 @@ pub struct DestructiveFreshBootstrapSettings {
     pub required: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct Settings {
     pub bind_addr: String,
     pub service_role: String,
@@ -123,6 +129,8 @@ pub struct Settings {
     pub ui_bootstrap_extract_graph_model_name: Option<String>,
     pub ui_bootstrap_embed_chunk_provider_kind: Option<String>,
     pub ui_bootstrap_embed_chunk_model_name: Option<String>,
+    pub ui_bootstrap_query_retrieve_provider_kind: Option<String>,
+    pub ui_bootstrap_query_retrieve_model_name: Option<String>,
     pub ui_bootstrap_query_compile_provider_kind: Option<String>,
     pub ui_bootstrap_query_compile_model_name: Option<String>,
     pub ui_bootstrap_query_answer_provider_kind: Option<String>,
@@ -179,8 +187,6 @@ pub struct Settings {
     /// Number of pages fetched in parallel during a web crawl run.
     pub web_ingest_crawl_concurrency: usize,
     pub llm_http_timeout_seconds: u64,
-    pub llm_transport_retry_attempts: usize,
-    pub llm_transport_retry_base_delay_ms: u64,
     pub runtime_agent_max_turns: u8,
     pub runtime_agent_max_parallel_actions: u8,
     pub runtime_trace_payload_budget_bytes: usize,
@@ -192,6 +198,7 @@ pub struct Settings {
     pub query_answer_source_links_enabled: bool,
     pub release_check_repository: String,
     pub release_check_interval_hours: u64,
+    pub graph_gc_hours: u64,
     pub query_rerank_enabled: bool,
     pub query_rerank_candidate_limit: usize,
     pub query_balanced_context_enabled: bool,
@@ -265,6 +272,7 @@ impl Settings {
         validate_recognition_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_release_monitor_settings(&settings).map_err(config::ConfigError::Message)?;
+        validate_graph_gc_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
 
         Ok(settings)
@@ -287,15 +295,19 @@ impl Settings {
 
     #[must_use]
     pub fn public_origin_settings(&self) -> PublicOriginSettings {
+        let allowed_origins = self
+            .frontend_origin
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
         PublicOriginSettings {
             raw_frontend_origin: self.frontend_origin.clone(),
-            allowed_origins: self
-                .frontend_origin
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(std::string::ToString::to_string)
-                .collect(),
+            session_cookie_secure: allowed_origins.iter().any(|origin| {
+                origin.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+            }),
+            allowed_origins,
         }
     }
 
@@ -378,19 +390,18 @@ impl Settings {
 
     #[must_use]
     pub fn resolved_ui_bootstrap_ai_setup(&self) -> Option<UiBootstrapAiSetup> {
-        let provider_secrets = [
-            ("openai", resolved_bootstrap_provider_api_key(BOOTSTRAP_PROVIDER_ENV_OPENAI)),
-            ("deepseek", resolved_bootstrap_provider_api_key(BOOTSTRAP_PROVIDER_ENV_DEEPSEEK)),
-            ("qwen", resolved_bootstrap_provider_api_key(BOOTSTRAP_PROVIDER_ENV_QWEN)),
-        ]
-        .into_iter()
-        .filter_map(|(provider_kind, api_key)| {
-            api_key.map(|api_key| UiBootstrapAiProviderSecret {
-                provider_kind: provider_kind.to_string(),
-                api_key,
+        let provider_secrets = BOOTSTRAP_PROVIDER_SECRET_ENVS
+            .iter()
+            .map(|(provider_kind, env_name)| {
+                (*provider_kind, resolved_bootstrap_provider_api_key(env_name))
             })
-        })
-        .collect::<Vec<_>>();
+            .filter_map(|(provider_kind, api_key)| {
+                api_key.map(|api_key| UiBootstrapAiProviderSecret {
+                    provider_kind: provider_kind.to_string(),
+                    api_key,
+                })
+            })
+            .collect::<Vec<_>>();
 
         let binding_defaults = [
             resolved_ui_bootstrap_ai_binding_default(
@@ -402,6 +413,11 @@ impl Settings {
                 "embed_chunk",
                 self.ui_bootstrap_embed_chunk_provider_kind.as_deref(),
                 self.ui_bootstrap_embed_chunk_model_name.as_deref(),
+            ),
+            resolved_ui_bootstrap_ai_binding_default(
+                "query_retrieve",
+                self.ui_bootstrap_query_retrieve_provider_kind.as_deref(),
+                self.ui_bootstrap_query_retrieve_model_name.as_deref(),
             ),
             resolved_ui_bootstrap_ai_binding_default(
                 "query_compile",
@@ -542,8 +558,6 @@ fn settings_config_builder()
         .set_default("web_ingest_user_agent", "IronRAG-WebIngest/0.1")?
         .set_default("web_ingest_crawl_concurrency", 4)?
         .set_default("llm_http_timeout_seconds", 120)?
-        .set_default("llm_transport_retry_attempts", 5)?
-        .set_default("llm_transport_retry_base_delay_ms", 500)?
         .set_default("runtime_agent_max_turns", 4)?
         .set_default("runtime_agent_max_parallel_actions", 4)?
         .set_default(
@@ -559,6 +573,7 @@ fn settings_config_builder()
         .set_default("query_answer_source_links_enabled", false)?
         .set_default("release_check_repository", "mlimarenko/IronRAG")?
         .set_default("release_check_interval_hours", 12)?
+        .set_default("graph_gc_hours", 24)?
         .set_default("query_rerank_enabled", true)?
         .set_default("query_rerank_candidate_limit", 24)?
         .set_default("query_balanced_context_enabled", true)?
@@ -841,6 +856,13 @@ fn validate_release_monitor_settings(settings: &Settings) -> Result<(), String> 
         return Err("release_check_interval_hours must be greater than zero".into());
     }
 
+    Ok(())
+}
+
+fn validate_graph_gc_settings(settings: &Settings) -> Result<(), String> {
+    if settings.graph_gc_hours == 0 {
+        return Err("graph_gc_hours must be greater than zero".into());
+    }
     Ok(())
 }
 

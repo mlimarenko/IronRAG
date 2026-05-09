@@ -3,24 +3,9 @@ pub mod config;
 pub mod shutdown;
 pub mod state;
 
-use ::http::Response;
-use axum::{
-    Router,
-    body::Body,
-    extract::{DefaultBodyLimit, MatchedPath},
-    http::{Method, Request, header},
-    middleware,
-    routing::get,
-};
-use axum_prometheus::PrometheusMetricLayer;
+use axum::Router;
 use std::{net::SocketAddr, time::Duration};
-use tower_http::{
-    classify::ServerErrorsFailureClass,
-    compression::CompressionLayer,
-    cors::{AllowOrigin, CorsLayer},
-    trace::TraceLayer,
-};
-use tracing::{Span, error, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     domains::deployment::ServiceRole,
@@ -31,7 +16,7 @@ use crate::{
             validate_canonical_bootstrap_state,
         },
     },
-    interfaces::http::{self, router_support},
+    interfaces::http::{self, middleware::apply_canonical_middleware},
     services::content::storage::types::ContentStorageProbeStatus,
 };
 
@@ -44,7 +29,7 @@ const STARTUP_ARANGO_READY_RETRY_DELAY: Duration = Duration::from_secs(3);
 /// Returns any configuration, bind, listener, or serve error encountered during startup.
 pub async fn run() -> anyhow::Result<()> {
     let config = config::Settings::from_env()?;
-    crate::shared::telemetry::init(&config.log_filter);
+    crate::observability::init_tracing()?;
     let role = config.service_role_kind().map_err(anyhow::Error::msg)?;
 
     let state = state::AppState::new(config.clone()).await?;
@@ -86,133 +71,21 @@ pub async fn run() -> anyhow::Result<()> {
     if let Some(worker_handle) = worker_handle {
         let _ = worker_handle.await;
     }
+    crate::observability::shutdown_tracing().await;
     run_result
 }
 
-fn build_router(config: &config::Settings, state: state::AppState) -> Router {
-    build_http_router(config, state, false)
+fn build_router(state: state::AppState) -> Router {
+    build_http_router(state, false)
 }
 
-fn build_probe_router(config: &config::Settings, state: state::AppState) -> Router {
-    build_http_router(config, state, true)
+fn build_probe_router(state: state::AppState) -> Router {
+    build_http_router(state, true)
 }
 
-fn build_http_router(
-    config: &config::Settings,
-    state: state::AppState,
-    probe_only: bool,
-) -> Router {
-    let public_origin_settings = config.public_origin_settings();
-    let max_request_body_bytes = state.mcp_memory.max_request_body_bytes();
+fn build_http_router(state: state::AppState, probe_only: bool) -> Router {
     let api_router = if probe_only { http::probe_router() } else { http::router() };
-    let (prometheus_layer, prometheus_handle) = PrometheusMetricLayer::pair();
-    Router::new()
-        .nest("/v1", api_router)
-        .route(
-            "/metrics",
-            get(move || {
-                let handle = prometheus_handle.clone();
-                async move { handle.render() }
-            }),
-        )
-        .layer(prometheus_layer)
-        .layer(
-            CompressionLayer::new()
-                .gzip(true)
-                .br(true)
-                .zstd(true)
-                .no_deflate(),
-        )
-        .layer(DefaultBodyLimit::max(max_request_body_bytes))
-        .layer(middleware::map_request(inject_request_id))
-        .layer(middleware::map_response(propagate_request_id))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(parse_allowed_origins(&public_origin_settings))
-                .allow_credentials(true)
-                .allow_methods([
-                    Method::GET,
-                    Method::POST,
-                    Method::PUT,
-                    Method::DELETE,
-                    Method::OPTIONS,
-                ])
-                .allow_headers([
-                    header::ACCEPT,
-                    header::AUTHORIZATION,
-                    header::CONTENT_TYPE,
-                    header::HeaderName::from_static(router_support::REQUEST_ID_HEADER),
-                ]),
-        )
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request<_>| {
-                    let matched_path = request.extensions().get::<MatchedPath>().map_or_else(
-                        || "<unmatched>".to_string(),
-                        |path| path.as_str().to_string(),
-                    );
-                    let request_id = request
-                        .extensions()
-                        .get::<router_support::RequestId>()
-                        .map_or_else(|| "-".to_string(), |request_id| request_id.0.clone());
-                    tracing::info_span!(
-                        "http_request",
-                        method = %request.method(),
-                        matched_path,
-                        uri = %request.uri(),
-                        request_id,
-                    )
-                })
-                .on_request(|request: &Request<_>, _span: &Span| {
-                    let matched_path = request.extensions().get::<MatchedPath>().map_or_else(
-                        || "<unmatched>".to_string(),
-                        |path| path.as_str().to_string(),
-                    );
-                    let user_agent = request
-                        .headers()
-                        .get(header::USER_AGENT)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("-");
-                    let request_id = request
-                        .extensions()
-                        .get::<router_support::RequestId>()
-                        .map_or("-", |request_id| request_id.0.as_str());
-                    info!(
-                        method = %request.method(),
-                        matched_path,
-                        uri = %request.uri(),
-                        user_agent,
-                        request_id,
-                        "http request started",
-                    );
-                })
-                .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
-                    let latency_ms = latency.as_millis();
-                    let status = response.status();
-                    let request_id = response
-                        .headers()
-                        .get(router_support::REQUEST_ID_HEADER)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("-");
-                    if status.is_server_error() {
-                        error!(%status, latency_ms, request_id, "http request completed with server error");
-                    } else if status.is_client_error() {
-                        warn!(%status, latency_ms, request_id, "http request completed with client error");
-                    } else {
-                        info!(%status, latency_ms, request_id, "http request completed");
-                    }
-                })
-                .on_failure(
-                    |failure_class: ServerErrorsFailureClass, latency: Duration, _span: &Span| {
-                        error!(
-                            %failure_class,
-                            latency_ms = latency.as_millis(),
-                            "http request failed before response",
-                        );
-                    },
-                ),
-        )
-        .with_state(state)
+    apply_canonical_middleware(Router::new().nest("/v1", api_router), state)
 }
 
 async fn run_http_api(
@@ -222,7 +95,7 @@ async fn run_http_api(
     shutdown: shutdown::ShutdownSignal,
 ) -> anyhow::Result<()> {
     spawn_boot_arango_healthcheck(state.clone(), shutdown.subscribe());
-    let router = build_router(config, state.clone());
+    let router = build_router(state.clone());
     let addr: SocketAddr = config.bind_addr.parse()?;
     info!(
         service = %config.service_name,
@@ -281,7 +154,7 @@ async fn run_probe_http_api(
     graph_backend: &str,
     shutdown: shutdown::ShutdownSignal,
 ) -> anyhow::Result<()> {
-    let router = build_probe_router(config, state.clone());
+    let router = build_probe_router(state.clone());
     let addr: SocketAddr = config.bind_addr.parse()?;
     info!(
         service = %config.service_name,
@@ -381,6 +254,28 @@ async fn run_startup_bootstraps(
     _bootstrap_settings: &config::BootstrapSettings,
     _destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
 ) -> anyhow::Result<()> {
+    // Provider preset + env-keyed credential side effects must run on
+    // every startup, regardless of whether a bootstrap admin login is
+    // configured. Operators who created the admin via the UI still need
+    // their `IRONRAG_<PROVIDER>_API_KEY` values to land as instance-scope
+    // credentials and have the matching presets seeded; gating those on
+    // `ui_bootstrap_admin` was the bug behind "I added a key and it
+    // never appeared in admin → AI".
+    state
+        .canonical_services
+        .ai_catalog
+        .seed_all_provider_presets(state)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to seed provider presets: {error}"))?;
+    state
+        .canonical_services
+        .ai_catalog
+        .ensure_env_provider_credentials(state)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to ensure env-keyed provider credentials: {error}")
+        })?;
+
     if state.ui_bootstrap_admin.is_some() {
         bootstrap::ensure_canonical_bootstrap_admin(state).await.map_err(|error| {
             anyhow::anyhow!("failed to initialize canonical bootstrap admin: {error}")
@@ -437,32 +332,4 @@ fn spawn_boot_arango_healthcheck(
             }
         }
     });
-}
-
-fn parse_allowed_origins(origins: &config::PublicOriginSettings) -> AllowOrigin {
-    let parsed_origins = origins
-        .allowed_origins
-        .iter()
-        .filter_map(|value| value.parse().ok())
-        .collect::<Vec<header::HeaderValue>>();
-
-    if parsed_origins.is_empty() {
-        return AllowOrigin::list([
-            header::HeaderValue::from_static("http://127.0.0.1:19000"),
-            header::HeaderValue::from_static("http://localhost:19000"),
-        ]);
-    }
-
-    AllowOrigin::list(parsed_origins)
-}
-
-async fn inject_request_id(mut request: Request<Body>) -> Request<Body> {
-    let request_id = router_support::ensure_or_generate_request_id(request.headers());
-    router_support::attach_request_id_header(request.headers_mut(), &request_id);
-    request.extensions_mut().insert(router_support::RequestId(request_id));
-    request
-}
-
-async fn propagate_request_id(response: Response<Body>) -> Response<Body> {
-    response
 }

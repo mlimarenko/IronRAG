@@ -3,6 +3,8 @@ use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::domains::query_ir::QueryIR;
+use crate::infra::arangodb::document_store::KnowledgeDocumentRow;
+use crate::services::query::text_match::{near_token_overlap_count, normalized_alnum_tokens};
 
 use super::{retrieve::score_value, types::RuntimeMatchedChunk};
 
@@ -38,13 +40,28 @@ where
         return BTreeSet::new();
     }
 
+    let concrete_values = values.into_iter().collect::<Vec<_>>();
     let explicit_literals = explicit_document_reference_literals(question);
     if !explicit_literals.is_empty() {
-        return explicit_document_reference_matching_document_ids(&explicit_literals, values);
+        return explicit_document_reference_matching_document_ids(
+            &explicit_literals,
+            concrete_values.iter().copied(),
+        );
+    }
+    let format_markers = explicit_document_format_markers(&normalized_question, &concrete_values);
+    if !format_markers.is_empty() {
+        let format_matches = explicit_document_format_matches(
+            &normalized_question,
+            &concrete_values,
+            &format_markers,
+        );
+        if !format_matches.is_empty() {
+            return format_matches;
+        }
     }
 
     let mut best_match_scores = HashMap::<Uuid, (usize, usize)>::new();
-    for (document_id, raw_value) in values {
+    for (document_id, raw_value) in concrete_values {
         for candidate in ranked_document_target_candidates([raw_value]) {
             if candidate.text.len() >= 4 && normalized_question.contains(candidate.text.as_str()) {
                 let score = (candidate.text.len(), candidate.priority);
@@ -64,6 +81,102 @@ where
     }
 
     BTreeSet::new()
+}
+
+fn explicit_document_format_markers<'a>(
+    normalized_question: &str,
+    values: &[(Uuid, &'a str)],
+) -> Vec<&'static str> {
+    let mut seen = BTreeSet::new();
+    normalized_question
+        .split_whitespace()
+        .filter_map(|token| {
+            EXPLICIT_DOCUMENT_REFERENCE_EXTENSIONS.iter().find_map(|extension| {
+                (*extension == token).then_some(*extension).and_then(|extension| {
+                    values
+                        .iter()
+                        .any(|(_, value)| {
+                            normalized_explicit_document_reference_candidates(value)
+                                .into_iter()
+                                .any(|candidate| {
+                                    candidate.rsplit_once('.').is_some_and(
+                                        |(_, extension_in_value)| extension_in_value == extension,
+                                    )
+                                })
+                        })
+                        .then_some(extension)
+                })
+            })
+        })
+        .filter(|extension| seen.insert(*extension))
+        .collect()
+}
+
+fn explicit_document_format_matches<'a>(
+    normalized_question: &str,
+    values: &[(Uuid, &'a str)],
+    extensions: &[&'static str],
+) -> BTreeSet<Uuid> {
+    if extensions.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let mut matches = BTreeSet::new();
+    let extension_set = extensions.iter().copied().collect::<BTreeSet<_>>();
+
+    for (document_id, raw_value) in values {
+        let mut has_matching_extension = false;
+        let mut question_matches_candidate_stem = false;
+        for candidate in normalized_explicit_document_reference_candidates(raw_value) {
+            let Some((stem, extension)) = candidate.rsplit_once('.') else {
+                continue;
+            };
+            if !extension_set.contains(extension) {
+                continue;
+            }
+
+            has_matching_extension = true;
+            for candidate in ranked_document_target_candidates([stem, &candidate]) {
+                if candidate.text.len() >= 4
+                    && normalized_question_contains_document_candidate(
+                        normalized_question,
+                        candidate.text.as_str(),
+                        extension,
+                    )
+                {
+                    question_matches_candidate_stem = true;
+                    break;
+                }
+            }
+
+            if question_matches_candidate_stem {
+                break;
+            }
+        }
+
+        if has_matching_extension && question_matches_candidate_stem {
+            matches.insert(*document_id);
+        }
+    }
+
+    matches
+}
+
+fn normalized_question_contains_document_candidate(
+    normalized_question: &str,
+    candidate: &str,
+    ignored_marker: &str,
+) -> bool {
+    if normalized_question.contains(candidate) {
+        return true;
+    }
+
+    normalized_question
+        .split_whitespace()
+        .filter(|token| *token != ignored_marker)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .contains(candidate)
 }
 
 pub(crate) fn explicit_document_reference_matching_document_ids<'a, I>(
@@ -213,6 +326,102 @@ pub(crate) fn question_requests_multi_document_scope(
     ir: Option<&QueryIR>,
 ) -> bool {
     ir.is_some_and(QueryIR::is_multi_document)
+}
+
+pub(crate) fn resolve_scoped_target_document_ids(
+    question: &str,
+    query_ir: Option<&QueryIR>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> BTreeSet<Uuid> {
+    let document_values = flattened_document_candidate_values(document_index);
+
+    let explicit_targets = explicit_target_document_ids_from_values(
+        question,
+        document_values.iter().map(|(document_id, value)| (*document_id, value.as_str())),
+    );
+    if !explicit_targets.is_empty() {
+        return explicit_targets;
+    }
+
+    let Some(ir) = query_ir else {
+        return BTreeSet::new();
+    };
+    if !matches!(ir.scope, crate::domains::query_ir::QueryScope::SingleDocument) {
+        return BTreeSet::new();
+    }
+
+    if let Some(document_focus) = &ir.document_focus {
+        let hint = document_focus.hint.trim();
+        if !hint.is_empty() {
+            let targets = document_ids_matching_focus_hint(hint, &document_values);
+            return if targets.len() == 1 { targets } else { BTreeSet::new() };
+        }
+    }
+
+    let target_entities_are_document_selectors =
+        ir.target_types.iter().any(|target_type| target_type.trim() == "document");
+    if !target_entities_are_document_selectors {
+        return BTreeSet::new();
+    }
+
+    let mut focused_targets = BTreeSet::new();
+    for hint in ir.target_entities.iter().filter_map(|entity| {
+        let trimmed = entity.label.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    }) {
+        let hint_targets = document_ids_matching_focus_hint(hint, &document_values);
+        focused_targets.extend(hint_targets);
+    }
+
+    if focused_targets.len() == 1 { focused_targets } else { BTreeSet::new() }
+}
+
+fn document_ids_matching_focus_hint(
+    hint: &str,
+    document_values: &[(Uuid, String)],
+) -> BTreeSet<Uuid> {
+    let hint_tokens = normalized_alnum_tokens(hint, 3);
+    if hint_tokens.is_empty() {
+        return BTreeSet::new();
+    }
+    let required_overlap = hint_tokens.len().clamp(1, 2);
+
+    let mut scores = HashMap::<Uuid, usize>::new();
+    for (document_id, value) in document_values {
+        let value_tokens = normalized_alnum_tokens(value, 3);
+        let overlap = near_token_overlap_count(&hint_tokens, &value_tokens);
+        if overlap >= required_overlap {
+            scores
+                .entry(*document_id)
+                .and_modify(|score| *score = (*score).max(overlap))
+                .or_insert(overlap);
+        }
+    }
+
+    let max_score = scores.values().copied().max().unwrap_or_default();
+    if max_score < required_overlap {
+        return BTreeSet::new();
+    }
+    scores
+        .into_iter()
+        .filter_map(|(document_id, score)| (score == max_score).then_some(document_id))
+        .collect()
+}
+
+fn flattened_document_candidate_values(
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> Vec<(Uuid, String)> {
+    let mut values = Vec::with_capacity(document_index.len().saturating_mul(3));
+    for document in document_index.values() {
+        if let Some(file_name) = document.file_name.as_deref() {
+            values.push((document.document_id, file_name.to_string()));
+        }
+        if let Some(title) = document.title.as_deref() {
+            values.push((document.document_id, title.to_string()));
+        }
+        values.push((document.document_id, document.external_key.to_string()));
+    }
+    values
 }
 
 pub(crate) fn focused_answer_document_id(
@@ -427,12 +636,174 @@ fn title_case_document_word(word: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use chrono::Utc;
     use uuid::Uuid;
 
     use super::{
         explicit_document_reference_literal_is_present, explicit_document_reference_literals,
-        explicit_target_document_ids_from_values,
+        explicit_target_document_ids_from_values, resolve_scoped_target_document_ids,
     };
+    use crate::domains::query_ir::{
+        DocumentHint, EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope,
+    };
+
+    fn scoped_query_ir(
+        scope: QueryScope,
+        document_focus: Option<&str>,
+        target_entities: &[&str],
+    ) -> QueryIR {
+        QueryIR {
+            act: QueryAct::RetrieveValue,
+            scope,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: target_entities
+                .iter()
+                .map(|value| EntityMention {
+                    label: (*value).to_string(),
+                    role: EntityRole::Subject,
+                })
+                .collect(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: document_focus.map(|hint| DocumentHint { hint: hint.to_string() }),
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 1.0,
+        }
+    }
+
+    fn scoped_document_index<'a>(
+        entries: impl IntoIterator<Item = (Uuid, &'a str, Option<&'a str>, &'a str)>,
+    ) -> HashMap<Uuid, crate::infra::arangodb::document_store::KnowledgeDocumentRow> {
+        let mut index = HashMap::new();
+        let library_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        for (document_id, file_name, title, external_key) in entries {
+            index.insert(
+                document_id,
+                crate::infra::arangodb::document_store::KnowledgeDocumentRow {
+                    key: Uuid::now_v7().to_string(),
+                    arango_id: None,
+                    arango_rev: None,
+                    document_id,
+                    workspace_id,
+                    library_id,
+                    external_key: external_key.to_string(),
+                    title: title.map(std::string::ToString::to_string),
+                    document_state: "active".to_string(),
+                    active_revision_id: Some(Uuid::now_v7()),
+                    readable_revision_id: None,
+                    latest_revision_no: Some(1),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    deleted_at: None,
+                    file_name: Some(file_name.to_string()),
+                },
+            );
+        }
+        index
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_prefers_explicit_reference() {
+        let scoped_document_id = Uuid::now_v7();
+        let other_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (scoped_document_id, "graphql-api.pdf", Some("GraphQL API"), "graphql-api.pdf"),
+            (other_document_id, "rest-api.pdf", Some("REST API"), "rest-api.pdf"),
+        ]);
+
+        let ir = scoped_query_ir(QueryScope::SingleDocument, Some("REST API"), &["rest"]);
+        let target_ids = resolve_scoped_target_document_ids(
+            "Read graphql-api.pdf for the auth setup section",
+            Some(&ir),
+            &index,
+        );
+
+        assert_eq!(target_ids, BTreeSet::from([scoped_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_selects_single_match_from_query_ir_scope() {
+        let alpha_document_id = Uuid::now_v7();
+        let beta_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (alpha_document_id, "alpha-guide.md", Some("alpha service handbook"), "alpha-guide.md"),
+            (beta_document_id, "beta-guide.md", Some("beta service handbook"), "beta-guide.md"),
+        ]);
+        let ir = scoped_query_ir(QueryScope::SingleDocument, Some("alpha service"), &["alpha"]);
+
+        let target_ids = resolve_scoped_target_document_ids(
+            "Where are the auth requirements?",
+            Some(&ir),
+            &index,
+        );
+
+        assert_eq!(target_ids, BTreeSet::from([alpha_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_keeps_document_focus_when_entities_are_values() {
+        let alpha_document_id = Uuid::now_v7();
+        let beta_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (alpha_document_id, "alpha-guide.md", Some("alpha service handbook"), "alpha-guide.md"),
+            (beta_document_id, "beta-guide.md", Some("beta service handbook"), "beta-guide.md"),
+        ]);
+        let ir = scoped_query_ir(
+            QueryScope::SingleDocument,
+            Some("alpha service"),
+            &["renewal policy", "escalation target"],
+        );
+
+        let target_ids =
+            resolve_scoped_target_document_ids("What is the renewal policy?", Some(&ir), &index);
+
+        assert_eq!(target_ids, BTreeSet::from([alpha_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_returns_empty_for_ambiguous_query_ir_focus() {
+        let alpha_document_id = Uuid::now_v7();
+        let beta_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (
+                alpha_document_id,
+                "service-overview.md",
+                Some("service overview"),
+                "service-overview.md",
+            ),
+            (beta_document_id, "service-notes.md", Some("service notes"), "service-notes.md"),
+        ]);
+        let ir = scoped_query_ir(QueryScope::SingleDocument, Some("service"), &["service"]);
+
+        let target_ids =
+            resolve_scoped_target_document_ids("What does the service handle?", Some(&ir), &index);
+
+        assert!(target_ids.is_empty());
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_ignores_focus_when_not_single_document_scope() {
+        let scoped_document_id = Uuid::now_v7();
+        let index = scoped_document_index([(
+            scoped_document_id,
+            "platform-notes.md",
+            Some("platform notes"),
+            "platform-notes.md",
+        )]);
+        let ir = scoped_query_ir(QueryScope::MultiDocument, Some("platform"), &["platform"]);
+
+        assert!(
+            resolve_scoped_target_document_ids("Which two services...?", Some(&ir), &index)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn explicit_target_document_ids_prefer_exact_extension_match() {
@@ -467,13 +838,45 @@ mod tests {
     }
 
     #[test]
-    fn explicit_target_document_ids_match_unicode_title_phrase_inside_long_question() {
-        let return_id = Uuid::now_v7();
+    fn explicit_target_document_ids_prefer_format_marker_with_same_stem() {
+        let pdf_id = Uuid::now_v7();
+        let docx_id = Uuid::now_v7();
+        let pptx_id = Uuid::now_v7();
         let matched = explicit_target_document_ids_from_values(
-            "How do I complete возврат тары and what matters for the empty container?",
-            [(return_id, "Возврат тары")],
+            "What report name appears in the runtime PDF upload check?",
+            [
+                (pdf_id, "runtime_upload_check.pdf"),
+                (docx_id, "runtime_upload_check.docx"),
+                (pptx_id, "runtime_upload_check.pptx"),
+            ],
         );
-        assert_eq!(matched, [return_id].into_iter().collect());
+        assert_eq!(matched, [pdf_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_keep_stem_ambiguous_without_format_marker() {
+        let pdf_id = Uuid::now_v7();
+        let docx_id = Uuid::now_v7();
+        let pptx_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "What report name appears in the runtime upload check?",
+            [
+                (pdf_id, "runtime_upload_check.pdf"),
+                (docx_id, "runtime_upload_check.docx"),
+                (pptx_id, "runtime_upload_check.pptx"),
+            ],
+        );
+        assert_eq!(matched, [pdf_id, docx_id, pptx_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_match_unicode_title_phrase_inside_long_question() {
+        let menu_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "How do I complete the café menu update before opening?",
+            [(menu_id, "Café menu")],
+        );
+        assert_eq!(matched, [menu_id].into_iter().collect());
     }
 
     #[test]
@@ -503,10 +906,10 @@ mod tests {
 
     #[test]
     fn explicit_target_document_ids_reject_partial_title_token_overlap() {
-        let time_id = Uuid::now_v7();
+        let opening_id = Uuid::now_v7();
         let matched = explicit_target_document_ids_from_values(
-            "How should operators register рабочего времени at store opening?",
-            [(time_id, "Регистрация рабочего времени")],
+            "How should operators register opening time at the store?",
+            [(opening_id, "Opening time registration")],
         );
         assert!(matched.is_empty());
     }

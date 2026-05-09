@@ -1,9 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::domains::catalog::ChunkingTemplate;
+use crate::services::ingest::cancellation::{StageError, ensure_not_cancelled};
 use crate::shared::extraction::{
     ExtractionLineHint, ExtractionLineSignal, ExtractionStructureHints,
     chunking::split_large_code_blocks,
@@ -19,7 +21,7 @@ use crate::shared::extraction::{
     table_summary::{build_table_column_summaries, render_table_column_summary},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareStructuredRevisionCommand {
     pub revision_id: Uuid,
@@ -37,7 +39,7 @@ pub struct PrepareStructuredRevisionCommand {
     pub prepared_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedStructuredRevision {
     pub prepared_revision: StructuredDocumentRevisionData,
@@ -49,9 +51,11 @@ pub struct PreparedStructuredRevision {
 pub enum StructuredPreparationError {
     #[error(transparent)]
     Validation(#[from] StructuredDocumentValidationError),
+    #[error(transparent)]
+    Cancelled(#[from] StageError),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuredPreparationFailureCode {
     InvalidStructuredRevision,
@@ -66,7 +70,7 @@ impl StructuredPreparationFailureCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredPreparationFailure {
     pub code: String,
@@ -102,17 +106,25 @@ impl StructuredPreparationService {
     pub fn prepare_revision(
         &self,
         command: PrepareStructuredRevisionCommand,
+        cancellation_token: &CancellationToken,
     ) -> Result<PreparedStructuredRevision, StructuredPreparationError> {
-        let mut ordered_blocks = build_structured_blocks(&command)?;
+        ensure_not_cancelled(cancellation_token)?;
+        let mut ordered_blocks = build_structured_blocks(&command, cancellation_token)?;
+        ensure_not_cancelled(cancellation_token)?;
         // Filter out blocks with empty text — code files can produce empty lines/blocks
         ordered_blocks
             .retain(|b| !b.text.trim().is_empty() || !b.normalized_text.trim().is_empty());
+        ensure_not_cancelled(cancellation_token)?;
         ordered_blocks = split_large_code_blocks(&ordered_blocks, self.chunking_profile.max_chars);
+        ensure_not_cancelled(cancellation_token)?;
         // Re-number ordinals after filtering
         for (i, block) in ordered_blocks.iter_mut().enumerate() {
+            ensure_not_cancelled(cancellation_token)?;
             block.ordinal = i32::try_from(i).unwrap_or(i32::MAX);
         }
+        ensure_not_cancelled(cancellation_token)?;
         let chunk_windows = build_structured_chunk_windows(&ordered_blocks, self.chunking_profile);
+        ensure_not_cancelled(cancellation_token)?;
         let prepared_revision = StructuredDocumentRevisionData {
             revision_id: command.revision_id,
             document_id: command.document_id,
@@ -137,16 +149,22 @@ impl StructuredPreparationService {
     pub fn prepare_runtime_stage(
         &self,
         command: PrepareStructuredRevisionCommand,
+        cancellation_token: &CancellationToken,
     ) -> Result<PreparedStructuredRevision, StructuredPreparationFailure> {
-        self.prepare_revision(command).map_err(|error| StructuredPreparationFailure {
-            code: StructuredPreparationFailureCode::InvalidStructuredRevision.as_str().to_string(),
-            summary: error.to_string(),
+        self.prepare_revision(command, cancellation_token).map_err(|error| {
+            StructuredPreparationFailure {
+                code: StructuredPreparationFailureCode::InvalidStructuredRevision
+                    .as_str()
+                    .to_string(),
+                summary: error.to_string(),
+            }
         })
     }
 }
 
 fn build_structured_blocks(
     command: &PrepareStructuredRevisionCommand,
+    cancellation_token: &CancellationToken,
 ) -> Result<Vec<StructuredBlockData>, StructuredPreparationError> {
     let lines = if command.structure_hints.lines.is_empty() {
         fallback_line_hints(&command.normalized_text)
@@ -159,6 +177,7 @@ fn build_structured_blocks(
     let mut index = 0_usize;
 
     while index < lines.len() {
+        ensure_not_cancelled(cancellation_token)?;
         let line = &lines[index];
         let trimmed = line.text.trim();
         if trimmed.is_empty() {
@@ -172,6 +191,7 @@ fn build_structured_blocks(
             index += 1;
             let mut code_lines = Vec::<ExtractionLineHint>::new();
             while index < lines.len() && !is_code_fence(&lines[index]) {
+                ensure_not_cancelled(cancellation_token)?;
                 if !lines[index].text.trim().is_empty() {
                     code_lines.push(lines[index].clone());
                 }
@@ -230,6 +250,7 @@ fn build_structured_blocks(
         if is_table_row_line(line) {
             let start = index;
             while index < lines.len() && is_table_row_line(&lines[index]) {
+                ensure_not_cancelled(cancellation_token)?;
                 index += 1;
             }
             let row_lines = &lines[start..index];
@@ -254,6 +275,7 @@ fn build_structured_blocks(
             let mut data_row_index = 0usize;
             let mut data_rows = Vec::<Vec<String>>::new();
             for row_line in row_lines.iter().skip(1) {
+                ensure_not_cancelled(cancellation_token)?;
                 let row_cells = parse_markdown_table_row(&row_line.text);
                 if row_cells.is_empty() || is_markdown_separator_row(&row_cells) {
                     continue;
@@ -286,6 +308,7 @@ fn build_structured_blocks(
             for summary in
                 build_table_column_summaries(sheet_name, table_name, &header_cells, &data_rows)
             {
+                ensure_not_cancelled(cancellation_token)?;
                 blocks.push(build_block(
                     ordinal,
                     StructuredBlockKind::MetadataBlock,
@@ -317,6 +340,7 @@ fn build_structured_blocks(
     }
 
     for block in &mut blocks {
+        ensure_not_cancelled(cancellation_token)?;
         if detect_boilerplate(&block.text) {
             block.is_boilerplate = true;
         }
@@ -550,6 +574,7 @@ mod tests {
     use std::collections::HashSet;
 
     use chrono::Utc;
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use super::{PrepareStructuredRevisionCommand, StructuredPreparationService};
@@ -562,21 +587,24 @@ mod tests {
     fn prepare_revision_derives_outline_from_heading_blocks() {
         let text = "# REST API\n\n## Authentication\n\nGET /v1/status\n";
         let prepared = StructuredPreparationService::new()
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "default".to_string(),
-                source_format: "md".to_string(),
-                language_code: Some("en".to_string()),
-                source_text: text.to_string(),
-                normalized_text: text.to_string(),
-                structure_hints: build_text_layout_from_content(text).structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "md".to_string(),
+                    language_code: Some("en".to_string()),
+                    source_text: text.to_string(),
+                    normalized_text: text.to_string(),
+                    structure_hints: build_text_layout_from_content(text).structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared revision");
 
         assert!(prepared.prepared_revision.outline.iter().any(|entry| entry.heading == "REST API"));
@@ -596,21 +624,24 @@ mod tests {
         // informal pipe-delimited text is no longer auto-classified as a table.
         let text = "# Products\n\n- Control Center\n\n| Method | Path |\n| --- | --- |\n| GET | /v1/status |\n\nGET /v1/status\n";
         let prepared = StructuredPreparationService::new()
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "default".to_string(),
-                source_format: "md".to_string(),
-                language_code: Some("en".to_string()),
-                source_text: text.to_string(),
-                normalized_text: text.to_string(),
-                structure_hints: build_text_layout_from_content(text).structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "md".to_string(),
+                    language_code: Some("en".to_string()),
+                    source_text: text.to_string(),
+                    normalized_text: text.to_string(),
+                    structure_hints: build_text_layout_from_content(text).structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared revision");
 
         assert!(
@@ -648,21 +679,24 @@ mod tests {
         .expect("record jsonl extraction");
 
         let prepared = StructuredPreparationService::new()
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "default".to_string(),
-                source_format: "record_jsonl".to_string(),
-                language_code: None,
-                source_text: extracted.content_text.clone(),
-                normalized_text: extracted.content_text,
-                structure_hints: extracted.structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "record_jsonl".to_string(),
+                    language_code: None,
+                    source_text: extracted.content_text.clone(),
+                    normalized_text: extracted.content_text,
+                    structure_hints: extracted.structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared revision");
 
         assert_eq!(prepared.ordered_blocks[0].block_kind, StructuredBlockKind::SourceProfile);
@@ -680,21 +714,24 @@ mod tests {
     fn prepare_revision_builds_semantic_table_row_text_and_preserves_raw_row_text() {
         let text = "## people\n\n| Name | Email |\n| --- | --- |\n| Alice | alice@example.com |\n";
         let prepared = StructuredPreparationService::new()
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "default".to_string(),
-                source_format: "csv".to_string(),
-                language_code: Some("en".to_string()),
-                source_text: text.to_string(),
-                normalized_text: text.to_string(),
-                structure_hints: build_text_layout_from_content(text).structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "csv".to_string(),
+                    language_code: Some("en".to_string()),
+                    source_text: text.to_string(),
+                    normalized_text: text.to_string(),
+                    structure_hints: build_text_layout_from_content(text).structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared revision");
 
         let row_block = prepared
@@ -714,21 +751,24 @@ mod tests {
     fn prepare_revision_keeps_single_column_markdown_tables_as_table_blocks() {
         let text = "## test1\n\n| col_1 |\n| --- |\n| test1 |\n";
         let prepared = StructuredPreparationService::new()
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "default".to_string(),
-                source_format: "xls".to_string(),
-                language_code: Some("en".to_string()),
-                source_text: text.to_string(),
-                normalized_text: text.to_string(),
-                structure_hints: build_text_layout_from_content(text).structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "xls".to_string(),
+                    language_code: Some("en".to_string()),
+                    source_text: text.to_string(),
+                    normalized_text: text.to_string(),
+                    structure_hints: build_text_layout_from_content(text).structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared revision");
 
         let block_kinds =
@@ -755,21 +795,24 @@ mod tests {
     fn prepare_revision_builds_table_summary_metadata_blocks() {
         let text = "## organizations\n\n| Country | Employees |\n| --- | --- |\n| Sweden | 10 |\n| Benin | 20 |\n| Sweden | 30 |\n";
         let prepared = StructuredPreparationService::new()
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "default".to_string(),
-                source_format: "csv".to_string(),
-                language_code: Some("en".to_string()),
-                source_text: text.to_string(),
-                normalized_text: text.to_string(),
-                structure_hints: build_text_layout_from_content(text).structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "csv".to_string(),
+                    language_code: Some("en".to_string()),
+                    source_text: text.to_string(),
+                    normalized_text: text.to_string(),
+                    structure_hints: build_text_layout_from_content(text).structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared revision");
 
         let summary_blocks = prepared
@@ -803,23 +846,26 @@ mod tests {
             }
             code.push_str("}\n\n");
         }
-        let text = format!("# Code\n\n```rust\n{code}```\n");
+        let text = format!("# Code\n\n```\n{code}```\n");
         let prepared = StructuredPreparationService::with_chunking(220, 0)
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "default".to_string(),
-                source_format: "md".to_string(),
-                language_code: Some("en".to_string()),
-                source_text: text.clone(),
-                normalized_text: text.clone(),
-                structure_hints: build_text_layout_from_content(&text).structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "md".to_string(),
+                    language_code: Some("en".to_string()),
+                    source_text: text.clone(),
+                    normalized_text: text.clone(),
+                    structure_hints: build_text_layout_from_content(&text).structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared revision");
 
         let known_block_ids =
@@ -856,21 +902,24 @@ mod tests {
     #[test]
     fn prepare_revision_allows_empty_normalized_content() {
         let prepared = StructuredPreparationService::new()
-            .prepare_revision(PrepareStructuredRevisionCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                preparation_state: "prepared".to_string(),
-                normalization_profile: "verbatim_v1".to_string(),
-                source_format: "image".to_string(),
-                language_code: None,
-                source_text: String::new(),
-                normalized_text: String::new(),
-                structure_hints: build_text_layout_from_content("").structure_hints,
-                typed_fact_count: 0,
-                prepared_at: Utc::now(),
-            })
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "verbatim_v1".to_string(),
+                    source_format: "image".to_string(),
+                    language_code: None,
+                    source_text: String::new(),
+                    normalized_text: String::new(),
+                    structure_hints: build_text_layout_from_content("").structure_hints,
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
             .expect("prepared empty revision");
 
         assert_eq!(prepared.prepared_revision.block_count, 0);

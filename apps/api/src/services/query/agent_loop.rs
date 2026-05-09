@@ -13,7 +13,7 @@ use crate::{
     domains::ai::AiBindingPurpose,
     domains::provider_profiles::ProviderModelSelection,
     integrations::llm::{ChatMessage, ToolUseRequest},
-    services::query::assistant_grounding::AssistantGroundingEvidence,
+    services::query::{assistant_grounding::AssistantGroundingEvidence, error::QueryServiceError},
 };
 
 /// Final result of one assistant turn.
@@ -50,7 +50,7 @@ pub async fn run_single_shot_turn(
     user_question: &str,
     conversation_history: Option<&str>,
     grounded_context: &str,
-) -> anyhow::Result<AgentTurnResult> {
+) -> Result<AgentTurnResult, QueryServiceError> {
     let binding = state
         .canonical_services
         .ai_catalog
@@ -62,7 +62,7 @@ pub async fn run_single_shot_turn(
         })?;
 
     let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.parse().unwrap_or_default(),
+        provider_kind: binding.provider_kind.clone(),
         model_name: binding.model_name.clone(),
     };
 
@@ -129,7 +129,7 @@ pub async fn run_literal_fidelity_revision_turn(
     original_answer: &str,
     unsupported_literals: &[String],
     grounded_context: &str,
-) -> anyhow::Result<AgentTurnResult> {
+) -> Result<AgentTurnResult, QueryServiceError> {
     let binding = state
         .canonical_services
         .ai_catalog
@@ -141,7 +141,7 @@ pub async fn run_literal_fidelity_revision_turn(
         })?;
 
     let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.parse().unwrap_or_default(),
+        provider_kind: binding.provider_kind.clone(),
         model_name: binding.model_name.clone(),
     };
 
@@ -215,7 +215,7 @@ pub async fn run_clarify_turn(
     user_question: &str,
     conversation_history: Option<&str>,
     variants: &[String],
-) -> anyhow::Result<AgentTurnResult> {
+) -> Result<AgentTurnResult, QueryServiceError> {
     let binding = state
         .canonical_services
         .ai_catalog
@@ -227,7 +227,7 @@ pub async fn run_clarify_turn(
         })?;
 
     let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.parse().unwrap_or_default(),
+        provider_kind: binding.provider_kind.clone(),
         model_name: binding.model_name.clone(),
     };
 

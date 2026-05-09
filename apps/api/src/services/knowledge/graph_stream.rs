@@ -48,6 +48,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{self, RuntimeGraphNodeRow},
+    services::knowledge::error::KnowledgeServiceError,
 };
 
 const NODE_BATCH: usize = 512;
@@ -234,7 +235,7 @@ async fn run_prewarm_once(state: &AppState, library_id: Uuid) {
 pub async fn build_graph_topology_bytes(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<Vec<u8>> {
+) -> Result<Vec<u8>, KnowledgeServiceError> {
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
@@ -545,8 +546,12 @@ async fn build_compact_topology(
             Some(_) => row.document_id,
             None => continue,
         };
-        let Some(&document_num) = id_map.get(&document_uuid) else { continue };
-        let Some(&target_num) = id_map.get(&row.target_node_id) else { continue };
+        let Some(&document_num) = id_map.get(&document_uuid) else {
+            continue;
+        };
+        let Some(&target_num) = id_map.get(&row.target_node_id) else {
+            continue;
+        };
         compact_document_links.push(CompactDocumentLink {
             document: document_num,
             target: target_num,

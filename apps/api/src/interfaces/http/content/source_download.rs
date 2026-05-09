@@ -27,9 +27,9 @@ use crate::{
     services::content::source_access::describe_content_source,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct SourceDownloadQuery {
+pub struct SourceDownloadQuery {
     pub revision_id: Option<Uuid>,
 }
 
@@ -39,7 +39,20 @@ pub(super) struct SourceDownloadQuery {
     skip_all,
     fields(document_id = %document_id)
 )]
-pub(super) async fn download_document_source(
+#[utoipa::path(
+    get,
+    path = "/v1/content/documents/{documentId}/source",
+    tag = "content",
+    operation_id = "getContentDocumentSource",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    responses(
+        (status = 200, description = "Original document source bytes", content_type = "application/octet-stream", body = String),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document or revision not found"),
+    ),
+)]
+pub async fn download_document_source(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
@@ -117,16 +130,13 @@ pub(super) async fn download_document_source(
         .content_storage
         .resolve_download_redirect_url(&storage_key, &disposition, &revision.mime_type)
         .await
-        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .map_err(ApiError::from)?
     {
         return Ok(Redirect::temporary(&href).into_response());
     }
 
-    let bytes = state
-        .content_storage
-        .read_revision_source(&storage_key)
-        .await
-        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let bytes =
+        state.content_storage.read_revision_source(&storage_key).await.map_err(ApiError::from)?;
     Ok((
         [(header::CONTENT_TYPE, revision.mime_type), (header::CONTENT_DISPOSITION, disposition)],
         Body::from(bytes),

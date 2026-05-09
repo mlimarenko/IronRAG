@@ -2,30 +2,31 @@ use std::{fs, net::Ipv4Addr};
 
 use reqwest::Url;
 
-pub fn provider_base_url_candidates(provider_kind: &str, base_url: &str) -> Vec<String> {
+pub fn provider_base_url_candidates(allow_private_network: bool, base_url: &str) -> Vec<String> {
     let normalized = base_url.trim().trim_end_matches('/').to_string();
     if normalized.is_empty() {
         return Vec::new();
     }
 
     let mut candidates = vec![normalized.clone()];
-    if let Some(container_candidate) = docker_host_gateway_candidate(provider_kind, &normalized)
-        .filter(|candidate| candidate != &normalized)
+    if let Some(container_candidate) =
+        docker_host_gateway_candidate(allow_private_network, &normalized)
+            .filter(|candidate| candidate != &normalized)
     {
         candidates.push(container_candidate);
     }
     candidates
 }
 
-pub fn resolve_runtime_provider_base_url(provider_kind: &str, base_url: &str) -> String {
-    provider_base_url_candidates(provider_kind, base_url)
+pub fn resolve_runtime_provider_base_url(allow_private_network: bool, base_url: &str) -> String {
+    provider_base_url_candidates(allow_private_network, base_url)
         .into_iter()
         .last()
         .unwrap_or_else(|| base_url.trim().trim_end_matches('/').to_string())
 }
 
-fn docker_host_gateway_candidate(provider_kind: &str, base_url: &str) -> Option<String> {
-    if provider_kind != "ollama" || !running_in_docker() {
+fn docker_host_gateway_candidate(allow_private_network: bool, base_url: &str) -> Option<String> {
+    if !allow_private_network || !running_in_docker() {
         return None;
     }
 

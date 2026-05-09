@@ -25,7 +25,7 @@ use crate::integrations::llm::ChatMessage;
 /// to the provider, the provider's raw response text, optional raw
 /// tool-call metadata for external compatibility, and the usage block
 /// if the provider returned one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmIterationDebug {
     pub iteration: usize,
@@ -37,7 +37,7 @@ pub struct LlmIterationDebug {
     pub usage: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseToolCallDebug {
     pub id: String,
@@ -49,7 +49,7 @@ pub struct ResponseToolCallDebug {
 
 /// Full debug snapshot for one assistant turn — one execution_id.
 /// The UI can render `iterations` as a stacked timeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmContextSnapshot {
     pub execution_id: Uuid,

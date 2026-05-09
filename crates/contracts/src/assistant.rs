@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::diagnostics::OperatorWarning;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AssistantTurnRole {
     User,
@@ -13,7 +13,7 @@ pub enum AssistantTurnRole {
     Tool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AssistantVerificationState {
     NotRun,
@@ -24,7 +24,7 @@ pub enum AssistantVerificationState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantConversation {
     pub id: Uuid,
@@ -37,7 +37,7 @@ pub struct AssistantConversation {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantTurn {
     pub id: Uuid,
@@ -50,7 +50,7 @@ pub struct AssistantTurn {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantExecution {
     pub id: Uuid,
@@ -70,7 +70,7 @@ pub struct AssistantExecution {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantChunkReference {
     pub execution_id: Uuid,
@@ -79,14 +79,14 @@ pub struct AssistantChunkReference {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantContentSourceAccess {
     pub kind: String,
     pub href: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantPreparedSegmentReference {
     pub execution_id: Uuid,
@@ -103,7 +103,7 @@ pub struct AssistantPreparedSegmentReference {
     pub source_access: Option<AssistantContentSourceAccess>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantTechnicalFactReference {
     pub execution_id: Uuid,
@@ -116,7 +116,7 @@ pub struct AssistantTechnicalFactReference {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantEntityReference {
     pub execution_id: Uuid,
@@ -128,7 +128,7 @@ pub struct AssistantEntityReference {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantRelationReference {
     pub execution_id: Uuid,
@@ -139,7 +139,7 @@ pub struct AssistantRelationReference {
     pub normalized_assertion: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantVerificationWarning {
     pub code: String,
@@ -148,14 +148,14 @@ pub struct AssistantVerificationWarning {
     pub related_fact_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantRuntimeStageSummary {
     pub stage_kind: String,
     pub stage_label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantPolicyDecisionSummary {
     pub target_kind: String,
@@ -165,7 +165,7 @@ pub struct AssistantPolicyDecisionSummary {
     pub decided_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantPolicySummary {
     pub allow_count: i32,
@@ -174,7 +174,7 @@ pub struct AssistantPolicySummary {
     pub recent_decisions: Vec<AssistantPolicyDecisionSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantRuntimeSummary {
     pub runtime_execution_id: Uuid,
@@ -190,7 +190,7 @@ pub struct AssistantRuntimeSummary {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantEvidenceBundle {
     pub chunk_references: Vec<AssistantChunkReference>,
@@ -204,7 +204,7 @@ pub struct AssistantEvidenceBundle {
     pub runtime_stage_summaries: Vec<AssistantRuntimeStageSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantConversationMessage {
     pub id: Uuid,
@@ -215,7 +215,7 @@ pub struct AssistantConversationMessage {
     pub evidence: Option<AssistantEvidenceBundle>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSessionListItem {
     pub id: Uuid,
@@ -228,7 +228,7 @@ pub struct AssistantSessionListItem {
     pub turn_count: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantConversationDetail {
     pub session: AssistantConversation,
@@ -236,7 +236,7 @@ pub struct AssistantConversationDetail {
     pub executions: Vec<AssistantExecution>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantExecutionDetail {
     pub context_bundle_id: Uuid,
@@ -254,14 +254,14 @@ pub struct AssistantExecutionDetail {
     pub verification_warnings: Vec<AssistantVerificationWarning>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantHydratedConversation {
     pub session: AssistantSessionListItem,
     pub messages: Vec<AssistantConversationMessage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantComposerState {
     pub can_submit: bool,
@@ -269,7 +269,7 @@ pub struct AssistantComposerState {
     pub placeholder: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantEvidenceItem {
     pub id: String,
@@ -279,7 +279,7 @@ pub struct AssistantEvidenceItem {
     pub document_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantEvidenceGroup {
     pub key: String,
@@ -287,7 +287,7 @@ pub struct AssistantEvidenceGroup {
     pub items: Vec<AssistantEvidenceItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantStageItem {
     pub stage_kind: String,
@@ -297,7 +297,7 @@ pub struct AssistantStageItem {
     pub failed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantWorkspaceSurface {
     pub sessions: Vec<AssistantSessionListItem>,

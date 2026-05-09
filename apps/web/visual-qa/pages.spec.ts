@@ -22,11 +22,13 @@ type Scenario = {
 };
 
 const scenarios: Scenario[] = [
+  { name: 'login', path: '/login', marker: /Sign in|Initial Setup|Войти|Начальная настройка/i },
   { name: 'dashboard', path: '/', marker: /Library Health|Dashboard|Загрузка|library/i },
   { name: 'documents', path: '/documents', marker: /Documents|Uploaded|Drop files|all/i },
   { name: 'graph', path: '/graph', marker: /Graph|ready|empty|nodes/i },
   { name: 'assistant', path: '/assistant', marker: /Assistant|Ask|New session/i },
   { name: 'admin-access', path: '/admin', marker: /Access|Token|Create/i },
+  { name: 'admin-ai', path: '/admin?tab=ai', marker: /AI|Provider|Binding|Модель|Провайдер/i },
   { name: 'admin-operations', path: '/admin?tab=operations', marker: /Operations|Queue|Audit/i },
   { name: 'admin-pricing', path: '/admin?tab=pricing', marker: /Pricing|Provider/i },
   { name: 'admin-mcp', path: '/admin?tab=mcp', marker: /MCP|server url|prompt/i },

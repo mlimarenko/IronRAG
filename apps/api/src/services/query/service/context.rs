@@ -29,7 +29,9 @@ use crate::{
     },
     interfaces::http::router_support::ApiError,
     services::query::assistant_grounding::AssistantGroundingDocumentReference,
-    services::query::execution::QueryChunkReferenceSnapshot,
+    services::query::execution::{
+        QueryChunkReferenceSnapshot, RuntimeMatchedEntity, RuntimeMatchedRelationship,
+    },
 };
 
 use super::{
@@ -49,6 +51,8 @@ pub(crate) async fn assemble_context_bundle(
     include_debug: bool,
     resolved_mode: RuntimeQueryMode,
     answer_chunk_references: &[QueryChunkReferenceSnapshot],
+    answer_entity_references: &[RuntimeMatchedEntity],
+    answer_relation_references: &[RuntimeMatchedRelationship],
 ) -> anyhow::Result<()> {
     let started_at = Instant::now();
     let candidate_limit = top_k.saturating_mul(3).max(6);
@@ -81,6 +85,9 @@ pub(crate) async fn assemble_context_bundle(
     let mut entity_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut relation_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
     let mut evidence_refs: HashMap<Uuid, RankedBundleReference> = HashMap::new();
+    seed_entity_refs_from_answer_graph(answer_entity_references, &mut entity_refs);
+    seed_relation_endpoint_refs_from_answer_graph(answer_relation_references, &mut entity_refs);
+    seed_relation_refs_from_answer_graph(answer_relation_references, &mut relation_refs);
 
     for (index, hit) in lexical_fact_hits.iter().enumerate() {
         merge_ranked_reference(
@@ -512,6 +519,60 @@ pub(crate) fn seed_chunk_refs_from_answer_context(
         );
     }
     chunk_refs
+}
+
+pub(crate) fn seed_entity_refs_from_answer_graph(
+    answer_entity_references: &[RuntimeMatchedEntity],
+    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
+) {
+    for (index, reference) in answer_entity_references.iter().enumerate() {
+        merge_ranked_reference(
+            entity_refs,
+            reference.node_id,
+            saturating_rank(index),
+            reference.score.map_or(0.0, f64::from),
+            "answer_graph_context",
+        );
+    }
+}
+
+pub(crate) fn seed_relation_refs_from_answer_graph(
+    answer_relation_references: &[RuntimeMatchedRelationship],
+    relation_refs: &mut HashMap<Uuid, RankedBundleReference>,
+) {
+    for (index, reference) in answer_relation_references.iter().enumerate() {
+        merge_ranked_reference(
+            relation_refs,
+            reference.edge_id,
+            saturating_rank(index),
+            reference.score.map_or(0.0, f64::from),
+            "answer_graph_context",
+        );
+    }
+}
+
+pub(crate) fn seed_relation_endpoint_refs_from_answer_graph(
+    answer_relation_references: &[RuntimeMatchedRelationship],
+    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
+) {
+    for (index, reference) in answer_relation_references.iter().enumerate() {
+        let rank = saturating_rank(index);
+        let score = reference.score.map_or(0.0, f64::from);
+        merge_ranked_reference(
+            entity_refs,
+            reference.from_node_id,
+            rank,
+            score,
+            "answer_relation_endpoint",
+        );
+        merge_ranked_reference(
+            entity_refs,
+            reference.to_node_id,
+            rank,
+            score,
+            "answer_relation_endpoint",
+        );
+    }
 }
 
 fn absorb_traversal_row(

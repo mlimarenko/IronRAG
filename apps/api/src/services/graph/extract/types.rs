@@ -29,18 +29,18 @@ pub struct GraphExtractionRequest {
 /// existing terms instead of inventing fresh near-duplicates each call.
 ///
 /// Empty hints (no prior `sub_type`s observed) render as nothing in the prompt.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphExtractionSubTypeHints {
     pub by_node_type: Vec<GraphExtractionSubTypeHintGroup>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphExtractionSubTypeHintGroup {
     pub node_type: String,
     pub entries: Vec<GraphExtractionSubTypeHintEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphExtractionSubTypeHintEntry {
     pub sub_type: String,
     pub occurrences: i64,
@@ -53,7 +53,7 @@ impl GraphExtractionSubTypeHints {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphExtractionStructuredChunkContext {
     pub chunk_kind: Option<String>,
     pub section_path: Vec<String>,
@@ -62,7 +62,7 @@ pub struct GraphExtractionStructuredChunkContext {
     pub literal_digest: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphExtractionTechnicalFact {
     pub fact_kind: String,
     pub canonical_value: String,
@@ -70,26 +70,26 @@ pub struct GraphExtractionTechnicalFact {
     pub qualifiers: Vec<TechnicalFactQualifier>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, utoipa::ToSchema)]
 pub struct GraphExtractionLifecycle {
     pub revision_id: Option<uuid::Uuid>,
     pub activated_by_attempt_id: Option<uuid::Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, utoipa::ToSchema)]
 pub struct GraphExtractionResumeHint {
     pub replay_count: usize,
     pub downgrade_level: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct GraphExtractionResumeState {
     pub resumed_from_checkpoint: bool,
     pub replay_count: usize,
     pub downgrade_level: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct GraphEntityCandidate {
     pub label: String,
     pub node_type: RuntimeNodeType,
@@ -98,7 +98,7 @@ pub struct GraphEntityCandidate {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct GraphRelationCandidate {
     pub source_label: String,
     pub target_label: String,
@@ -106,13 +106,13 @@ pub struct GraphRelationCandidate {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, utoipa::ToSchema)]
 pub struct GraphExtractionCandidateSet {
     pub entities: Vec<GraphEntityCandidate>,
     pub relations: Vec<GraphRelationCandidate>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphExtractionTaskFailureCode {
     MalformedOutput,
@@ -129,7 +129,7 @@ impl GraphExtractionTaskFailureCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphExtractionTaskFailure {
     pub code: String,
@@ -152,7 +152,7 @@ pub struct GraphExtractionOutcome {
     pub recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GraphExtractionRecoveryRecord {
     pub recovery_kind: String,
     pub trigger_reason: String,
@@ -161,7 +161,7 @@ pub struct GraphExtractionRecoveryRecord {
     pub recovered_summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GraphExtractionUsageCall {
     pub provider_call_no: i32,
     pub provider_attempt_no: i32,
@@ -172,7 +172,7 @@ pub struct GraphExtractionUsageCall {
     pub timing: GraphExtractionCallTiming,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct GraphExtractionCallTiming {
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
@@ -196,7 +196,7 @@ pub(crate) struct RawGraphExtractionResponse {
     pub(crate) timing: GraphExtractionCallTiming,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub(crate) struct GraphExtractionRecoveryAttempt {
     pub(crate) provider_attempt_no: usize,
     pub(crate) prompt_hash: String,
@@ -209,7 +209,7 @@ pub(crate) struct GraphExtractionRecoveryAttempt {
     pub(crate) trigger_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub(crate) struct GraphExtractionRecoveryTrace {
     pub(crate) provider_attempt_count: usize,
     pub(crate) reask_count: usize,
@@ -240,6 +240,7 @@ pub(crate) struct GraphExtractionFailureOutcome {
     pub(crate) provider_failure: Option<RuntimeProviderFailureDetail>,
     pub(crate) recovery_summary: ExtractionRecoverySummary,
     pub(crate) recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
+    pub(crate) cancelled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +252,7 @@ pub struct GraphExtractionExecutionError {
     pub recovery_summary: ExtractionRecoverySummary,
     pub recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
     pub resume_state: GraphExtractionResumeState,
+    pub cancelled: bool,
 }
 
 impl fmt::Display for GraphExtractionExecutionError {

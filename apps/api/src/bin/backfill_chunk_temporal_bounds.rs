@@ -25,9 +25,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::{
-        arangodb::collections::KNOWLEDGE_CHUNK_COLLECTION, repositories::catalog_repository,
-    },
+    infra::{arangodb::collections::KNOWLEDGE_CHUNK_COLLECTION, repositories::catalog_repository},
     shared::extraction::record_jsonl::extract_chunk_temporal_bounds,
 };
 use sqlx::FromRow;
@@ -56,7 +54,7 @@ struct LibraryCounts {
 #[tokio::main]
 async fn main() -> Result<()> {
     let settings = Settings::from_env()?;
-    ironrag_backend::shared::telemetry::init(&settings.log_filter);
+    ironrag_backend::observability::init_tracing()?;
     let state = AppState::new(settings).await?;
 
     let mut args = std::env::args().skip(1);
@@ -77,11 +75,7 @@ async fn main() -> Result<()> {
         anyhow::bail!("no libraries matched temporal-bounds backfill target");
     }
 
-    info!(
-        dry_run,
-        library_count = libraries.len(),
-        "starting chunk temporal-bounds backfill"
-    );
+    info!(dry_run, library_count = libraries.len(), "starting chunk temporal-bounds backfill");
 
     let mut totals = LibraryCounts::default();
     for library in libraries {
@@ -132,11 +126,13 @@ async fn main() -> Result<()> {
     // and we now Arango-first → PG-flip, so failed rows are still
     // eligible.
     if totals.failed_arango_mirror > 0 {
+        ironrag_backend::observability::shutdown_tracing().await;
         anyhow::bail!(
             "{} chunks failed Arango mirror; PG was not flipped for those rows — re-run to retry",
             totals.failed_arango_mirror
         );
     }
+    ironrag_backend::observability::shutdown_tracing().await;
     Ok(())
 }
 
@@ -176,7 +172,9 @@ async fn backfill_library(
             break;
         }
 
-        let last_id = rows.last().map(|row| row.id).expect("non-empty batch");
+        let Some(last_id) = rows.last().map(|row| row.id) else {
+            break;
+        };
         for row in &rows {
             counts.scanned += 1;
             let Some((occurred_at, occurred_until)) =

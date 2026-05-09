@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IngestionExecutionPayload {
     #[serde(alias = "project_id")]
     pub library_id: Uuid,
@@ -106,7 +106,7 @@ fn default_json_object() -> serde_json::Value {
     serde_json::json!({})
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphProgressCheckpointRow {
     pub ingestion_run_id: Uuid,
     pub attempt_no: i32,
@@ -147,7 +147,7 @@ pub struct RuntimeGraphProgressCheckpointInput {
     pub computed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphExtractionRecordRow {
     pub id: Uuid,
     pub runtime_execution_id: Uuid,
@@ -166,7 +166,7 @@ pub struct RuntimeGraphExtractionRecordRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphExtractionResumeStateRow {
     pub ingestion_run_id: Uuid,
     pub chunk_ordinal: i32,
@@ -191,7 +191,7 @@ pub struct RuntimeGraphExtractionResumeStateRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphExtractionResumeRollupRow {
     pub ingestion_run_id: Uuid,
     pub chunk_count: i64,
@@ -226,7 +226,7 @@ pub struct UpsertRuntimeGraphExtractionResumeStateInput {
     pub last_successful_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphExtractionRecoveryAttemptRow {
     pub id: Uuid,
     pub runtime_execution_id: Uuid,
@@ -295,7 +295,7 @@ pub struct UpdateRuntimeGraphExtractionRecordInput {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct ContentMutationImpactScopeRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -332,7 +332,7 @@ pub struct CreateContentMutationImpactScopeInput {
     pub fallback_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphFilteredArtifactRow {
     pub id: Uuid,
     pub library_id: Uuid,
@@ -349,11 +349,10 @@ pub struct RuntimeGraphFilteredArtifactRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphConvergenceCountersRow {
     pub queued_document_count: i64,
     pub processing_document_count: i64,
-    pub ready_no_graph_count: i64,
     pub pending_update_count: i64,
     pub pending_delete_count: i64,
     pub filtered_artifact_count: i64,

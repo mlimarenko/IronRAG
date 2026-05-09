@@ -1,4 +1,4 @@
-mod session;
+pub mod session;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,8 +57,19 @@ pub fn router() -> Router<AppState> {
         .route("/iam/grants/{grant_id}", delete(revoke_grant))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/iam/me",
+    tag = "iam",
+    operation_id = "getIamMe",
+    responses(
+        (status = 200, description = "Authenticated principal with effective grants and workspace memberships", body = MeResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 404, description = "Principal not found"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.get_me", skip_all)]
-async fn get_me(
+pub async fn get_me(
     auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<MeResponse>, ApiError> {
@@ -106,13 +117,25 @@ async fn get_me(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/iam/tokens",
+    tag = "iam",
+    operation_id = "listIamTokens",
+    params(crate::interfaces::http::iam::types::ListTokensQuery),
+    responses(
+        (status = 200, description = "API tokens visible to the IAM administrator", body = [TokenResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_tokens",
     skip_all,
     fields(workspace_id = ?query.workspace_id, item_count)
 )]
-async fn list_tokens(
+pub async fn list_tokens(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListTokensQuery>,
@@ -176,13 +199,26 @@ async fn list_tokens(
     Ok(Json(items))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/iam/tokens",
+    tag = "iam",
+    operation_id = "mintIamToken",
+    request_body = crate::interfaces::http::iam::types::MintTokenRequest,
+    responses(
+        (status = 200, description = "Newly minted API token (plaintext only returned once)", body = MintTokenResponse),
+        (status = 400, description = "Invalid request payload"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.mint_token",
     skip_all,
     fields(workspace_id = ?payload.workspace_id)
 )]
-async fn mint_token(
+pub async fn mint_token(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -333,7 +369,19 @@ async fn mint_token(
     skip_all,
     fields(principal_id = ?query.principal_id, item_count)
 )]
-async fn list_grants(
+#[utoipa::path(
+    get,
+    path = "/v1/iam/grants",
+    tag = "iam",
+    operation_id = "listIamGrants",
+    params(crate::interfaces::http::iam::types::ListGrantsQuery),
+    responses(
+        (status = 200, description = "Grants visible to the IAM administrator", body = [GrantResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+    ),
+)]
+pub async fn list_grants(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListGrantsQuery>,
@@ -398,7 +446,20 @@ async fn list_grants(
     skip_all,
     fields(token_principal_id = %token_principal_id)
 )]
-async fn revoke_token(
+#[utoipa::path(
+    post,
+    path = "/v1/iam/tokens/{tokenPrincipalId}/revoke",
+    tag = "iam",
+    operation_id = "revokeIamToken",
+    params(("tokenPrincipalId" = uuid::Uuid, Path, description = "Principal id whose tokens are revoked")),
+    responses(
+        (status = 204, description = "Token revoked"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+        (status = 404, description = "Token principal not found"),
+    ),
+)]
+pub async fn revoke_token(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -475,7 +536,20 @@ async fn revoke_token(
     skip_all,
     fields(principal_id = %payload.principal_id)
 )]
-async fn create_grant(
+#[utoipa::path(
+    post,
+    path = "/v1/iam/grants",
+    tag = "iam",
+    operation_id = "createIamGrant",
+    request_body = crate::interfaces::http::iam::types::CreateGrantRequest,
+    responses(
+        (status = 200, description = "Newly created grant", body = GrantResponse),
+        (status = 400, description = "Invalid request payload"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+    ),
+)]
+pub async fn create_grant(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(payload): Json<CreateGrantRequest>,
@@ -529,7 +603,20 @@ async fn create_grant(
     skip_all,
     fields(grant_id = %grant_id)
 )]
-async fn revoke_grant(
+#[utoipa::path(
+    delete,
+    path = "/v1/iam/grants/{grantId}",
+    tag = "iam",
+    operation_id = "revokeIamGrant",
+    params(("grantId" = uuid::Uuid, Path, description = "Grant identifier")),
+    responses(
+        (status = 204, description = "Grant revoked"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+        (status = 404, description = "Grant not found"),
+    ),
+)]
+pub async fn revoke_grant(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(grant_id): Path<Uuid>,
@@ -545,18 +632,15 @@ async fn revoke_grant(
     .await?;
     authorize_workspace_scope_for_id(&auth, workspace_id)?;
 
-    iam_repository::delete_grant(&state.persistence.postgres, grant_id)
-        .await
-        .map_err(|error| {
-            error!(
-                auth_principal_id = %auth.principal_id,
-                grant_id = %grant_id,
-                ?error,
-                "failed to revoke grant",
-            );
-            ApiError::Internal
-        })?
-        .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))?;
+    state.canonical_services.iam.revoke_grant(&state, grant_id).await.map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            grant_id = %grant_id,
+            ?error,
+            "failed to revoke grant",
+        );
+        error
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -737,27 +821,13 @@ async fn load_grant_row(
     state: &AppState,
     grant_id: Uuid,
 ) -> Result<iam_repository::IamGrantRow, ApiError> {
-    sqlx::query_as::<_, iam_repository::IamGrantRow>(
-        "select
-            id,
-            principal_id,
-            resource_kind::text as resource_kind,
-            resource_id,
-            permission_kind::text as permission_kind,
-            granted_at,
-            granted_by_principal_id,
-            expires_at
-         from iam_grant
-         where id = $1",
-    )
-    .bind(grant_id)
-    .fetch_optional(&state.persistence.postgres)
-    .await
-    .map_err(|error| {
-        error!(grant_id = %grant_id, ?error, "failed to load grant");
-        ApiError::Internal
-    })?
-    .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))
+    iam_repository::get_grant_by_id(&state.persistence.postgres, grant_id)
+        .await
+        .map_err(|error| {
+            error!(grant_id = %grant_id, ?error, "failed to load grant");
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))
 }
 
 fn authorize_workspace_scope_for_id(

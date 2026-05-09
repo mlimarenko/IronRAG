@@ -17,7 +17,7 @@ use crate::{
     interfaces::http::router_support::ApiError,
 };
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentCostSummary {
     pub document_id: Uuid,
@@ -26,7 +26,7 @@ pub struct DocumentCostSummary {
     pub provider_call_count: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryCostSummary {
     pub total_cost: Decimal,
@@ -35,7 +35,7 @@ pub struct LibraryCostSummary {
     pub provider_call_count: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceCostSummary {
     pub total_cost: Decimal,

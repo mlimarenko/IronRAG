@@ -35,7 +35,7 @@ pub(crate) fn build_table_row_grounded_answer(
         return None;
     }
 
-    if let Some(row_count) = requested_initial_table_row_count(question) {
+    if let Some(row_count) = requested_initial_table_row_count(ir) {
         return build_initial_table_rows_answer(&rows, row_count);
     }
 

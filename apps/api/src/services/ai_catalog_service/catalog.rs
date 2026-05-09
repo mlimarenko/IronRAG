@@ -10,7 +10,7 @@ impl AiCatalogService {
         let rows = ai_repository::list_provider_catalog(&state.persistence.postgres)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_provider_row).collect())
+        rows.into_iter().map(map_provider_row).collect()
     }
 
     pub async fn list_model_catalog(
@@ -74,7 +74,7 @@ impl AiCatalogService {
                 if let Some(provider) = provider_by_id.get(&credential.provider_catalog_id) {
                     let should_refresh = provider_catalog_id
                         .is_none_or(|value| value == provider.id)
-                        && provider_credential_policy(&provider.provider_kind).validation_mode
+                        && provider_credential_policy(provider).validation_mode
                             == ProviderCredentialValidationMode::ModelList;
                     if should_refresh {
                         match sync_provider_model_catalog(
@@ -127,9 +127,9 @@ impl AiCatalogService {
                 };
                 let availability_state = match provider_by_id
                     .get(&model.provider_catalog_id)
-                    .map(|provider| provider.provider_kind.as_str())
+                    .map(|provider| provider.model_discovery.mode)
                 {
-                    Some("ollama")
+                    Some(ProviderModelDiscoveryMode::Credential)
                         if explicitly_checked_providers.contains(&model.provider_catalog_id) =>
                     {
                         if available_credential_ids.is_empty() {
@@ -138,7 +138,7 @@ impl AiCatalogService {
                             ModelAvailabilityState::Available
                         }
                     }
-                    Some("ollama") => ModelAvailabilityState::Unknown,
+                    Some(ProviderModelDiscoveryMode::Credential) => ModelAvailabilityState::Unknown,
                     Some(_) => ModelAvailabilityState::Available,
                     None => ModelAvailabilityState::Unknown,
                 };
@@ -226,18 +226,40 @@ fn normalize_currency_code(value: &str) -> Result<String, ApiError> {
     Ok(normalized.to_ascii_uppercase())
 }
 
-fn map_provider_row(row: ai_repository::AiProviderCatalogRow) -> ProviderCatalogEntry {
-    let policy = provider_credential_policy(&row.provider_kind);
-    ProviderCatalogEntry {
+fn map_provider_row(
+    row: ai_repository::AiProviderCatalogRow,
+) -> Result<ProviderCatalogEntry, ApiError> {
+    let profile = parse_provider_profile(&row.provider_kind, &row.capability_flags_json)?;
+    let policy = profile.credentials.clone();
+    Ok(ProviderCatalogEntry {
         id: row.id,
         provider_kind: row.provider_kind,
         display_name: row.display_name,
         api_style: row.api_style,
         lifecycle_state: row.lifecycle_state,
         default_base_url: row.default_base_url,
+        capability_flags_json: row.capability_flags_json,
         api_key_required: policy.api_key_required,
         base_url_required: policy.base_url_required,
-    }
+        credential_policy: policy,
+        base_url_policy: profile.base_url.clone(),
+        model_discovery: profile.model_discovery.clone(),
+        capabilities: profile.capabilities.clone(),
+        runtime: profile.runtime.clone(),
+        ui_hints: profile.ui_hints.clone(),
+        profile,
+    })
+}
+
+fn parse_provider_profile(
+    provider_kind: &str,
+    capability_flags_json: &serde_json::Value,
+) -> Result<ProviderProfile, ApiError> {
+    serde_json::from_value::<ProviderProfile>(capability_flags_json.clone()).map_err(|error| {
+        ApiError::BadRequest(format!(
+            "provider {provider_kind} has invalid provider profile metadata: {error}"
+        ))
+    })
 }
 
 fn map_model_row(row: ai_repository::AiModelCatalogRow) -> Result<ModelCatalogEntry, ApiError> {
@@ -273,15 +295,16 @@ fn map_price_row(row: ai_repository::AiPriceCatalogRow) -> PriceCatalogEntry {
 pub(super) fn parse_allowed_binding_purposes(
     metadata_json: &serde_json::Value,
 ) -> Result<Vec<AiBindingPurpose>, ApiError> {
-    let Some(roles) =
-        metadata_json.get("defaultRoles").and_then(serde_json::Value::as_array)
+    let Some(roles) = metadata_json.get("defaultRoles").and_then(serde_json::Value::as_array)
     else {
         return Ok(Vec::new());
     };
 
     let mut allowed = Vec::with_capacity(roles.len());
     for role in roles {
-        let Some(role_str) = role.as_str() else { continue };
+        let Some(role_str) = role.as_str() else {
+            continue;
+        };
         // Catalog seeds carry forward-compatible role labels (e.g. `rerank`,
         // `utility`) that aren't bound to AiBindingPurpose variants yet.
         // Skip unknown labels instead of failing — otherwise a single

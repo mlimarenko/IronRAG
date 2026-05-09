@@ -177,11 +177,15 @@ pub async fn upsert_model_catalog(
             'active'::ai_model_lifecycle_state,
             $5
          )
+         -- Seed migration is the canonical source of `modality_kind` and
+         -- `metadata_json.defaultRoles` (incl. `vision` role for multimodal
+         -- chat models). Runtime provider-discovery cannot classify per
+         -- model — its signature is keyed on capability_kind only — so we
+         -- must NOT let it overwrite the seed. On conflict only refresh
+         -- lifecycle so re-discovered models bounce back to `active`.
          on conflict (provider_catalog_id, model_name, capability_kind) do update
          set
-            modality_kind = excluded.modality_kind,
-            lifecycle_state = 'active'::ai_model_lifecycle_state,
-            metadata_json = excluded.metadata_json
+            lifecycle_state = 'active'::ai_model_lifecycle_state
          returning
             id,
             provider_catalog_id,

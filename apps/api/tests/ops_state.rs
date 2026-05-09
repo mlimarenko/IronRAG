@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use ironrag_contracts::documents::DocumentReadiness;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
@@ -848,7 +849,7 @@ fn sample_prepared_revision(
 }
 
 fn sample_document_summary(
-    readiness_kind: &str,
+    readiness_kind: DocumentReadiness,
     graph_coverage_kind: &str,
     typed_fact_coverage: Option<f64>,
 ) -> ContentDocumentSummary {
@@ -900,7 +901,7 @@ fn sample_document_summary(
         readiness_summary: Some(DocumentReadinessSummary {
             document_id,
             active_revision_id: Some(revision_id),
-            readiness_kind: readiness_kind.to_string(),
+            readiness_kind,
             activity_status: RuntimeDocumentActivityStatus::Ready,
             stalled_reason: None,
             preparation_state: "prepared".to_string(),
@@ -930,7 +931,7 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
         Some(&sample_mutation("accepted")),
         None,
     );
-    assert_eq!(processing.readiness_kind, "processing");
+    assert_eq!(processing.readiness_kind, DocumentReadiness::Processing);
     assert_eq!(processing.graph_coverage_kind, "processing");
 
     let readable = service.classify_document_knowledge_state(
@@ -939,7 +940,7 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
         None,
         Some(&sample_job("queued")),
     );
-    assert_eq!(readable.readiness_kind, "readable");
+    assert_eq!(readable.readiness_kind, DocumentReadiness::Readable);
     assert_eq!(readable.graph_coverage_kind, "graph_sparse");
     assert!(readable.typed_fact_coverage.unwrap_or_default() > 0.0);
 
@@ -949,7 +950,7 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
         None,
         None,
     );
-    assert_eq!(graph_sparse.readiness_kind, "graph_sparse");
+    assert_eq!(graph_sparse.readiness_kind, DocumentReadiness::GraphSparse);
     assert_eq!(graph_sparse.graph_coverage_kind, "graph_sparse");
 
     let graph_ready = service.classify_document_knowledge_state(
@@ -958,7 +959,7 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
         None,
         None,
     );
-    assert_eq!(graph_ready.readiness_kind, "graph_ready");
+    assert_eq!(graph_ready.readiness_kind, DocumentReadiness::GraphReady);
     assert_eq!(graph_ready.graph_coverage_kind, "graph_ready");
 
     let legacy_ready_without_prepared_revision = service.classify_document_knowledge_state(
@@ -967,7 +968,10 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
         None,
         None,
     );
-    assert_eq!(legacy_ready_without_prepared_revision.readiness_kind, "graph_sparse");
+    assert_eq!(
+        legacy_ready_without_prepared_revision.readiness_kind,
+        DocumentReadiness::GraphSparse
+    );
     assert_eq!(legacy_ready_without_prepared_revision.graph_coverage_kind, "graph_sparse");
     assert_eq!(legacy_ready_without_prepared_revision.preparation_state, "pending");
     assert!(legacy_ready_without_prepared_revision.readable);
@@ -979,7 +983,7 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
         None,
         None,
     );
-    assert_eq!(failed.readiness_kind, "failed");
+    assert_eq!(failed.readiness_kind, DocumentReadiness::Failed);
     assert_eq!(failed.graph_coverage_kind, "failed");
 }
 
@@ -990,11 +994,11 @@ fn canonical_library_knowledge_coverage_aggregates_readiness_and_graph_sparse_co
     let coverage = service.derive_library_knowledge_coverage(
         library_id,
         &[
-            sample_document_summary("processing", "processing", None),
-            sample_document_summary("readable", "graph_sparse", Some(0.1)),
-            sample_document_summary("graph_sparse", "graph_sparse", None),
-            sample_document_summary("graph_ready", "graph_ready", Some(0.2)),
-            sample_document_summary("failed", "failed", None),
+            sample_document_summary(DocumentReadiness::Processing, "processing", None),
+            sample_document_summary(DocumentReadiness::Readable, "graph_sparse", Some(0.1)),
+            sample_document_summary(DocumentReadiness::GraphSparse, "graph_sparse", None),
+            sample_document_summary(DocumentReadiness::GraphReady, "graph_ready", Some(0.2)),
+            sample_document_summary(DocumentReadiness::Failed, "failed", None),
         ],
         Some(Uuid::now_v7()),
     );

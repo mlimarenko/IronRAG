@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use uuid::Uuid;
 
+use crate::services::query::text_match::{near_token_overlap_count, normalized_alnum_tokens};
 use crate::{
     domains::query_ir::QueryIR,
     shared::extraction::technical_facts::{TechnicalFactKind, TechnicalFactQualifier},
@@ -13,12 +14,13 @@ use super::{
     document_target::{focused_answer_document_id, question_requests_multi_document_scope},
     fact_lookup::{best_matching_fact, build_document_labels},
     question_intent::{
-        QuestionIntent, classify_question_or_ir_intents, has_question_intent,
-        query_ir_blocks_endpoint_lookup,
+        query_ir_allows_deterministic_endpoint_lookup,
+        query_ir_disallows_graph_id_like_endpoint_candidate,
     },
+    source_profile::SOURCE_PROFILE_CHUNK_KIND,
     technical_answer::document_focus_preference,
     technical_literals::{
-        question_mentions_pagination, technical_chunk_selection_score, technical_keyword_weight,
+        technical_chunk_selection_score, technical_keyword_weight,
         technical_literal_focus_keyword_segments, technical_literal_focus_keywords,
     },
     types::RuntimeMatchedChunk,
@@ -30,14 +32,10 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_or_ir_intents(question, query_ir);
-    if !has_question_intent(&intents, QuestionIntent::Endpoint) {
+    if !query_ir_allows_deterministic_endpoint_lookup(query_ir) {
         return None;
     }
     if !question_requests_multi_document_scope(question, Some(query_ir)) {
-        return None;
-    }
-    if query_ir_blocks_endpoint_lookup(query_ir) {
         return None;
     }
 
@@ -69,7 +67,19 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
             evidence,
             &document_labels,
             TechnicalFactKind::EndpointPath,
-            |fact| fact.document_id == document_id,
+            |fact| {
+                fact.document_id == document_id
+                    && !query_ir_disallows_graph_id_like_endpoint_candidate(
+                        query_ir,
+                        fact.display_value.as_str(),
+                    )
+                    && endpoint_fact_has_query_focused_support(
+                        fact,
+                        chunks,
+                        query_ir,
+                        &question_keywords,
+                    )
+            },
             |fact, document_label| {
                 endpoint_fact_score(
                     &fact.display_value,
@@ -101,13 +111,10 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let intents = classify_question_or_ir_intents(question, query_ir);
-    if !has_question_intent(&intents, QuestionIntent::Endpoint) {
+    if !query_ir_allows_deterministic_endpoint_lookup(query_ir) {
         return None;
     }
-    if question_requests_multi_document_scope(question, Some(query_ir))
-        || query_ir_blocks_endpoint_lookup(query_ir)
-    {
+    if question_requests_multi_document_scope(question, Some(query_ir)) {
         return None;
     }
 
@@ -122,7 +129,12 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
         evidence,
         &document_labels,
         TechnicalFactKind::EndpointPath,
-        |_| true,
+        |fact| {
+            !query_ir_disallows_graph_id_like_endpoint_candidate(
+                query_ir,
+                fact.display_value.as_str(),
+            ) && endpoint_fact_has_query_focused_support(fact, chunks, query_ir, &question_keywords)
+        },
         |fact, document_label| {
             endpoint_fact_score(
                 &fact.display_value,
@@ -161,6 +173,72 @@ fn endpoint_fact_score(
                     + usize::from(lowered_endpoint.contains(keyword)) * 8
             })
             .sum::<usize>()
+}
+
+fn endpoint_fact_has_query_focused_support(
+    fact: &crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    chunks: &[RuntimeMatchedChunk],
+    query_ir: &QueryIR,
+    question_keywords: &[String],
+) -> bool {
+    let endpoint_literal = repair_technical_layout_noise(&fact.display_value).to_lowercase();
+    if endpoint_literal.trim().is_empty() {
+        return false;
+    }
+
+    let same_document_chunks = chunks
+        .iter()
+        .filter(|chunk| {
+            chunk.document_id == fact.document_id
+                && chunk.chunk_kind.as_deref() != Some(SOURCE_PROFILE_CHUNK_KIND)
+        })
+        .collect::<Vec<_>>();
+    if same_document_chunks.is_empty() {
+        return true;
+    }
+
+    let endpoint_chunks = same_document_chunks
+        .into_iter()
+        .filter(|chunk| endpoint_support_text(chunk).to_lowercase().contains(&endpoint_literal))
+        .collect::<Vec<_>>();
+    if endpoint_chunks.is_empty() {
+        return false;
+    }
+
+    let focus_segments = endpoint_support_focus_segments(query_ir, question_keywords);
+    if focus_segments.is_empty() {
+        return true;
+    }
+
+    endpoint_chunks.iter().any(|chunk| {
+        let chunk_tokens = normalized_alnum_tokens(&endpoint_support_text(chunk), 3);
+        focus_segments.iter().any(|segment| {
+            let required_overlap = segment.len().clamp(1, 2);
+            near_token_overlap_count(segment, &chunk_tokens) >= required_overlap
+        })
+    })
+}
+
+fn endpoint_support_text(chunk: &RuntimeMatchedChunk) -> String {
+    repair_technical_layout_noise(format!("{} {}", chunk.excerpt, chunk.source_text).as_str())
+}
+
+fn endpoint_support_focus_segments(
+    query_ir: &QueryIR,
+    question_keywords: &[String],
+) -> Vec<BTreeSet<String>> {
+    let mut segments = query_ir
+        .literal_constraints
+        .iter()
+        .map(|literal| literal.text.as_str())
+        .chain(query_ir.target_entities.iter().map(|entity| entity.label.as_str()))
+        .map(|value| normalized_alnum_tokens(value, 3))
+        .filter(|tokens| !tokens.is_empty())
+        .collect::<Vec<_>>();
+    if segments.is_empty() && !question_keywords.is_empty() {
+        segments.push(question_keywords.iter().cloned().collect());
+    }
+    segments
 }
 
 fn endpoint_method_literal(
@@ -207,7 +285,7 @@ pub(super) fn select_multi_document_scope_ids(
     ordered_document_ids: &[Uuid],
     per_document_chunks: &HashMap<Uuid, Vec<&RuntimeMatchedChunk>>,
 ) -> Vec<Uuid> {
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
     let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir));
     if focus_segments.is_empty() {
         return ordered_document_ids.to_vec();

@@ -40,6 +40,91 @@ fn build_exact_technical_literals_section_extracts_urls_paths_and_parameters() {
 }
 
 #[test]
+fn route_target_types_do_not_expand_endpoint_literal_intent() {
+    let intent = detect_technical_literal_intent_from_query_ir(
+        "Which graph route connects the entities?",
+        &query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["relationship"]),
+    );
+
+    assert!(!intent.wants_urls);
+    assert!(!intent.wants_paths);
+    assert!(!intent.wants_methods);
+}
+
+#[test]
+fn detect_technical_literal_intent_falls_back_to_parameters_for_exact_literal_queries_without_known_tags()
+ {
+    let mut ir =
+        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["route_map_inventory"]);
+    ir.act = QueryAct::RetrieveValue;
+    ir.literal_constraints =
+        vec![LiteralSpan { text: "12".to_string(), kind: LiteralKind::NumericCode }];
+
+    let intent = detect_technical_literal_intent_from_query_ir(
+        "What is the inventory route_map value?",
+        &ir,
+    );
+
+    assert!(intent.wants_parameters);
+}
+
+#[test]
+fn exact_literal_queries_without_technical_tag_still_build_technical_literal_sections() {
+    let mut ir =
+        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["route_map_inventory"]);
+    ir.act = QueryAct::RetrieveValue;
+    ir.literal_constraints =
+        vec![LiteralSpan { text: "12".to_string(), kind: LiteralKind::NumericCode }];
+    let section = build_exact_technical_literals_section(
+        "What is the inventory route_map value?",
+        &ir,
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: Uuid::now_v7(),
+            document_label: "inventory_reference.md".to_string(),
+            excerpt: "Inventory route map is computed from route_map_key.".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.9),
+            source_text: repair_technical_layout_noise(
+                "route_map_inventory_timeout_ms = 30000\nroute_map_inventory_retries = 5",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(section.contains("Document: `inventory_reference.md`"));
+    assert!(section.contains("Parameters"));
+    assert!(section.contains("route_map_inventory_timeout_ms"));
+}
+
+#[test]
+fn focused_document_answer_intent_ignores_spurious_path_literals() {
+    let mut query_ir =
+        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["secondary_heading"]);
+    query_ir.target_entities = vec![EntityMention {
+        label: "runtime PDF upload check".to_string(),
+        role: EntityRole::Object,
+    }];
+    query_ir.literal_constraints = vec![LiteralSpan {
+        text: "upload://upload_smoke_fixture.docx".to_string(),
+        kind: LiteralKind::Path,
+    }];
+
+    let intent = detect_technical_literal_intent_from_query_ir(
+        "What report name appears in the runtime PDF upload check?",
+        &query_ir,
+    );
+
+    assert!(!intent.wants_urls);
+    assert!(!intent.wants_paths);
+    assert!(!intent.wants_methods);
+    assert!(!intent.wants_parameters);
+}
+
+#[test]
 fn build_exact_technical_literals_section_extracts_dotted_config_keys_and_values() {
     let section = build_exact_technical_literals_section(
         "Which naming strategy parameters are used for implicit and physical modes?",
@@ -471,7 +556,7 @@ fn technical_literal_focus_keywords_without_literals_keeps_all_question_tokens_a
     // often they appear in candidate documents instead.
     let keywords = technical_literal_focus_keywords(
         "Which endpoint returns the account list?",
-        Some(&fallback_query_ir()),
+        Some(&generic_query_ir()),
     );
 
     assert!(keywords.iter().any(|keyword| keyword == "which"));
@@ -684,7 +769,7 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
         TechnicalLiteralIntent { wants_parameters: true, ..TechnicalLiteralIntent::default() },
         8,
         &technical_literal_focus_keywords(question, Some(&ir)),
-        question_mentions_pagination(question),
+        false,
     );
 
     assert_eq!(selected.len(), 1);
@@ -741,7 +826,7 @@ fn select_technical_literal_chunks_prefers_matching_wsdl_document_for_single_sou
         },
         8,
         &technical_literal_focus_keywords(question, Some(&ir)),
-        question_mentions_pagination(question),
+        false,
     );
 
     assert!(!selected.is_empty());

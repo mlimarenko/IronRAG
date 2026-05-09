@@ -5,7 +5,7 @@ use url::Url;
 pub const DEFAULT_WEB_CRAWL_DEPTH: i32 = 3;
 pub const DEFAULT_WEB_CRAWL_MAX_PAGES: i32 = 100;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebIngestMode {
     SinglePage,
@@ -22,7 +22,7 @@ impl WebIngestMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebBoundaryPolicy {
     SameHost,
@@ -39,7 +39,7 @@ impl WebBoundaryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebIngestUrlFilterMode {
     #[default]
@@ -57,14 +57,14 @@ impl WebIngestUrlFilterMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebIngestPolicy {
     #[serde(default)]
     pub url_filter: WebIngestUrlFilter,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebIngestUrlFilter {
     #[serde(default)]
@@ -79,7 +79,7 @@ impl Default for WebIngestUrlFilter {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebIngestPattern {
     pub kind: String,
@@ -316,7 +316,7 @@ fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
     pattern_index == pattern.len()
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebRunState {
     Accepted,
@@ -343,7 +343,7 @@ impl WebRunState {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebCandidateState {
     Discovered,
@@ -376,7 +376,7 @@ impl WebCandidateState {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebClassificationReason {
     SeedAccepted,
@@ -433,7 +433,7 @@ impl WebClassificationReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebRunFailureCode {
     Inaccessible,
@@ -479,7 +479,7 @@ impl WebRunFailureCode {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebRunCounts {
     pub discovered: i64,
@@ -494,7 +494,7 @@ pub struct WebRunCounts {
     pub canceled: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidatedWebRunSettings {
     pub mode: String,

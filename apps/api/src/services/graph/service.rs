@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use chrono::Utc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod canonicalization;
@@ -21,6 +22,7 @@ use crate::{
         repositories,
     },
     services::{
+        graph::error::GraphServiceError,
         graph::extract::GraphExtractionCandidateSet,
         graph::merge::{GraphMergeOutcome, GraphMergeScope},
         graph::projection::{GraphProjectionOutcome, GraphProjectionScope},
@@ -151,7 +153,7 @@ impl GraphService {
         chunk: &repositories::ChunkRow,
         candidates: &crate::services::graph::extract::GraphExtractionCandidateSet,
         extraction_recovery: Option<&crate::domains::graph_quality::ExtractionRecoverySummary>,
-    ) -> Result<GraphMergeOutcome> {
+    ) -> Result<GraphMergeOutcome, GraphServiceError> {
         crate::services::graph::merge::merge_chunk_graph_candidates(
             pool,
             graph_quality_guard,
@@ -170,7 +172,7 @@ impl GraphService {
         revision_id: Uuid,
         chunk_id: Uuid,
         candidates: &GraphExtractionCandidateSet,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
         let revision = state
             .arango_document_store
             .get_revision(revision_id)
@@ -202,7 +204,7 @@ impl GraphService {
         state: &AppState,
         revision_id: Uuid,
         superseded_by_revision_id: Option<Uuid>,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
         let revision = state
             .arango_document_store
             .get_revision(revision_id)
@@ -285,7 +287,7 @@ impl GraphService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
         let library = state
             .canonical_services
             .catalog
@@ -344,7 +346,7 @@ impl GraphService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
         let chunk_embeddings =
             state.canonical_services.search.rebuild_chunk_embeddings(state, library_id).await?;
         let graph_node_embeddings = state
@@ -364,7 +366,7 @@ impl GraphService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
         self.with_runtime_graph_lock(state, library_id, async {
             let mut outcome = self
                 .build_and_refresh_arango_graph_from_candidates(state, library_id, None)
@@ -376,13 +378,14 @@ impl GraphService {
             Ok(outcome)
         })
         .await
+        .map_err(Into::into)
     }
 
     pub async fn rebuild_arango_library_evidence(
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
         self.with_runtime_graph_lock(state, library_id, async {
             self.refresh_arango_library_candidate_materialization(state, library_id).await?;
             let mut outcome =
@@ -394,13 +397,14 @@ impl GraphService {
             Ok(outcome)
         })
         .await
+        .map_err(Into::into)
     }
 
     pub async fn rebuild_arango_library(
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
         self.with_runtime_graph_lock(state, library_id, async {
             let text = self.rebuild_arango_library_text(state, library_id).await?;
             self.refresh_arango_library_candidate_materialization(state, library_id).await?;
@@ -435,6 +439,7 @@ impl GraphService {
             Ok(outcome)
         })
         .await
+        .map_err(Into::into)
     }
 
     async fn with_runtime_graph_lock<T, F>(
@@ -442,9 +447,9 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
         operation: F,
-    ) -> Result<T>
+    ) -> anyhow::Result<T>
     where
-        F: std::future::Future<Output = Result<T>>,
+        F: std::future::Future<Output = anyhow::Result<T>>,
     {
         let graph_lock = repositories::acquire_runtime_library_graph_lock(
             &state.persistence.postgres,
@@ -470,7 +475,7 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
-    ) -> Result<u64> {
+    ) -> Result<u64, GraphServiceError> {
         GraphSummaryService::default().refresh_summaries(state, library_id, refresh).await
     }
 
@@ -479,7 +484,7 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
-    ) -> Result<u64> {
+    ) -> Result<u64, GraphServiceError> {
         GraphSummaryService::default().invalidate_summaries(state, library_id, refresh).await
     }
 
@@ -487,7 +492,7 @@ impl GraphService {
         &self,
         state: &AppState,
         scope: &GraphProjectionScope,
-    ) -> Result<GraphProjectionOutcome> {
+    ) -> Result<GraphProjectionOutcome, GraphServiceError> {
         crate::services::graph::projection::project_canonical_graph(state, scope).await
     }
 
@@ -495,7 +500,7 @@ impl GraphService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<GraphProjectionOutcome> {
+    ) -> Result<GraphProjectionOutcome, GraphServiceError> {
         crate::services::graph::rebuild::rebuild_library_graph(state, library_id).await
     }
 
@@ -506,7 +511,9 @@ impl GraphService {
         document_id: Uuid,
         revision_id: Uuid,
         activated_by_attempt_id: Option<Uuid>,
-    ) -> Result<RevisionGraphReconcileOutcome> {
+        cancellation_token: &CancellationToken,
+    ) -> Result<RevisionGraphReconcileOutcome, GraphServiceError> {
+        crate::services::ingest::cancellation::ensure_not_cancelled(cancellation_token)?;
         let document_lock = repositories::content_repository::acquire_content_document_lock(
             &state.persistence.postgres,
             document_id,
@@ -514,13 +521,38 @@ impl GraphService {
         .await
         .context("failed to acquire content document advisory lock for graph reconcile")?;
         let lock = self.library_merge_lock(library_id);
-        let _guard = lock.lock().await;
+        let guard_result = tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                Err(anyhow::Error::new(
+                    crate::services::ingest::cancellation::StageError::Cancelled,
+                ))
+            }
+            guard = lock.lock() => Ok(guard),
+        };
+        let _guard = match guard_result {
+            Ok(guard) => guard,
+            Err(error) => {
+                let release_result = repositories::content_repository::release_content_document_lock(
+                    document_lock,
+                    document_id,
+                )
+                .await
+                .context("failed to release content document advisory lock after canceled graph reconcile");
+                return match release_result {
+                    Ok(()) => Err(error.into()),
+                    Err(release_error) => {
+                        Err(GraphServiceError::from(release_error.context(error.to_string())))
+                    }
+                };
+            }
+        };
         let result = crate::services::graph::rebuild::reconcile_revision_graph(
             state,
             library_id,
             document_id,
             revision_id,
             activated_by_attempt_id,
+            cancellation_token,
         )
         .await;
         let release_result = repositories::content_repository::release_content_document_lock(
@@ -532,8 +564,10 @@ impl GraphService {
         match (result, release_result) {
             (Ok(outcome), Ok(())) => Ok(outcome),
             (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(release_error)) => Err(release_error),
-            (Err(error), Err(release_error)) => Err(release_error).context(error.to_string()),
+            (Ok(_), Err(release_error)) => Err(release_error.into()),
+            (Err(error), Err(release_error)) => {
+                Err(GraphServiceError::from(release_error.context(error.to_string())))
+            }
         }
     }
 }

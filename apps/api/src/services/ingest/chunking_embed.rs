@@ -6,6 +6,7 @@ use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
     integrations::llm::EmbeddingBatchRequest,
+    services::ingest::error::IngestServiceError,
     shared::extraction::chunking::{BlockSentenceEmbeddings, split_into_sentences},
     shared::extraction::structured_document::StructuredBlockData,
 };
@@ -28,7 +29,7 @@ pub async fn embed_sentences_for_blocks(
     library_id: Uuid,
     blocks: &[StructuredBlockData],
     max_tokens_per_chunk: usize,
-) -> anyhow::Result<(BlockSentenceEmbeddings, usize)> {
+) -> Result<(BlockSentenceEmbeddings, usize), IngestServiceError> {
     let embedding_binding = state
         .canonical_services
         .ai_catalog
@@ -157,11 +158,13 @@ pub async fn embed_sentences_for_blocks(
     for batch_result in batch_results {
         let (batch, response) = batch_result?;
         if response.embeddings.len() != batch.len() {
-            anyhow::bail!(
-                "sentence embedding batch returned {} vectors for {} inputs",
-                response.embeddings.len(),
-                batch.len()
-            );
+            return Err(IngestServiceError::ProviderUnavailable {
+                message: format!(
+                    "sentence embedding batch returned {} vectors for {} inputs",
+                    response.embeddings.len(),
+                    batch.len()
+                ),
+            });
         }
         for ((block_id, sentence_idx, _), embedding) in
             batch.into_iter().zip(response.embeddings.into_iter())

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
-mod library;
-mod search;
+pub mod library;
+pub mod search;
 
 use axum::{
     Json, Router,
@@ -55,9 +55,9 @@ pub fn router() -> Router<AppState> {
         .route("/search/documents", get(search::search_documents_by_library_query))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeEntityDetailResponse {
+pub struct KnowledgeEntityDetailResponse {
     entity: RuntimeKnowledgeEntityRow,
     mention_edges: Vec<KnowledgeEntityMentionEdgeRow>,
     mentioned_chunks: Vec<KnowledgeChunkRow>,
@@ -67,9 +67,9 @@ struct KnowledgeEntityDetailResponse {
     graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeRelationDetailResponse {
+pub struct KnowledgeRelationDetailResponse {
     relation: RuntimeKnowledgeRelationRow,
     supporting_evidence_edges: Vec<KnowledgeEvidenceSupportRelationEdgeRow>,
     supporting_evidence: Vec<RuntimeKnowledgeEvidenceRow>,
@@ -77,9 +77,9 @@ struct KnowledgeRelationDetailResponse {
     graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeLibrarySummaryResponse {
+pub struct KnowledgeLibrarySummaryResponse {
     library_id: Uuid,
     document_counts_by_readiness: BTreeMap<String, i64>,
     node_count: i64,
@@ -91,17 +91,17 @@ struct KnowledgeLibrarySummaryResponse {
     latest_generation: Option<KnowledgeLibraryGeneration>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeDocumentProvenanceSummary {
+pub struct KnowledgeDocumentProvenanceSummary {
     supporting_evidence_count: usize,
     lexical_chunk_count: usize,
     vector_chunk_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeTechnicalFactProvenanceSummary {
+pub struct KnowledgeTechnicalFactProvenanceSummary {
     typed_fact_count: usize,
     fact_kind_counts: BTreeMap<String, usize>,
     conflict_group_count: usize,
@@ -109,16 +109,16 @@ struct KnowledgeTechnicalFactProvenanceSummary {
     support_chunk_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeGraphEvidenceSummary {
+pub struct KnowledgeGraphEvidenceSummary {
     evidence_count: usize,
     chunk_backed_count: usize,
     block_backed_count: usize,
     fact_backed_count: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeEntityMentionEdgeRow {
     key: String,
@@ -130,7 +130,7 @@ struct KnowledgeEntityMentionEdgeRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeEvidenceSupportEntityEdgeRow {
     key: String,
@@ -142,7 +142,7 @@ struct KnowledgeEvidenceSupportEntityEdgeRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeEvidenceSupportRelationEdgeRow {
     key: String,
@@ -154,7 +154,7 @@ struct KnowledgeEvidenceSupportRelationEdgeRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeKnowledgeEntityRow {
     key: String,
@@ -174,7 +174,7 @@ struct RuntimeKnowledgeEntityRow {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeKnowledgeRelationRow {
     key: String,
@@ -194,7 +194,7 @@ struct RuntimeKnowledgeRelationRow {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeKnowledgeEvidenceRow {
     key: String,
@@ -230,16 +230,26 @@ struct RuntimeKnowledgeEvidenceRow {
     skip_all,
     fields(%library_id)
 )]
-async fn get_graph(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/graph",
+    tag = "knowledge",
+    operation_id = "getKnowledgeGraphWorkbench",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Knowledge graph topology streamed as ND-JSON", content_type = "application/x-ndjson", body = String),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn get_graph(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
 
-    let bytes = build_graph_topology_bytes(&state, library_id)
-        .await
-        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let bytes = build_graph_topology_bytes(&state, library_id).await.map_err(ApiError::from)?;
     Response::builder()
         .status(200)
         .header(header::CONTENT_TYPE, "application/x-ndjson")
@@ -254,7 +264,23 @@ async fn get_graph(
     skip_all,
     fields(library_id = %library_id, entity_id = %entity_id)
 )]
-async fn get_entity(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/entities/{entityId}",
+    tag = "knowledge",
+    operation_id = "getKnowledgeEntity",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        ("entityId" = uuid::Uuid, Path, description = "Entity identifier"),
+    ),
+    responses(
+        (status = 200, description = "Knowledge entity detail", body = KnowledgeEntityDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the entity"),
+        (status = 404, description = "Entity not found"),
+    ),
+)]
+pub async fn get_entity(
     auth: AuthContext,
     State(state): State<AppState>,
     Path((library_id, entity_id)): Path<(Uuid, Uuid)>,
@@ -300,7 +326,23 @@ async fn get_entity(
     skip_all,
     fields(library_id = %library_id, relation_id = %relation_id)
 )]
-async fn get_relation(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/relations/{relationId}",
+    tag = "knowledge",
+    operation_id = "getKnowledgeRelation",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        ("relationId" = uuid::Uuid, Path, description = "Relation identifier"),
+    ),
+    responses(
+        (status = 200, description = "Knowledge relation detail", body = KnowledgeRelationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the relation"),
+        (status = 404, description = "Relation not found"),
+    ),
+)]
+pub async fn get_relation(
     auth: AuthContext,
     State(state): State<AppState>,
     Path((library_id, relation_id)): Path<(Uuid, Uuid)>,

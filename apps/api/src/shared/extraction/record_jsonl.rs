@@ -474,7 +474,7 @@ fn normalize_timestamp_header(value: &str) -> String {
 ///
 /// This is the canonical temporal extractor: shared by the ingest write path
 /// (so new chunks are temporally indexed) and the runtime backfill binary
-/// (so legacy chunks become indexed without re-ingest). No second
+/// (so older chunks become indexed without re-ingest). No second
 /// implementation may parse this header — keep this fn as the only authority.
 pub fn extract_chunk_temporal_bounds(text: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     const HEADER_KEY: &str = "occurred_at=";
@@ -557,7 +557,7 @@ mod tests {
                 .lines
                 .iter()
                 .skip(1)
-                .all(|line| !line.signals.contains(&ExtractionLineSignal::MetadataCandidate))
+                .all(|line| { !line.signals.contains(&ExtractionLineSignal::MetadataCandidate) })
         );
     }
 

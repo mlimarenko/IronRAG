@@ -381,7 +381,10 @@ pub(crate) async fn describe_libraries(
         let readiness = readiness_by_library.get(&library.id).cloned().unwrap_or(
             CatalogLibraryIngestionReadiness {
                 ready: false,
-                missing_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
+                missing_binding_purposes: vec![
+                    AiBindingPurpose::ExtractGraph,
+                    AiBindingPurpose::EmbedChunk,
+                ],
             },
         );
         let workspace_slug = workspace_slug_by_id

@@ -7,7 +7,7 @@ use crate::domains::recognition::LibraryRecognitionPolicy;
 use crate::shared::web::ingest::WebIngestPolicy;
 
 /// Chunking strategy applied when segmenting document content into chunks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkingTemplate {
     Naive,
@@ -56,14 +56,14 @@ impl ChunkingTemplate {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum CatalogLifecycleState {
     Active,
     Disabled,
     Archived,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CatalogWorkspace {
     pub id: Uuid,
     pub slug: String,
@@ -73,14 +73,20 @@ pub struct CatalogWorkspace {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogLibraryIngestionReadiness {
     pub ready: bool,
     pub missing_binding_purposes: Vec<AiBindingPurpose>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogLibraryRuntimeReadiness {
+    pub missing_binding_purposes: Vec<AiBindingPurpose>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CatalogLibrary {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -93,11 +99,12 @@ pub struct CatalogLibrary {
     pub lifecycle_state: CatalogLifecycleState,
     pub chunking_template: ChunkingTemplate,
     pub ingestion_readiness: CatalogLibraryIngestionReadiness,
+    pub runtime_readiness: CatalogLibraryRuntimeReadiness,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CatalogLibraryConnector {
     pub id: Uuid,
     pub workspace_id: Uuid,

@@ -5,6 +5,7 @@ edition = "2024"
 rust-version.workspace = true
 license = "MIT"
 build = "build.rs"
+publish = false
 
 [features]
 default = []
@@ -24,6 +25,7 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
+dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
 result_large_err = "allow"
@@ -46,64 +48,66 @@ unnecessary_lazy_evaluations = "allow"
 [dependencies]
 axum = { version = "0.8", features = ["macros", "json", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
+utoipa.workspace = true
 config = "0.15"
 http = "1"
-reqwest = { version = "0.13", features = ["json", "rustls"] }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream"] }
 semver = "1"
-genai = "0.6.0-beta.14"
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-json", "hyper-client", "internal-logs"] }
+opentelemetry-http = "0.31"
+opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "macros", "rust_decimal"] }
-thiserror = "2.0"
-tokio = { version = "1.51", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time", "io-util", "process"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time", "io-util", "process"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip", "compression-br", "compression-zstd"] }
 axum-prometheus = "0.10"
 tracing = "0.1"
+tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
-uuid = { version = "1.23", features = ["v5", "v7", "serde"] }
-redis = { version = "1.2", features = ["tokio-comp"] }
+uuid = { version = "1.23.1", features = ["v4", "v5", "v7", "serde"] }
+redis = { version = "1.2.1", features = ["tokio-comp"] }
 anyhow = "1.0"
 futures = "0.3"
 http-body-util = "0.1"
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11.0"
+hmac = "0.13.0"
 subtle = "2"
 hex = "0.4"
 async-trait = "0.1"
-aws-sdk-s3 = "1"
+aws-sdk-s3 = { version = "1.132", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
 rust_decimal = { version = "1", features = ["serde"] }
 cookie = "0.18"
 argon2 = "0.5"
 calamine = "0.34.0"
 csv = "1.4.0"
-zip = { version = "8.5.0", default-features = false, features = ["deflate"] }
-tree-sitter = "0.25"
+tree-sitter = "0.26.8"
 # Tier 1: mainstream languages
-tree-sitter-python = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-bash = "0.23"
-tree-sitter-rust = "0.24"
-tree-sitter-go = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-c = "0.23"
-tree-sitter-c-sharp = "0.23"
-tree-sitter-ruby = "0.23"
-tree-sitter-php = "0.23"
+tree-sitter-python = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-bash = "0.25.1"
+tree-sitter-rust = "0.24.2"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c = "0.24.2"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-php = "0.24.2"
 # Tier 2: common in technical docs
-tree-sitter-swift = "0.7"
+tree-sitter-swift = "0.7.2"
 # tree-sitter-kotlin removed: depends on tree-sitter 0.20, incompatible with 0.25
-tree-sitter-scala = "0.23"
-tree-sitter-sql = "0.0.2"
-tree-sitter-yaml = "0.7"
-tree-sitter-toml = "0.20"
-tree-sitter-dockerfile = "0.2"
+tree-sitter-scala = "0.26.0"
+tree-sitter-yaml = "0.7.2"
 tree-sitter-proto = "0.4"
 # Config parsing (structural, not tree-sitter)
 serde_yaml = "0.9"
-toml_edit = { version = "0.22", features = ["serde"] }
-tokio-tar = "0.3"
+toml_edit = { version = "0.25.11", features = ["serde"] }
+async-tar = { version = "0.6.0", default-features = false, features = ["runtime-tokio"] }
 async-compression = { version = "0.4", features = ["zstd", "tokio"] }
 base64 = "0.22.1"
 tempfile = "3.27.0"
@@ -115,7 +119,7 @@ unicode-normalization = "0.1"
 url = "2"
 ironrag-contracts = { path = "../../crates/contracts" }
 clap = { version = "4", features = ["derive"] }
-rand = "0.9"
+rand = "0.10.1"
 percent-encoding = "2"
 
 [[bin]]
@@ -138,7 +142,14 @@ path = "src/bin/gc_stale_chunks.rs"
 name = "ironrag-backfill-chunk-temporal-bounds"
 path = "src/bin/backfill_chunk_temporal_bounds.rs"
 
+[[bin]]
+name = "ironrag-emit-openapi"
+path = "src/bin/emit_openapi.rs"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-yaml-rust2 = "0.10.4"
+regex = "1.12.3"
+yaml-rust2 = "0.11.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+insta = { version = "1.43.2", features = ["json"] }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuredBlockKind {
     Heading,
@@ -60,14 +60,14 @@ impl std::str::FromStr for StructuredBlockKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredSourceSpan {
     pub start_offset: i32,
     pub end_offset: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredTableCoordinates {
     pub row_index: i32,
@@ -76,7 +76,7 @@ pub struct StructuredTableCoordinates {
     pub column_span: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredOutlineEntry {
     pub block_id: Uuid,
@@ -87,7 +87,7 @@ pub struct StructuredOutlineEntry {
     pub section_path: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredBlockData {
     pub block_id: Uuid,
@@ -105,7 +105,7 @@ pub struct StructuredBlockData {
     pub is_boilerplate: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredChunkWindow {
     pub chunk_index: i32,
@@ -123,7 +123,7 @@ pub struct StructuredChunkWindow {
     pub window_text: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredDocumentRevisionData {
     pub revision_id: Uuid,

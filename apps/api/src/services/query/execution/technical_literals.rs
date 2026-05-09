@@ -1,11 +1,12 @@
 use crate::domains::query_ir::{LiteralKind, QueryIR};
 
+use super::question_intent::query_ir_has_focused_document_answer_intent;
 pub(super) use super::technical_literal_extractors::{
     extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
     extract_prefix_literals, extract_url_literals, push_unique_limited,
 };
 pub(super) use super::technical_literal_focus::{
-    document_local_focus_keywords, question_mentions_pagination, select_document_balanced_chunks,
+    document_local_focus_keywords, select_document_balanced_chunks,
     technical_chunk_selection_score, technical_keyword_weight,
     technical_literal_focus_keyword_segments, technical_literal_focus_keywords,
 };
@@ -57,22 +58,24 @@ pub(super) fn detect_technical_literal_intent_from_query_ir(
     _question: &str,
     query_ir: &QueryIR,
 ) -> TechnicalLiteralIntent {
+    if query_ir_has_focused_document_answer_intent(query_ir) {
+        return TechnicalLiteralIntent::default();
+    }
+
     let mut intent = TechnicalLiteralIntent::default();
     for tag in query_ir.target_types.iter().map(|value| value.trim().to_ascii_lowercase()) {
         match tag.as_str() {
-            "endpoint" | "api_endpoint" | "route" | "api_route" | "path" | "url" | "wsdl" => {
+            "endpoint" | "path" | "url" | "wsdl" => {
                 intent.wants_urls = true;
                 intent.wants_paths = true;
                 intent.wants_methods = true;
             }
-            "base_url" | "base_path" | "prefix" => {
+            "base_url" => {
                 intent.wants_urls = true;
                 intent.wants_prefixes = true;
             }
-            "parameter" | "query_parameter" | "request_parameter" | "config_key" | "setting" => {
-                intent.wants_parameters = true;
-            }
-            "http_method" | "method" => intent.wants_methods = true,
+            "parameter" | "config_key" => intent.wants_parameters = true,
+            "http_method" => intent.wants_methods = true,
             _ => {}
         }
     }
@@ -83,6 +86,9 @@ pub(super) fn detect_technical_literal_intent_from_query_ir(
             LiteralKind::Identifier => intent.wants_parameters = true,
             LiteralKind::Version | LiteralKind::NumericCode | LiteralKind::Other => {}
         }
+    }
+    if !intent.any() && query_ir.is_exact_literal_technical() {
+        intent.wants_parameters = true;
     }
     intent
 }

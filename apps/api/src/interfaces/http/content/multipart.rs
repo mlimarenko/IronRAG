@@ -9,7 +9,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(super) struct ParsedUploadMultipart {
+pub struct ParsedUploadMultipart {
     pub library_id: Uuid,
     pub external_key: Option<String>,
     pub idempotency_key: Option<String>,
@@ -20,7 +20,7 @@ pub(super) struct ParsedUploadMultipart {
 }
 
 #[derive(Debug)]
-pub(super) struct ParsedReplaceMultipart {
+pub struct ParsedReplaceMultipart {
     pub idempotency_key: Option<String>,
     pub file_name: String,
     pub mime_type: Option<String>,

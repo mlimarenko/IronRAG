@@ -4,7 +4,7 @@ use uuid::Uuid;
 use crate::auth::{BootstrapBindingPurpose, TokenGrant, UiLocale, WorkspaceMembership};
 use crate::diagnostics::OperatorWarning;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellRole {
     Admin,
@@ -12,14 +12,14 @@ pub enum ShellRole {
     Viewer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellCapability {
     pub key: String,
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSummary {
     pub id: Uuid,
@@ -28,7 +28,7 @@ pub struct WorkspaceSummary {
     pub lifecycle_state: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LibrarySummary {
     pub id: Uuid,
@@ -42,7 +42,7 @@ pub struct LibrarySummary {
     pub query_ready: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellViewer {
     pub principal_id: Uuid,
@@ -53,7 +53,7 @@ pub struct ShellViewer {
     pub is_admin: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellScopeSelection {
     pub active_workspace_id: Option<Uuid>,
@@ -61,7 +61,7 @@ pub struct ShellScopeSelection {
     pub locale: UiLocale,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellBootstrap {
     pub viewer: ShellViewer,

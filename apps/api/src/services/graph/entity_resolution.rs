@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::Result as AnyhowResult;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     infra::repositories::{self, RuntimeGraphNodeRow},
+    services::graph::error::GraphServiceError,
 };
 
 /// Outcome of an entity resolution pass over a library's graph nodes.
@@ -88,7 +89,7 @@ impl EntityResolutionService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<EntityResolutionOutcome> {
+    ) -> std::result::Result<EntityResolutionOutcome, GraphServiceError> {
         let pool = &state.persistence.postgres;
 
         let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
@@ -136,7 +137,7 @@ impl EntityResolutionService {
 pub async fn resolve_after_ingestion(
     state: &AppState,
     library_id: Uuid,
-) -> Result<EntityResolutionOutcome> {
+) -> std::result::Result<EntityResolutionOutcome, GraphServiceError> {
     let pool = &state.persistence.postgres;
     let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
     let node_count = snapshot.as_ref().map_or(0, |s| s.node_count);
@@ -415,7 +416,7 @@ async fn execute_merge(
     library_id: Uuid,
     projection_version: i64,
     candidate: &MergeCandidate,
-) -> Result<bool> {
+) -> AnyhowResult<bool> {
     // Verify both nodes still exist (earlier merge in this batch may have removed one).
     let keep_node =
         repositories::get_runtime_graph_node_by_id(pool, library_id, candidate.keep_node_id)
@@ -575,7 +576,7 @@ async fn collapse_parallel_edges_for_node(
     library_id: Uuid,
     projection_version: i64,
     kept_node_id: Uuid,
-) -> Result<Vec<Uuid>> {
+) -> AnyhowResult<Vec<Uuid>> {
     let survivor_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         with grouped as (
@@ -649,7 +650,7 @@ async fn recalculate_edge_canonical_keys(
     library_id: Uuid,
     projection_version: i64,
     node_id: Uuid,
-) -> Result<()> {
+) -> AnyhowResult<()> {
     let edges = repositories::list_admitted_runtime_graph_edges_by_node_ids(
         pool,
         library_id,

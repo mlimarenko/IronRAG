@@ -742,7 +742,7 @@ async fn workspace_scoped_discovery_only_returns_visible_workspace_and_libraries
         assert_eq!(libraries[0]["ingestionReadiness"]["ready"], json!(false));
         assert_eq!(
             libraries[0]["ingestionReadiness"]["missingBindingPurposes"],
-            json!(["extract_graph"])
+            json!(["extract_graph", "embed_chunk"])
         );
 
         Ok(())

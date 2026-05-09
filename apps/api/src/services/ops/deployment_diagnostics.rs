@@ -12,7 +12,7 @@ use crate::{
     services::content::storage::types::ContentStorageProbeStatus,
 };
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyHealth {
     Ok,
@@ -26,7 +26,7 @@ const WORKER_STATUS_ERROR: &str = "error";
 
 const DEPENDENCY_MODE_MISCONFIGURED: &str = "misconfigured";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupAuthorityState {
     Succeeded,
@@ -35,7 +35,7 @@ pub enum StartupAuthorityState {
     Running,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OverallReadiness {
     Ready,
@@ -43,7 +43,7 @@ pub enum OverallReadiness {
     Blocked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageHealth {
     Ok,
@@ -52,7 +52,7 @@ pub enum StorageHealth {
     Misconfigured,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TopologySupport {
     Supported,
@@ -112,7 +112,7 @@ impl WorkerRuntimeState {
 #[derive(Clone, Default)]
 pub struct DeploymentDiagnosticsService;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyStatus {
     pub mode: String,
@@ -120,7 +120,7 @@ pub struct DependencyStatus {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyStatusSet {
     pub postgres: DependencyStatus,
@@ -128,7 +128,7 @@ pub struct DependencyStatusSet {
     pub arangodb: DependencyStatus,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupAuthorityStatus {
     pub mode: String,
@@ -136,7 +136,7 @@ pub struct StartupAuthorityStatus {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageStatus {
     pub provider: String,
@@ -148,14 +148,14 @@ pub struct StorageStatus {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TopologyStatus {
     pub status: TopologySupport,
     pub message: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeploymentReadinessSnapshot {
     pub status: OverallReadiness,

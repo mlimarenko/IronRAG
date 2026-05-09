@@ -1,0 +1,845 @@
+---
+source: apps/api/tests/mcp_grounded_answer_contract.rs
+assertion_line: 77
+expression: shapes
+---
+[
+  {
+    "case": "verified_endpoint_answer",
+    "citationCounts": {
+      "chunkReferences": 2,
+      "entityReferences": 0,
+      "preparedSegmentReferences": 1,
+      "relationReferences": 0,
+      "technicalFactReferences": 1,
+      "total": 4
+    },
+    "contentShape": {
+      "blocks": [
+        {
+          "keys": [
+            "text",
+            "type"
+          ],
+          "textPresent": true,
+          "type": "text"
+        }
+      ],
+      "count": 1
+    },
+    "executionDetailKeys": [
+      "chunkReferences",
+      "contextBundleId",
+      "entityReferences",
+      "execution",
+      "preparedSegmentReferences",
+      "relationReferences",
+      "requestTurn",
+      "responseTurn",
+      "runtimeStageSummaries",
+      "runtimeSummary",
+      "technicalFactReferences",
+      "verificationState",
+      "verificationWarnings"
+    ],
+    "hasTopLevelCitations": false,
+    "input": {
+      "includeDebug": true,
+      "library": "alpha-workspace/adapter-library",
+      "query": "Which endpoint does the demo adapter call for inventory sync?",
+      "topK": 8
+    },
+    "isError": false,
+    "runtimeStageSummaries": {
+      "count": 4,
+      "items": [
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "retrieve",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "assemble_context",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "answer",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "persist",
+          "stageLabelPresent": true
+        }
+      ]
+    },
+    "shortcutMatchesExecutionDetail": {
+      "conversationId": true,
+      "executionId": true,
+      "libraryId": true,
+      "lifecycleState": true,
+      "runtimeExecutionId": true,
+      "workspaceId": true
+    },
+    "structuredContentKeys": [
+      "conversationId",
+      "executionDetail",
+      "executionId",
+      "libraryId",
+      "lifecycleState",
+      "runtimeExecutionId",
+      "workspaceId"
+    ],
+    "topLevelKeys": [
+      "content",
+      "isError",
+      "structuredContent"
+    ],
+    "turnShape": {
+      "requestTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ],
+      "responseTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ]
+    },
+    "verifier": {
+      "state": "verified",
+      "warningCount": 0,
+      "warningShapes": []
+    }
+  },
+  {
+    "case": "followup_with_external_turns",
+    "citationCounts": {
+      "chunkReferences": 1,
+      "entityReferences": 0,
+      "preparedSegmentReferences": 2,
+      "relationReferences": 0,
+      "technicalFactReferences": 2,
+      "total": 5
+    },
+    "contentShape": {
+      "blocks": [
+        {
+          "keys": [
+            "text",
+            "type"
+          ],
+          "textPresent": true,
+          "type": "text"
+        }
+      ],
+      "count": 1
+    },
+    "executionDetailKeys": [
+      "chunkReferences",
+      "contextBundleId",
+      "entityReferences",
+      "execution",
+      "preparedSegmentReferences",
+      "relationReferences",
+      "requestTurn",
+      "responseTurn",
+      "runtimeStageSummaries",
+      "runtimeSummary",
+      "technicalFactReferences",
+      "verificationState",
+      "verificationWarnings"
+    ],
+    "hasTopLevelCitations": false,
+    "input": {
+      "conversationTurns": [
+        {
+          "content": "Summarize the synthetic retry policy.",
+          "role": "user"
+        },
+        {
+          "content": "The synthetic retry policy uses a bounded retry window.",
+          "role": "assistant"
+        }
+      ],
+      "includeDebug": true,
+      "library": "alpha-workspace/adapter-library",
+      "query": "Which setting changes when the retry window is raised?",
+      "topK": 6
+    },
+    "isError": false,
+    "runtimeStageSummaries": {
+      "count": 5,
+      "items": [
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "retrieve",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "assemble_context",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "answer",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "verify",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "persist",
+          "stageLabelPresent": true
+        }
+      ]
+    },
+    "shortcutMatchesExecutionDetail": {
+      "conversationId": true,
+      "executionId": true,
+      "libraryId": true,
+      "lifecycleState": true,
+      "runtimeExecutionId": true,
+      "workspaceId": true
+    },
+    "structuredContentKeys": [
+      "conversationId",
+      "executionDetail",
+      "executionId",
+      "libraryId",
+      "lifecycleState",
+      "runtimeExecutionId",
+      "workspaceId"
+    ],
+    "topLevelKeys": [
+      "content",
+      "isError",
+      "structuredContent"
+    ],
+    "turnShape": {
+      "requestTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ],
+      "responseTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ]
+    },
+    "verifier": {
+      "state": "verified",
+      "warningCount": 0,
+      "warningShapes": []
+    }
+  },
+  {
+    "case": "insufficient_evidence_answer",
+    "citationCounts": {
+      "chunkReferences": 0,
+      "entityReferences": 0,
+      "preparedSegmentReferences": 0,
+      "relationReferences": 0,
+      "technicalFactReferences": 0,
+      "total": 0
+    },
+    "contentShape": {
+      "blocks": [
+        {
+          "keys": [
+            "text",
+            "type"
+          ],
+          "textPresent": true,
+          "type": "text"
+        }
+      ],
+      "count": 1
+    },
+    "executionDetailKeys": [
+      "chunkReferences",
+      "contextBundleId",
+      "entityReferences",
+      "execution",
+      "preparedSegmentReferences",
+      "relationReferences",
+      "requestTurn",
+      "responseTurn",
+      "runtimeStageSummaries",
+      "runtimeSummary",
+      "technicalFactReferences",
+      "verificationState",
+      "verificationWarnings"
+    ],
+    "hasTopLevelCitations": false,
+    "input": {
+      "includeDebug": false,
+      "library": "beta-workspace/ops-library",
+      "query": "What retention window does the missing sample note specify?",
+      "topK": 4
+    },
+    "isError": false,
+    "runtimeStageSummaries": {
+      "count": 0,
+      "items": []
+    },
+    "shortcutMatchesExecutionDetail": {
+      "conversationId": true,
+      "executionId": true,
+      "libraryId": true,
+      "lifecycleState": true,
+      "runtimeExecutionId": true,
+      "workspaceId": true
+    },
+    "structuredContentKeys": [
+      "conversationId",
+      "executionDetail",
+      "executionId",
+      "libraryId",
+      "lifecycleState",
+      "runtimeExecutionId",
+      "workspaceId"
+    ],
+    "topLevelKeys": [
+      "content",
+      "isError",
+      "structuredContent"
+    ],
+    "turnShape": {
+      "requestTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ],
+      "responseTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ]
+    },
+    "verifier": {
+      "state": "insufficient_evidence",
+      "warningCount": 1,
+      "warningShapes": [
+        {
+          "code": "insufficient_evidence",
+          "keys": [
+            "code",
+            "message",
+            "relatedFactId",
+            "relatedSegmentId"
+          ],
+          "messagePresent": true,
+          "relatedFactIdPresent": false,
+          "relatedSegmentIdPresent": false
+        }
+      ]
+    }
+  },
+  {
+    "case": "conflicting_prepared_segments",
+    "citationCounts": {
+      "chunkReferences": 2,
+      "entityReferences": 0,
+      "preparedSegmentReferences": 2,
+      "relationReferences": 0,
+      "technicalFactReferences": 0,
+      "total": 4
+    },
+    "contentShape": {
+      "blocks": [
+        {
+          "keys": [
+            "text",
+            "type"
+          ],
+          "textPresent": true,
+          "type": "text"
+        }
+      ],
+      "count": 1
+    },
+    "executionDetailKeys": [
+      "chunkReferences",
+      "contextBundleId",
+      "entityReferences",
+      "execution",
+      "preparedSegmentReferences",
+      "relationReferences",
+      "requestTurn",
+      "responseTurn",
+      "runtimeStageSummaries",
+      "runtimeSummary",
+      "technicalFactReferences",
+      "verificationState",
+      "verificationWarnings"
+    ],
+    "hasTopLevelCitations": false,
+    "input": {
+      "includeDebug": true,
+      "library": "beta-workspace/ops-library",
+      "query": "Compare the two retry limits in the sample operations guide.",
+      "topK": 10
+    },
+    "isError": false,
+    "runtimeStageSummaries": {
+      "count": 5,
+      "items": [
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "retrieve",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "assemble_context",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "answer",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "verify",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "persist",
+          "stageLabelPresent": true
+        }
+      ]
+    },
+    "shortcutMatchesExecutionDetail": {
+      "conversationId": true,
+      "executionId": true,
+      "libraryId": true,
+      "lifecycleState": true,
+      "runtimeExecutionId": true,
+      "workspaceId": true
+    },
+    "structuredContentKeys": [
+      "conversationId",
+      "executionDetail",
+      "executionId",
+      "libraryId",
+      "lifecycleState",
+      "runtimeExecutionId",
+      "workspaceId"
+    ],
+    "topLevelKeys": [
+      "content",
+      "isError",
+      "structuredContent"
+    ],
+    "turnShape": {
+      "requestTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ],
+      "responseTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ]
+    },
+    "verifier": {
+      "state": "conflicting",
+      "warningCount": 1,
+      "warningShapes": [
+        {
+          "code": "conflicting_evidence",
+          "keys": [
+            "code",
+            "message",
+            "relatedFactId",
+            "relatedSegmentId"
+          ],
+          "messagePresent": true,
+          "relatedFactIdPresent": false,
+          "relatedSegmentIdPresent": true
+        }
+      ]
+    }
+  },
+  {
+    "case": "graph_grounded_answer",
+    "citationCounts": {
+      "chunkReferences": 1,
+      "entityReferences": 2,
+      "preparedSegmentReferences": 1,
+      "relationReferences": 1,
+      "technicalFactReferences": 0,
+      "total": 5
+    },
+    "contentShape": {
+      "blocks": [
+        {
+          "keys": [
+            "text",
+            "type"
+          ],
+          "textPresent": true,
+          "type": "text"
+        }
+      ],
+      "count": 1
+    },
+    "executionDetailKeys": [
+      "chunkReferences",
+      "contextBundleId",
+      "entityReferences",
+      "execution",
+      "preparedSegmentReferences",
+      "relationReferences",
+      "requestTurn",
+      "responseTurn",
+      "runtimeStageSummaries",
+      "runtimeSummary",
+      "technicalFactReferences",
+      "verificationState",
+      "verificationWarnings"
+    ],
+    "hasTopLevelCitations": false,
+    "input": {
+      "includeDebug": true,
+      "library": "gamma-workspace/topology-library",
+      "query": "What does the deployment graph connect between the worker and queue?",
+      "topK": 12
+    },
+    "isError": false,
+    "runtimeStageSummaries": {
+      "count": 4,
+      "items": [
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "retrieve",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "assemble_context",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "answer",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "persist",
+          "stageLabelPresent": true
+        }
+      ]
+    },
+    "shortcutMatchesExecutionDetail": {
+      "conversationId": true,
+      "executionId": true,
+      "libraryId": true,
+      "lifecycleState": true,
+      "runtimeExecutionId": true,
+      "workspaceId": true
+    },
+    "structuredContentKeys": [
+      "conversationId",
+      "executionDetail",
+      "executionId",
+      "libraryId",
+      "lifecycleState",
+      "runtimeExecutionId",
+      "workspaceId"
+    ],
+    "topLevelKeys": [
+      "content",
+      "isError",
+      "structuredContent"
+    ],
+    "turnShape": {
+      "requestTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ],
+      "responseTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ]
+    },
+    "verifier": {
+      "state": "verified",
+      "warningCount": 0,
+      "warningShapes": []
+    }
+  },
+  {
+    "case": "partially_supported_fact_answer",
+    "citationCounts": {
+      "chunkReferences": 1,
+      "entityReferences": 1,
+      "preparedSegmentReferences": 1,
+      "relationReferences": 0,
+      "technicalFactReferences": 1,
+      "total": 4
+    },
+    "contentShape": {
+      "blocks": [
+        {
+          "keys": [
+            "text",
+            "type"
+          ],
+          "textPresent": true,
+          "type": "text"
+        }
+      ],
+      "count": 1
+    },
+    "executionDetailKeys": [
+      "chunkReferences",
+      "contextBundleId",
+      "entityReferences",
+      "execution",
+      "preparedSegmentReferences",
+      "relationReferences",
+      "requestTurn",
+      "responseTurn",
+      "runtimeStageSummaries",
+      "runtimeSummary",
+      "technicalFactReferences",
+      "verificationState",
+      "verificationWarnings"
+    ],
+    "hasTopLevelCitations": false,
+    "input": {
+      "includeDebug": true,
+      "library": "gamma-workspace/changelog-library",
+      "query": "What does the synthetic changelog say about upload validation?",
+      "topK": 5
+    },
+    "isError": false,
+    "runtimeStageSummaries": {
+      "count": 5,
+      "items": [
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "retrieve",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "assemble_context",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "answer",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "verify",
+          "stageLabelPresent": true
+        },
+        {
+          "keys": [
+            "stageKind",
+            "stageLabel"
+          ],
+          "stageKind": "persist",
+          "stageLabelPresent": true
+        }
+      ]
+    },
+    "shortcutMatchesExecutionDetail": {
+      "conversationId": true,
+      "executionId": true,
+      "libraryId": true,
+      "lifecycleState": true,
+      "runtimeExecutionId": true,
+      "workspaceId": true
+    },
+    "structuredContentKeys": [
+      "conversationId",
+      "executionDetail",
+      "executionId",
+      "libraryId",
+      "lifecycleState",
+      "runtimeExecutionId",
+      "workspaceId"
+    ],
+    "topLevelKeys": [
+      "content",
+      "isError",
+      "structuredContent"
+    ],
+    "turnShape": {
+      "requestTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ],
+      "responseTurnKeys": [
+        "authorPrincipalId",
+        "contentText",
+        "conversationId",
+        "createdAt",
+        "executionId",
+        "id",
+        "turnIndex",
+        "turnKind"
+      ]
+    },
+    "verifier": {
+      "state": "partially_supported",
+      "warningCount": 1,
+      "warningShapes": [
+        {
+          "code": "unsupported_literal",
+          "keys": [
+            "code",
+            "message",
+            "relatedFactId",
+            "relatedSegmentId"
+          ],
+          "messagePresent": true,
+          "relatedFactIdPresent": true,
+          "relatedSegmentIdPresent": false
+        }
+      ]
+    }
+  }
+]

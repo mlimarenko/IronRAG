@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
 };
 
 use anyhow::Context;
@@ -25,6 +25,15 @@ use super::{
     QueryGraphIndex, RetrievalBundle, RuntimeMatchedEntity, RuntimeMatchedRelationship,
     resolve_runtime_vector_search_context, score_value,
 };
+
+const ASSOCIATIVE_GRAPH_EXPANSION_HOPS: usize = 2;
+const ASSOCIATIVE_GRAPH_MAX_CANDIDATE_EDGES: usize = 512;
+const ASSOCIATIVE_GRAPH_MAX_FRONTIER_NODES: usize = 128;
+const ASSOCIATIVE_GRAPH_MAX_EDGES_PER_FRONTIER_NODE: usize = 64;
+const ASSOCIATIVE_GRAPH_RANK_ITERATIONS: usize = 8;
+const ASSOCIATIVE_GRAPH_DAMPING: f32 = 0.85;
+const ASSOCIATIVE_EDGE_SUPPORT_WEIGHT: f32 = 0.015;
+const ASSOCIATIVE_EDGE_TEXT_RELEVANCE_WEIGHT: f32 = 16.0;
 
 pub(crate) async fn retrieve_entity_hits(
     state: &AppState,
@@ -92,7 +101,7 @@ pub(crate) async fn retrieve_relationship_hits(
         graph_index,
     )
     .await?;
-    let topology_hits = related_edges_for_entities(
+    let topology_hits = associative_edges_for_entities(
         &entity_hits,
         graph_index,
         plan,
@@ -125,7 +134,7 @@ pub(crate) async fn retrieve_local_bundle(
     )
     .await?;
     let relationships =
-        related_edges_for_entities(&entity_hits, graph_index, plan, query_ir, limit);
+        associative_edges_for_entities(&entity_hits, graph_index, plan, query_ir, limit);
     Ok(RetrievalBundle { entities: entity_hits, relationships, chunks: Vec::new() })
 }
 
@@ -640,41 +649,254 @@ fn lexical_relationship_hits(
     hits
 }
 
-pub(crate) fn related_edges_for_entities(
+pub(crate) fn associative_edges_for_entities(
     entities: &[RuntimeMatchedEntity],
     graph_index: &QueryGraphIndex,
     plan: &RuntimeQueryPlan,
     query_ir: Option<&QueryIR>,
     top_k: usize,
 ) -> Vec<RuntimeMatchedRelationship> {
-    let entity_ids = entities.iter().map(|entity| entity.node_id).collect::<BTreeSet<_>>();
-    let entity_scores = entities
+    if top_k == 0 || entities.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seed_scores = entities
         .iter()
-        .map(|entity| (entity.node_id, score_value(entity.score)))
-        .collect::<HashMap<_, _>>();
-    let search_keywords = graph_relevance_keywords(plan, query_ir);
-    let mut relationships = graph_index
-        .edges()
-        .filter(|edge| {
-            entity_ids.contains(&edge.from_node_id) || entity_ids.contains(&edge.to_node_id)
+        .filter_map(|entity| {
+            let node = graph_index.node(entity.node_id)?;
+            if node.node_type.eq_ignore_ascii_case("document") {
+                return None;
+            }
+            let score = score_value(entity.score).max(0.0);
+            Some((entity.node_id, 1.0 + score.ln_1p()))
         })
-        .filter_map(|edge| {
-            let relevance = match (
-                entity_scores.get(&edge.from_node_id).copied(),
-                entity_scores.get(&edge.to_node_id).copied(),
-            ) {
-                (Some(left), Some(right)) => left.max(right),
-                (Some(score), None) | (None, Some(score)) => score,
-                (None, None) => 0.5,
-            };
-            let relevance =
-                relevance + graph_edge_text_relevance(edge, graph_index, &search_keywords);
-            map_edge_hit(edge.id, Some(relevance), graph_index)
+        .collect::<BTreeMap<_, _>>();
+    if seed_scores.is_empty() {
+        seed_scores = entities
+            .iter()
+            .filter_map(|entity| {
+                graph_index.node(entity.node_id).map(|_| {
+                    let score = score_value(entity.score).max(0.0);
+                    (entity.node_id, 1.0 + score.ln_1p())
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+    }
+    if seed_scores.is_empty() {
+        return Vec::new();
+    }
+
+    let search_keywords = graph_relevance_keywords(plan, query_ir);
+    let candidate_edges =
+        associative_candidate_edges(&seed_scores, graph_index, &search_keywords, top_k);
+    if candidate_edges.is_empty() {
+        return Vec::new();
+    }
+
+    let node_scores = propagate_associative_node_scores(&seed_scores, &candidate_edges);
+    let mut relationships = candidate_edges
+        .iter()
+        .filter_map(|candidate| {
+            let from_score = node_scores.get(&candidate.from_node_id).copied().unwrap_or_default();
+            let to_score = node_scores.get(&candidate.to_node_id).copied().unwrap_or_default();
+            let endpoint_score = from_score.max(to_score) + (from_score.min(to_score) * 0.5);
+            let relevance = endpoint_score
+                + (candidate.text_relevance * ASSOCIATIVE_EDGE_TEXT_RELEVANCE_WEIGHT)
+                + candidate.support_bonus;
+            map_edge_hit(candidate.edge_id, Some(relevance), graph_index)
         })
         .collect::<Vec<_>>();
     relationships.sort_by(score_desc_relationships);
     relationships.truncate(top_k);
     relationships
+}
+
+fn is_document_node(graph_index: &QueryGraphIndex, node_id: &Uuid) -> bool {
+    graph_index.node(*node_id).is_some_and(|node| node.node_type.eq_ignore_ascii_case("document"))
+}
+
+#[derive(Debug, Clone)]
+struct AssociativeCandidateEdge {
+    edge_id: Uuid,
+    from_node_id: Uuid,
+    to_node_id: Uuid,
+    text_relevance: f32,
+    support_bonus: f32,
+    walk_weight: f32,
+    pre_score: f32,
+}
+
+fn associative_candidate_edges(
+    seed_scores: &BTreeMap<Uuid, f32>,
+    graph_index: &QueryGraphIndex,
+    search_keywords: &[String],
+    top_k: usize,
+) -> Vec<AssociativeCandidateEdge> {
+    let max_candidate_edges =
+        top_k.saturating_mul(16).clamp(64, ASSOCIATIVE_GRAPH_MAX_CANDIDATE_EDGES);
+    let mut selected_edges = Vec::new();
+    let mut selected_edge_ids = BTreeSet::new();
+    let mut known_node_ids = seed_scores.keys().copied().collect::<BTreeSet<_>>();
+    let mut frontier = known_node_ids.clone();
+
+    for _ in 0..ASSOCIATIVE_GRAPH_EXPANSION_HOPS {
+        if frontier.is_empty() || selected_edges.len() >= max_candidate_edges {
+            break;
+        }
+
+        let mut depth_edge_ids = BTreeSet::new();
+        let mut depth_edges = Vec::new();
+        for node_id in frontier.iter().take(ASSOCIATIVE_GRAPH_MAX_FRONTIER_NODES) {
+            let mut incident_edges = graph_index
+                .incident_edges(*node_id)
+                .filter(|edge| !selected_edge_ids.contains(&edge.id))
+                .filter(|edge| depth_edge_ids.insert(edge.id))
+                .filter_map(|edge| {
+                    associative_candidate_edge(
+                        edge,
+                        graph_index,
+                        search_keywords,
+                        seed_scores,
+                        &known_node_ids,
+                    )
+                })
+                .collect::<Vec<_>>();
+            incident_edges.sort_by(|left, right| {
+                right
+                    .pre_score
+                    .total_cmp(&left.pre_score)
+                    .then_with(|| left.edge_id.cmp(&right.edge_id))
+            });
+            depth_edges.extend(
+                incident_edges.into_iter().take(ASSOCIATIVE_GRAPH_MAX_EDGES_PER_FRONTIER_NODE),
+            );
+        }
+
+        depth_edges.sort_by(|left, right| {
+            right
+                .pre_score
+                .total_cmp(&left.pre_score)
+                .then_with(|| left.edge_id.cmp(&right.edge_id))
+        });
+
+        let remaining = max_candidate_edges.saturating_sub(selected_edges.len());
+        let mut next_frontier = BTreeSet::new();
+        for edge in depth_edges.into_iter().take(remaining) {
+            selected_edge_ids.insert(edge.edge_id);
+            for node_id in [edge.from_node_id, edge.to_node_id] {
+                if is_document_node(graph_index, &node_id) {
+                    continue;
+                }
+                if known_node_ids.insert(node_id) {
+                    next_frontier.insert(node_id);
+                }
+            }
+            selected_edges.push(edge);
+        }
+        frontier = next_frontier;
+    }
+
+    selected_edges
+}
+
+fn associative_candidate_edge(
+    edge: &crate::infra::repositories::RuntimeGraphEdgeRow,
+    graph_index: &QueryGraphIndex,
+    search_keywords: &[String],
+    seed_scores: &BTreeMap<Uuid, f32>,
+    known_node_ids: &BTreeSet<Uuid>,
+) -> Option<AssociativeCandidateEdge> {
+    if graph_index.node(edge.from_node_id).is_none() || graph_index.node(edge.to_node_id).is_none()
+    {
+        return None;
+    }
+    let text_relevance = graph_edge_text_relevance(edge, graph_index, search_keywords);
+    let support_bonus =
+        (edge.support_count.max(1) as f32).ln_1p() * ASSOCIATIVE_EDGE_SUPPORT_WEIGHT;
+    let seed_score = seed_scores
+        .get(&edge.from_node_id)
+        .copied()
+        .unwrap_or_default()
+        .max(seed_scores.get(&edge.to_node_id).copied().unwrap_or_default());
+    let known_endpoint_bonus = if known_node_ids.contains(&edge.from_node_id)
+        || known_node_ids.contains(&edge.to_node_id)
+    {
+        0.05
+    } else {
+        0.0
+    };
+    let stored_weight = edge
+        .weight
+        .map(|weight| weight as f32)
+        .filter(|weight| weight.is_finite() && *weight > 0.0)
+        .unwrap_or(1.0 + support_bonus)
+        .min(10.0);
+    let weighted_text_relevance = text_relevance * ASSOCIATIVE_EDGE_TEXT_RELEVANCE_WEIGHT;
+    let pre_score = seed_score + weighted_text_relevance + support_bonus + known_endpoint_bonus;
+    Some(AssociativeCandidateEdge {
+        edge_id: edge.id,
+        from_node_id: edge.from_node_id,
+        to_node_id: edge.to_node_id,
+        text_relevance,
+        support_bonus,
+        walk_weight: stored_weight + weighted_text_relevance,
+        pre_score,
+    })
+}
+
+fn propagate_associative_node_scores(
+    seed_scores: &BTreeMap<Uuid, f32>,
+    candidate_edges: &[AssociativeCandidateEdge],
+) -> BTreeMap<Uuid, f32> {
+    let seed_total = seed_scores.values().copied().sum::<f32>();
+    if seed_total <= 0.0 {
+        return BTreeMap::new();
+    }
+
+    let teleport = seed_scores
+        .iter()
+        .map(|(node_id, score)| (*node_id, *score / seed_total))
+        .collect::<BTreeMap<_, _>>();
+    let mut adjacency = BTreeMap::<Uuid, Vec<(Uuid, f32)>>::new();
+    for edge in candidate_edges {
+        adjacency.entry(edge.from_node_id).or_default().push((edge.to_node_id, edge.walk_weight));
+        adjacency.entry(edge.to_node_id).or_default().push((edge.from_node_id, edge.walk_weight));
+    }
+
+    let mut ranks = teleport.clone();
+    for _ in 0..ASSOCIATIVE_GRAPH_RANK_ITERATIONS {
+        let mut next = teleport
+            .iter()
+            .map(|(node_id, score)| (*node_id, score * (1.0 - ASSOCIATIVE_GRAPH_DAMPING)))
+            .collect::<BTreeMap<_, _>>();
+        let mut dangling_mass = 0.0;
+
+        for (node_id, rank) in &ranks {
+            let Some(neighbors) = adjacency.get(node_id) else {
+                dangling_mass += *rank;
+                continue;
+            };
+            let total_weight = neighbors.iter().map(|(_, weight)| *weight).sum::<f32>();
+            if total_weight <= 0.0 {
+                dangling_mass += *rank;
+                continue;
+            }
+            for (neighbor_id, weight) in neighbors {
+                let propagated = ASSOCIATIVE_GRAPH_DAMPING * *rank * (*weight / total_weight);
+                *next.entry(*neighbor_id).or_default() += propagated;
+            }
+        }
+
+        if dangling_mass > 0.0 {
+            for (node_id, score) in &teleport {
+                *next.entry(*node_id).or_default() +=
+                    ASSOCIATIVE_GRAPH_DAMPING * dangling_mass * *score;
+            }
+        }
+        ranks = next;
+    }
+
+    ranks
 }
 
 fn graph_edge_text_relevance(
@@ -743,7 +965,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        lexical_entity_hits, merge_entity_retrieval_lanes, related_edges_for_entities, score_value,
+        associative_edges_for_entities, lexical_entity_hits, merge_entity_retrieval_lanes,
+        score_value,
     };
     use crate::{
         domains::query_ir::{
@@ -1076,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn related_edges_rank_edge_text_relevance_before_stable_ties() {
+    fn associative_edges_rank_edge_text_relevance_before_stable_ties() {
         let source = node("source process", "process", None);
         let ordinary_target = node("ordinary artifact", "artifact", None);
         let needle_target = node("needle artifact", "artifact", None);
@@ -1099,9 +1322,145 @@ mod tests {
             score: Some(0.3),
         }];
 
-        let hits = related_edges_for_entities(&entities, &graph_index, &plan, None, 2);
+        let hits = associative_edges_for_entities(&entities, &graph_index, &plan, None, 2);
 
         assert_eq!(hits[0].to_label, "needle artifact");
         assert!(score_value(hits[0].score) > score_value(hits[1].score));
+    }
+
+    #[test]
+    fn associative_edges_promote_two_hop_bridge_over_one_hop_noise() {
+        let source = node("Alpha Relay", "process", None);
+        let bridge = node("Bridge Junction", "artifact", None);
+        let endpoint = node("Gamma Endpoint", "artifact", None);
+        let noise = node("Ordinary Artifact", "artifact", None);
+        let noise_edge = edge(source.id, noise.id, "mentions", Some("ordinary output"));
+        let bridge_edge = edge(source.id, bridge.id, "connects", Some("Alpha Relay bridge"));
+        let endpoint_edge =
+            edge(bridge.id, endpoint.id, "routes_to", Some("Bridge reaches Gamma Endpoint"));
+        let graph_index = graph_index_with_projection(
+            vec![source.clone(), bridge, endpoint, noise],
+            vec![noise_edge, bridge_edge, endpoint_edge],
+        );
+        let plan = RuntimeQueryPlan {
+            keywords: vec!["gamma".to_string(), "endpoint".to_string()],
+            entity_keywords: Vec::new(),
+            ..build_query_plan("which route reaches Gamma Endpoint?", None, Some(8), None)
+        };
+        let entities = vec![RuntimeMatchedEntity {
+            node_id: source.id,
+            label: source.label,
+            node_type: source.node_type,
+            score: Some(0.3),
+        }];
+
+        let hits = associative_edges_for_entities(&entities, &graph_index, &plan, None, 3);
+
+        assert_eq!(hits[0].to_label, "Gamma Endpoint");
+        assert!(hits.iter().any(|hit| hit.to_label == "Ordinary Artifact"));
+    }
+
+    #[test]
+    fn associative_edges_ignore_document_seed_noise() {
+        let router = node("Router Hub", "artifact", None);
+        let needle_artifact = node("Needle Artifact", "artifact", None);
+        let ordinary_artifact = node("Ordinary Artifact", "artifact", None);
+        let noise_artifact = node("Noise Artifact", "artifact", None);
+        let source_document = node("random topology snapshot", "document", None);
+        let noisy_document = node("reference guide", "document", None);
+        let noise_edge = edge(
+            source_document.id,
+            noise_artifact.id,
+            "mentions",
+            Some("Document mentions extracted entity"),
+        );
+        let noisy_edge = edge(
+            noisy_document.id,
+            needle_artifact.id,
+            "mentions",
+            Some("Document mentions extracted entity"),
+        );
+        let guarded_route_edge = edge(
+            router.id,
+            needle_artifact.id,
+            "selects",
+            Some("Router Hub selects Needle Artifact through the guarded needle route"),
+        );
+        let ordinary_edge = edge(
+            router.id,
+            ordinary_artifact.id,
+            "mentions",
+            Some("Router Hub mentions Ordinary Artifact through the ordinary noise route"),
+        );
+        let graph_index = graph_index_with_projection(
+            vec![
+                router.clone(),
+                needle_artifact.clone(),
+                ordinary_artifact.clone(),
+                noise_artifact.clone(),
+                source_document.clone(),
+                noisy_document.clone(),
+            ],
+            vec![noise_edge, noisy_edge, guarded_route_edge, ordinary_edge],
+        );
+        let plan = RuntimeQueryPlan {
+            keywords: vec![
+                "Router".into(),
+                "Hub".into(),
+                "guarded".into(),
+                "needle".into(),
+                "route".into(),
+                "Ordinary".into(),
+                "Artifact".into(),
+            ],
+            entity_keywords: Vec::new(),
+            ..build_query_plan("Which route does Router Hub select?", None, Some(8), None)
+        };
+        let entities = vec![
+            RuntimeMatchedEntity {
+                node_id: router.id,
+                label: router.label,
+                node_type: router.node_type,
+                score: Some(0.8),
+            },
+            RuntimeMatchedEntity {
+                node_id: source_document.id,
+                label: source_document.label,
+                node_type: source_document.node_type,
+                score: Some(12.0),
+            },
+            RuntimeMatchedEntity {
+                node_id: noisy_document.id,
+                label: noisy_document.label,
+                node_type: noisy_document.node_type,
+                score: Some(11.0),
+            },
+        ];
+
+        let hits = associative_edges_for_entities(&entities, &graph_index, &plan, None, 3);
+
+        assert!(hits.iter().any(|hit| hit.to_label == "Needle Artifact"));
+        assert!(hits.iter().any(|hit| hit.to_label == "Ordinary Artifact"));
+        assert!(hits.iter().any(|hit| {
+            hit.summary.as_deref().is_some_and(|summary| summary.contains("guarded needle route"))
+        }));
+    }
+
+    #[test]
+    fn associative_edges_return_empty_for_empty_seed_or_limit() {
+        let source = node("Alpha Relay", "process", None);
+        let target = node("Gamma Endpoint", "artifact", None);
+        let edge = edge(source.id, target.id, "routes_to", Some("route"));
+        let graph_index = graph_index_with_projection(vec![source.clone(), target], vec![edge]);
+        let plan = build_query_plan("Gamma Endpoint", None, Some(8), None);
+        let entities = vec![RuntimeMatchedEntity {
+            node_id: source.id,
+            label: source.label,
+            node_type: source.node_type,
+            score: Some(0.3),
+        }];
+
+        assert!(associative_edges_for_entities(&[], &graph_index, &plan, None, 3).is_empty());
+        assert!(associative_edges_for_entities(&entities, &graph_index, &plan, None, 0).is_empty());
     }
 }

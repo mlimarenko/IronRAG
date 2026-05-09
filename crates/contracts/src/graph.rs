@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::diagnostics::OperatorWarning;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphNodeType {
     Entity,
@@ -19,7 +19,7 @@ pub enum GraphNodeType {
     Attribute,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphStatus {
     Empty,
@@ -31,7 +31,7 @@ pub enum GraphStatus {
     Stale,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphConvergenceStatus {
     Current,
@@ -39,7 +39,7 @@ pub enum GraphConvergenceStatus {
     Degraded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphGenerationSummary {
     pub generation_id: Option<Uuid>,
@@ -48,7 +48,7 @@ pub struct GraphGenerationSummary {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphReadinessSummary {
     pub library_id: Uuid,
@@ -60,7 +60,7 @@ pub struct GraphReadinessSummary {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphNode {
     pub id: Uuid,
@@ -73,7 +73,7 @@ pub struct GraphNode {
     pub filtered_artifact: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphEdge {
     pub id: Uuid,
@@ -85,7 +85,7 @@ pub struct GraphEdge {
     pub filtered_artifact: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphSurface {
     pub library_id: Uuid,
@@ -104,14 +104,14 @@ pub struct GraphSurface {
     pub readiness_summary: Option<GraphReadinessSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphDocumentReference {
     pub document_id: Uuid,
     pub document_label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphEvidence {
     pub id: String,
@@ -125,7 +125,7 @@ pub struct GraphEvidence {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRelatedNode {
     pub id: Uuid,
@@ -133,7 +133,7 @@ pub struct GraphRelatedNode {
     pub relation_type: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphNodeDetail {
     pub id: Uuid,
@@ -147,7 +147,7 @@ pub struct GraphNodeDetail {
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphFilterState {
     pub search_query: Option<String>,
@@ -155,7 +155,7 @@ pub struct GraphFilterState {
     pub include_filtered_artifacts: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphWorkbenchSurface {
     pub graph: GraphSurface,

@@ -69,7 +69,8 @@ impl AiCatalogService {
                 || ApiError::resource_not_found("provider_catalog", command.provider_catalog_id),
             )?;
         let api_key = normalize_optional(command.api_key.as_deref());
-        let base_url = resolve_provider_base_url(provider, command.base_url.as_deref())?;
+        let base_url =
+            provider_credential_base_url_for_create(provider, command.base_url.as_deref())?;
         validate_provider_access(state, provider, &models, api_key.as_deref(), base_url.as_deref())
             .await?;
         let row = ai_repository::create_provider_credential(
@@ -104,13 +105,13 @@ impl AiCatalogService {
                 || ApiError::resource_not_found("provider_catalog", existing.provider_catalog_id),
             )?;
         let api_key = normalize_optional(command.api_key.as_deref());
-        let base_url = normalize_provider_base_url_input(provider, command.base_url.as_deref())?;
+        let base_url = provider_credential_base_url_for_update(
+            provider,
+            existing.base_url.as_deref(),
+            command.base_url.as_deref(),
+        )?;
         let effective_api_key = api_key.as_deref().or(existing.api_key.as_deref());
-        let effective_base_url = base_url
-            .as_deref()
-            .or(existing.base_url.as_deref())
-            .or(provider.default_base_url.as_deref());
-        validate_provider_access(state, provider, &models, effective_api_key, effective_base_url)
+        validate_provider_access(state, provider, &models, effective_api_key, base_url.as_deref())
             .await?;
         let row = ai_repository::update_provider_credential(
             &state.persistence.postgres,

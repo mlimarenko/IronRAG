@@ -15,7 +15,7 @@ use crate::{
         },
         repositories::{self, RuntimeGraphSnapshotRow},
     },
-    services::graph::summary::GraphSummaryRefreshRequest,
+    services::graph::{error::GraphServiceError, summary::GraphSummaryRefreshRequest},
     services::knowledge::graph_stream::prewarm_graph_topology_cache,
     shared::json_coercion::from_value_or_default,
 };
@@ -96,7 +96,7 @@ pub fn next_projection_version(snapshot: Option<&RuntimeGraphSnapshotRow>) -> i6
 pub async fn resolve_projection_scope(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<GraphProjectionScope> {
+) -> Result<GraphProjectionScope, GraphServiceError> {
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
@@ -108,7 +108,7 @@ pub async fn ensure_empty_graph_snapshot(
     state: &AppState,
     library_id: Uuid,
     projection_version: i64,
-) -> anyhow::Result<GraphProjectionOutcome> {
+) -> Result<GraphProjectionOutcome, GraphServiceError> {
     repositories::upsert_runtime_graph_snapshot(
         &state.persistence.postgres,
         library_id,
@@ -133,7 +133,7 @@ pub async fn ensure_empty_graph_snapshot(
 pub async fn project_canonical_graph(
     state: &AppState,
     scope: &GraphProjectionScope,
-) -> anyhow::Result<GraphProjectionOutcome> {
+) -> Result<GraphProjectionOutcome, GraphServiceError> {
     // `synchronize_projection_support_counts` runs three library-wide
     // sweeps (recalculate support counts, prune zero-support edges,
     // prune zero-support nodes). On a mid-sized graph (27k edges / 10k
@@ -148,7 +148,7 @@ pub async fn project_canonical_graph(
     // happens during full projections. So the sync is safe to skip on
     // targeted paths and run only on full rebuilds.
     if scope.is_targeted_refresh() {
-        return project_targeted_canonical_graph(state, scope).await;
+        return project_targeted_canonical_graph(state, scope).await.map_err(Into::into);
     }
     synchronize_projection_support_counts(state, scope).await?;
     let nodes = repositories::list_admitted_runtime_graph_nodes_by_library(
@@ -265,7 +265,7 @@ pub async fn project_canonical_graph(
         )
         .await
         .context("failed to mark graph snapshot as failed after graph-store refresh error")?;
-        return Err(error).context("failed to refresh the canonical graph view");
+        return Err(error.context("failed to refresh the canonical graph view").into());
     }
 
     repositories::upsert_runtime_graph_snapshot(

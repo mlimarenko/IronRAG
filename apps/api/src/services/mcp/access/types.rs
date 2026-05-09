@@ -55,7 +55,7 @@ pub(crate) struct McpRevisionGroundingReferences {
     pub(crate) evidence_references: Vec<McpEvidenceReference>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub(crate) struct ArangoChunkMentionReferenceRow {
     pub(crate) entity_id: Uuid,
     pub(crate) rank: i32,
@@ -63,7 +63,7 @@ pub(crate) struct ArangoChunkMentionReferenceRow {
     pub(crate) inclusion_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub(crate) struct ArangoRelationSupportReferenceRow {
     pub(crate) relation_id: Uuid,
     pub(crate) rank: i32,

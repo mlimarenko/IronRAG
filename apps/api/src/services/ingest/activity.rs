@@ -45,9 +45,7 @@ impl IngestActivityService {
         now: DateTime<Utc>,
     ) -> RuntimeDocumentActivityStatus {
         match run_status {
-            RuntimeIngestionStatus::Ready | RuntimeIngestionStatus::ReadyNoGraph => {
-                RuntimeDocumentActivityStatus::Ready
-            }
+            RuntimeIngestionStatus::Ready => RuntimeDocumentActivityStatus::Ready,
             RuntimeIngestionStatus::Failed => RuntimeDocumentActivityStatus::Failed,
             RuntimeIngestionStatus::Queued => {
                 derive_queued_status(claimed_at, latest_error, now, self.stalled_after)
@@ -88,9 +86,7 @@ impl IngestActivityService {
                     return None;
                 }
             }
-            RuntimeIngestionStatus::Ready
-            | RuntimeIngestionStatus::ReadyNoGraph
-            | RuntimeIngestionStatus::Failed => return None,
+            RuntimeIngestionStatus::Ready | RuntimeIngestionStatus::Failed => return None,
         }
         if let Some(message) = latest_error.filter(|message| !message.trim().is_empty()) {
             return Some(message.trim().to_string());
@@ -98,9 +94,7 @@ impl IngestActivityService {
         let idle_since = match run_status {
             RuntimeIngestionStatus::Queued => claimed_at,
             RuntimeIngestionStatus::Processing => last_activity_at,
-            RuntimeIngestionStatus::Ready
-            | RuntimeIngestionStatus::ReadyNoGraph
-            | RuntimeIngestionStatus::Failed => None,
+            RuntimeIngestionStatus::Ready | RuntimeIngestionStatus::Failed => None,
         };
         idle_since.map(|value| {
             let idle = now - value;
@@ -115,9 +109,7 @@ impl IngestActivityService {
                     RuntimeIngestionStatus::Processing => {
                         format!("no visible activity for {}s", idle.num_seconds())
                     }
-                    RuntimeIngestionStatus::Ready
-                    | RuntimeIngestionStatus::ReadyNoGraph
-                    | RuntimeIngestionStatus::Failed => {
+                    RuntimeIngestionStatus::Ready | RuntimeIngestionStatus::Failed => {
                         "activity freshness window elapsed".to_string()
                     }
                 }
@@ -196,7 +188,7 @@ fn document_activity_signal<'a>(
             "canceled" => ready_ingestion_status(text_ready, graph_ready)
                 .unwrap_or(RuntimeIngestionStatus::Failed),
             _ if graph_ready => RuntimeIngestionStatus::Ready,
-            _ if text_ready => RuntimeIngestionStatus::ReadyNoGraph,
+            _ if text_ready => RuntimeIngestionStatus::Ready,
             _ => RuntimeIngestionStatus::Queued,
         };
         return DocumentActivitySignal {
@@ -208,10 +200,8 @@ fn document_activity_signal<'a>(
     }
 
     DocumentActivitySignal {
-        run_status: if graph_ready {
+        run_status: if graph_ready || text_ready {
             RuntimeIngestionStatus::Ready
-        } else if text_ready {
-            RuntimeIngestionStatus::ReadyNoGraph
         } else {
             RuntimeIngestionStatus::Queued
         },
@@ -230,7 +220,7 @@ fn map_job_queue_state(
         "queued" => RuntimeIngestionStatus::Queued,
         "leased" => RuntimeIngestionStatus::Processing,
         "completed" if graph_ready => RuntimeIngestionStatus::Ready,
-        "completed" if text_ready => RuntimeIngestionStatus::ReadyNoGraph,
+        "completed" if text_ready => RuntimeIngestionStatus::Ready,
         "completed" => RuntimeIngestionStatus::Processing,
         "failed" => RuntimeIngestionStatus::Failed,
         "canceled" => ready_ingestion_status(text_ready, graph_ready)
@@ -240,13 +230,7 @@ fn map_job_queue_state(
 }
 
 fn ready_ingestion_status(text_ready: bool, graph_ready: bool) -> Option<RuntimeIngestionStatus> {
-    if graph_ready {
-        Some(RuntimeIngestionStatus::Ready)
-    } else if text_ready {
-        Some(RuntimeIngestionStatus::ReadyNoGraph)
-    } else {
-        None
-    }
+    if graph_ready || text_ready { Some(RuntimeIngestionStatus::Ready) } else { None }
 }
 
 fn derive_queued_status(

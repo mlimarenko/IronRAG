@@ -7,7 +7,7 @@ use axum::{
 
 use crate::app::state::AppState;
 
-const OPENAPI_SPEC: &str = include_str!("../../../contracts/ironrag.openapi.yaml");
+const OPENAPI_SPEC: &str = include_str!("../../../contracts/openapi.gen.yaml");
 /// `OpenAPI` `paths` in the contract are absolute from the host (`/v1/...`). The server URL must be
 /// the API origin **without** a `/v1` suffix, otherwise Swagger UI concatenates `/v1` + `/v1/...`.
 const RELATIVE_SERVER_URL: &str = "/";
@@ -18,7 +18,17 @@ pub fn router() -> Router<crate::app::state::AppState> {
     Router::new().route("/openapi/ironrag.openapi.yaml", get(get_openapi_spec))
 }
 
-async fn get_openapi_spec(State(state): State<AppState>) -> (HeaderMap, String) {
+#[utoipa::path(
+    get,
+    path = "/v1/openapi/ironrag.openapi.yaml",
+    tag = "system",
+    operation_id = "getOpenApiContract",
+    security(),
+    responses(
+        (status = 200, description = "OpenAPI 3.1 contract for the public IronRAG HTTP API", content_type = "application/yaml", body = String),
+    ),
+)]
+pub async fn get_openapi_spec(State(state): State<AppState>) -> (HeaderMap, String) {
     let mut response_headers = HeaderMap::new();
     response_headers
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/yaml; charset=utf-8"));

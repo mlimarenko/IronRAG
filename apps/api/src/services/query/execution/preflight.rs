@@ -13,11 +13,12 @@ use super::{
     build_canonical_answer_context, build_deterministic_grounded_answer,
     build_missing_explicit_document_answer, load_canonical_answer_chunks,
     load_canonical_answer_evidence, load_direct_targeted_table_answer, load_document_index,
+    question_intent::query_ir_has_focused_document_answer_intent,
     question_requests_multi_document_scope,
     retrieve::{merge_chunks, score_value},
     technical_literals::{
-        TechnicalLiteralIntent, document_local_focus_keywords, question_mentions_pagination,
-        select_document_balanced_chunks, technical_chunk_selection_score, technical_keyword_weight,
+        TechnicalLiteralIntent, document_local_focus_keywords, select_document_balanced_chunks,
+        technical_chunk_selection_score, technical_keyword_weight,
         technical_literal_candidate_limit, technical_literal_focus_keywords,
     },
 };
@@ -250,6 +251,9 @@ pub(super) fn preflight_exact_literal_document_scope(
     intent_profile: &QueryIntentProfile,
     technical_literal_chunks: &[RuntimeMatchedChunk],
 ) -> Option<HashSet<Uuid>> {
+    if query_ir_has_focused_document_answer_intent(query_ir) {
+        return None;
+    }
     if !intent_profile.exact_literal_technical || technical_literal_chunks.is_empty() {
         return None;
     }
@@ -304,7 +308,7 @@ pub(super) fn select_preflight_literal_document_id(
     }
 
     let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
     for chunk in chunks {

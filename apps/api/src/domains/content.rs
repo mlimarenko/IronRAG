@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domains::knowledge::StructuredDocumentRevision;
+use ironrag_contracts::documents::DocumentReadiness;
 
 pub use crate::domains::runtime_ingestion::RuntimeDocumentActivityStatus;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentDocument {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -18,7 +19,7 @@ pub struct ContentDocument {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentDocumentHead {
     pub document_id: Uuid,
     pub active_revision_id: Option<Uuid>,
@@ -46,7 +47,7 @@ impl ContentDocumentHead {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentRevision {
     pub id: Uuid,
     pub document_id: Uuid,
@@ -66,21 +67,21 @@ pub struct ContentRevision {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentSourceAccessKind {
     StoredDocument,
     ExternalUrl,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentSourceAccess {
     pub kind: ContentSourceAccessKind,
     pub href: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentRevisionReadiness {
     pub revision_id: Uuid,
     pub text_state: String,
@@ -91,7 +92,7 @@ pub struct ContentRevisionReadiness {
     pub graph_ready_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentMutation {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -108,7 +109,7 @@ pub struct ContentMutation {
     pub conflict_code: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentChunk {
     pub id: Uuid,
     pub revision_id: Uuid,
@@ -128,7 +129,7 @@ pub struct ContentChunk {
     pub occurred_until: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentMutationItem {
     pub id: Uuid,
     pub mutation_id: Uuid,
@@ -144,7 +145,7 @@ pub fn revision_text_state_is_readable(text_state: &str) -> bool {
     matches!(text_state.trim(), "readable" | "ready" | "text_readable")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebPageProvenance {
     pub run_id: Option<Uuid>,
@@ -153,7 +154,7 @@ pub struct WebPageProvenance {
     pub canonical_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentDocumentPipelineJob {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -172,18 +173,18 @@ pub struct ContentDocumentPipelineJob {
     pub retryable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentDocumentPipelineState {
     pub latest_mutation: Option<ContentMutation>,
     pub latest_job: Option<ContentDocumentPipelineJob>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentReadinessSummary {
     pub document_id: Uuid,
     pub active_revision_id: Option<Uuid>,
-    pub readiness_kind: String,
+    pub readiness_kind: DocumentReadiness,
     pub activity_status: RuntimeDocumentActivityStatus,
     pub stalled_reason: Option<String>,
     pub preparation_state: String,
@@ -194,7 +195,7 @@ pub struct DocumentReadinessSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryKnowledgeCoverage {
     pub library_id: Uuid,
@@ -206,7 +207,7 @@ pub struct LibraryKnowledgeCoverage {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentDocumentSummary {
     pub document: ContentDocument,
     pub file_name: String,

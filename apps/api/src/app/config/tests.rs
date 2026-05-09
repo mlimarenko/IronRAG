@@ -38,6 +38,8 @@ fn sample_settings() -> Settings {
         ui_bootstrap_extract_graph_model_name: None,
         ui_bootstrap_embed_chunk_provider_kind: None,
         ui_bootstrap_embed_chunk_model_name: None,
+        ui_bootstrap_query_retrieve_provider_kind: None,
+        ui_bootstrap_query_retrieve_model_name: None,
         ui_bootstrap_query_compile_provider_kind: None,
         ui_bootstrap_query_compile_model_name: None,
         ui_bootstrap_query_answer_provider_kind: None,
@@ -76,8 +78,6 @@ fn sample_settings() -> Settings {
         ingestion_embedding_parallelism: 2,
         ingestion_graph_extract_parallelism_per_doc: 2,
         llm_http_timeout_seconds: 120,
-        llm_transport_retry_attempts: 5,
-        llm_transport_retry_base_delay_ms: 500,
         runtime_agent_max_turns: 4,
         runtime_agent_max_parallel_actions: 4,
         runtime_trace_payload_budget_bytes: DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES,
@@ -89,6 +89,7 @@ fn sample_settings() -> Settings {
         query_answer_source_links_enabled: false,
         release_check_repository: "mlimarenko/IronRAG".into(),
         release_check_interval_hours: 12,
+        graph_gc_hours: 24,
         query_rerank_enabled: true,
         query_rerank_candidate_limit: 24,
         query_balanced_context_enabled: true,
@@ -140,6 +141,7 @@ fn settings_from_env_entries(entries: &[(&str, &str)]) -> Settings {
     validate_recognition_settings(&settings).expect("recognition settings should validate");
     validate_runtime_agent_settings(&settings).expect("runtime settings should validate");
     validate_release_monitor_settings(&settings).expect("release monitor settings should validate");
+    validate_graph_gc_settings(&settings).expect("graph GC settings should validate");
     validate_mcp_memory_settings(&settings).expect("mcp settings should validate");
     settings
 }
@@ -165,6 +167,7 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.runtime_agent_max_turns, 4);
     assert_eq!(settings.release_check_repository, "mlimarenko/IronRAG");
     assert_eq!(settings.release_check_interval_hours, 12);
+    assert_eq!(settings.graph_gc_hours, 24);
     assert_eq!(settings.runtime_agent_max_parallel_actions, 4);
     assert_eq!(settings.recognition_default_raster_image_engine, "docling");
     assert_eq!(
@@ -250,6 +253,13 @@ fn canonical_ingestion_limit_variables_override_defaults() {
 }
 
 #[test]
+fn canonical_graph_gc_interval_variable_overrides_default() {
+    let settings = settings_from_env_entries(&[("IRONRAG_GRAPH_GC_HOURS", "6")]);
+
+    assert_eq!(settings.graph_gc_hours, 6);
+}
+
+#[test]
 fn ingestion_limits_must_nest_from_library_to_global() {
     let mut settings = sample_settings();
     settings.ingestion_max_parallel_jobs_global = 64;
@@ -331,18 +341,35 @@ fn resolved_ui_bootstrap_ai_is_absent_without_provider_credentials() {
 }
 
 #[test]
+fn bootstrap_provider_secret_envs_include_router_providers_without_aliases() {
+    assert_eq!(
+        BOOTSTRAP_PROVIDER_SECRET_ENVS,
+        &[
+            ("openai", "IRONRAG_OPENAI_API_KEY"),
+            ("deepseek", "IRONRAG_DEEPSEEK_API_KEY"),
+            ("qwen", "IRONRAG_QWEN_API_KEY"),
+            ("openrouter", "IRONRAG_OPENROUTER_API_KEY"),
+            ("gptunnel", "IRONRAG_GPTUNNEL_API_KEY"),
+            ("routerai", "IRONRAG_ROUTERAI_API_KEY"),
+        ]
+    );
+}
+
+#[test]
 fn resolved_ui_bootstrap_ai_exposes_binding_defaults_without_provider_credentials() {
     let mut settings = sample_settings();
-    settings.ui_bootstrap_extract_graph_provider_kind = Some(" deepseek ".into());
-    settings.ui_bootstrap_extract_graph_model_name = Some(" deepseek-chat ".into());
-    settings.ui_bootstrap_embed_chunk_provider_kind = Some(" openai ".into());
-    settings.ui_bootstrap_embed_chunk_model_name = Some(" text-embedding-3-large ".into());
-    settings.ui_bootstrap_query_compile_provider_kind = Some(" openai ".into());
-    settings.ui_bootstrap_query_compile_model_name = Some(" gpt-5.4-mini ".into());
-    settings.ui_bootstrap_query_answer_provider_kind = Some(" openai ".into());
-    settings.ui_bootstrap_query_answer_model_name = Some(" gpt-5.4 ".into());
-    settings.ui_bootstrap_vision_provider_kind = Some(" openai ".into());
-    settings.ui_bootstrap_vision_model_name = Some(" gpt-5.4-mini ".into());
+    settings.ui_bootstrap_extract_graph_provider_kind = Some(" provider-alpha ".into());
+    settings.ui_bootstrap_extract_graph_model_name = Some(" alpha-chat-small ".into());
+    settings.ui_bootstrap_embed_chunk_provider_kind = Some(" provider-beta ".into());
+    settings.ui_bootstrap_embed_chunk_model_name = Some(" beta-embedding-large ".into());
+    settings.ui_bootstrap_query_retrieve_provider_kind = Some(" provider-beta ".into());
+    settings.ui_bootstrap_query_retrieve_model_name = Some(" beta-embedding-large ".into());
+    settings.ui_bootstrap_query_compile_provider_kind = Some(" provider-alpha ".into());
+    settings.ui_bootstrap_query_compile_model_name = Some(" alpha-chat-plus ".into());
+    settings.ui_bootstrap_query_answer_provider_kind = Some(" provider-alpha ".into());
+    settings.ui_bootstrap_query_answer_model_name = Some(" alpha-chat-large ".into());
+    settings.ui_bootstrap_vision_provider_kind = Some(" provider-alpha ".into());
+    settings.ui_bootstrap_vision_model_name = Some(" alpha-vision ".into());
 
     assert_eq!(
         settings.resolved_ui_bootstrap_ai_setup(),
@@ -351,28 +378,33 @@ fn resolved_ui_bootstrap_ai_exposes_binding_defaults_without_provider_credential
             binding_defaults: vec![
                 UiBootstrapAiBindingDefault {
                     binding_purpose: "extract_graph".into(),
-                    provider_kind: Some("deepseek".into()),
-                    model_name: Some("deepseek-chat".into()),
+                    provider_kind: Some("provider-alpha".into()),
+                    model_name: Some("alpha-chat-small".into()),
                 },
                 UiBootstrapAiBindingDefault {
                     binding_purpose: "embed_chunk".into(),
-                    provider_kind: Some("openai".into()),
-                    model_name: Some("text-embedding-3-large".into()),
+                    provider_kind: Some("provider-beta".into()),
+                    model_name: Some("beta-embedding-large".into()),
+                },
+                UiBootstrapAiBindingDefault {
+                    binding_purpose: "query_retrieve".into(),
+                    provider_kind: Some("provider-beta".into()),
+                    model_name: Some("beta-embedding-large".into()),
                 },
                 UiBootstrapAiBindingDefault {
                     binding_purpose: "query_compile".into(),
-                    provider_kind: Some("openai".into()),
-                    model_name: Some("gpt-5.4-mini".into()),
+                    provider_kind: Some("provider-alpha".into()),
+                    model_name: Some("alpha-chat-plus".into()),
                 },
                 UiBootstrapAiBindingDefault {
                     binding_purpose: "query_answer".into(),
-                    provider_kind: Some("openai".into()),
-                    model_name: Some("gpt-5.4".into()),
+                    provider_kind: Some("provider-alpha".into()),
+                    model_name: Some("alpha-chat-large".into()),
                 },
                 UiBootstrapAiBindingDefault {
                     binding_purpose: "vision".into(),
-                    provider_kind: Some("openai".into()),
-                    model_name: Some("gpt-5.4-mini".into()),
+                    provider_kind: Some("provider-alpha".into()),
+                    model_name: Some("alpha-vision".into()),
                 },
             ],
         }),
@@ -419,6 +451,16 @@ fn public_origin_settings_split_and_trim_allowed_origins() {
         origins.allowed_origins,
         vec!["https://app.example.com".to_string(), "http://localhost:19000".to_string()]
     );
+    assert!(origins.session_cookie_secure);
+}
+
+#[test]
+fn public_origin_settings_leave_local_http_session_cookies_non_secure() {
+    let settings = sample_settings();
+
+    let origins = settings.public_origin_settings();
+
+    assert!(!origins.session_cookie_secure);
 }
 
 #[test]
@@ -549,4 +591,14 @@ fn rejects_zero_release_check_interval() {
     let error = validate_release_monitor_settings(&settings)
         .expect_err("zero interval should fail release monitor validation");
     assert!(error.contains("release_check_interval_hours"));
+}
+
+#[test]
+fn rejects_zero_graph_gc_interval() {
+    let mut settings = sample_settings();
+    settings.graph_gc_hours = 0;
+
+    let error =
+        validate_graph_gc_settings(&settings).expect_err("zero interval should fail graph GC");
+    assert!(error.contains("graph_gc_hours"));
 }

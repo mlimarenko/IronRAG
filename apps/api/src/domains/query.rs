@@ -10,7 +10,15 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub const DEFAULT_TOP_K: usize = 24;
+pub const MAX_TOP_K: usize = 32;
+
+#[must_use]
+pub fn resolve_top_k(requested_top_k: Option<usize>) -> usize {
+    requested_top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeQueryMode {
     Document,
@@ -48,7 +56,7 @@ impl std::str::FromStr for RuntimeQueryMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryIntentCacheStatus {
     Miss,
@@ -56,14 +64,14 @@ pub enum QueryIntentCacheStatus {
     HitStaleRecomputed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentKeywords {
     pub high_level: Vec<String>,
     pub low_level: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryPlanningMetadata {
     pub requested_mode: RuntimeQueryMode,
@@ -73,7 +81,7 @@ pub struct QueryPlanningMetadata {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RerankStatus {
     NotApplicable,
@@ -82,7 +90,7 @@ pub enum RerankStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RerankMetadata {
     pub status: RerankStatus,
@@ -90,7 +98,7 @@ pub struct RerankMetadata {
     pub reordered_count: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextAssemblyStatus {
     DocumentOnly,
@@ -99,14 +107,14 @@ pub enum ContextAssemblyStatus {
     MixedSkewed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextAssemblyMetadata {
     pub status: ContextAssemblyStatus,
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupedReferenceKind {
     Document,
@@ -115,7 +123,7 @@ pub enum GroupedReferenceKind {
     Mixed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupedReference {
     pub id: String,
@@ -127,7 +135,7 @@ pub struct GroupedReference {
     pub support_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryConversationState {
     Active,
@@ -156,7 +164,7 @@ impl std::str::FromStr for QueryConversationState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryTurnKind {
     User,
@@ -191,14 +199,14 @@ impl std::str::FromStr for QueryTurnKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryRuntimeStageSummary {
     pub stage_kind: RuntimeStageKind,
     pub stage_label: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryConversation {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -210,7 +218,7 @@ pub struct QueryConversation {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryTurn {
     pub id: Uuid,
     pub conversation_id: Uuid,
@@ -222,7 +230,7 @@ pub struct QueryTurn {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryExecution {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -241,7 +249,7 @@ pub struct QueryExecution {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryChunkReference {
     pub execution_id: Uuid,
     pub chunk_id: Uuid,
@@ -249,7 +257,7 @@ pub struct QueryChunkReference {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryGraphNodeReference {
     pub execution_id: Uuid,
     pub node_id: Uuid,
@@ -260,15 +268,17 @@ pub struct QueryGraphNodeReference {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryGraphEdgeReference {
     pub execution_id: Uuid,
     pub edge_id: Uuid,
     pub rank: i32,
     pub score: f64,
+    pub relation_type: String,
+    pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedSegmentReference {
     pub execution_id: Uuid,
@@ -285,7 +295,7 @@ pub struct PreparedSegmentReference {
     pub source_access: Option<ContentSourceAccess>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TechnicalFactReference {
     pub execution_id: Uuid,
@@ -298,7 +308,7 @@ pub struct TechnicalFactReference {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryVerificationState {
     #[default]
@@ -310,7 +320,7 @@ pub enum QueryVerificationState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryVerificationWarning {
     pub code: String,
@@ -319,14 +329,14 @@ pub struct QueryVerificationWarning {
     pub related_fact_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryConversationDetail {
     pub conversation: QueryConversation,
     pub turns: Vec<QueryTurn>,
     pub executions: Vec<QueryExecution>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryExecutionDetail {
     pub execution: QueryExecution,
     pub runtime_summary: RuntimeExecutionSummary,

@@ -11,17 +11,17 @@ use super::super::{
 use super::{
     DOCUMENT_IDENTITY_SCORE_FLOOR, RuntimeChunkScoreKind, apply_graph_evidence_texts_to_chunks,
     canonical_document_revision_id, chunk_answer_source_text, document_identity_chunk_score,
-    entity_bio_chunk_score, explicit_target_document_ids, graph_evidence_chunk_hits_from_rows,
-    graph_evidence_chunk_score, graph_evidence_context_line, graph_evidence_targets,
-    graph_evidence_targets_for_query, graph_target_entity_profiles, latest_version_documents,
-    map_chunk_hit, merge_chunks, merge_entity_bio_chunks, merge_graph_evidence_chunks,
-    merge_query_ir_focus_chunks, query_ir_focus_search_queries, query_ir_lexical_focus_queries,
+    entity_bio_chunk_score, graph_evidence_chunk_hits_from_rows, graph_evidence_chunk_score,
+    graph_evidence_context_line, graph_evidence_targets, graph_evidence_targets_for_query,
+    graph_target_entity_profiles, latest_version_documents, map_chunk_hit, merge_chunks,
+    merge_entity_bio_chunks, merge_graph_evidence_chunks, merge_query_ir_focus_chunks,
+    query_ir_focus_search_queries, query_ir_lexical_focus_queries,
     rank_graph_evidence_context_rows, retain_canonical_document_head_chunks,
     retain_entity_bio_candidates, truncate_bundle,
 };
 use crate::domains::query_ir::{
-    DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct, QueryIR,
-    QueryLanguage, QueryScope,
+    ComparisonSpec, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct,
+    QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceSpec,
 };
 use crate::infra::{
     arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
@@ -48,7 +48,7 @@ fn release_query_ir(count: Option<&str>, entity: Option<&str>) -> QueryIR {
         act: QueryAct::Enumerate,
         scope: QueryScope::MultiDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["release".to_string()],
+        target_types: vec!["version".to_string()],
         target_entities: entity
             .map(|label| {
                 vec![EntityMention { label: label.to_string(), role: EntityRole::Subject }]
@@ -202,19 +202,6 @@ fn non_table_chunk_answer_context_preserves_raw_content_text() {
 }
 
 #[test]
-fn explicit_target_document_ids_match_exact_file_name() {
-    let document = sample_document_row("people-100.csv", "people-100.csv");
-    let document_index = HashMap::from([(document.document_id, document.clone())]);
-
-    let targeted = explicit_target_document_ids(
-        "In people-100.csv what is Shelby Terrell's job title?",
-        &document_index,
-    );
-
-    assert_eq!(targeted, BTreeSet::from([document.document_id]));
-}
-
-#[test]
 fn document_target_candidates_include_extensionless_stem() {
     let document = sample_document_row("sample-heavy-1.xls", "sample-heavy-1.xls");
 
@@ -233,11 +220,30 @@ fn document_target_candidates_include_extensionless_stem() {
 }
 
 #[test]
-fn requested_initial_table_row_count_detects_english_row_ranges() {
-    assert_eq!(
-        requested_initial_table_row_count("Show the first 7 rows from people-100.csv."),
-        Some(7)
-    );
+fn requested_initial_table_row_count_uses_typed_source_slice() {
+    let mut ir = QueryIR {
+        act: QueryAct::Enumerate,
+        scope: QueryScope::SingleDocument,
+        language: QueryLanguage::Auto,
+        target_types: vec!["table_row".to_string()],
+        target_entities: Vec::new(),
+        literal_constraints: Vec::new(),
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: None,
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: Some(SourceSliceSpec {
+            direction: SourceSliceDirection::Head,
+            count: Some(7),
+        }),
+        confidence: 1.0,
+    };
+
+    assert_eq!(requested_initial_table_row_count(Some(&ir)), Some(7));
+
+    ir.target_types = vec!["document".to_string()];
+    assert_eq!(requested_initial_table_row_count(Some(&ir)), None);
 }
 
 #[test]
@@ -614,10 +620,114 @@ fn truncate_bundle_preserves_runtime_evidence_lanes() {
         chunks: high_scored_noise,
     };
 
-    truncate_bundle(&mut bundle, 4);
+    truncate_bundle(&mut bundle, 4, None);
 
     assert!(bundle.chunks.iter().any(|chunk| chunk.chunk_id == graph_evidence.chunk_id));
     assert_eq!(bundle.chunks[0].chunk_id, graph_evidence.chunk_id);
+}
+
+#[test]
+fn truncate_bundle_preserves_multi_document_relevant_coverage_for_compare_queries() {
+    let rust_document = Uuid::now_v7();
+    let llm_document = Uuid::now_v7();
+    let rust_chunk = |score: f32| RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id: rust_document,
+        document_label: "rust_programming_language_wikipedia".to_string(),
+        excerpt: "Rust language runtime context".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(score),
+        source_text: "Rust language context".to_string(),
+    };
+    let llm_chunk = |score: f32| RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id: llm_document,
+        document_label: "large_language_model_wikipedia".to_string(),
+        excerpt: "LLM context".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(score),
+        source_text: "Large Language Model context".to_string(),
+    };
+
+    let mut query_ir = target_entities_query_ir(&["Rust", "Large Language Model"]);
+    query_ir.act = QueryAct::Compare;
+    query_ir.scope = QueryScope::MultiDocument;
+    query_ir.comparison = Some(ComparisonSpec {
+        a: Some("Rust".to_string()),
+        b: Some("Large Language Model".to_string()),
+        dimension: "features".to_string(),
+    });
+
+    let mut bundle = RetrievalBundle {
+        entities: Vec::new(),
+        relationships: Vec::new(),
+        chunks: vec![
+            rust_chunk(10.0),
+            rust_chunk(9.9),
+            rust_chunk(9.8),
+            rust_chunk(9.7),
+            rust_chunk(9.6),
+            rust_chunk(9.5),
+            llm_chunk(8.0),
+            llm_chunk(7.9),
+        ],
+    };
+
+    truncate_bundle(&mut bundle, 6, Some(&query_ir));
+
+    assert_eq!(bundle.chunks.len(), 6);
+    assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == rust_document));
+    assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == llm_document));
+}
+
+#[test]
+fn truncate_bundle_compare_fallback_keeps_second_document_when_terms_are_not_present() {
+    let first_document = Uuid::now_v7();
+    let second_document = Uuid::now_v7();
+    let chunk = |document_id: Uuid, label: &str, score: f32| RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id,
+        document_label: label.to_string(),
+        excerpt: "neutral context".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(score),
+        source_text: "neutral context".to_string(),
+    };
+
+    let mut query_ir = target_entities_query_ir(&["Alpha", "Beta"]);
+    query_ir.act = QueryAct::Compare;
+    query_ir.scope = QueryScope::MultiDocument;
+    query_ir.comparison = Some(ComparisonSpec {
+        a: Some("Alpha".to_string()),
+        b: Some("Beta".to_string()),
+        dimension: "difference".to_string(),
+    });
+
+    let mut bundle = RetrievalBundle {
+        entities: Vec::new(),
+        relationships: Vec::new(),
+        chunks: vec![
+            chunk(first_document, "first.md", 10.0),
+            chunk(first_document, "first.md", 9.9),
+            chunk(first_document, "first.md", 9.8),
+            chunk(second_document, "second.md", 8.0),
+        ],
+    };
+
+    truncate_bundle(&mut bundle, 2, Some(&query_ir));
+
+    assert_eq!(bundle.chunks.len(), 2);
+    assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == first_document));
+    assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == second_document));
 }
 
 #[test]
@@ -894,7 +1004,7 @@ fn graph_evidence_context_ranking_keeps_multi_anchor_target_row_under_body_dedup
 
     let ranked = rank_graph_evidence_context_rows(
         &[generic_row],
-        &[composite_row.clone()],
+        std::slice::from_ref(&composite_row),
         "Which event involved Beacon and Harbor Delta?",
         &["Beacon Harbor Delta".to_string()],
         &graph_index,

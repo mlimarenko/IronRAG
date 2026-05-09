@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::{
     app::config::Settings,
     domains::deployment::{ContentStorageProvider, DeploymentTopology},
+    services::content::error::ContentServiceError,
 };
 
 use self::{
@@ -53,7 +54,7 @@ impl StashedContentDirectory {
 }
 
 impl ContentStorageService {
-    pub fn from_settings(settings: &Settings) -> anyhow::Result<Self> {
+    pub fn from_settings(settings: &Settings) -> Result<Self, ContentServiceError> {
         let provider = settings.content_storage_provider_kind().map_err(|error| anyhow!(error))?;
         let topology = settings.content_storage_topology_kind().map_err(|error| anyhow!(error))?;
         let key_prefix = settings.content_storage_key_prefix.trim().trim_matches('/').to_string();
@@ -133,7 +134,7 @@ impl ContentStorageService {
         &self.diagnostics
     }
 
-    pub async fn prepare_startup(&self) -> anyhow::Result<ContentStorageProbe> {
+    pub async fn prepare_startup(&self) -> Result<ContentStorageProbe, ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => provider.prepare_and_validate().await,
             ContentStorageBackend::S3(provider) => provider.prepare_and_validate().await,
@@ -165,7 +166,7 @@ impl ContentStorageService {
         file_name: &str,
         checksum: &str,
         file_bytes: &[u8],
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, ContentServiceError> {
         let storage_key =
             Self::build_revision_storage_key(workspace_id, library_id, file_name, checksum);
         match &self.backend {
@@ -186,7 +187,7 @@ impl ContentStorageService {
         source_uri: &str,
         checksum: &str,
         file_bytes: &[u8],
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, ContentServiceError> {
         let file_name = build_web_snapshot_file_name(source_uri);
         self.persist_revision_source(workspace_id, library_id, &file_name, checksum, file_bytes)
             .await
@@ -202,14 +203,20 @@ impl ContentStorageService {
         build_revision_storage_key(workspace_id, library_id, file_name, checksum)
     }
 
-    pub async fn has_revision_source(&self, storage_key: &str) -> anyhow::Result<bool> {
+    pub async fn has_revision_source(
+        &self,
+        storage_key: &str,
+    ) -> Result<bool, ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => provider.has(storage_key).await,
             ContentStorageBackend::S3(provider) => provider.has(storage_key).await,
         }
     }
 
-    pub async fn read_revision_source(&self, storage_key: &str) -> anyhow::Result<Vec<u8>> {
+    pub async fn read_revision_source(
+        &self,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => provider.read(storage_key).await,
             ContentStorageBackend::S3(provider) => provider.read(storage_key).await,
@@ -228,7 +235,7 @@ impl ContentStorageService {
         &self,
         storage_key: &str,
         file_bytes: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => {
                 provider.persist(storage_key, file_bytes).await
@@ -242,7 +249,7 @@ impl ContentStorageService {
         storage_key: &str,
         content_disposition: &str,
         content_type: &str,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> Result<Option<String>, ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(_) => Ok(None),
             ContentStorageBackend::S3(provider) => provider
@@ -256,21 +263,21 @@ impl ContentStorageService {
         &self,
         workspace_id: Uuid,
         library_id: Uuid,
-    ) -> anyhow::Result<Option<StashedContentDirectory>> {
+    ) -> Result<Option<StashedContentDirectory>, ContentServiceError> {
         self.stash_relative_directory(&format!("content/{workspace_id}/{library_id}")).await
     }
 
     pub async fn stash_workspace_storage(
         &self,
         workspace_id: Uuid,
-    ) -> anyhow::Result<Option<StashedContentDirectory>> {
+    ) -> Result<Option<StashedContentDirectory>, ContentServiceError> {
         self.stash_relative_directory(&format!("content/{workspace_id}")).await
     }
 
     pub async fn restore_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => {
                 provider.restore_stashed_directory(stashed_directory).await
@@ -284,7 +291,7 @@ impl ContentStorageService {
     pub async fn purge_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => {
                 provider.purge_stashed_directory(stashed_directory).await
@@ -298,7 +305,7 @@ impl ContentStorageService {
     async fn stash_relative_directory(
         &self,
         relative_directory: &str,
-    ) -> anyhow::Result<Option<StashedContentDirectory>> {
+    ) -> Result<Option<StashedContentDirectory>, ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => {
                 provider.stash_prefix(relative_directory).await

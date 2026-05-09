@@ -120,12 +120,7 @@ pub(super) fn build_transport_contract_comparison_answer(
 
 fn query_ir_requests_transport_comparison(query_ir: &QueryIR) -> bool {
     matches!(query_ir.act, QueryAct::Compare)
-        && query_ir.target_types.iter().any(|tag| {
-            matches!(
-                tag.trim().to_ascii_lowercase().replace('-', "_").as_str(),
-                "transport" | "protocol"
-            )
-        })
+        && query_ir.target_types.iter().any(|tag| tag.trim().eq_ignore_ascii_case("protocol"))
 }
 
 #[cfg(test)]
@@ -141,7 +136,7 @@ mod tests {
             act: QueryAct::Compare,
             scope: QueryScope::MultiDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["transport".to_string(), "protocol".to_string()],
+            target_types: vec!["protocol".to_string()],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),

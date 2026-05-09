@@ -15,7 +15,10 @@ use ironrag_backend::{
         },
         query::{QueryExecution, QueryVerificationState},
     },
-    domains::{audit::AuditEventSubject, ops::OpsAsyncOperation},
+    domains::{
+        audit::AuditEventSubject,
+        ops::{OpsAsyncOperation, OpsAsyncOperationStatus},
+    },
     infra::arangodb::{
         bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
         client::ArangoClient,
@@ -283,6 +286,8 @@ impl QueryGroundingFixture {
                 window_text: None,
 
                 raptor_level: None,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert grounding chunk")?;
@@ -917,7 +922,7 @@ fn sample_async_operation(
     workspace_id: Uuid,
     library_id: Uuid,
     execution_id: Uuid,
-    status: &str,
+    status: OpsAsyncOperationStatus,
     failure_code: Option<&str>,
 ) -> OpsAsyncOperation {
     OpsAsyncOperation {
@@ -925,14 +930,20 @@ fn sample_async_operation(
         workspace_id,
         library_id: Some(library_id),
         operation_kind: "query_execution".to_string(),
-        status: status.to_string(),
+        status,
         surface_kind: Some("rest".to_string()),
         subject_kind: Some("query_execution".to_string()),
         subject_id: Some(execution_id),
         parent_async_operation_id: None,
         failure_code: failure_code.map(ToString::to_string),
         created_at: Utc::now(),
-        completed_at: matches!(status, "ready" | "failed" | "canceled").then(Utc::now),
+        completed_at: matches!(
+            status,
+            OpsAsyncOperationStatus::Ready
+                | OpsAsyncOperationStatus::Failed
+                | OpsAsyncOperationStatus::Canceled
+        )
+        .then(Utc::now),
     }
 }
 
@@ -1384,18 +1395,23 @@ fn failure_cancellation_and_retry_scaffold_preserve_execution_bundle_linkage() {
         workspace_id,
         library_id,
         failed.id,
-        "failed",
+        OpsAsyncOperationStatus::Failed,
         failed.failure_code.as_deref(),
     );
     let canceled_operation = sample_async_operation(
         workspace_id,
         library_id,
         canceled.id,
-        "failed",
+        OpsAsyncOperationStatus::Failed,
         canceled.failure_code.as_deref(),
     );
-    let retried_operation =
-        sample_async_operation(workspace_id, library_id, retried.id, "processing", None);
+    let retried_operation = sample_async_operation(
+        workspace_id,
+        library_id,
+        retried.id,
+        OpsAsyncOperationStatus::Processing,
+        None,
+    );
 
     let failed_execution_subject =
         sample_audit_subject("query_execution", failed.id, workspace_id, library_id, None);

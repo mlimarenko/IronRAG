@@ -1,8 +1,17 @@
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use super::InlineMutationContext;
 
 use chrono::Utc;
+use tokio::time;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -12,7 +21,7 @@ use crate::{
     infra::arangodb::document_store::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
     },
-    infra::repositories,
+    infra::repositories::{self, ingest_repository},
     interfaces::http::router_support::ApiError,
     services::{
         graph::extract::{
@@ -44,13 +53,54 @@ use super::{
     MaterializeWebCaptureCommand, MaterializedWebCapture, PromoteHeadCommand,
     ReconcileFailedIngestMutationCommand, ReplaceInlineMutationCommand, RevisionAdmissionMetadata,
     UpdateMutationCommand, UpdateMutationItemCommand, UploadInlineDocumentCommand,
-    edited_markdown_file_name, infer_inline_mime_type, merge_appended_text, sha256_hex_bytes,
-    sha256_hex_text, source_uri_for_inline_payload,
+    edited_markdown_file_name, graph_extract_success_message, graph_state_after_successful_extract,
+    infer_inline_mime_type, merge_appended_bytes, sha256_hex_bytes, sha256_hex_text,
+    source_uri_for_inline_payload,
 };
 
 const GRAPH_EXTRACTION_MIN_CHUNK_QUALITY_SCORE: f32 = 0.35;
 const CHUNK_KIND_SOURCE_PROFILE: &str = "source_profile";
 const CHUNK_KIND_SOURCE_UNIT: &str = "source_unit";
+
+struct InlineAttemptHeartbeatGuard {
+    running: Arc<AtomicBool>,
+}
+
+impl Drop for InlineAttemptHeartbeatGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+    }
+}
+
+fn spawn_inline_attempt_heartbeat(
+    state: &AppState,
+    attempt_id: Uuid,
+) -> InlineAttemptHeartbeatGuard {
+    let running = Arc::new(AtomicBool::new(true));
+    let heartbeat_running = Arc::clone(&running);
+    let heartbeat_postgres = state.persistence.heartbeat_postgres.clone();
+    let heartbeat_interval =
+        Duration::from_secs(state.settings.ingestion_worker_heartbeat_interval_seconds.max(1));
+    tokio::spawn(async move {
+        while heartbeat_running.load(Ordering::Relaxed) {
+            time::sleep(heartbeat_interval).await;
+            if !heartbeat_running.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Err(error) =
+                ingest_repository::touch_attempt_heartbeat(&heartbeat_postgres, attempt_id, None)
+                    .await
+            {
+                warn!(
+                    attempt_id = %attempt_id,
+                    ?error,
+                    "failed to touch inline ingest attempt heartbeat",
+                );
+            }
+        }
+    });
+    InlineAttemptHeartbeatGuard { running }
+}
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct GraphExtractionChunkPolicy {
@@ -435,13 +485,42 @@ impl ContentService {
         state: &AppState,
         command: AppendInlineMutationCommand,
     ) -> Result<ContentMutationAdmission, ApiError> {
-        let document_context =
-            self.load_editable_document_context(state, command.document_id).await?;
-        let source_file_name = document_context.title.clone();
-        let source_mime_type = "text/plain".to_string();
-        let merged_text =
-            merge_appended_text(&document_context.current_content, &command.appended_text);
-        let merged_checksum = sha256_hex_bytes(merged_text.as_bytes());
+        if command.appended_text.trim().is_empty() {
+            return Err(ApiError::BadRequest("appendedText must not be empty".to_string()));
+        }
+        let source_identity = command.source_identity.clone();
+        let accept_command = AcceptMutationCommand {
+            workspace_id: command.workspace_id,
+            library_id: command.library_id,
+            operation_kind: "append".to_string(),
+            requested_by_principal_id: command.requested_by_principal_id,
+            request_surface: command.request_surface.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            source_identity: source_identity.clone(),
+        };
+        if let Some(existing_admission) =
+            self.get_existing_mutation_admission_for_request(state, &accept_command).await?
+        {
+            return Ok(existing_admission);
+        }
+
+        let appendable = self.load_appendable_document_source(state, command.document_id).await?;
+        let source_file_name = appendable.title.clone();
+        let source_mime_type = appendable.mime_type.clone();
+        let merged_bytes =
+            merge_appended_bytes(&appendable.raw_bytes, &command.appended_text, &source_mime_type);
+        if merged_bytes.is_empty() {
+            return Err(ApiError::BadRequest(
+                "append produced no content — appendedText must not be empty".to_string(),
+            ));
+        }
+        let merged_text = String::from_utf8(merged_bytes.clone()).map_err(|_| {
+            ApiError::BadRequest(
+                "append produced non-utf8 content — only text-like sources can be appended"
+                    .to_string(),
+            )
+        })?;
+        let merged_checksum = sha256_hex_bytes(&merged_bytes);
         let storage_file_name = source_file_name
             .clone()
             .unwrap_or_else(|| format!("document-{}.txt", command.document_id));
@@ -452,10 +531,9 @@ impl ContentService {
                 command.library_id,
                 &storage_file_name,
                 &format!("sha256:{merged_checksum}"),
-                merged_text.as_bytes(),
+                &merged_bytes,
             )
             .await?;
-        let source_identity = command.source_identity.clone();
         let admission = self
             .admit_mutation(
                 state,
@@ -472,9 +550,9 @@ impl ContentService {
                         content_source_kind: "append".to_string(),
                         checksum: format!("sha256:{merged_checksum}"),
                         mime_type: source_mime_type.clone(),
-                        byte_size: i64::try_from(merged_text.len()).unwrap_or(i64::MAX),
+                        byte_size: i64::try_from(merged_bytes.len()).unwrap_or(i64::MAX),
                         title: source_file_name.clone(),
-                        language_code: document_context.language_code,
+                        language_code: appendable.language_code,
                         source_uri: Some(source_uri_for_inline_payload(
                             "append",
                             source_identity.as_deref(),
@@ -668,6 +746,7 @@ impl ContentService {
     ) -> Result<ContentMutationAdmission, ApiError> {
         let context = self.inline_mutation_context_from_admission(admission)?;
         let attempt = self.lease_inline_attempt(state, &context).await?;
+        let _heartbeat_guard = spawn_inline_attempt_heartbeat(state, attempt.id);
         self.update_mutation(
             state,
             UpdateMutationCommand {
@@ -773,9 +852,16 @@ impl ContentService {
         } else {
             build_inline_text_extraction_plan(&text)
         };
+        let preparation_cancellation_token = CancellationToken::new();
         let preparation = self
-            .prepare_and_persist_revision_structure(state, context.revision_id, &extraction_plan)
-            .await?;
+            .prepare_and_persist_revision_structure(
+                state,
+                context.revision_id,
+                &extraction_plan,
+                &preparation_cancellation_token,
+            )
+            .await
+            .map_err(ApiError::from)?;
         state
             .canonical_services
             .ingest
@@ -909,7 +995,13 @@ impl ContentService {
                 },
             )
             .await?;
-        self.complete_successful_inline_mutation(state, &context, attempt.id).await
+        match self.complete_successful_inline_mutation(state, &context, attempt.id).await {
+            Ok(admission) => Ok(admission),
+            Err(error) => {
+                self.finalize_failed_inline_mutation(state, &context, attempt.id, &error).await;
+                Err(error)
+            }
+        }
     }
 
     async fn complete_successful_inline_mutation(
@@ -991,12 +1083,63 @@ impl ContentService {
         self.get_mutation_admission(state, context.mutation_id).await
     }
 
+    async fn finalize_failed_inline_mutation(
+        &self,
+        state: &AppState,
+        context: &InlineMutationContext,
+        attempt_id: Uuid,
+        error: &ApiError,
+    ) {
+        if let Err(finalize_error) = state
+            .canonical_services
+            .ingest
+            .finalize_attempt(
+                state,
+                FinalizeAttemptCommand {
+                    attempt_id,
+                    knowledge_generation_id: None,
+                    attempt_state: "failed".to_string(),
+                    current_stage: Some(INGEST_STAGE_FINALIZING.to_string()),
+                    failure_class: Some("content_mutation".to_string()),
+                    failure_code: Some("inline_pipeline_failed".to_string()),
+                    retryable: false,
+                },
+            )
+            .await
+        {
+            warn!(
+                attempt_id = %attempt_id,
+                ?finalize_error,
+                "failed to finalize inline mutation attempt after pipeline error",
+            );
+        }
+        if let Err(reconcile_error) = self
+            .reconcile_failed_ingest_mutation(
+                state,
+                ReconcileFailedIngestMutationCommand {
+                    mutation_id: context.mutation_id,
+                    failure_code: "inline_pipeline_failed".to_string(),
+                    failure_message: format!("inline mutation pipeline failed: {error}"),
+                },
+            )
+            .await
+        {
+            warn!(
+                mutation_id = %context.mutation_id,
+                attempt_id = %attempt_id,
+                ?reconcile_error,
+                "failed to reconcile inline mutation after pipeline error",
+            );
+        }
+    }
+
     async fn run_inline_post_chunk_pipeline(
         &self,
         state: &AppState,
         context: &InlineMutationContext,
         attempt_id: Uuid,
     ) -> Result<(), ApiError> {
+        let cancellation_token = CancellationToken::new();
         // --- Stage: embed_chunk ------------------------------------------
         // Mirrors the background-ingest worker: embed this revision's
         // chunks synchronously using the library's EmbedChunk binding so
@@ -1033,10 +1176,16 @@ impl ContentService {
         let embed_chunk_result = state
             .canonical_services
             .search
-            .embed_chunks_for_revision(state, context.library_id, context.revision_id)
+            .embed_chunks_for_revision(
+                state,
+                context.library_id,
+                context.revision_id,
+                &cancellation_token,
+            )
             .await;
         let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
-        let embed_chunk_success = match &embed_chunk_result {
+        let mut embed_chunk_failure: Option<String> = None;
+        match &embed_chunk_result {
             Ok(outcome) => {
                 if let (Some(provider), Some(model), Some(usage_json)) = (
                     outcome.provider_kind.clone(),
@@ -1099,6 +1248,7 @@ impl ContentService {
                 true
             }
             Err(error) => {
+                embed_chunk_failure = Some(format!("chunk embedding failed: {error:#}"));
                 warn!(
                     attempt_id = %attempt_id,
                     revision_id = %context.revision_id,
@@ -1134,6 +1284,18 @@ impl ContentService {
             }
         };
         drop(embed_chunk_result);
+
+        if let Some(reason) = embed_chunk_failure {
+            super::fail_revision_vector_graph_readiness(state, context.revision_id, &reason)
+                .await
+                .map_err(|error| {
+                    ApiError::internal_with_log(
+                        error,
+                        "failed to mark inline embed_chunk failure readiness",
+                    )
+                })?;
+            return Err(ApiError::internal_with_log(&reason, "inline chunk embedding failed"));
+        }
 
         state
             .canonical_services
@@ -1171,6 +1333,7 @@ impl ContentService {
                     revision_id: context.revision_id,
                     attempt_id: Some(attempt_id),
                 },
+                &cancellation_token,
             )
             .await;
         let extract_elapsed_ms = extract_start.elapsed().as_millis() as i64;
@@ -1188,6 +1351,7 @@ impl ContentService {
                         context.document_id,
                         context.revision_id,
                         Some(attempt_id),
+                        &cancellation_token,
                     )
                     .await;
                 graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
@@ -1235,7 +1399,9 @@ impl ContentService {
                                     attempt_id,
                                     stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                                     stage_state: "completed".to_string(),
-                                    message: Some("graph candidates extracted and reconciled".to_string()),
+                                    message: Some(
+                                        graph_extract_success_message(graph_ready).to_string(),
+                                    ),
                                     details_json: serde_json::json!({
 	                                        "chunksProcessed": graph_materialization.chunk_count,
 	                                        "graphChunksSelected": graph_materialization.selected_graph_chunks,
@@ -1343,13 +1509,16 @@ impl ContentService {
             }
         }
 
-        // Fail-fast: graph_ready already encodes
-        // (graph_contribution_count > 0 && projection.graph_status == "ready").
-        // Anything else is a hard failure for this pipeline — there is no
-        // half-complete state and no silent degradation to readable.
-        if !graph_ready && graph_failure.is_none() {
-            graph_failure =
-                Some("graph reconcile produced no contributions for this revision".to_string());
+        if let Some(reason) = graph_failure {
+            super::fail_revision_vector_graph_readiness(state, context.revision_id, &reason)
+                .await
+                .map_err(|error| {
+                    ApiError::internal_with_log(
+                        error,
+                        "failed to mark inline graph failure readiness",
+                    )
+                })?;
+            return Err(ApiError::internal_with_log(&reason, "inline graph pipeline failed"));
         }
 
         let revision = state
@@ -1361,28 +1530,20 @@ impl ContentService {
                 ApiError::resource_not_found("knowledge_revision", context.revision_id)
             })?;
         let now = Utc::now();
-        let graph_state_label = if graph_ready { "ready" } else { "failed" };
-        let vector_state_label = if embed_chunk_success { "ready" } else { "failed" };
-        let vector_ready_at =
-            if embed_chunk_success { revision.vector_ready_at.or(Some(now)) } else { None };
         state
             .arango_document_store
             .update_revision_readiness(
                 revision.revision_id,
                 &revision.text_state,
-                vector_state_label,
-                graph_state_label,
+                "ready",
+                graph_state_after_successful_extract(graph_ready),
                 revision.text_readable_at,
-                vector_ready_at,
+                revision.vector_ready_at.or(Some(now)),
                 revision.graph_ready_at.or(graph_ready.then_some(now)),
                 revision.superseded_by_revision_id,
             )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-
-        if let Some(reason) = graph_failure {
-            return Err(ApiError::internal_with_log(&reason, "inline graph pipeline failed"));
-        }
 
         Ok(())
     }

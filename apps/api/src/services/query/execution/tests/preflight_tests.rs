@@ -11,7 +11,7 @@ fn canonical_preflight_answer_prefers_missing_explicit_document_before_other_pat
 
     let answer = build_canonical_preflight_answer(
         "What does missing-contract.md say?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &QueryIntentProfile::default(),
         &document_index,
         Some("table answer".to_string()),
@@ -65,7 +65,12 @@ fn canonical_preflight_answer_reuses_single_endpoint_override_for_live_path() {
     let revision_id = Uuid::now_v7();
     let answer = build_canonical_preflight_answer(
         "Which endpoint returns the current checkout server info?",
-        &query_ir_with_literals_and_target_types(["current info", "checkout server"], ["endpoint"]),
+        &query_ir_with_act_scope_literals_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["current info", "checkout server"],
+            ["endpoint"],
+        ),
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         &document_index,
         None,
@@ -121,12 +126,15 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
         ),
     };
 
+    let query_ir = query_ir_with_act_scope_literals_and_target_types(
+        QueryAct::RetrieveValue,
+        QueryScope::SingleDocument,
+        ["current information", "checkout server"],
+        ["endpoint"],
+    );
     let merged = build_preflight_answer_chunks(
         "Which endpoint returns the current checkout server info?",
-        &query_ir_with_literals_and_target_types(
-            ["current information", "checkout server"],
-            ["endpoint"],
-        ),
+        &query_ir,
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         std::slice::from_ref(&noisy_chunk),
         std::slice::from_ref(&endpoint_chunk),
@@ -138,10 +146,7 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
     let revision_id = Uuid::now_v7();
     let answer = build_canonical_preflight_answer(
         "Which endpoint returns the current checkout server info?",
-        &query_ir_with_literals_and_target_types(
-            ["current information", "checkout server"],
-            ["endpoint"],
-        ),
+        &query_ir,
         &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
         &document_index,
         None,
@@ -256,7 +261,7 @@ fn select_technical_literal_chunks_focuses_single_source_parameter_question_on_b
         TechnicalLiteralIntent { wants_parameters: true, ..TechnicalLiteralIntent::default() },
         8,
         &technical_literal_focus_keywords(question, Some(&ir)),
-        question_mentions_pagination(question),
+        false,
     );
 
     assert_eq!(selected.len(), 1);
@@ -313,7 +318,7 @@ fn select_technical_literal_chunks_prefers_matching_wsdl_document_for_single_sou
         },
         8,
         &technical_literal_focus_keywords(question, Some(&ir)),
-        question_mentions_pagination(question),
+        false,
     );
 
     assert!(!selected.is_empty());
@@ -383,6 +388,95 @@ fn build_preflight_canonical_evidence_scopes_exact_literal_questions_to_literal_
         filtered.technical_facts.iter().map(|fact| fact.document_id).collect::<HashSet<_>>(),
         HashSet::from([rewards_document_id])
     );
+}
+
+#[test]
+fn focused_document_preflight_ignores_spurious_exact_literal_document_scope() {
+    let pdf_document_id = Uuid::now_v7();
+    let docx_document_id = Uuid::now_v7();
+    let profile =
+        QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() };
+    let mut ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::RetrieveValue,
+        QueryScope::SingleDocument,
+        ["secondary_heading", "config_key"],
+    );
+    ir.literal_constraints.push(LiteralSpan {
+        text: "upload_smoke_fixture.docx".to_string(),
+        kind: LiteralKind::Path,
+    });
+    ir.literal_constraints.push(LiteralSpan {
+        text: "runtime PDF upload check".to_string(),
+        kind: LiteralKind::Identifier,
+    });
+    let pdf_chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id: pdf_document_id,
+        document_label: "runtime_upload_check.pdf".to_string(),
+        excerpt: "Runtime PDF upload check".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(0.7),
+        source_text: "Runtime PDF upload check\n\nQuarterly graph report".to_string(),
+    };
+    let docx_chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id: docx_document_id,
+        document_label: "runtime_upload_check.docx".to_string(),
+        excerpt: "Runtime DOCX upload check".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(0.95),
+        source_text: "Runtime DOCX upload check\n\nCanonical pipeline validation".to_string(),
+    };
+
+    assert!(
+        preflight_exact_literal_document_scope(
+            "What report name appears in the runtime PDF upload check?",
+            &ir,
+            &profile,
+            std::slice::from_ref(&docx_chunk),
+        )
+        .is_none()
+    );
+
+    let chunks = build_preflight_answer_chunks(
+        "What report name appears in the runtime PDF upload check?",
+        &ir,
+        &profile,
+        std::slice::from_ref(&pdf_chunk),
+        std::slice::from_ref(&docx_chunk),
+    );
+    let answer = build_canonical_preflight_answer(
+        "What report name appears in the runtime PDF upload check?",
+        &ir,
+        &profile,
+        &HashMap::from([
+            (
+                pdf_document_id,
+                sample_document_row_for_preflight(pdf_document_id, "runtime_upload_check.pdf"),
+            ),
+            (
+                docx_document_id,
+                sample_document_row_for_preflight(docx_document_id, "runtime_upload_check.docx"),
+            ),
+        ]),
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &chunks,
+    )
+    .expect("focused document preflight answer");
+
+    assert_eq!(answer, "Quarterly graph report");
 }
 
 #[test]
@@ -686,7 +780,7 @@ fn preflight_exact_literal_scope_keeps_multi_document_comparison_questions_broad
 
     let scoped_documents = preflight_exact_literal_document_scope(
         "How does rewards REST differ from inventory WSDL?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &profile,
         &[
             RuntimeMatchedChunk {
@@ -746,7 +840,7 @@ fn canonical_preflight_answer_handles_english_transport_comparison_without_graph
         &query_ir_with_act_scope_and_target_types(
             QueryAct::Compare,
             QueryScope::MultiDocument,
-            ["transport", "protocol"],
+            ["protocol"],
         ),
         &QueryIntentProfile::default(),
         &document_index,

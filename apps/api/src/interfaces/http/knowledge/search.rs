@@ -4,6 +4,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
@@ -42,12 +43,16 @@ use super::{
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const DEFAULT_EVIDENCE_SAMPLE_LIMIT: usize = 5;
+const SEARCH_LEXICAL_QUERY_PARALLELISM: usize = 4;
+const SEARCH_CHUNK_EVIDENCE_PARALLELISM: usize = 4;
+const SEARCH_DOCUMENT_ENRICHMENT_PARALLELISM: usize = 4;
 const DOCUMENT_KEYWORD_COVERAGE_BONUS_WEIGHT: f64 = 0.8;
 const DOCUMENT_KEYWORD_AGGREGATE_COVERAGE_BONUS_WEIGHT: f64 = 0.25;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct KnowledgeDocumentSearchQuery {
+#[into_params(parameter_in = Query)]
+pub struct KnowledgeDocumentSearchQuery {
     #[serde(alias = "q")]
     query: Option<String>,
     #[serde(default)]
@@ -58,9 +63,10 @@ pub(super) struct KnowledgeDocumentSearchQuery {
     evidence_sample_limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct KnowledgeDocumentSearchRequest {
+#[into_params(parameter_in = Query)]
+pub struct KnowledgeDocumentSearchRequest {
     library_id: Uuid,
     #[serde(alias = "q")]
     query: Option<String>,
@@ -72,9 +78,9 @@ pub(super) struct KnowledgeDocumentSearchRequest {
     evidence_sample_limit: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeSearchRevisionSummary {
+pub struct KnowledgeSearchRevisionSummary {
     revision_id: Uuid,
     document_id: Uuid,
     revision_number: i64,
@@ -89,9 +95,9 @@ struct KnowledgeSearchRevisionSummary {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeSearchDocumentHit {
+pub struct KnowledgeSearchDocumentHit {
     document: KnowledgeDocumentRow,
     revision: KnowledgeSearchRevisionSummary,
     score: f64,
@@ -108,9 +114,9 @@ struct KnowledgeSearchDocumentHit {
     graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct KnowledgeDocumentSearchResponse {
+pub struct KnowledgeDocumentSearchResponse {
     library_id: Uuid,
     query_text: String,
     limit: usize,
@@ -203,6 +209,20 @@ fn document_keyword_coverage_bonus(
         + (aggregate_signal * DOCUMENT_KEYWORD_AGGREGATE_COVERAGE_BONUS_WEIGHT)
 }
 
+fn resolved_evidence_sample_limit(value: Option<usize>) -> usize {
+    value.unwrap_or(DEFAULT_EVIDENCE_SAMPLE_LIMIT)
+}
+
+fn document_search_vector_limits(
+    limit: usize,
+    chunk_hit_limit_per_document: usize,
+) -> (usize, usize) {
+    let chunk_limit =
+        limit.saturating_mul(chunk_hit_limit_per_document).max(limit.saturating_mul(2)).max(1);
+    let entity_limit = limit.max(1);
+    (chunk_limit, entity_limit)
+}
+
 fn expand_document_search_queries(query_text: &str) -> Vec<String> {
     let mut queries = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
@@ -231,7 +251,22 @@ fn expand_document_search_queries(query_text: &str) -> Vec<String> {
     skip_all,
     fields(library_id = %library_id, elapsed_ms)
 )]
-pub(super) async fn search_documents(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/search/documents",
+    tag = "search",
+    operation_id = "searchKnowledgeDocuments",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        KnowledgeDocumentSearchQuery,
+    ),
+    responses(
+        (status = 200, description = "Hybrid lexical + vector document search results", body = KnowledgeDocumentSearchResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn search_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -258,7 +293,20 @@ pub(super) async fn search_documents(
     skip_all,
     fields(library_id = %query.library_id, elapsed_ms)
 )]
-pub(super) async fn search_documents_by_library_query(
+#[utoipa::path(
+    get,
+    path = "/v1/search/documents",
+    tag = "search",
+    operation_id = "searchDocuments",
+    params(KnowledgeDocumentSearchRequest),
+    responses(
+        (status = 200, description = "Hybrid document search across the requested library", body = KnowledgeDocumentSearchResponse),
+        (status = 400, description = "libraryId is required"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn search_documents_by_library_query(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<KnowledgeDocumentSearchRequest>,
@@ -295,86 +343,53 @@ async fn search_documents_impl(
 
     let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1);
     let chunk_hit_limit_per_document = chunk_hit_limit_per_document.unwrap_or(10).max(1);
-    let evidence_sample_limit =
-        evidence_sample_limit.unwrap_or(DEFAULT_EVIDENCE_SAMPLE_LIMIT).max(1);
+    let evidence_sample_limit = resolved_evidence_sample_limit(evidence_sample_limit);
     let query_keywords = document_search_keywords(&query_text);
     let internal_candidate_limit =
         limit.saturating_mul(chunk_hit_limit_per_document.max(3)).saturating_mul(4).max(16);
-    let mut lexical_chunk_hit_map = HashMap::<Uuid, KnowledgeChunkSearchRow>::new();
-    for search_query in expand_document_search_queries(&query_text) {
-        let rows = state
-            .arango_search_store
-            .search_chunks(library_id, &search_query, internal_candidate_limit, None, None)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        for row in rows {
-            match lexical_chunk_hit_map.entry(row.chunk_id) {
-                std::collections::hash_map::Entry::Occupied(mut occupied) => {
-                    if row.score > occupied.get().score {
-                        occupied.insert(row);
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(vacant) => {
-                    vacant.insert(row);
-                }
-            }
-        }
-    }
-    let mut lexical_chunk_hits = lexical_chunk_hit_map.into_values().collect::<Vec<_>>();
-    lexical_chunk_hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
-    });
-    let lexical_entity_hits =
-        search_entities_by_library(&state, library_id, &query_text, limit).await?;
-    let lexical_relation_hits =
-        search_relations_by_library(&state, library_id, &query_text, limit).await?;
+    let (vector_chunk_limit, vector_entity_limit) =
+        document_search_vector_limits(limit, chunk_hit_limit_per_document);
+    let (lexical_chunk_hits_result, lexical_entity_hits, lexical_relation_hits, hybrid_context) = tokio::try_join!(
+        search_expanded_lexical_chunks(&state, library_id, &query_text, internal_candidate_limit),
+        search_entities_by_library(&state, library_id, &query_text, limit),
+        search_relations_by_library(&state, library_id, &query_text, limit),
+        resolve_hybrid_search_context(&state, library_id, &query_text),
+    )?;
+    let mut lexical_chunk_hits = lexical_chunk_hits_result;
 
-    let hybrid_context = resolve_hybrid_search_context(&state, library_id, &query_text).await?;
-    let vector_candidate_limit = internal_candidate_limit.max(limit.saturating_mul(2).max(1));
-    let mut vector_chunk_hits = if let Some(context) = hybrid_context.as_ref() {
-        match state
-            .arango_search_store
-            .search_chunk_vectors_by_similarity(
-                library_id,
-                &context.model_catalog_id.to_string(),
-                &context.query_vector,
-                vector_candidate_limit,
-                None,
-                None,
-                None,
-            )
-            .await
-        {
+    let (mut vector_chunk_hits, vector_entity_hits) = if let Some(context) = hybrid_context.as_ref()
+    {
+        let embedding_model_key = context.model_catalog_id.to_string();
+        let vector_chunk_future = state.arango_search_store.search_chunk_vectors_by_similarity(
+            library_id,
+            &embedding_model_key,
+            &context.query_vector,
+            vector_chunk_limit,
+            None,
+            None,
+            None,
+        );
+        let vector_entity_future = state.arango_search_store.search_entity_vectors_by_similarity(
+            library_id,
+            &embedding_model_key,
+            &context.query_vector,
+            vector_entity_limit,
+            None,
+        );
+        let (chunk_result, entity_result) = tokio::join!(vector_chunk_future, vector_entity_future);
+        let chunk_rows = match chunk_result {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(
                     library_id = %library_id,
                     model_catalog_id = %context.model_catalog_id,
                     error = ?error,
-                    "hybrid knowledge chunk vector search failed; falling back to lexical-only hits",
+                    "hybrid knowledge chunk vector search failed; returning lexical chunk hits only",
                 );
                 Vec::new()
             }
-        }
-    } else {
-        Vec::new()
-    };
-    let vector_entity_hits = if let Some(context) = hybrid_context.as_ref() {
-        match state
-            .arango_search_store
-            .search_entity_vectors_by_similarity(
-                library_id,
-                &context.model_catalog_id.to_string(),
-                &context.query_vector,
-                vector_candidate_limit,
-                None,
-            )
-            .await
-        {
+        };
+        let entity_rows = match entity_result {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(
@@ -385,9 +400,10 @@ async fn search_documents_impl(
                 );
                 Vec::new()
             }
-        }
+        };
+        (chunk_rows, entity_rows)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     let chunk_ids: Vec<Uuid> = lexical_chunk_hits
@@ -415,9 +431,20 @@ async fn search_documents_impl(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let revisions = load_revisions_by_ids(&state, &revision_ids).await?;
+    let document_ids: Vec<Uuid> = chunk_map
+        .values()
+        .map(|chunk| chunk.document_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let (revisions, documents) = tokio::try_join!(
+        load_revisions_by_ids(&state, &revision_ids),
+        load_documents_by_ids(&state, &document_ids),
+    )?;
     let revision_map: HashMap<Uuid, KnowledgeRevisionRow> =
         revisions.into_iter().map(|revision| (revision.revision_id, revision)).collect();
+    let document_map: HashMap<Uuid, KnowledgeDocumentRow> =
+        documents.into_iter().map(|document| (document.document_id, document)).collect();
     if revision_map.len() < revision_ids.len() {
         warn!(
             library_id = %library_id,
@@ -426,16 +453,6 @@ async fn search_documents_impl(
             "knowledge document search ignored chunk hits whose revisions are no longer readable",
         );
     }
-
-    let document_ids: Vec<Uuid> = chunk_map
-        .values()
-        .map(|chunk| chunk.document_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let documents = load_documents_by_ids(&state, &document_ids).await?;
-    let document_map: HashMap<Uuid, KnowledgeDocumentRow> =
-        documents.into_iter().map(|document| (document.document_id, document)).collect();
     if document_map.len() < document_ids.len() {
         warn!(
             library_id = %library_id,
@@ -547,28 +564,36 @@ async fn search_documents_impl(
             .map(|hit| hit.chunk_id)
             .chain(accumulator.vector_chunk_hits.iter().map(|hit| hit.chunk_id))
             .collect();
+        let mut deduped_chunk_ids = Vec::<Uuid>::new();
         for chunk_id in candidate_chunk_ids {
             if !seen_evidence_chunks.insert(chunk_id) {
                 continue;
             }
-            let evidence_rows = state
-                .arango_graph_store
-                .list_evidence_by_chunk(chunk_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-            for evidence in evidence_rows {
-                if evidence.document_id != accumulator.document.document_id {
+            deduped_chunk_ids.push(chunk_id);
+        }
+
+        if evidence_sample_limit > 0 {
+            let evidence_by_chunk = load_evidence_samples_by_chunk_ids(
+                &state,
+                accumulator.document.document_id,
+                &deduped_chunk_ids,
+            )
+            .await?;
+            for chunk_id in deduped_chunk_ids {
+                let Some(evidence_rows) = evidence_by_chunk.get(&chunk_id) else {
                     continue;
-                }
-                if accumulator.evidence_ids.insert(evidence.evidence_id) {
-                    accumulator.evidence_samples.push(evidence);
+                };
+                for evidence in evidence_rows {
+                    if accumulator.evidence_ids.insert(evidence.evidence_id) {
+                        accumulator.evidence_samples.push(evidence.clone());
+                    }
+                    if accumulator.evidence_samples.len() >= evidence_sample_limit {
+                        break;
+                    }
                 }
                 if accumulator.evidence_samples.len() >= evidence_sample_limit {
                     break;
                 }
-            }
-            if accumulator.evidence_samples.len() >= evidence_sample_limit {
-                break;
             }
         }
 
@@ -596,41 +621,32 @@ async fn search_documents_impl(
             .then_with(|| left.document.document_id.cmp(&right.document.document_id))
     });
     document_hits.truncate(limit);
-    let mut response_hits = Vec::with_capacity(document_hits.len());
-    for mut accumulator in document_hits {
-        backfill_document_chunk_hits(
-            &state,
-            &query_text,
-            chunk_hit_limit_per_document,
-            &mut accumulator,
-        )
-        .await?;
-        let technical_fact_samples = state
-            .canonical_services
-            .knowledge
-            .list_typed_technical_facts(&state, accumulator.revision.revision_id)
-            .await?;
-        response_hits.push(KnowledgeSearchDocumentHit {
-            provenance_summary: KnowledgeDocumentProvenanceSummary {
-                supporting_evidence_count: accumulator.evidence_samples.len(),
-                lexical_chunk_count: accumulator.chunk_hits.len(),
-                vector_chunk_count: accumulator.vector_chunk_hits.len(),
-            },
-            technical_fact_summary: summarize_typed_technical_facts(&technical_fact_samples),
-            graph_evidence_summary: summarize_graph_evidence(&accumulator.evidence_samples),
-            document: accumulator.document,
-            revision: map_search_revision_summary(accumulator.revision),
-            score: accumulator.score,
-            lexical_rank: accumulator.lexical_rank,
-            vector_rank: accumulator.vector_rank,
-            lexical_score: accumulator.lexical_score,
-            vector_score: accumulator.vector_score,
-            chunk_hits: accumulator.chunk_hits,
-            vector_chunk_hits: accumulator.vector_chunk_hits,
-            evidence_samples: accumulator.evidence_samples,
-            technical_fact_samples,
-        });
+    let enrichment_parallelism =
+        SEARCH_DOCUMENT_ENRICHMENT_PARALLELISM.min(document_hits.len()).max(1);
+    let enriched_results =
+        stream::iter(document_hits.into_iter().enumerate().map(|(index, accumulator)| {
+            let state = state.clone();
+            let query_text = query_text.clone();
+            async move {
+                enrich_document_search_hit(
+                    state,
+                    query_text,
+                    chunk_hit_limit_per_document,
+                    index,
+                    accumulator,
+                )
+                .await
+            }
+        }))
+        .buffer_unordered(enrichment_parallelism)
+        .collect::<Vec<_>>()
+        .await;
+    let mut indexed_response_hits = Vec::with_capacity(enriched_results.len());
+    for result in enriched_results {
+        indexed_response_hits.push(result?);
     }
+    indexed_response_hits.sort_by_key(|(index, _)| *index);
+    let response_hits = indexed_response_hits.into_iter().map(|(_, hit)| hit).collect::<Vec<_>>();
 
     Ok(Json(KnowledgeDocumentSearchResponse {
         library_id,
@@ -658,6 +674,137 @@ async fn search_documents_impl(
         vector_chunk_hits,
         vector_entity_hits,
     }))
+}
+
+async fn search_expanded_lexical_chunks(
+    state: &AppState,
+    library_id: Uuid,
+    query_text: &str,
+    internal_candidate_limit: usize,
+) -> Result<Vec<KnowledgeChunkSearchRow>, ApiError> {
+    let search_queries = expand_document_search_queries(query_text);
+    let parallelism = SEARCH_LEXICAL_QUERY_PARALLELISM.min(search_queries.len()).max(1);
+    let search_results = stream::iter(search_queries.into_iter().map(|search_query| {
+        let state = state.clone();
+        async move {
+            state
+                .arango_search_store
+                .search_chunks(library_id, &search_query, internal_candidate_limit, None, None)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))
+        }
+    }))
+    .buffer_unordered(parallelism)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut lexical_chunk_hit_map = HashMap::<Uuid, KnowledgeChunkSearchRow>::new();
+    for result in search_results {
+        for row in result? {
+            match lexical_chunk_hit_map.entry(row.chunk_id) {
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    if row.score > occupied.get().score {
+                        occupied.insert(row);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(row);
+                }
+            }
+        }
+    }
+
+    let mut lexical_chunk_hits = lexical_chunk_hit_map.into_values().collect::<Vec<_>>();
+    lexical_chunk_hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    Ok(lexical_chunk_hits)
+}
+
+async fn load_evidence_samples_by_chunk_ids(
+    state: &AppState,
+    document_id: Uuid,
+    chunk_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<KnowledgeEvidenceRow>>, ApiError> {
+    if chunk_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let parallelism = SEARCH_CHUNK_EVIDENCE_PARALLELISM.min(chunk_ids.len()).max(1);
+    let evidence_results = stream::iter(chunk_ids.iter().copied().map(|chunk_id| {
+        let state = state.clone();
+        async move {
+            let evidence_rows = state
+                .arango_graph_store
+                .list_evidence_by_chunk(chunk_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            Ok::<(Uuid, Vec<KnowledgeEvidenceRow>), ApiError>((chunk_id, evidence_rows))
+        }
+    }))
+    .buffer_unordered(parallelism)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut evidence_by_chunk: HashMap<Uuid, Vec<KnowledgeEvidenceRow>> = HashMap::new();
+    for result in evidence_results {
+        let (chunk_id, evidence_rows) = result?;
+        let rows = evidence_rows
+            .into_iter()
+            .filter(|evidence| evidence.document_id == document_id)
+            .collect::<Vec<_>>();
+        if !rows.is_empty() {
+            evidence_by_chunk.insert(chunk_id, rows);
+        }
+    }
+    Ok(evidence_by_chunk)
+}
+
+async fn enrich_document_search_hit(
+    state: AppState,
+    query_text: String,
+    chunk_hit_limit_per_document: usize,
+    index: usize,
+    mut accumulator: KnowledgeDocumentAccumulator,
+) -> Result<(usize, KnowledgeSearchDocumentHit), ApiError> {
+    backfill_document_chunk_hits(
+        &state,
+        &query_text,
+        chunk_hit_limit_per_document,
+        &mut accumulator,
+    )
+    .await?;
+    let technical_fact_samples = state
+        .canonical_services
+        .knowledge
+        .list_typed_technical_facts(&state, accumulator.revision.revision_id)
+        .await?;
+    Ok((
+        index,
+        KnowledgeSearchDocumentHit {
+            provenance_summary: KnowledgeDocumentProvenanceSummary {
+                supporting_evidence_count: accumulator.evidence_samples.len(),
+                lexical_chunk_count: accumulator.chunk_hits.len(),
+                vector_chunk_count: accumulator.vector_chunk_hits.len(),
+            },
+            technical_fact_summary: summarize_typed_technical_facts(&technical_fact_samples),
+            graph_evidence_summary: summarize_graph_evidence(&accumulator.evidence_samples),
+            document: accumulator.document,
+            revision: map_search_revision_summary(accumulator.revision),
+            score: accumulator.score,
+            lexical_rank: accumulator.lexical_rank,
+            vector_rank: accumulator.vector_rank,
+            lexical_score: accumulator.lexical_score,
+            vector_score: accumulator.vector_score,
+            chunk_hits: accumulator.chunk_hits,
+            vector_chunk_hits: accumulator.vector_chunk_hits,
+            evidence_samples: accumulator.evidence_samples,
+            technical_fact_samples,
+        },
+    ))
 }
 
 fn resolved_chunk_hit(
@@ -703,10 +850,17 @@ async fn backfill_document_chunk_hits(
     let existing_chunk_ids =
         accumulator.chunk_hits.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
     let mut candidates = accumulator.chunk_hits.clone();
+    let mut backfill_terms = keywords.clone();
+    backfill_terms.extend(document_search_anchor_tokens(query_text));
+    backfill_terms.extend(document_search_anchor_phrases(query_text));
     candidates.extend(
         state
             .arango_document_store
-            .list_chunks_by_revision(accumulator.revision.revision_id)
+            .list_chunks_by_revision_matching_terms(
+                accumulator.revision.revision_id,
+                &backfill_terms,
+                chunk_hit_limit_per_document.saturating_mul(4).max(chunk_hit_limit_per_document),
+            )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .into_iter()
@@ -792,50 +946,6 @@ fn document_search_anchor_phrases(query_text: &str) -> Vec<String> {
     phrases
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn chunk_hit(text: &str) -> KnowledgeChunkSearchRow {
-        KnowledgeChunkSearchRow {
-            chunk_id: Uuid::nil(),
-            workspace_id: Uuid::nil(),
-            library_id: Uuid::nil(),
-            revision_id: Uuid::nil(),
-            content_text: text.to_string(),
-            normalized_text: text.to_string(),
-            section_path: Vec::new(),
-            heading_trail: Vec::new(),
-            score: 1.0,
-            quality_score: None,
-        }
-    }
-
-    #[test]
-    fn document_keyword_coverage_bonus_rewards_concentrated_evidence() {
-        let keywords =
-            document_search_keywords("Alpha Gateway auth billing payment service ports queue");
-        let weak = chunk_hit("Alpha Gateway API mentions payment once.");
-        let strong = chunk_hit(
-            "Alpha Gateway auth service, billing service, payment service, ports, and queue.",
-        );
-
-        let weak_bonus = document_keyword_coverage_bonus(&[weak], &keywords);
-        let strong_bonus = document_keyword_coverage_bonus(&[strong], &keywords);
-
-        assert!(strong_bonus > weak_bonus + 0.2);
-    }
-
-    #[test]
-    fn anchor_phrases_are_generated_from_structure_without_topic_aliases() {
-        let queries = expand_document_search_queries("Alpha Gateway auth service ports");
-
-        assert_eq!(queries[0], "Alpha Gateway auth service ports");
-        assert!(queries.iter().any(|query| query == "alpha gateway"));
-        assert!(queries.iter().any(|query| query == "gateway auth"));
-    }
-}
-
 async fn resolve_hybrid_search_context(
     state: &AppState,
     library_id: Uuid,
@@ -894,17 +1004,11 @@ async fn load_revisions_by_ids(
     if revision_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut rows = Vec::with_capacity(revision_ids.len());
-    for revision_id in revision_ids {
-        let revision = state
-            .arango_document_store
-            .get_revision(*revision_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
-        rows.push(revision);
-    }
-    Ok(rows)
+    state
+        .arango_document_store
+        .list_revisions_by_ids(revision_ids)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))
 }
 
 async fn load_documents_by_ids(
@@ -914,17 +1018,11 @@ async fn load_documents_by_ids(
     if document_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut rows = Vec::with_capacity(document_ids.len());
-    for document_id in document_ids {
-        let document = state
-            .arango_document_store
-            .get_document(*document_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_document", document_id))?;
-        rows.push(document);
-    }
-    Ok(rows)
+    state
+        .arango_document_store
+        .list_documents_by_ids(document_ids)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))
 }
 
 async fn search_entities_by_library(
@@ -951,4 +1049,61 @@ async fn search_relations_by_library(
         .search_relations(library_id, query_text, limit.max(1))
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk_hit(text: &str) -> KnowledgeChunkSearchRow {
+        KnowledgeChunkSearchRow {
+            chunk_id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            library_id: Uuid::nil(),
+            revision_id: Uuid::nil(),
+            content_text: text.to_string(),
+            normalized_text: text.to_string(),
+            section_path: Vec::new(),
+            heading_trail: Vec::new(),
+            score: 1.0,
+            quality_score: None,
+        }
+    }
+
+    #[test]
+    fn document_keyword_coverage_bonus_rewards_concentrated_evidence() {
+        let keywords =
+            document_search_keywords("Alpha Gateway auth billing payment service ports queue");
+        let weak = chunk_hit("Alpha Gateway API mentions payment once.");
+        let strong = chunk_hit(
+            "Alpha Gateway auth service, billing service, payment service, ports, and queue.",
+        );
+
+        let weak_bonus = document_keyword_coverage_bonus(&[weak], &keywords);
+        let strong_bonus = document_keyword_coverage_bonus(&[strong], &keywords);
+
+        assert!(strong_bonus > weak_bonus + 0.2);
+    }
+
+    #[test]
+    fn evidence_sample_limit_preserves_explicit_zero() {
+        assert_eq!(resolved_evidence_sample_limit(Some(0)), 0);
+        assert_eq!(resolved_evidence_sample_limit(Some(2)), 2);
+        assert_eq!(resolved_evidence_sample_limit(None), DEFAULT_EVIDENCE_SAMPLE_LIMIT);
+    }
+
+    #[test]
+    fn document_search_vector_limits_track_response_surface() {
+        assert_eq!(document_search_vector_limits(3, 3), (9, 3));
+        assert_eq!(document_search_vector_limits(1, 1), (2, 1));
+    }
+
+    #[test]
+    fn anchor_phrases_are_generated_from_structure_without_topic_aliases() {
+        let queries = expand_document_search_queries("Alpha Gateway auth service ports");
+
+        assert_eq!(queries[0], "Alpha Gateway auth service ports");
+        assert!(queries.iter().any(|query| query == "alpha gateway"));
+        assert!(queries.iter().any(|query| query == "gateway auth"));
+    }
 }

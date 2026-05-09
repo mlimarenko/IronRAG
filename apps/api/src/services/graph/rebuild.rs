@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use chrono::Utc;
 use futures::stream::{self, StreamExt, TryStreamExt};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +12,7 @@ use crate::{
     domains::ops::{ASYNC_OP_STATUS_READY, GRAPH_STATUS_READY},
     infra::repositories::{self, ChunkRow, DocumentRow, content_repository},
     services::{
+        graph::error::GraphServiceError,
         graph::extract::{
             GraphExtractionCandidateSet, extraction_lifecycle_from_record,
             extraction_recovery_summary_from_record,
@@ -22,6 +24,7 @@ use crate::{
             GraphProjectionOutcome, GraphProjectionScope, ensure_empty_graph_snapshot,
             next_projection_version, project_canonical_graph,
         },
+        ingest::cancellation::{StageError, ensure_not_cancelled},
         ingest::runtime::{
             RuntimeStageUsageSummary, embed_runtime_graph_edges, embed_runtime_graph_nodes,
             resolve_effective_provider_profile,
@@ -33,7 +36,8 @@ use crate::{
 pub async fn rebuild_library_graph(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<GraphProjectionOutcome> {
+) -> Result<GraphProjectionOutcome, GraphServiceError> {
+    let cancellation_token = CancellationToken::new();
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
@@ -194,16 +198,24 @@ pub async fn rebuild_library_graph(
     }
 
     if merged_any {
-        embed_runtime_graph_nodes(state, &provider_profile, &merged_nodes)
+        embed_runtime_graph_nodes(state, &provider_profile, &merged_nodes, &cancellation_token)
             .await
             .context("failed to embed rebuilt graph nodes")?;
-        embed_runtime_graph_edges(state, &provider_profile, &merged_nodes, &merged_edges)
-            .await
-            .context("failed to embed rebuilt graph edges")?;
+        embed_runtime_graph_edges(
+            state,
+            &provider_profile,
+            &merged_nodes,
+            &merged_edges,
+            &cancellation_token,
+        )
+        .await
+        .context("failed to embed rebuilt graph edges")?;
     }
 
     let projection_scope = GraphProjectionScope::new(library_id, projection_version);
-    run_rebuild_projection(state, &projection_scope, "failed to project rebuilt graph").await
+    run_rebuild_projection(state, &projection_scope, "failed to project rebuilt graph")
+        .await
+        .map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]
@@ -220,25 +232,31 @@ pub async fn reconcile_revision_graph(
     document_id: Uuid,
     revision_id: Uuid,
     activated_by_attempt_id: Option<Uuid>,
-) -> anyhow::Result<RevisionGraphReconcileOutcome> {
+    cancellation_token: &CancellationToken,
+) -> Result<RevisionGraphReconcileOutcome, GraphServiceError> {
+    ensure_not_cancelled(cancellation_token)?;
     let document_row =
         content_repository::get_document_by_id(&state.persistence.postgres, document_id)
             .await
             .with_context(|| format!("failed to load content document {document_id}"))?
             .with_context(|| format!("content document {document_id} not found"))?;
+    ensure_not_cancelled(cancellation_token)?;
     let document_head =
         content_repository::get_document_head(&state.persistence.postgres, document_id)
             .await
             .with_context(|| format!("failed to load content document head {document_id}"))?
             .with_context(|| format!("content document head {document_id} not found"))?;
+    ensure_not_cancelled(cancellation_token)?;
     let revision = content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
         .await
         .with_context(|| format!("failed to load content revision {revision_id}"))?
         .with_context(|| format!("content revision {revision_id} not found"))?;
+    ensure_not_cancelled(cancellation_token)?;
     let revision_chunks =
         content_repository::list_chunks_by_revision(&state.persistence.postgres, revision_id)
             .await
             .with_context(|| format!("failed to list chunks for content revision {revision_id}"))?;
+    ensure_not_cancelled(cancellation_token)?;
 
     let document = synthesize_document_row(&document_row, &document_head, Some(&revision));
     let revision_chunk_ids = revision_chunks.iter().map(|chunk| chunk.id).collect::<BTreeSet<_>>();
@@ -253,6 +271,7 @@ pub async fn reconcile_revision_graph(
         .active_revision_id
         .filter(|active_revision_id| *active_revision_id != revision_id);
     if let Some(previous_active_revision_id) = previous_active_revision_id {
+        ensure_not_cancelled(cancellation_token)?;
         repositories::delete_query_execution_references_by_content_revision(
             &state.persistence.postgres,
             library_id,
@@ -277,16 +296,19 @@ pub async fn reconcile_revision_graph(
                 "failed to deactivate stale graph evidence for document {document_id} revision {previous_active_revision_id}"
             )
         })?;
+        ensure_not_cancelled(cancellation_token)?;
     }
 
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
             .context("failed to load graph snapshot while reconciling revision graph")?;
+    ensure_not_cancelled(cancellation_token)?;
     let mut projection_scope =
         crate::services::graph::projection::resolve_projection_scope(state, library_id)
             .await
             .context("failed to resolve active projection scope for revision graph reconcile")?;
+    ensure_not_cancelled(cancellation_token)?;
     let existing_graph_is_empty =
         snapshot.as_ref().is_none_or(|value| value.node_count <= 0 && value.edge_count <= 0);
     if document_row.document_state == "deleted" || document_row.deleted_at.is_some() {
@@ -323,6 +345,7 @@ pub async fn reconcile_revision_graph(
     let mut latest_records_by_chunk =
         BTreeMap::<Uuid, repositories::RuntimeGraphExtractionRecordRow>::new();
     for record in extraction_records {
+        ensure_not_cancelled(cancellation_token)?;
         if record.status != ASYNC_OP_STATUS_READY || !revision_chunk_ids.contains(&record.chunk_id)
         {
             continue;
@@ -375,8 +398,10 @@ pub async fn reconcile_revision_graph(
         let document = Arc::clone(&document_arc);
         let chunk_rows_by_id = Arc::clone(&chunk_rows_by_id_arc);
         let merge_scope = Arc::clone(&merge_scope);
+        let cancellation_token = cancellation_token.clone();
         let doc_id = document_arc.id;
         async move {
+            ensure_not_cancelled(&cancellation_token)?;
             let chunk_id = record.chunk_id;
             let merge_started = std::time::Instant::now();
             // Per-chunk entry trace so the next hot-stuck incident can
@@ -419,6 +444,7 @@ pub async fn reconcile_revision_graph(
             })
             .await
             .unwrap_or_default();
+            ensure_not_cancelled(&cancellation_token)?;
             if candidates.entities.is_empty() && candidates.relations.is_empty() {
                 tracing::info!(
                     %doc_id,
@@ -448,7 +474,12 @@ pub async fn reconcile_revision_graph(
                 &candidates,
                 recovery.as_ref(),
             );
-            let merge_outcome = match tokio::time::timeout(PER_CHUNK_MERGE_TIMEOUT, merge_fut).await {
+            let merge_outcome = match tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    return Err(anyhow::Error::new(StageError::Cancelled));
+                }
+                result = tokio::time::timeout(PER_CHUNK_MERGE_TIMEOUT, merge_fut) => result,
+            } {
                 Ok(result) => result.with_context(|| {
                     format!(
                         "failed to merge graph candidates for document {} chunk {}",
@@ -498,6 +529,7 @@ pub async fn reconcile_revision_graph(
     let mut changed_node_ids = BTreeSet::new();
     let mut changed_edge_ids = BTreeSet::new();
     for outcome in merge_results {
+        ensure_not_cancelled(cancellation_token)?;
         graph_contribution_count = graph_contribution_count.saturating_add(outcome.contribution);
         merge_follow_up_required |= outcome.follow_up;
         changed_node_ids.extend(outcome.node_ids);
@@ -512,9 +544,11 @@ pub async fn reconcile_revision_graph(
     )
     .await
     .context("failed to reconcile graph support counts during revision graph reconcile")?;
+    ensure_not_cancelled(cancellation_token)?;
 
     let changed_edge_ids = changed_edge_ids.into_iter().collect::<Vec<_>>();
     let changed_node_ids = changed_node_ids.into_iter().collect::<Vec<_>>();
+    ensure_not_cancelled(cancellation_token)?;
     let changed_edge_rows = repositories::list_admitted_runtime_graph_edges_by_ids(
         &state.persistence.postgres,
         library_id,
@@ -523,6 +557,7 @@ pub async fn reconcile_revision_graph(
     )
     .await
     .context("failed to load changed graph edges during revision graph reconcile")?;
+    ensure_not_cancelled(cancellation_token)?;
     let changed_node_rows = repositories::list_admitted_runtime_graph_nodes_by_ids(
         &state.persistence.postgres,
         library_id,
@@ -531,9 +566,11 @@ pub async fn reconcile_revision_graph(
     )
     .await
     .context("failed to load changed graph nodes during revision graph reconcile")?;
+    ensure_not_cancelled(cancellation_token)?;
 
     let mut embedding_usage: Option<RuntimeStageUsageSummary> = None;
     if merge_follow_up_required {
+        ensure_not_cancelled(cancellation_token)?;
         let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
         let supporting_node_rows = if changed_edge_rows.is_empty() {
             Vec::new()
@@ -550,12 +587,14 @@ pub async fn reconcile_revision_graph(
             .context("failed to load supporting graph nodes during revision graph reconcile")?
         };
         if !changed_node_rows.is_empty() {
-            let node_usage =
-                embed_runtime_graph_nodes(state, &provider_profile, &changed_node_rows)
-                    .await
-                    .context(
-                        "failed to embed changed graph nodes during revision graph reconcile",
-                    )?;
+            let node_usage = embed_runtime_graph_nodes(
+                state,
+                &provider_profile,
+                &changed_node_rows,
+                cancellation_token,
+            )
+            .await
+            .context("failed to embed changed graph nodes during revision graph reconcile")?;
             embedding_usage = Some(node_usage);
         }
         if !changed_edge_rows.is_empty() {
@@ -564,6 +603,7 @@ pub async fn reconcile_revision_graph(
                 &provider_profile,
                 &supporting_node_rows,
                 &changed_edge_rows,
+                cancellation_token,
             )
             .await
             .context("failed to embed changed graph edges during revision graph reconcile")?;
@@ -579,6 +619,7 @@ pub async fn reconcile_revision_graph(
         crate::services::query::support::invalidate_library_source_truth(state, library_id)
             .await
             .context("failed to advance source truth during revision graph reconcile")?;
+    ensure_not_cancelled(cancellation_token)?;
     let summary_refresh = if previous_active_revision_id.is_some()
         || (changed_node_ids.is_empty() && changed_edge_ids.is_empty())
     {

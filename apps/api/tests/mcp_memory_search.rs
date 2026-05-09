@@ -237,6 +237,8 @@ impl McpSearchFixture {
                     ),
                     normalized_text: chunk,
                     text_checksum: "mcp-search-chunk",
+                    occurred_at: None,
+                    occurred_until: None,
                 },
             )
             .await

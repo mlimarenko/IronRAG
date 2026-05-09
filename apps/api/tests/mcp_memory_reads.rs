@@ -390,7 +390,7 @@ async fn unreadable_documents_return_honest_processing_failed_and_unavailable_re
             .create_document_state("failed-read", "failed", None, Some("extractor timeout"))
             .await?;
         let (unavailable_document_id, _) =
-            fixture.create_document_state("unavailable-read", "ready_no_graph", None, None).await?;
+            fixture.create_document_state("unavailable-read", "ready", None, None).await?;
 
         let processing = fixture
             .mcp_tool_call(

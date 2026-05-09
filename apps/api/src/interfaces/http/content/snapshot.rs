@@ -1,6 +1,6 @@
 //! Canonical HTTP surface for library snapshot export and import.
 //!
-//! Export: `GET /content/libraries/{id}/snapshot?include=content,runtime_graph,knowledge,blobs`
+//! Export: `GET /content/libraries/{id}/snapshot?include=library_data,blobs`
 //! streams an `application/zstd` tar.zst archive back to the caller. The
 //! writer runs in a background task, pushing bytes through a bounded
 //! `tokio::io::duplex` channel whose read half is attached to the axum
@@ -22,7 +22,8 @@ use axum::{
     routing::MethodRouter,
 };
 use futures::TryStreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
@@ -39,26 +40,65 @@ use crate::{
     },
 };
 
-#[derive(Debug, Deserialize)]
-pub(super) struct ExportQuery {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ExportQuery {
     /// Comma-separated list of include kinds. Defaults to everything.
     include: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct ImportQuery {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ImportQuery {
     /// `reject` (default) or `replace`.
     overwrite: Option<String>,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotImportReportResponse {
+    pub library_id: Uuid,
+    pub overwrite_mode: OverwriteMode,
+    pub include_kinds: Vec<IncludeKind>,
+    pub postgres_rows_by_table: BTreeMap<String, u64>,
+    pub arango_docs_by_store: BTreeMap<String, u64>,
+    pub arango_edges_by_store: BTreeMap<String, u64>,
+    pub blobs_restored: u64,
+}
+
+impl From<SnapshotImportReport> for SnapshotImportReportResponse {
+    fn from(report: SnapshotImportReport) -> Self {
+        Self {
+            library_id: report.library_id,
+            overwrite_mode: report.overwrite_mode,
+            include_kinds: report.include_kinds,
+            postgres_rows_by_table: report.postgres_rows_by_table.into_iter().collect(),
+            arango_docs_by_store: report.arango_docs_by_collection.into_iter().collect(),
+            arango_edges_by_store: report.arango_edges_by_collection.into_iter().collect(),
+            blobs_restored: report.blobs_restored,
+        }
+    }
+}
+
 /// Streams a library snapshot as `application/zstd` (tar.zst).
+#[utoipa::path(
+    get,
+    path = "/v1/content/libraries/{libraryId}/snapshot",
+    tag = "content",
+    operation_id = "exportLibrarySnapshot",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Streaming tar.zst archive of the library", content_type = "application/zstd", body = String),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.export_library_snapshot",
     skip_all,
     fields(library_id = %library_id)
 )]
-pub(super) async fn export_library_snapshot(
+pub async fn export_library_snapshot(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -118,14 +158,38 @@ pub(super) async fn export_library_snapshot(
     skip_all,
     fields(library_id = %library_id)
 )]
-pub(super) async fn import_library_snapshot(
+#[utoipa::path(
+    post,
+    path = "/v1/content/libraries/{libraryId}/snapshot",
+    tag = "content",
+    operation_id = "importLibrarySnapshot",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        ("overwrite" = Option<String>, Query, description = "Overwrite mode: 'reject' (default) or 'replace'"),
+    ),
+    request_body(
+        content_type = "application/zstd",
+        description = "tar.zst archive previously emitted by GET /v1/content/libraries/{libraryId}/snapshot",
+    ),
+    responses(
+        (status = 200, description = "Snapshot import report (per-table row counts, blob count, applied overwrite mode)", body = SnapshotImportReportResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+        (status = 409, description = "Library already populated and overwrite=reject"),
+    ),
+)]
+pub async fn import_library_snapshot(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
     Query(query): Query<ImportQuery>,
     body: Body,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    auth.require_any_scope(POLICY_LIBRARY_WRITE)?;
+) -> Result<Json<SnapshotImportReportResponse>, ApiError> {
+    match load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await {
+        Ok(_) => {}
+        Err(ApiError::NotFound(_)) if auth.is_system_admin => {}
+        Err(error) => return Err(error),
+    }
 
     let overwrite = OverwriteMode::parse(query.overwrite.as_deref().unwrap_or(""))
         .map_err(|error| ApiError::BadRequest(format!("invalid overwrite: {error}")))?;
@@ -136,30 +200,11 @@ pub(super) async fn import_library_snapshot(
         .map_err(|error| std::io::Error::other(format!("body stream error: {error}")));
     let reader = StreamReader::new(body_stream);
 
-    let report = restore_library_archive(&state, library_id, reader, overwrite).await.map_err(
-        |error: anyhow::Error| {
-            let message = error.to_string();
-            if message.contains("already exists") {
-                ApiError::Conflict(message)
-            } else {
-                ApiError::BadRequest(message)
-            }
-        },
-    )?;
+    let report = restore_library_archive(&state, library_id, reader, overwrite)
+        .await
+        .map_err(ApiError::from)?;
 
-    Ok(Json(import_report_to_json(&report)))
-}
-
-fn import_report_to_json(report: &SnapshotImportReport) -> serde_json::Value {
-    serde_json::json!({
-        "libraryId": report.library_id,
-        "overwriteMode": report.overwrite_mode,
-        "includeKinds": report.include_kinds,
-        "postgresRowsByTable": report.postgres_rows_by_table.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
-        "arangoDocsByCollection": report.arango_docs_by_collection.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
-        "arangoEdgesByCollection": report.arango_edges_by_collection.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
-        "blobsRestored": report.blobs_restored,
-    })
+    Ok(Json(report.into()))
 }
 
 /// Snapshot routes. Wired as a `Router` because the import route

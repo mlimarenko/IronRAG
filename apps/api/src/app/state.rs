@@ -63,6 +63,7 @@ pub struct UiRuntimeSettings {
 pub struct UiSessionCookieConfig {
     pub name: &'static str,
     pub ttl_hours: u64,
+    pub secure: bool,
 }
 
 #[derive(Clone)]
@@ -285,6 +286,7 @@ impl AppState {
         let ui_session_cookie = UiSessionCookieConfig {
             name: UI_SESSION_COOKIE_NAME,
             ttl_hours: settings.ui_session_ttl_hours,
+            secure: public_origin_settings.session_cookie_secure,
         };
         let graph_runtime = GraphRuntimeSettings { backend_name: "arangodb".to_string() };
         let arango_runtime = ArangoRuntimeSettings {

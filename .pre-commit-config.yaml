@@ -1,33 +1,79 @@
+minimum_pre_commit_version: "3.5.0"
+default_stages:
+  - pre-commit
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+  - commit-msg
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^apps/web/src/shared/api/generated/|^apps/web/src/shared/api/mocks/handlers\.ts
+        stages: [pre-commit]
       - id: end-of-file-fixer
-      - id: check-yaml
-      - id: check-json
-      - id: check-added-large-files
-        args: ['--maxkb=1000']
+        exclude: ^apps/web/src/shared/api/generated/|^apps/web/src/shared/api/mocks/handlers\.ts
+        stages: [pre-commit]
       - id: check-merge-conflict
-      - id: check-case-conflict
-      - id: mixed-line-ending
-        args: ['--fix=lf']
+        stages: [pre-commit]
+      - id: check-yaml
+        exclude: ^charts/ironrag/templates/
+        stages: [pre-commit]
       - id: check-toml
-      - id: detect-private-key
+        stages: [pre-commit]
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+        stages: [pre-commit]
+      - id: mixed-line-ending
+        stages: [pre-commit]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: ^\.secrets\.baseline$
+        stages: [pre-commit]
+
   - repo: local
     hooks:
-      - id: max-lines
-        name: max-lines
-        entry: scripts/pre-commit/check-max-lines.sh
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
         language: system
-        pass_filenames: true
-      - id: backend-fmt
-        name: backend-fmt
-        entry: bash -lc 'cargo fmt --all'
-        language: system
+        files: \.rs$
         pass_filenames: false
-      - id: backend-lint
-        name: backend-lint
-        entry: bash -lc 'CARGO_TARGET_DIR=.cargo-target/api cargo clippy -p ironrag-backend --all-targets -- -D warnings'
+        stages: [pre-commit]
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: make backend-lint
         language: system
+        files: \.rs$
         pass_filenames: false
+        stages: [pre-push]
+
+      - id: eslint
+        name: eslint
+        entry: bash -c 'cd apps/web && npx eslint --no-warn-ignored "${@/#apps\/web\//}"' --
+        language: system
+        files: ^apps/web/.*\.(ts|tsx)$
+        stages: [pre-commit]
+
+      - id: tsc
+        name: tsc
+        entry: make frontend-typecheck
+        language: system
+        files: ^apps/web/.*\.(ts|tsx)$
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: vitest
+        name: vitest
+        entry: make frontend-test
+        language: system
+        files: ^apps/web/
+        pass_filenames: false
+        stages: [pre-push]

@@ -30,9 +30,9 @@ pub fn router() -> Router<AppState> {
         .route("/runtime/executions/{execution_id}/trace", get(get_runtime_execution_trace))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeExecutionResponse {
+pub struct RuntimeExecutionResponse {
     execution_id: Uuid,
     owner_kind: crate::domains::agent_runtime::RuntimeExecutionOwnerKind,
     owner_id: Uuid,
@@ -52,9 +52,9 @@ struct RuntimeExecutionResponse {
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeStageRecordResponse {
+pub struct RuntimeStageRecordResponse {
     stage_record_id: Uuid,
     stage_kind: crate::domains::agent_runtime::RuntimeStageKind,
     stage_ordinal: i32,
@@ -68,9 +68,9 @@ struct RuntimeStageRecordResponse {
     output_summary: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeActionRecordResponse {
+pub struct RuntimeActionRecordResponse {
     action_id: Uuid,
     stage_record_id: Uuid,
     action_kind: crate::domains::agent_runtime::RuntimeActionKind,
@@ -83,9 +83,9 @@ struct RuntimeActionRecordResponse {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct RuntimePolicyDecisionResponse {
+pub struct RuntimePolicyDecisionResponse {
     decision_id: Uuid,
     stage_record_id: Option<Uuid>,
     action_record_id: Option<Uuid>,
@@ -96,22 +96,35 @@ struct RuntimePolicyDecisionResponse {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeExecutionTraceResponse {
+pub struct RuntimeExecutionTraceResponse {
     execution: RuntimeExecutionResponse,
     stages: Vec<RuntimeStageRecordResponse>,
     actions: Vec<RuntimeActionRecordResponse>,
     policy_decisions: Vec<RuntimePolicyDecisionResponse>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/runtime/executions/{executionId}",
+    tag = "runtime",
+    operation_id = "getRuntimeExecution",
+    params(("executionId" = uuid::Uuid, Path, description = "Runtime execution identifier")),
+    responses(
+        (status = 200, description = "Runtime execution snapshot", body = RuntimeExecutionResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for this execution"),
+        (status = 404, description = "Execution not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_runtime_execution",
     skip_all,
     fields(execution_id = %execution_id)
 )]
-async fn get_runtime_execution(
+pub async fn get_runtime_execution(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(execution_id): Path<Uuid>,
@@ -136,13 +149,26 @@ async fn get_runtime_execution(
     )))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/runtime/executions/{executionId}/trace",
+    tag = "runtime",
+    operation_id = "getRuntimeExecutionTrace",
+    params(("executionId" = uuid::Uuid, Path, description = "Runtime execution identifier")),
+    responses(
+        (status = 200, description = "Runtime execution trace with stages, actions, and policy decisions", body = RuntimeExecutionTraceResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for this execution"),
+        (status = 404, description = "Execution not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_runtime_execution_trace",
     skip_all,
     fields(execution_id = %execution_id)
 )]
-async fn get_runtime_execution_trace(
+pub async fn get_runtime_execution_trace(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(execution_id): Path<Uuid>,

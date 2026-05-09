@@ -46,7 +46,7 @@ pub fn router() -> Router<AppState> {
 // Outbound subscription management
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSubscriptionRequest {
     pub workspace_id: Uuid,
@@ -59,7 +59,7 @@ pub struct CreateSubscriptionRequest {
     pub custom_headers: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSubscriptionRequest {
     pub display_name: Option<String>,
@@ -70,7 +70,7 @@ pub struct UpdateSubscriptionRequest {
     pub active: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionResponse {
     pub id: Uuid,
@@ -84,19 +84,34 @@ pub struct SubscriptionResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct ListSubscriptionsQuery {
     pub workspace_id: Uuid,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct ListAttemptsQuery {
     pub state: Option<String>,
 }
 
-async fn create_subscription(
+#[utoipa::path(
+    post,
+    path = "/v1/webhooks/subscriptions",
+    tag = "webhooks",
+    operation_id = "createWebhookSubscription",
+    request_body = CreateSubscriptionRequest,
+    responses(
+        (status = 201, description = "Created outbound webhook subscription", body = SubscriptionResponse),
+        (status = 400, description = "Request body is invalid"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace administrator"),
+    ),
+)]
+pub async fn create_subscription(
     State(state): State<AppState>,
     auth: AuthContext,
     Json(req): Json<CreateSubscriptionRequest>,
@@ -135,7 +150,19 @@ async fn create_subscription(
     Ok((StatusCode::CREATED, Json(subscription_row_to_response(row))))
 }
 
-async fn list_subscriptions(
+#[utoipa::path(
+    get,
+    path = "/v1/webhooks/subscriptions",
+    tag = "webhooks",
+    operation_id = "listWebhookSubscriptions",
+    params(ListSubscriptionsQuery),
+    responses(
+        (status = 200, description = "Outbound webhook subscriptions for a workspace", body = [SubscriptionResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace administrator"),
+    ),
+)]
+pub async fn list_subscriptions(
     State(state): State<AppState>,
     auth: AuthContext,
     Query(q): Query<ListSubscriptionsQuery>,
@@ -152,7 +179,20 @@ async fn list_subscriptions(
     Ok(Json(rows.into_iter().map(subscription_row_to_response).collect()))
 }
 
-async fn get_subscription(
+#[utoipa::path(
+    get,
+    path = "/v1/webhooks/subscriptions/{id}",
+    tag = "webhooks",
+    operation_id = "getWebhookSubscription",
+    params(("id" = uuid::Uuid, Path, description = "Webhook subscription identifier")),
+    responses(
+        (status = 200, description = "Outbound webhook subscription", body = SubscriptionResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace administrator"),
+        (status = 404, description = "Webhook subscription not found"),
+    ),
+)]
+pub async fn get_subscription(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(id): Path<Uuid>,
@@ -167,7 +207,22 @@ async fn get_subscription(
     Ok(Json(subscription_row_to_response(row)))
 }
 
-async fn update_subscription(
+#[utoipa::path(
+    patch,
+    path = "/v1/webhooks/subscriptions/{id}",
+    tag = "webhooks",
+    operation_id = "updateWebhookSubscription",
+    params(("id" = uuid::Uuid, Path, description = "Webhook subscription identifier")),
+    request_body = UpdateSubscriptionRequest,
+    responses(
+        (status = 200, description = "Updated outbound webhook subscription", body = SubscriptionResponse),
+        (status = 400, description = "Request body is invalid"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace administrator"),
+        (status = 404, description = "Webhook subscription not found"),
+    ),
+)]
+pub async fn update_subscription(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(id): Path<Uuid>,
@@ -217,7 +272,20 @@ async fn update_subscription(
     Ok(Json(subscription_row_to_response(row)))
 }
 
-async fn delete_subscription(
+#[utoipa::path(
+    delete,
+    path = "/v1/webhooks/subscriptions/{id}",
+    tag = "webhooks",
+    operation_id = "deleteWebhookSubscription",
+    params(("id" = uuid::Uuid, Path, description = "Webhook subscription identifier")),
+    responses(
+        (status = 204, description = "Webhook subscription deleted"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace administrator"),
+        (status = 404, description = "Webhook subscription not found"),
+    ),
+)]
+pub async fn delete_subscription(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(id): Path<Uuid>,
@@ -238,7 +306,23 @@ async fn delete_subscription(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_delivery_attempts(
+#[utoipa::path(
+    get,
+    path = "/v1/webhooks/subscriptions/{id}/attempts",
+    tag = "webhooks",
+    operation_id = "listWebhookDeliveryAttempts",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Webhook subscription identifier"),
+        ListAttemptsQuery,
+    ),
+    responses(
+        (status = 200, description = "Delivery attempts for the outbound webhook subscription", body = [DeliveryAttemptResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace administrator"),
+        (status = 404, description = "Webhook subscription not found"),
+    ),
+)]
+pub async fn list_delivery_attempts(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(id): Path<Uuid>,
@@ -280,7 +364,7 @@ async fn list_delivery_attempts(
     Ok(Json(resp))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryAttemptResponse {
     pub id: Uuid,

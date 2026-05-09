@@ -1,0 +1,78 @@
+[graph]
+all-features = true
+no-default-features = false
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# cargo-deny 0.19 hard-denies vulnerability advisories by default unless an
+# advisory is explicitly ignored below; the `vulnerability = "deny"` key was
+# removed by cargo-deny and is rejected by the validator.
+yanked = "deny"
+# cargo-deny 0.19 models unmaintained and unsound advisories as scope
+# selectors; enabling all scopes emits warnings for informational advisories.
+unmaintained = "all"
+unsound = "all"
+ignore = []
+unused-ignored-advisory = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow-workspace = true
+deny = [
+    { crate = "native-tls", reason = "Backend TLS must stay on the canonical rustls stack." },
+    { crate = "openssl", reason = "Backend TLS must stay on the canonical rustls stack." },
+    { crate = "openssl-sys", reason = "Backend TLS must stay on the canonical rustls stack." },
+    { crate = "openssl-src", reason = "Backend TLS must stay on the canonical rustls stack." },
+    { crate = "serde_yml", reason = "YAML support must not use the unsound serde_yml crate." },
+    { crate = "yaml-rust", reason = "YAML support must stay on the maintained canonical YAML stack." },
+]
+skip = []
+skip-tree = []
+
+[licenses]
+version = 2
+# GPL and AGPL family licenses are denied by omission from this allow-list.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+unused-license-exception = "deny"
+include-dev = true
+include-build = true
+exceptions = [
+    { crate = "webpki-root-certs@1.0.7", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@0.26.11", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@1.0.7", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "xxhash-rust@0.8.15", allow = ["BSL-1.0"] },
+]
+
+[licenses.private]
+ignore = false
+registries = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

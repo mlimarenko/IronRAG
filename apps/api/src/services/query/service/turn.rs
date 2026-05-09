@@ -17,7 +17,9 @@ use crate::{
     },
     app::state::AppState,
     domains::catalog::CatalogLifecycleState,
-    domains::query::{QueryConversationState, QueryExecutionDetail, QueryVerificationState},
+    domains::query::{
+        QueryConversationState, QueryExecutionDetail, QueryVerificationState, resolve_top_k,
+    },
     domains::{
         agent_runtime::{
             RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState,
@@ -46,10 +48,11 @@ use super::{
     context::{assemble_context_bundle, load_execution_prepared_reference_context},
     formatting::{
         append_answer_source_links, build_assistant_document_references,
-        build_prepared_segment_references, build_technical_fact_references, map_chunk_references,
+        build_prepared_segment_references, build_technical_fact_references,
+        hydrate_entity_references, hydrate_relation_references, map_chunk_references,
         map_entity_references, map_execution_runtime_stage_summaries,
         map_execution_runtime_summary, map_relation_references, parse_query_verification_state,
-        parse_query_verification_warnings, search_pg_entity_references,
+        parse_query_verification_warnings, search_runtime_graph_entity_references,
     },
     session::{
         build_conversation_runtime_context,
@@ -167,7 +170,7 @@ impl QueryService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .map(|binding| binding.id);
 
-        let top_k = command.top_k.clamp(1, 32);
+        let top_k = resolve_top_k(Some(command.top_k));
         let cache_context = build_query_result_cache_context(
             state,
             &conversation,
@@ -516,6 +519,8 @@ impl QueryService {
                         command.include_debug,
                         prepared.structured.planned_mode,
                         &prepared.structured.chunk_references,
+                        &prepared.structured.graph_entity_references,
+                        &prepared.structured.graph_relation_references,
                     )
                     .await
                     {
@@ -1248,14 +1253,39 @@ impl QueryService {
             .as_ref()
             .map_or_else(Vec::new, map_entity_references);
 
-        // Fallback: if ArangoDB returned no entity references, search PostgreSQL
-        // runtime_graph_node by keyword overlap with the query text.
         if graph_node_references.is_empty() {
-            graph_node_references = search_pg_entity_references(
+            graph_node_references = search_runtime_graph_entity_references(
                 &state.persistence.postgres,
                 execution.library_id,
                 execution.id,
                 &query_text,
+            )
+            .await;
+        }
+        let mut graph_edge_references = prepared_reference_context
+            .bundle_refs
+            .as_ref()
+            .map_or_else(Vec::new, map_relation_references);
+        if !graph_node_references.is_empty() || !graph_edge_references.is_empty() {
+            let graph_projection_version = crate::infra::repositories::get_runtime_graph_snapshot(
+                &state.persistence.postgres,
+                execution.library_id,
+            )
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+            .map_or(0, |snapshot| snapshot.projection_version.max(0));
+            graph_node_references = hydrate_entity_references(
+                &state.persistence.postgres,
+                execution.library_id,
+                graph_projection_version,
+                graph_node_references,
+            )
+            .await;
+            graph_edge_references = hydrate_relation_references(
+                &state.persistence.postgres,
+                execution.library_id,
+                graph_projection_version,
+                graph_edge_references,
             )
             .await;
         }
@@ -1293,10 +1323,7 @@ impl QueryService {
                 &prepared_reference_context.fact_rank_refs,
             ),
             graph_node_references,
-            graph_edge_references: prepared_reference_context
-                .bundle_refs
-                .as_ref()
-                .map_or_else(Vec::new, map_relation_references),
+            graph_edge_references,
             verification_state: prepared_reference_context
                 .bundle_refs
                 .as_ref()
@@ -1748,6 +1775,25 @@ fn truncate_failure_code(message: &str) -> &str {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::is_query_vector_source_mismatch;
+
+    #[test]
+    fn classifies_runtime_vector_source_mismatch() {
+        assert!(is_query_vector_source_mismatch(
+            "active query retrieval binding must use the same vector source as active chunk embedding binding"
+        ));
+    }
+
+    #[test]
+    fn ignores_non_vector_source_mismatch_messages() {
+        assert!(!is_query_vector_source_mismatch(
+            "query retrieval provider is healthy and ready for embeddings"
+        ));
+    }
+}
+
 fn map_query_execution_error_message(
     state: &AppState,
     execution_id: &Uuid,
@@ -1763,6 +1809,10 @@ fn map_query_execution_error_message(
 
     if normalized.contains("active answer binding is not configured")
         || normalized.contains("active embedding binding is not configured")
+        || normalized.contains("active query retrieval binding is not configured")
+        || normalized.contains("active chunk embedding binding is not configured")
+        || normalized.contains("query retrieval binding must use the same model")
+        || is_query_vector_source_mismatch(&normalized)
         || normalized.contains("missing provider api key")
         || normalized.contains("missing openai api key")
         || normalized.contains("missing deepseek api key")
@@ -1794,14 +1844,23 @@ fn map_query_execution_error_message(
     ApiError::InternalMessage(formatted)
 }
 
+fn is_query_vector_source_mismatch(normalized_message: &str) -> bool {
+    const VECTOR_SOURCE_MISMATCH_MARKERS: [&str; 3] = [
+        "must use the same vector source",
+        "query retrieval and chunk embedding bindings must use the same vector source",
+        "vector source mismatch",
+    ];
+    VECTOR_SOURCE_MISMATCH_MARKERS.iter().any(|marker| normalized_message.contains(marker))
+}
+
 /// Record a billing row for the QueryCompiler LLM call that produced
 /// the `QueryIR` used by this turn. `None` means the compiler served
-/// the IR from cache or from a fallback (binding missing / provider
-/// outage), in which case no token usage was spent and no billing
-/// row is required. The helper is called from both the `Completed`
-/// and `Recovered` terminal branches — both go through the same
-/// answer pipeline and both need the compile-stage cost attributed
-/// to the same `query_execution` row.
+/// the IR from cache, in which case no token usage was spent and no
+/// billing row is required. Binding/provider failures fail the turn
+/// before this helper is called. The helper is called from both the
+/// `Completed` and `Recovered` terminal branches — both go through
+/// the same answer pipeline and both need the compile-stage cost
+/// attributed to the same `query_execution` row.
 async fn capture_query_compile_usage_if_any(
     state: &AppState,
     conversation: &query_repository::QueryConversationRow,

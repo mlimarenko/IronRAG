@@ -16,7 +16,7 @@
     - `Accept: application/json` → a plain JSON body (default, curl-friendly).
     - `Accept: application/json, text/event-stream` → a single SSE frame `event: message\ndata: …\n\n`; SDK clients that advertise both formats get the transport they expect.
     - Notification-only requests (no `id`) are acknowledged with a bare `202 Accepted`.
-  - `GET` — reserved for server-push streams. IronRAG emits no background notifications today, so it returns `200 OK` + `Content-Type: text/event-stream` with a single `: ready` SSE comment and no further events. Spec 2025-06-18 permits either 405 or an empty SSE stream; we pick the latter because some bundled clients (OpenClaw `bundle-mcp`) treat any non-200 handshake as fatal and drop the whole MCP server for that agent context.
+  - `GET` — reserved for server-push streams. IronRAG emits no background notifications today, so it returns `200 OK` + `Content-Type: text/event-stream` with a single `: ready` SSE comment and no further events. Spec 2025-06-18 permits either 405 or an empty SSE stream; we pick the latter because some bundled MCP clients treat any non-200 handshake as fatal and drop the whole MCP server for that agent context.
   - `DELETE` — session termination signal. The server is stateless between requests, so it always returns `200 OK` so client cleanup flows finish cleanly.
 - The `initialize` response carries an `Mcp-Session-Id` header (UUIDv7). Clients that echo it on subsequent requests are accepted without additional validation.
 - Capabilities (for monitoring and UI): `GET http://127.0.0.1:19000/v1/mcp/capabilities` — this is not part of the MCP protocol, just a sidecar probe.
@@ -66,9 +66,9 @@ Catalog targets use canonical refs instead of opaque UUIDs: `workspace` is `<wor
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `grounded_answer` | Ask a natural-language question and get a grounded answer with citations — **the same pipeline the built-in UI assistant uses** (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `library`, `query` |
+| `grounded_answer` | Ask a natural-language question and get a grounded answer with canonical evidence references — **the same pipeline the built-in UI assistant uses** (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `library`, `query` |
 
-Response shape: `answer` (text), `citations` (chunks + graph entities), `verifier` (`level` + `warnings`), `runtimeExecutionId` (feed it to `get_runtime_execution_trace` for the full execution graph), `executionId`, `conversationId`. An MCP client receives exactly the answer a user would see in the UI for the same library and question — MCP and UI share the same grounded-answer pipeline, no parallel implementation.
+Response shape: tool text contains the answer; structured output contains `executionDetail`, the same assistant execution DTO the UI consumes, with chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request, and response fields. Top-level `runtimeExecutionId`, `executionId`, and `conversationId` are shortcuts for trace lookup. An MCP client receives exactly the answer a user would see in the UI for the same library and question — MCP and UI share the same grounded-answer pipeline, no parallel implementation.
 
 ### Discovery
 

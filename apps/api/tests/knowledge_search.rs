@@ -205,7 +205,7 @@ impl KnowledgeSearchFixture {
         loop {
             let hits = self
                 .search_store
-                .search_chunks(library_id, query, expected_chunk_ids.len().max(8))
+                .search_chunks(library_id, query, expected_chunk_ids.len().max(8), None, None)
                 .await
                 .with_context(|| format!("failed to search chunks for query {query}"))?;
             let actual = hits.iter().map(|row| row.chunk_id).collect::<BTreeSet<_>>();
@@ -543,6 +543,8 @@ impl KnowledgeSearchHttpFixture {
                 window_text: None,
 
                 raptor_level: None,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert knowledge search chunk")?;
@@ -692,6 +694,8 @@ impl KnowledgeSearchHttpFixture {
                 vector: vec![0.9, 0.8, 0.7],
                 freshness_generation: 1,
                 created_at: now,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert knowledge search chunk vector")?;
@@ -1009,6 +1013,8 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 window_text: None,
 
                 raptor_level: None,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert target chunk")?;
@@ -1098,6 +1104,8 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 window_text: None,
 
                 raptor_level: None,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert distractor chunk")?;
@@ -1224,6 +1232,8 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 window_text: None,
 
                 raptor_level: None,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert vector test chunk")?;
@@ -1265,6 +1275,8 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 vector: vec![0.1, 0.2, 0.3],
                 freshness_generation: 1,
                 created_at: now,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert generation 1 chunk vector")?;
@@ -1285,6 +1297,8 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 vector: vec![0.9, 0.8, 0.7],
                 freshness_generation: 2,
                 created_at: now + chrono::TimeDelta::seconds(1),
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert generation 2 chunk vector")?;
@@ -1469,6 +1483,8 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 window_text: None,
 
                 raptor_level: None,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert revision one chunk")?;
@@ -1578,6 +1594,8 @@ async fn revision_replacement_updates_readiness_generation_and_chunk_search_surf
                 window_text: None,
 
                 raptor_level: None,
+                occurred_at: None,
+                occurred_until: None,
             })
             .await
             .context("failed to insert revision two chunk")?;
@@ -1781,7 +1799,7 @@ async fn lexical_chunk_search_ignores_non_chunk_documents_in_shared_search_view(
             let hits = fixture
                 .state
                 .arango_search_store
-                .search_chunks(fixture.library_id, "/orion/status", 8)
+                .search_chunks(fixture.library_id, "/orion/status", 8, None, None)
                 .await
                 .context("failed to run lexical chunk search against shared search view")?;
             let chunk_ids = hits.iter().map(|row| row.chunk_id).collect::<BTreeSet<_>>();

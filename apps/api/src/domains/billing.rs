@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::domains::agent_runtime::RuntimeTaskKind;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingCapability {
     Indexing,
@@ -15,7 +15,7 @@ pub enum PricingCapability {
     GraphExtract,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingBillingUnit {
     Per1MInputTokens,
@@ -25,7 +25,7 @@ pub enum PricingBillingUnit {
     FixedPerCall,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingResolutionStatus {
     Priced,
@@ -34,14 +34,15 @@ pub enum PricingResolutionStatus {
     PricingMissing,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StageAttributionSource {
     StageNative,
     Reconciled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageStageOwnership {
     pub ingestion_run_id: Uuid,
     pub stage_event_id: Uuid,
@@ -55,7 +56,7 @@ pub enum RuntimeStageBillingPolicy {
     NonBillable,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingExecutionOwnerKind {
     QueryExecution,
@@ -63,7 +64,8 @@ pub enum BillingExecutionOwnerKind {
     IngestAttempt,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct BillingProviderCall {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -81,7 +83,8 @@ pub struct BillingProviderCall {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct BillingUsage {
     pub id: Uuid,
     pub provider_call_id: Uuid,
@@ -91,7 +94,8 @@ pub struct BillingUsage {
     pub observed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct BillingCharge {
     pub id: Uuid,
     pub usage_id: Uuid,
@@ -102,7 +106,8 @@ pub struct BillingCharge {
     pub priced_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct BillingExecutionCost {
     pub id: Uuid,
     pub owning_execution_kind: BillingExecutionOwnerKind,

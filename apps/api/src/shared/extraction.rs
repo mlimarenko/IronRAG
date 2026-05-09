@@ -28,7 +28,7 @@ pub struct ExtractedImage {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtractionLineSignal {
     Heading,
@@ -43,7 +43,7 @@ pub enum ExtractionLineSignal {
     Quote,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractionLineHint {
     pub ordinal: i32,
@@ -55,13 +55,13 @@ pub struct ExtractionLineHint {
     pub signals: Vec<ExtractionLineSignal>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractionStructureHints {
     pub lines: Vec<ExtractionLineHint>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractionSourceMetadata {
     pub source_format: String,
@@ -69,7 +69,7 @@ pub struct ExtractionSourceMetadata {
     pub line_count: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExtractionOutput {
     pub extraction_kind: String,
     pub content_text: String,

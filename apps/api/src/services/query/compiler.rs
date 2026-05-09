@@ -14,14 +14,15 @@
 //! hardcoded in this file.
 //!
 //! Robustness guarantees:
-//! - If provider binding resolution fails (no binding configured) or the
-//!   provider call itself fails, the compiler returns a **fallback IR**
-//!   (`QueryAct::Describe` / `QueryScope::SingleDocument` / `confidence: 0.0`)
-//!   so the rest of the pipeline keeps working in a degraded but safe mode.
-//!   Callers inspect `fallback_reason` to decide whether to surface a
-//!   warning.
-//! - Provider output that fails JSON-schema validation also returns a
-//!   fallback IR with the parse error recorded in `fallback_reason`.
+//! - Missing `QueryCompile` binding, provider call failures, and invalid
+//!   provider output fail loudly with `ApiError::ProviderFailure`. A turn must
+//!   not continue with a synthetic IR because that hides routing regressions
+//!   behind low-quality retrieval.
+//! - Cache hits are allowed only after the active `QueryCompile` binding has
+//!   resolved successfully. The cache key includes the resolved binding
+//!   fingerprint, so model/provider/preset changes do not replay stale IR.
+//! - Only successful live compiles and binding-validated cache hits produce
+//!   `CompileQueryOutcome`.
 
 use async_trait::async_trait;
 use redis::{AsyncCommands, Client as RedisClient};
@@ -37,12 +38,12 @@ use crate::{
     domains::{
         ai::AiBindingPurpose,
         query_ir::{
-            ClarificationReason, QUERY_IR_SCHEMA_VERSION, QueryAct, QueryIR, QueryLanguage,
-            QueryScope, VerificationLevel, query_ir_json_schema,
+            ClarificationReason, QUERY_IR_SCHEMA_VERSION, QueryAct, QueryIR, VerificationLevel,
+            query_ir_json_schema,
         },
     },
     infra::repositories::query_ir_cache_repository::{get_query_ir_cache, upsert_query_ir_cache},
-    integrations::llm::{ChatRequestSeed, LlmGateway, build_structured_chat_request},
+    integrations::llm::{LlmGateway, build_structured_chat_request},
     interfaces::http::router_support::ApiError,
     services::ai_catalog_service::ResolvedRuntimeBinding,
 };
@@ -63,7 +64,7 @@ pub const CACHE_HIT_POSTGRES_PROVIDER_KIND: &str = "cache:postgres";
 /// Turn the conversation resolver feeds in so the compiler can spot
 /// anaphora / deixis across turns. Kept deliberately thin — only the last
 /// few turns matter and the compiler will not crawl full history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CompileHistoryTurn {
     /// `"user"` or `"assistant"`.
     pub role: String,
@@ -88,11 +89,6 @@ pub struct CompileQueryOutcome {
     pub provider_kind: String,
     pub model_name: String,
     pub usage_json: serde_json::Value,
-    /// `None` on the canonical success path. `Some(reason)` when the
-    /// compiler fell back to a default IR (binding missing, provider
-    /// outage, invalid model output). Callers should surface this as a
-    /// non-fatal diagnostic in the query execution record.
-    pub fallback_reason: Option<String>,
     /// `true` when this outcome was served from the two-tier cache
     /// (Redis or Postgres) instead of a live LLM call. Billing must
     /// skip cache hits so repeat questions do not double-charge the
@@ -262,22 +258,26 @@ impl<'a> QueryIrCache for PersistenceQueryIrCache<'a> {
 }
 
 /// Compute the canonical cache key hash for one compile request. The hash is
-/// content-addressed: equal inputs under the same compiler runtime produce
-/// equal keys regardless of trailing whitespace or letter case so
-/// trivially-reworded repeats share a cache entry. Compiler/runtime source
-/// files are part of the address, so semantic fixes never serve stale IR rows
-/// that were compiled under older routing rules.
+/// content-addressed: equal inputs under the same compiler runtime and resolved
+/// QueryCompile binding produce equal keys regardless of trailing whitespace or
+/// letter case so trivially-reworded repeats share a cache entry.
+/// Compiler/runtime source files and binding fields are part of the address, so
+/// semantic fixes or provider/model changes never serve stale IR rows that were
+/// compiled under a different routing contract.
 #[must_use]
-pub fn hash_question(
+fn hash_compile_request(
     question: &str,
     history: &[CompileHistoryTurn],
     schema_version: u16,
+    binding: &ResolvedRuntimeBinding,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"schema|");
     hasher.update(schema_version.to_be_bytes());
     hasher.update(b"|runtime|");
     hasher.update(query_ir_runtime_fingerprint().as_bytes());
+    hasher.update(b"|binding|");
+    hasher.update(query_compile_binding_fingerprint(binding).as_bytes());
     hasher.update(b"|q|");
     hasher.update(normalize(question).as_bytes());
     for turn in history {
@@ -287,6 +287,104 @@ pub fn hash_question(
         hasher.update(normalize(&turn.content).as_bytes());
     }
     hex::encode(hasher.finalize())
+}
+
+#[must_use]
+fn query_compile_binding_fingerprint(binding: &ResolvedRuntimeBinding) -> String {
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, "binding_id", &binding.binding_id.to_string());
+    hash_field(&mut hasher, "workspace_id", &binding.workspace_id.to_string());
+    hash_field(&mut hasher, "library_id", &binding.library_id.to_string());
+    hash_field(&mut hasher, "binding_purpose", binding.binding_purpose.as_str());
+    hash_field(&mut hasher, "provider_catalog_id", &binding.provider_catalog_id.to_string());
+    hash_field(&mut hasher, "provider_kind", &binding.provider_kind);
+    hash_option_field(&mut hasher, "provider_base_url", binding.provider_base_url.as_deref());
+    hash_field(&mut hasher, "provider_api_style", &binding.provider_api_style);
+    hash_field(&mut hasher, "credential_id", &binding.credential_id.to_string());
+    hash_field(&mut hasher, "model_catalog_id", &binding.model_catalog_id.to_string());
+    hash_field(&mut hasher, "model_name", &binding.model_name);
+    hash_option_field(&mut hasher, "system_prompt", binding.system_prompt.as_deref());
+    hash_optional_display_field(&mut hasher, "temperature", binding.temperature);
+    hash_optional_display_field(&mut hasher, "top_p", binding.top_p);
+    hash_optional_display_field(
+        &mut hasher,
+        "max_output_tokens_override",
+        binding.max_output_tokens_override,
+    );
+    hash_json_value(&mut hasher, "extra_parameters_json", &binding.extra_parameters_json);
+    hex::encode(hasher.finalize())
+}
+
+fn hash_field(hasher: &mut Sha256, name: &str, value: &str) {
+    hasher.update(name.as_bytes());
+    hasher.update(b"=");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b";");
+}
+
+fn hash_option_field(hasher: &mut Sha256, name: &str, value: Option<&str>) {
+    match value {
+        Some(value) => hash_field(hasher, name, value),
+        None => hash_field(hasher, name, "<none>"),
+    }
+}
+
+fn hash_optional_display_field<T: ToString>(hasher: &mut Sha256, name: &str, value: Option<T>) {
+    let value = value.map(|value| value.to_string());
+    hash_option_field(hasher, name, value.as_deref());
+}
+
+fn hash_json_value(hasher: &mut Sha256, name: &str, value: &Value) {
+    hasher.update(name.as_bytes());
+    hasher.update(b"=");
+    hash_json(hasher, value);
+    hasher.update(b";");
+}
+
+fn hash_json(hasher: &mut Sha256, value: &Value) {
+    match value {
+        Value::Null => hasher.update(b"null"),
+        Value::Bool(value) => {
+            if *value {
+                hasher.update(b"true");
+            } else {
+                hasher.update(b"false");
+            }
+        }
+        Value::Number(value) => hasher.update(value.to_string().as_bytes()),
+        Value::String(value) => {
+            hasher.update(b"str:");
+            hasher.update(value.len().to_string().as_bytes());
+            hasher.update(b":");
+            hasher.update(value.as_bytes());
+        }
+        Value::Array(values) => {
+            hasher.update(b"[");
+            for value in values {
+                hash_json(hasher, value);
+                hasher.update(b",");
+            }
+            hasher.update(b"]");
+        }
+        Value::Object(map) => {
+            hasher.update(b"{");
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for key in keys {
+                hasher.update(key.len().to_string().as_bytes());
+                hasher.update(b":");
+                hasher.update(key.as_bytes());
+                hasher.update(b"=");
+                if let Some(value) = map.get(key) {
+                    hash_json(hasher, value);
+                }
+                hasher.update(b",");
+            }
+            hasher.update(b"}");
+        }
+    }
 }
 
 #[must_use]
@@ -372,29 +470,18 @@ pub struct QueryCompilerService;
 impl QueryCompilerService {
     /// Canonical entry point. Lookup order is:
     ///
-    /// 1. Hash the `(question, history, schema_version)` triple.
-    /// 2. Redis hot tier — on hit, return without touching binding
-    ///    resolution or the LLM.
-    /// 3. Postgres persistent tier — on hit, warm Redis and return.
-    /// 4. Miss: resolve the active `QueryCompile` binding, call the LLM,
-    ///    write through to both tiers on the canonical success path.
-    ///    Fallback outcomes (`fallback_reason.is_some()`) are NEVER
-    ///    cached so a transient binding / provider outage does not
-    ///    freeze a degraded IR into both tiers.
+    /// 1. Resolve the active `QueryCompile` binding fail-loud.
+    /// 2. Hash `(question, history, schema_version, binding fingerprint)`.
+    /// 3. Redis hot tier — on hit, return without touching the LLM.
+    /// 4. Postgres persistent tier — on hit, warm Redis and return.
+    /// 5. Miss: call the LLM with the resolved binding,
+    ///    write successful compiles through to both tiers. Missing binding
+    ///    or provider failures return `ApiError::ProviderFailure`.
     pub async fn compile(
         &self,
         state: &AppState,
         command: CompileQueryCommand,
     ) -> Result<CompileQueryOutcome, ApiError> {
-        let cache =
-            PersistenceQueryIrCache::new(&state.persistence.postgres, &state.persistence.redis);
-        let question_hash =
-            hash_question(&command.question, &command.history, QUERY_IR_SCHEMA_VERSION);
-
-        if let Some(entry) = cache.get(command.library_id, &question_hash).await {
-            return Ok(cached_outcome(entry));
-        }
-
         let binding = match state
             .canonical_services
             .ai_catalog
@@ -407,13 +494,27 @@ impl QueryCompilerService {
         {
             Some(binding) => binding,
             None => {
-                tracing::warn!(
+                tracing::error!(
                     library_id = %command.library_id,
-                    "query_compile binding is not configured — returning fallback IR"
+                    "query_compile binding is not configured"
                 );
-                return Ok(fallback_outcome("binding_not_configured"));
+                return Err(ApiError::ProviderFailure(
+                    "QueryCompile binding is not configured for this library".to_string(),
+                ));
             }
         };
+        let cache =
+            PersistenceQueryIrCache::new(&state.persistence.postgres, &state.persistence.redis);
+        let question_hash = hash_compile_request(
+            &command.question,
+            &command.history,
+            QUERY_IR_SCHEMA_VERSION,
+            &binding,
+        );
+
+        if let Some(entry) = cache.get(command.library_id, &question_hash).await {
+            return Ok(cached_outcome(entry));
+        }
 
         let outcome = self
             .compile_with_gateway(
@@ -424,20 +525,18 @@ impl QueryCompilerService {
             )
             .await?;
 
-        if outcome.fallback_reason.is_none() {
-            cache
-                .put(
-                    command.library_id,
-                    &question_hash,
-                    &CachedIrEntry {
-                        ir: outcome.ir.clone(),
-                        provider_kind: outcome.provider_kind.clone(),
-                        model_name: outcome.model_name.clone(),
-                        usage_json: outcome.usage_json.clone(),
-                    },
-                )
-                .await;
-        }
+        cache
+            .put(
+                command.library_id,
+                &question_hash,
+                &CachedIrEntry {
+                    ir: outcome.ir.clone(),
+                    provider_kind: outcome.provider_kind.clone(),
+                    model_name: outcome.model_name.clone(),
+                    usage_json: outcome.usage_json.clone(),
+                },
+            )
+            .await;
 
         Ok(outcome)
     }
@@ -454,7 +553,8 @@ impl QueryCompilerService {
         question: &str,
         history: &[CompileHistoryTurn],
     ) -> Result<CompileQueryOutcome, ApiError> {
-        let question_hash = hash_question(question, history, QUERY_IR_SCHEMA_VERSION);
+        let question_hash =
+            hash_compile_request(question, history, QUERY_IR_SCHEMA_VERSION, binding);
 
         if let Some(entry) = cache.get(library_id, &question_hash).await {
             return Ok(cached_outcome(entry));
@@ -462,20 +562,18 @@ impl QueryCompilerService {
 
         let outcome = self.compile_with_gateway(gateway, binding, question, history).await?;
 
-        if outcome.fallback_reason.is_none() {
-            cache
-                .put(
-                    library_id,
-                    &question_hash,
-                    &CachedIrEntry {
-                        ir: outcome.ir.clone(),
-                        provider_kind: outcome.provider_kind.clone(),
-                        model_name: outcome.model_name.clone(),
-                        usage_json: outcome.usage_json.clone(),
-                    },
-                )
-                .await;
-        }
+        cache
+            .put(
+                library_id,
+                &question_hash,
+                &CachedIrEntry {
+                    ir: outcome.ir.clone(),
+                    provider_kind: outcome.provider_kind.clone(),
+                    model_name: outcome.model_name.clone(),
+                    usage_json: outcome.usage_json.clone(),
+                },
+            )
+            .await;
 
         Ok(outcome)
     }
@@ -507,43 +605,40 @@ impl QueryCompilerService {
             .filter(|value| !value.trim().is_empty())
             .map_or_else(|| QUERY_COMPILER_SYSTEM_PROMPT.to_string(), ToOwned::to_owned);
 
-        let seed = ChatRequestSeed {
-            provider_kind: binding.provider_kind.clone(),
-            model_name: binding.model_name.clone(),
-            api_key_override: binding.api_key.clone(),
-            base_url_override: binding.provider_base_url.clone(),
-            system_prompt: Some(system_prompt),
-            temperature: binding.temperature,
-            top_p: binding.top_p,
-            max_output_tokens_override: binding.max_output_tokens_override,
-            extra_parameters_json: binding.extra_parameters_json.clone(),
-        };
+        let mut seed = binding.chat_request_seed();
+        seed.system_prompt = Some(system_prompt);
         let request = build_structured_chat_request(seed, prompt, response_format);
 
         let response = match gateway.generate(request).await {
             Ok(value) => value,
             Err(error) => {
-                tracing::warn!(
+                tracing::error!(
                     provider = %binding.provider_kind,
                     model = %binding.model_name,
                     ?error,
-                    "query compile provider call failed — returning fallback IR"
+                    "query compile provider call failed"
                 );
-                return Ok(fallback_outcome("provider_call_failed"));
+                return Err(ApiError::ProviderFailure(format!(
+                    "QueryCompile provider call failed for provider `{}` model `{}`",
+                    binding.provider_kind, binding.model_name
+                )));
             }
         };
 
         let ir: QueryIR = match serde_json::from_str(&response.output_text) {
             Ok(value) => value,
             Err(error) => {
-                tracing::warn!(
+                tracing::error!(
                     provider = %binding.provider_kind,
                     model = %binding.model_name,
                     output_preview = %preview(&response.output_text, 200),
                     ?error,
-                    "query compile output is not valid QueryIR JSON — returning fallback IR"
+                    "query compile output is not valid QueryIR JSON"
                 );
-                return Ok(fallback_outcome("invalid_ir_output"));
+                return Err(ApiError::ProviderFailure(format!(
+                    "QueryCompile provider returned invalid QueryIR JSON for provider `{}` model `{}`",
+                    binding.provider_kind, binding.model_name
+                )));
             }
         };
         let ir = normalize_compiled_ir(question, history, ir);
@@ -574,7 +669,6 @@ impl QueryCompilerService {
             provider_kind: response.provider_kind,
             model_name: response.model_name,
             usage_json: response.usage_json,
-            fallback_reason: None,
             served_from_cache: false,
         })
     }
@@ -590,22 +684,7 @@ fn cached_outcome(entry: CachedIrEntry) -> CompileQueryOutcome {
         provider_kind: entry.provider_kind,
         model_name: entry.model_name,
         usage_json: entry.usage_json,
-        fallback_reason: None,
         served_from_cache: true,
-    }
-}
-
-fn fallback_outcome(reason: &str) -> CompileQueryOutcome {
-    CompileQueryOutcome {
-        ir: fallback_ir(),
-        provider_kind: String::new(),
-        model_name: String::new(),
-        usage_json: json!({
-            "aggregation": "none",
-            "call_count": 0,
-        }),
-        fallback_reason: Some(reason.to_string()),
-        served_from_cache: false,
     }
 }
 
@@ -916,33 +995,12 @@ fn stateless_ir_has_explicit_target(ir: &QueryIR) -> bool {
         || ir.source_slice.is_some()
 }
 
-/// Safe default when the compiler cannot run. Chosen so no downstream stage
-/// narrows recall from an under-specified IR: `Describe` + `MultiDocument`
-/// keeps retrieval broad, verification is `Lenient`, and `confidence = 0.0`
-/// signals callers that the compile stage degraded.
-fn fallback_ir() -> QueryIR {
-    QueryIR {
-        act: QueryAct::Describe,
-        scope: QueryScope::MultiDocument,
-        language: QueryLanguage::Auto,
-        target_types: Vec::new(),
-        target_entities: Vec::new(),
-        literal_constraints: Vec::new(),
-        temporal_constraints: Vec::new(),
-        comparison: None,
-        document_focus: None,
-        conversation_refs: Vec::new(),
-        needs_clarification: None,
-        source_slice: None,
-        confidence: 0.0,
-    }
-}
-
 const QUERY_COMPILER_SYSTEM_PROMPT: &str = "You are the IronRAG query compiler. Your only job is to \
 read the user's natural-language question and, where present, a short window of prior conversation \
-turns, and return a typed QueryIR JSON object. The JSON schema is supplied through structured \
-outputs; you MUST follow it exactly and MUST NOT add prose, commentary, code fences, or extra \
-fields.\n\
+turns, and return a typed QueryIR JSON object. The JSON schema is supplied through the runtime \
+structured-output contract; when the runtime cannot carry the full schema, the same schema is \
+included in the system instructions. You MUST follow it exactly and MUST NOT add prose, commentary, \
+code fences, or extra fields.\n\
 \n\
 Guiding principles:\n\
 1. `act` captures what the user is fundamentally asking: `retrieve_value` (exact value), \
@@ -958,30 +1016,30 @@ is empty.\n\
 surface span exactly as visible to the user. Populate `start` and `end` with ISO-8601 UTC bounds \
 whenever the surface contains a self-contained absolute date or date-range (year, year+month, \
 year+month+day, quarter, year+week, ISO timestamp, decade). Treat `start` as inclusive and `end` as \
-exclusive. Use null bounds ONLY when the reference is genuinely under-determined and has no anchor \
-the runtime supplies (bare deixis like \"recently\" / \"lately\" / \"long ago\" without an \
-explicit period). Phrases like \"in March 2026\", \"27 марта 2026\", \"2026-Q1\", \
-\"on 2026-03-27\", \"3月2026\", \"first half of 2025\" are absolute and MUST resolve.\n\
+exclusive. Use null bounds ONLY when the reference is genuinely under-determined and has no runtime \
+anchor or explicit absolute period. Absolute calendar references must resolve regardless of the \
+writing system used in the original surface.\n\
 \n\
-Worked examples (cover ≥ 2 writing systems and one purely numeric form per CLAUDE.md \
-script-agnostic policy):\n\
+Worked examples use numeric calendar forms so the rule stays script-agnostic:\n\
 \n\
-- surface: \"March 2026\" → start: \"2026-03-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
-- surface: \"в марте 2026\" → start: \"2026-03-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
-- surface: \"27 марта 2026\" → start: \"2026-03-27T00:00:00Z\", end: \"2026-03-28T00:00:00Z\"\n\
-- surface: \"2026-03-27\" → start: \"2026-03-27T00:00:00Z\", end: \"2026-03-28T00:00:00Z\"\n\
-- surface: \"2026-Q1\" → start: \"2026-01-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
-- surface: \"в первой половине 2025\" → start: \"2025-01-01T00:00:00Z\", end: \"2025-07-01T00:00:00Z\"\n\
-- surface: \"recently\" / \"недавно\" (no anchor) → start: null, end: null\n\
+- surface: \"2026-03\" -> start: \"2026-03-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
+- surface: \"2026-03-27\" -> start: \"2026-03-27T00:00:00Z\", end: \"2026-03-28T00:00:00Z\"\n\
+- surface: \"2026-Q1\" -> start: \"2026-01-01T00:00:00Z\", end: \"2026-04-01T00:00:00Z\"\n\
+- surface: \"2026-W13\" -> start: \"2026-03-23T00:00:00Z\", end: \"2026-03-30T00:00:00Z\"\n\
+- surface: \"2026-03-27T14:30:00Z\" -> start: \"2026-03-27T14:30:00Z\", end: \"2026-03-27T14:30:01Z\"\n\
 5. `conversation_refs` lists unresolved anaphora / deixis / ellipsis that point to prior \
 user-assistant turns, not to positions, ranges, neighboring units, or anchors inside the source \
 documents being searched. `act = follow_up` is typical when the question cannot stand on its own.\n\
-6. `target_types` are free-form ontology tags (examples: endpoint, port, parameter, procedure, \
-protocol, config_key, error_code, env_var, metric, table_row, table_summary, table_average, \
-table_frequency, document, concept) and may also use \
-runtime graph node-type tags when the user asks for graph inventory or graph facts: person, \
-organization, location, event, artifact, process, concept, attribute, entity. You may invent a new \
-tag if nothing fits — the system grows its ontology from your output.\n\
+6. `target_types` are canonical ontology tags. Use built-in tags exactly as written when they fit: \
+endpoint, url, path, wsdl, base_url, port, parameter, http_method, protocol, config_key, \
+error_code, env_var, version, procedure, metric, table_row, table_summary, table_average, \
+table_frequency, document, primary_heading, secondary_heading, formats_under_test, concept, \
+relationship. For graph facts, use runtime node-type tags: person, organization, location, event, \
+artifact, natural, process, concept, attribute, entity. \
+Endpoint-like tags (`endpoint`, `url`, `path`, `wsdl`, `base_url`) identify exact network or \
+interface identifiers only; do not use them for timing, severity, status, count, metric, or \
+outcome attributes unless the user asks for the identifier itself. You may invent a new singular \
+snake_case tag only when no built-in tag fits.\n\
 7. `source_slice` is null for ordinary summaries, comparisons, procedures, and needle lookups. \
 Set it only when the user asks for a positional slice of a sequential source: earliest units \
 (`head`), latest units (`tail`), or a bounded representation of the whole sequence (`all`). \
@@ -1036,6 +1094,7 @@ fn preview(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domains::query_ir::{QueryLanguage, QueryScope};
     use crate::integrations::llm::{
         ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
         EmbeddingResponse, VisionRequest, VisionResponse,
@@ -1085,7 +1144,7 @@ mod tests {
             provider_base_url: None,
             provider_api_style: "openai".to_string(),
             credential_id: Uuid::now_v7(),
-            api_key: Some("sk-test".to_string()),
+            api_key: Some("test-key".to_string()),
             model_catalog_id: Uuid::now_v7(),
             model_name: "gpt-5.4-nano".to_string(),
             system_prompt: None,
@@ -1132,7 +1191,6 @@ mod tests {
             .await
             .expect("compile ok");
 
-        assert!(outcome.fallback_reason.is_none());
         assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
         assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
         assert_eq!(outcome.ir.language, QueryLanguage::Ru);
@@ -1325,39 +1383,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_fallback_on_provider_error() {
+    async fn returns_provider_failure_on_provider_error() {
         let gateway = StubGateway::new(Err(anyhow::anyhow!("upstream 503")));
         let service = QueryCompilerService;
         let binding = sample_binding();
 
-        let outcome = service
+        let error = service
             .compile_with_gateway(&gateway, &binding, "what is /system/info?", &[])
             .await
-            .expect("fallback is a success path");
+            .expect_err("provider failure must fail the compile");
 
-        assert_eq!(outcome.fallback_reason.as_deref(), Some("provider_call_failed"));
-        assert_eq!(outcome.ir.confidence, 0.0);
-        assert_eq!(outcome.ir.act, QueryAct::Describe);
-        assert_eq!(outcome.verification_level(), VerificationLevel::Lenient);
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
     }
 
     #[tokio::test]
-    async fn returns_fallback_on_invalid_ir_output() {
+    async fn returns_provider_failure_on_invalid_ir_output() {
         let gateway = StubGateway::new(Ok(chat_response_with("not valid json")));
         let service = QueryCompilerService;
         let binding = sample_binding();
 
-        let outcome = service
+        let error = service
             .compile_with_gateway(&gateway, &binding, "anything", &[])
             .await
-            .expect("fallback is a success path");
+            .expect_err("invalid IR must fail the compile");
 
-        assert_eq!(outcome.fallback_reason.as_deref(), Some("invalid_ir_output"));
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
     }
 
     #[tokio::test]
     async fn history_turns_are_embedded_in_prompt() {
-        let ir_json = serde_json::to_string(&fallback_ir()).unwrap();
+        let ir_json = serde_json::to_string(&canonical_ir()).unwrap();
         let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
         let service = QueryCompilerService;
         let binding = sample_binding();
@@ -1386,9 +1441,9 @@ mod tests {
     // -----------------------------------------------------------------
     // Two-level cache tests — mirror `StubGateway` with a `StubCache`
     // keyed by `(library_id, question_hash)` so we can assert both the
-    // read-through path (hit skips the LLM) and the write-through path
-    // (successful compile populates the cache) without any real Redis
-    // or Postgres.
+    // read-through path (binding-scoped hit skips the LLM) and the
+    // write-through path (successful compile populates the cache) without
+    // any real Redis or Postgres.
     // -----------------------------------------------------------------
 
     #[derive(Default)]
@@ -1453,7 +1508,9 @@ mod tests {
         let library_id = Uuid::now_v7();
         let question = "how do I configure the payment module?";
         let history: Vec<CompileHistoryTurn> = Vec::new();
-        let hash = hash_question(question, &history, QUERY_IR_SCHEMA_VERSION);
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+        let hash = hash_compile_request(question, &history, QUERY_IR_SCHEMA_VERSION, &binding);
         let cached = CachedIrEntry {
             ir: canonical_ir(),
             provider_kind: CACHE_HIT_REDIS_PROVIDER_KIND.to_string(),
@@ -1463,8 +1520,6 @@ mod tests {
         let cache = StubCache::seeded(library_id, hash, cached);
         let gateway =
             StubGateway::new(Err(anyhow::anyhow!("gateway must not be called on cache hit")));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
 
         let outcome = service
             .compile_with_cache_and_gateway(
@@ -1473,7 +1528,6 @@ mod tests {
             .await
             .expect("cache hit is a success path");
 
-        assert!(outcome.fallback_reason.is_none());
         assert_eq!(outcome.provider_kind, CACHE_HIT_REDIS_PROVIDER_KIND);
         assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
         assert!(
@@ -1516,7 +1570,6 @@ mod tests {
             .await
             .expect("compile ok");
 
-        assert!(outcome.fallback_reason.is_none());
         assert_eq!(outcome.ir.act, QueryAct::RetrieveValue);
         assert_eq!(cache.put_calls(), 1, "successful compile must write through to cache");
         assert_eq!(cache.len(), 1);
@@ -1534,7 +1587,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_is_not_cached() {
+    async fn cache_key_is_scoped_to_resolved_binding() {
+        let library_id = Uuid::now_v7();
+        let question = "how do I configure the payment module?";
+        let history: Vec<CompileHistoryTurn> = Vec::new();
+        let binding = sample_binding();
+        let mut other_binding = binding.clone();
+        other_binding.binding_id = Uuid::now_v7();
+        other_binding.model_catalog_id = Uuid::now_v7();
+        other_binding.model_name = "gpt-5.4-mini".to_string();
+
+        let hash = hash_compile_request(question, &history, QUERY_IR_SCHEMA_VERSION, &binding);
+        let cache = StubCache::seeded(
+            library_id,
+            hash,
+            CachedIrEntry {
+                ir: canonical_ir(),
+                provider_kind: CACHE_HIT_REDIS_PROVIDER_KIND.to_string(),
+                model_name: String::new(),
+                usage_json: json!({"source": "redis"}),
+            },
+        );
+        let ir_json = json!({
+            "act": "retrieve_value",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["port"],
+            "target_entities": [],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.85
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+
+        let outcome = service
+            .compile_with_cache_and_gateway(
+                &cache,
+                &gateway,
+                &other_binding,
+                library_id,
+                question,
+                &history,
+            )
+            .await
+            .expect("binding-scoped cache miss should compile live");
+
+        assert_eq!(outcome.ir.act, QueryAct::RetrieveValue);
+        assert_eq!(
+            gateway
+                .last_request
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|request| request.model_name.as_str()),
+            Some("gpt-5.4-mini")
+        );
+        assert_eq!(cache.put_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_failure_is_not_cached() {
         let library_id = Uuid::now_v7();
         let question = "anything";
         let history: Vec<CompileHistoryTurn> = Vec::new();
@@ -1543,36 +1662,50 @@ mod tests {
         let service = QueryCompilerService;
         let binding = sample_binding();
 
-        let outcome = service
+        let error = service
             .compile_with_cache_and_gateway(
                 &cache, &gateway, &binding, library_id, question, &history,
             )
             .await
-            .expect("fallback is a success path");
+            .expect_err("provider failure must fail the compile");
 
-        assert_eq!(outcome.fallback_reason.as_deref(), Some("provider_call_failed"));
-        assert_eq!(cache.put_calls(), 0, "fallback outcomes must not be cached");
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
+        assert_eq!(cache.put_calls(), 0, "failed compiles must not be cached");
         assert_eq!(cache.len(), 0);
     }
 
     #[tokio::test]
-    async fn hash_question_is_normalized_and_history_sensitive() {
-        let base = hash_question("Hello World", &[], QUERY_IR_SCHEMA_VERSION);
-        let variant = hash_question("  hello world  ", &[], QUERY_IR_SCHEMA_VERSION);
+    async fn hash_compile_request_is_normalized_history_and_binding_sensitive() {
+        let binding = sample_binding();
+        let base = hash_compile_request("Hello World", &[], QUERY_IR_SCHEMA_VERSION, &binding);
+        let variant =
+            hash_compile_request("  hello world  ", &[], QUERY_IR_SCHEMA_VERSION, &binding);
         assert_eq!(base, variant, "trim + lowercase must produce the same hash");
 
-        let with_history = hash_question(
+        let with_history = hash_compile_request(
             "Hello World",
             &[CompileHistoryTurn {
                 role: "user".to_string(),
                 content: "prior context".to_string(),
             }],
             QUERY_IR_SCHEMA_VERSION,
+            &binding,
         );
         assert_ne!(base, with_history, "history must contribute to the hash");
 
-        let bumped = hash_question("Hello World", &[], QUERY_IR_SCHEMA_VERSION.wrapping_add(1));
+        let bumped = hash_compile_request(
+            "Hello World",
+            &[],
+            QUERY_IR_SCHEMA_VERSION.wrapping_add(1),
+            &binding,
+        );
         assert_ne!(base, bumped, "schema_version must contribute to the hash");
+
+        let mut other_binding = binding;
+        other_binding.model_name = "gpt-5.4-mini".to_string();
+        let other_binding_hash =
+            hash_compile_request("Hello World", &[], QUERY_IR_SCHEMA_VERSION, &other_binding);
+        assert_ne!(base, other_binding_hash, "binding fingerprint must contribute to the hash");
 
         assert_eq!(
             query_ir_runtime_fingerprint().len(),

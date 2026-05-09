@@ -5,8 +5,8 @@
 //! Postgres tier that survives Redis restarts and lets operators audit
 //! every (library, question) → IR compilation decision offline. Rows are
 //! scoped by `schema_version`, and the question hash includes the compiler
-//! runtime fingerprint, so stale entries are skipped without requiring a
-//! compatibility reader. A `compiled_at` TTL
+//! runtime plus resolved QueryCompile binding fingerprint, so stale entries
+//! are skipped without requiring a compatibility reader. A `compiled_at` TTL
 //! (`QUERY_IR_CACHE_MAX_AGE_DAYS`) keeps cold rows from accumulating
 //! indefinitely.
 
@@ -129,13 +129,17 @@ mod tests {
         // the schema version names the compile-contract. Pinning them
         // here keeps the repository / compiler / migration story in
         // sync so an accidental downgrade fails CI.
-        assert!(
-            QUERY_IR_CACHE_MAX_AGE_DAYS >= 1,
-            "TTL must be positive or the cache never serves anything"
-        );
-        assert!(
-            QUERY_IR_SCHEMA_VERSION >= 2,
-            "schema_version must be ≥ 2 after the 0.3.1 consolidation / pack-budget contract bump"
-        );
+        const {
+            assert!(
+                QUERY_IR_CACHE_MAX_AGE_DAYS >= 1,
+                "TTL must be positive or the cache never serves anything"
+            );
+        }
+        const {
+            assert!(
+                QUERY_IR_SCHEMA_VERSION >= 2,
+                "schema_version must be ≥ 2 after the 0.3.1 consolidation / pack-budget contract bump"
+            );
+        }
     }
 }

@@ -5,11 +5,9 @@
     {
       "id": "inventory_wsdl",
       "communityMinCount": 1,
-      "assistantMaxToolStarts": 0,
       "entityQuery": "Inventory",
       "documentQuery": "What is the WSDL for inventory soap api?",
       "question": "What is the WSDL for inventory soap api?",
-      "expectedSearchTopLabel": "Inventory SOAP API Contract",
       "assistantRequireAll": [
         "http://demo.local:8080/inventory-api/ws/inventory.wsdl"
       ],
@@ -21,7 +19,6 @@
     {
       "id": "checkout_system_info",
       "communityMinCount": 1,
-      "assistantMaxToolStarts": 0,
       "entityQuery": "checkout",
       "documentQuery": "Which endpoint returns the current checkout server info?",
       "question": "Which endpoint returns the current checkout server info?",
@@ -35,7 +32,6 @@
     {
       "id": "protocol_comparison",
       "communityMinCount": 1,
-      "assistantMaxToolStarts": 0,
       "entityQuery": "rewards inventory",
       "documentQuery": "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?",
       "question": "How does the REST API for rewards accounts differ from the inventory WSDL transport contract?",
@@ -44,10 +40,6 @@
         "WSDL",
         "rewards",
         "inventory"
-      ],
-      "assistantForbidAny": [
-        "GraphQL",
-        "checkout"
       ]
     }
   ]

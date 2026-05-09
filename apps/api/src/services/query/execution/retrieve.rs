@@ -8,15 +8,16 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::{
+        ai::AiBindingPurpose,
         provider_profiles::EffectiveProviderProfile,
         query::RuntimeQueryMode,
-        query_ir::{QueryIR, TemporalConstraint},
+        query_ir::{QueryAct, QueryIR, QueryScope, TemporalConstraint},
     },
     infra::{
         arangodb::document_store::{
             KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
         },
-        repositories::{self, ai_repository},
+        repositories,
     },
     services::{
         knowledge::runtime_read::load_active_runtime_graph_projection,
@@ -37,23 +38,25 @@ use crate::{
     shared::extraction::text_render::repair_technical_layout_noise,
 };
 
+use super::question_intent::query_ir_has_focused_document_answer_intent;
 use super::technical_literals::technical_literal_focus_keyword_segments;
 use super::tuning::DOCUMENT_IDENTITY_SCORE_FLOOR;
 use super::types::*;
 use super::{
     GraphTargetEntityCoverageField, GraphTargetEntityCoverageFieldKind, GraphTargetEntityProfile,
-    graph_target_entity_coverage_score, graph_target_entity_profiles,
-    load_initial_table_rows_for_documents, load_table_rows_for_documents,
-    load_table_summary_chunks_for_documents, merge_canonical_table_aggregation_chunks,
-    query_relevant_entity_hits, question_asks_table_aggregation, related_edges_for_entities,
-    requested_initial_table_row_count,
+    associative_edges_for_entities, graph_target_entity_coverage_score,
+    graph_target_entity_profiles, load_initial_table_rows_for_documents,
+    load_table_rows_for_documents, load_table_summary_chunks_for_documents,
+    merge_canonical_table_aggregation_chunks, query_relevant_entity_hits,
+    question_asks_table_aggregation, requested_initial_table_row_count,
+    resolve_scoped_target_document_ids,
 };
 
 const DIRECT_TABLE_AGGREGATION_SUMMARY_LIMIT: usize = 32;
 const DIRECT_TABLE_AGGREGATION_ROW_LIMIT: usize = 24;
 const DIRECT_TABLE_AGGREGATION_CHUNK_LIMIT: usize = 32;
 const DOCUMENT_IDENTITY_CHUNKS_PER_DOCUMENT: usize = 3;
-const GRAPH_EVIDENCE_CONTEXT_FETCH_MULTIPLIER: usize = 4;
+const GRAPH_EVIDENCE_CONTEXT_FETCH_MULTIPLIER: usize = 3;
 const GRAPH_EVIDENCE_CONTEXT_SCORE_TOKEN_MIN_CHARS: usize = 4;
 const GRAPH_EVIDENCE_CONTEXT_EVIDENCE_FIELD_WEIGHT: usize = 4;
 const GRAPH_EVIDENCE_CONTEXT_TARGET_FIELD_WEIGHT: usize = 2;
@@ -270,6 +273,7 @@ async fn load_entity_bio_chunks(
     query_ir: Option<&QueryIR>,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     plan_keywords: &[String],
+    targeted_document_ids: &BTreeSet<Uuid>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
     let Some(ir) = query_ir else {
         return Ok(Vec::new());
@@ -399,9 +403,9 @@ async fn load_entity_bio_chunks(
         .enumerate()
         .map(|(rank, id)| (id, entity_bio_chunk_score(rank)))
         .collect();
-    let empty_targets: BTreeSet<Uuid> = BTreeSet::new();
     let candidates =
-        batch_hydrate_hits(state, hits, document_index, plan_keywords, &empty_targets).await?;
+        batch_hydrate_hits(state, hits, document_index, plan_keywords, targeted_document_ids)
+            .await?;
     // Post-filter: ArangoSearch BM25 stems tokens, so a surname like
     // "Foster" can retrieve chunks mentioning "forest" that share a
     // stem but have nothing to do with the target person. Similarly,
@@ -442,6 +446,7 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
     query_ir: Option<&QueryIR>,
     graph_index: &QueryGraphIndex,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    targeted_document_ids: &BTreeSet<Uuid>,
     plan_keywords: &[String],
 ) -> anyhow::Result<RuntimeGraphEvidenceRetrieval> {
     let ranked_evidence = load_ranked_graph_evidence_rows_for_query(
@@ -453,6 +458,7 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
         plan,
         query_ir,
         graph_index,
+        targeted_document_ids,
         graph_evidence_context_fetch_cap(),
     )
     .await
@@ -475,10 +481,10 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
         return Ok(RuntimeGraphEvidenceRetrieval { chunks: Vec::new(), context_lines });
     }
 
-    let empty_targets = BTreeSet::new();
-    let mut chunks = batch_hydrate_hits(state, hits, document_index, plan_keywords, &empty_targets)
-        .await
-        .context("failed to hydrate graph evidence chunks")?;
+    let mut chunks =
+        batch_hydrate_hits(state, hits, document_index, plan_keywords, targeted_document_ids)
+            .await
+            .context("failed to hydrate graph evidence chunks")?;
     apply_graph_evidence_texts_to_chunks(&mut chunks, &evidence_texts_by_chunk, plan_keywords);
     for chunk in &mut chunks {
         chunk.score_kind = RuntimeChunkScoreKind::GraphEvidence;
@@ -520,6 +526,9 @@ struct RankedGraphEvidenceRows {
     target_evidence_count: usize,
 }
 
+type GraphEvidenceChunkHits = Vec<(Uuid, f32)>;
+type GraphEvidenceTextsByChunk = HashMap<Uuid, Vec<String>>;
+
 async fn load_ranked_graph_evidence_rows_for_query(
     state: &AppState,
     library_id: Uuid,
@@ -529,6 +538,7 @@ async fn load_ranked_graph_evidence_rows_for_query(
     plan: &RuntimeQueryPlan,
     query_ir: Option<&QueryIR>,
     graph_index: &QueryGraphIndex,
+    targeted_document_ids: &BTreeSet<Uuid>,
     limit: usize,
 ) -> anyhow::Result<RankedGraphEvidenceRows> {
     let targets =
@@ -542,10 +552,16 @@ async fn load_ranked_graph_evidence_rows_for_query(
         &state.persistence.postgres,
         library_id,
         &text_queries,
-        GRAPH_EVIDENCE_CONTEXT_LINE_CAP as i64,
+        graph_evidence_context_fetch_cap() as i64,
     )
     .await
     .context("failed to search graph evidence context by evidence text")?;
+    let text_evidence = if targeted_document_ids.is_empty() {
+        text_evidence
+    } else {
+        filter_graph_evidence_rows_for_target_documents(state, text_evidence, targeted_document_ids)
+            .await?
+    };
 
     let target_evidence = if targets.is_empty() {
         Vec::new()
@@ -558,6 +574,16 @@ async fn load_ranked_graph_evidence_rows_for_query(
         )
         .await
         .context("failed to list graph evidence context for retrieved graph targets")?
+    };
+    let target_evidence = if targeted_document_ids.is_empty() {
+        target_evidence
+    } else {
+        filter_graph_evidence_rows_for_target_documents(
+            state,
+            target_evidence,
+            targeted_document_ids,
+        )
+        .await?
     };
 
     let rows = rank_graph_evidence_context_rows(
@@ -579,9 +605,65 @@ async fn load_ranked_graph_evidence_rows_for_query(
     })
 }
 
+async fn filter_graph_evidence_rows_for_target_documents(
+    state: &AppState,
+    rows: Vec<repositories::RuntimeGraphEvidenceRow>,
+    targeted_document_ids: &BTreeSet<Uuid>,
+) -> anyhow::Result<Vec<repositories::RuntimeGraphEvidenceRow>> {
+    if rows.is_empty() || targeted_document_ids.is_empty() {
+        return Ok(rows);
+    }
+
+    let mut selected = Vec::with_capacity(rows.len());
+    let mut unresolved = Vec::with_capacity(rows.len());
+    let mut fallback_chunk_ids = BTreeSet::new();
+
+    for (position, row) in rows.into_iter().enumerate() {
+        if let Some(document_id) = row.document_id {
+            if targeted_document_ids.contains(&document_id) {
+                selected.push((position, row));
+            }
+            continue;
+        }
+
+        let Some(chunk_id) = row.chunk_id else {
+            continue;
+        };
+        unresolved.push((position, row, chunk_id));
+        fallback_chunk_ids.insert(chunk_id);
+    }
+
+    if unresolved.is_empty() {
+        selected.sort_unstable_by_key(|(position, _)| *position);
+        return Ok(selected.into_iter().map(|(_, row)| row).collect());
+    }
+
+    let chunk_rows = state
+        .arango_document_store
+        .list_chunks_by_ids(&fallback_chunk_ids.iter().copied().collect::<Vec<_>>())
+        .await
+        .context("failed to resolve chunk document ids for scoped graph evidence filtering")?;
+    let chunk_documents = chunk_rows
+        .into_iter()
+        .map(|chunk| (chunk.chunk_id, chunk.document_id))
+        .collect::<HashMap<_, _>>();
+
+    for (position, row, chunk_id) in unresolved {
+        if chunk_documents
+            .get(&chunk_id)
+            .is_some_and(|document_id| targeted_document_ids.contains(document_id))
+        {
+            selected.push((position, row));
+        }
+    }
+
+    selected.sort_unstable_by_key(|(position, _)| *position);
+    Ok(selected.into_iter().map(|(_, row)| row).collect())
+}
+
 pub(crate) fn graph_evidence_chunk_hits_from_rows(
     rows: &[repositories::RuntimeGraphEvidenceRow],
-) -> (Vec<(Uuid, f32)>, HashMap<Uuid, Vec<String>>) {
+) -> (GraphEvidenceChunkHits, GraphEvidenceTextsByChunk) {
     let mut seen_chunks = HashSet::<Uuid>::new();
     let mut seen_texts = HashSet::<(Uuid, String)>::new();
     let mut evidence_texts_by_chunk = HashMap::<Uuid, Vec<String>>::new();
@@ -1036,7 +1118,7 @@ pub(crate) fn graph_evidence_targets_for_query(
 ) -> Vec<(String, Uuid)> {
     let query_entities =
         query_relevant_entity_hits(plan, query_ir, graph_index, GRAPH_EVIDENCE_TARGET_CAP / 2);
-    let query_relationships = related_edges_for_entities(
+    let query_relationships = associative_edges_for_entities(
         &query_entities,
         graph_index,
         plan,
@@ -1065,6 +1147,7 @@ async fn load_query_ir_focus_chunks(
     library_id: Uuid,
     question: &str,
     focus_queries: &[String],
+    targeted_document_ids: &BTreeSet<Uuid>,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     plan_keywords: &[String],
     temporal_start: Option<DateTime<Utc>>,
@@ -1115,10 +1198,10 @@ async fn load_query_ir_focus_chunks(
         return Ok(Vec::new());
     }
 
-    let empty_targets = BTreeSet::new();
-    let mut chunks = batch_hydrate_hits(state, hits, document_index, plan_keywords, &empty_targets)
-        .await
-        .context("failed to hydrate query-IR focus chunks")?;
+    let mut chunks =
+        batch_hydrate_hits(state, hits, document_index, plan_keywords, targeted_document_ids)
+            .await
+            .context("failed to hydrate query-IR focus chunks")?;
     for chunk in &mut chunks {
         chunk.score_kind = RuntimeChunkScoreKind::QueryIrFocus;
     }
@@ -1146,8 +1229,8 @@ pub(crate) async fn retrieve_document_chunks(
     let targeted_document_ids = forced_target_document_ids
         .filter(|ids| !ids.is_empty())
         .cloned()
-        .unwrap_or_else(|| explicit_target_document_ids(question, document_index));
-    let initial_table_row_count = requested_initial_table_row_count(question);
+        .unwrap_or_else(|| resolve_scoped_target_document_ids(question, query_ir, document_index));
+    let initial_table_row_count = requested_initial_table_row_count(query_ir);
     let targeted_table_aggregation =
         question_asks_table_aggregation(question, query_ir) && !targeted_document_ids.is_empty();
     let query_ir_focus_queries = query_ir.map(query_ir_lexical_focus_queries).unwrap_or_default();
@@ -1298,8 +1381,15 @@ pub(crate) async fn retrieve_document_chunks(
             latest_version_context_top_k(query_ir.expect("latest chunks require QueryIR"), limit),
         );
     }
-    let entity_bio_chunks =
-        load_entity_bio_chunks(state, library_id, query_ir, document_index, plan_keywords).await?;
+    let entity_bio_chunks = load_entity_bio_chunks(
+        state,
+        library_id,
+        query_ir,
+        document_index,
+        plan_keywords,
+        &targeted_document_ids,
+    )
+    .await?;
     if !entity_bio_chunks.is_empty() {
         // Cap at limit + the bio budget so entity-bio hits are additive
         // rather than pushing other high-score chunks off the top-K.
@@ -1311,6 +1401,7 @@ pub(crate) async fn retrieve_document_chunks(
         library_id,
         question,
         &query_ir_focus_queries,
+        &targeted_document_ids,
         document_index,
         plan_keywords,
         temporal_start,
@@ -1698,22 +1789,14 @@ async fn batch_hydrate_hits(
 pub(crate) async fn resolve_runtime_vector_search_context(
     state: &AppState,
     library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
+    _provider_profile: &EffectiveProviderProfile,
 ) -> anyhow::Result<Option<RuntimeVectorSearchContext>> {
-    let providers = ai_repository::list_provider_catalog(&state.persistence.postgres)
+    let Some(binding) = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryRetrieve)
         .await
-        .context("failed to list provider catalog for runtime vector search")?;
-    let Some(provider) = providers
-        .into_iter()
-        .find(|row| row.provider_kind == provider_profile.embedding.provider_kind.as_str())
-    else {
-        return Ok(None);
-    };
-    let models = ai_repository::list_model_catalog(&state.persistence.postgres, Some(provider.id))
-        .await
-        .context("failed to list model catalog for runtime vector search")?;
-    let Some(model) =
-        models.into_iter().find(|row| row.model_name == provider_profile.embedding.model_name)
+        .context("failed to resolve query retrieval binding for runtime vector search")?
     else {
         return Ok(None);
     };
@@ -1725,7 +1808,7 @@ pub(crate) async fn resolve_runtime_vector_search_context(
         return Ok(None);
     }
 
-    Ok(Some(RuntimeVectorSearchContext { model_catalog_id: model.id }))
+    Ok(Some(RuntimeVectorSearchContext { model_catalog_id: binding.model_catalog_id }))
 }
 
 pub(crate) fn expanded_candidate_limit(
@@ -1959,11 +2042,19 @@ fn query_ir_compound_focus_values(query_ir: &QueryIR) -> Vec<String> {
         values.push(normalized);
     };
 
-    for literal in &query_ir.literal_constraints {
-        push_value(&literal.text, &mut values);
-    }
-    for entity in &query_ir.target_entities {
-        push_value(&entity.label, &mut values);
+    let focus_uses_target_entities = query_ir_has_focused_document_answer_intent(query_ir)
+        && !query_ir.target_entities.is_empty();
+    if focus_uses_target_entities {
+        for entity in &query_ir.target_entities {
+            push_value(&entity.label, &mut values);
+        }
+    } else {
+        for literal in &query_ir.literal_constraints {
+            push_value(&literal.text, &mut values);
+        }
+        for entity in &query_ir.target_entities {
+            push_value(&entity.label, &mut values);
+        }
     }
     values
 }
@@ -1979,16 +2070,24 @@ fn query_ir_focus_values(query_ir: &QueryIR) -> Vec<String> {
         values.push(normalized);
     };
 
-    for literal in &query_ir.literal_constraints {
-        push_value(&literal.text, &mut values);
-    }
+    let focus_uses_target_entities = query_ir_has_focused_document_answer_intent(query_ir)
+        && !query_ir.target_entities.is_empty();
     for temporal in &query_ir.temporal_constraints {
         for focus in temporal_constraint_focus_values(temporal) {
             push_value(&focus, &mut values);
         }
     }
-    for entity in &query_ir.target_entities {
-        push_value(&entity.label, &mut values);
+    if focus_uses_target_entities {
+        for entity in &query_ir.target_entities {
+            push_value(&entity.label, &mut values);
+        }
+    } else {
+        for literal in &query_ir.literal_constraints {
+            push_value(&literal.text, &mut values);
+        }
+        for entity in &query_ir.target_entities {
+            push_value(&entity.label, &mut values);
+        }
     }
     values
 }
@@ -2227,10 +2326,7 @@ pub(crate) fn retain_canonical_document_head_chunks(
     // chunks under non-head revisions and the strict gate would hide
     // them. Downstream chunk_id dedup handles cross-revision duplicates.
     chunks.retain(|chunk| {
-        document_index
-            .get(&chunk.document_id)
-            .and_then(canonical_document_revision_id)
-            .is_some()
+        document_index.get(&chunk.document_id).and_then(canonical_document_revision_id).is_some()
     });
     before.saturating_sub(chunks.len())
 }
@@ -2248,25 +2344,6 @@ fn chunk_answer_source_text(chunk: &KnowledgeChunkRow) -> String {
         return repair_technical_layout_noise(&chunk.normalized_text);
     }
     repair_technical_layout_noise(&chunk.content_text)
-}
-
-fn explicit_target_document_ids(
-    question: &str,
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-) -> BTreeSet<Uuid> {
-    super::explicit_target_document_ids_from_values(
-        question,
-        document_index.values().flat_map(|document| {
-            [
-                document.file_name.as_deref(),
-                document.title.as_deref(),
-                Some(document.external_key.as_str()),
-            ]
-            .into_iter()
-            .flatten()
-            .map(move |value| (document.document_id, value))
-        }),
-    )
 }
 
 pub(crate) fn canonical_document_revision_id(document: &KnowledgeDocumentRow) -> Option<Uuid> {
@@ -2492,13 +2569,21 @@ pub(crate) fn score_value(score: Option<f32>) -> f32 {
     score.unwrap_or(0.0)
 }
 
-pub(crate) fn truncate_bundle(bundle: &mut RetrievalBundle, top_k: usize) {
+pub(crate) fn truncate_bundle(
+    bundle: &mut RetrievalBundle,
+    top_k: usize,
+    query_ir: Option<&QueryIR>,
+) {
     bundle.entities.truncate(top_k);
     bundle.relationships.truncate(top_k);
-    truncate_chunks_for_context(&mut bundle.chunks, top_k);
+    truncate_chunks_for_context(&mut bundle.chunks, top_k, query_ir);
 }
 
-fn truncate_chunks_for_context(chunks: &mut Vec<RuntimeMatchedChunk>, top_k: usize) {
+fn truncate_chunks_for_context(
+    chunks: &mut Vec<RuntimeMatchedChunk>,
+    top_k: usize,
+    query_ir: Option<&QueryIR>,
+) {
     if chunks.len() <= top_k {
         return;
     }
@@ -2508,8 +2593,151 @@ fn truncate_chunks_for_context(chunks: &mut Vec<RuntimeMatchedChunk>, top_k: usi
             .cmp(&score_kind_priority(left.score_kind))
             .then_with(|| left_index.cmp(right_index))
     });
-    indexed.truncate(top_k);
-    *chunks = indexed.into_iter().map(|(_, chunk)| chunk).collect();
+    let selected = if let Some(query_ir) = query_ir {
+        if matches!(query_ir.scope, QueryScope::MultiDocument) {
+            truncate_chunks_for_multi_document_scope(&indexed, top_k, query_ir)
+        } else {
+            indexed.into_iter().take(top_k).collect::<Vec<_>>()
+        }
+    } else {
+        indexed.into_iter().take(top_k).collect::<Vec<_>>()
+    };
+    *chunks = selected.into_iter().map(|(_, chunk)| chunk).collect();
+}
+
+fn truncate_chunks_for_multi_document_scope(
+    chunks: &[(usize, RuntimeMatchedChunk)],
+    top_k: usize,
+    query_ir: &QueryIR,
+) -> Vec<(usize, RuntimeMatchedChunk)> {
+    if top_k == 0 || chunks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut selected = Vec::with_capacity(top_k);
+    let mut selected_indices = HashSet::new();
+    let relevant_documents = multi_document_relevant_document_ids(chunks, query_ir, top_k);
+
+    for document_id in relevant_documents {
+        let next_chunk = chunks
+            .iter()
+            .find(|(_, chunk)| chunk.document_id == document_id)
+            .map(|(index, chunk)| (*index, chunk.clone()));
+        if let Some((index, chunk)) = next_chunk {
+            selected_indices.insert(index);
+            selected.push((index, chunk));
+        }
+        if selected.len() >= top_k {
+            return selected;
+        }
+    }
+
+    for (index, chunk) in chunks {
+        if selected.len() >= top_k {
+            break;
+        }
+        if selected_indices.insert(*index) {
+            selected.push((*index, chunk.clone()));
+        }
+    }
+    selected
+}
+
+fn multi_document_relevant_document_ids(
+    chunks: &[(usize, RuntimeMatchedChunk)],
+    query_ir: &QueryIR,
+    top_k: usize,
+) -> Vec<Uuid> {
+    let relevance_terms = query_multi_document_relevance_terms(query_ir);
+    let mut relevant_documents = Vec::new();
+    let mut scored_documents = HashSet::new();
+    for (_, chunk) in chunks {
+        let document_id = chunk.document_id;
+        if scored_documents.insert(document_id)
+            && query_chunk_relevance_score(chunk, &relevance_terms) > 0
+        {
+            relevant_documents.push(document_id);
+            if relevant_documents.len() >= top_k {
+                return relevant_documents;
+            }
+        }
+    }
+
+    if relevant_documents.len() < 2 && matches!(query_ir.act, QueryAct::Compare) {
+        let mut selected_documents = relevant_documents.iter().copied().collect::<HashSet<_>>();
+        for (_, chunk) in chunks {
+            let document_id = chunk.document_id;
+            if selected_documents.insert(document_id) {
+                relevant_documents.push(document_id);
+            }
+            if relevant_documents.len() >= 2 {
+                break;
+            }
+        }
+    }
+
+    if relevant_documents.is_empty() {
+        let mut selected_documents = HashSet::new();
+        for (_, chunk) in chunks {
+            let document_id = chunk.document_id;
+            if selected_documents.insert(document_id) {
+                relevant_documents.push(document_id);
+            }
+            if relevant_documents.len() >= top_k {
+                break;
+            }
+        }
+    }
+
+    if relevant_documents.len() > top_k {
+        relevant_documents.truncate(top_k);
+    }
+    relevant_documents
+}
+
+fn query_chunk_relevance_score(chunk: &RuntimeMatchedChunk, terms: &[String]) -> usize {
+    if terms.is_empty() {
+        return 0;
+    }
+
+    let haystack =
+        format!("{} {} {}", chunk.document_label, chunk.excerpt, chunk.source_text).to_lowercase();
+    terms.iter().filter(|term| haystack.contains(term.as_str())).count()
+}
+
+fn query_multi_document_relevance_terms(query_ir: &QueryIR) -> Vec<String> {
+    let mut terms = BTreeSet::new();
+    let push_terms = |value: &str, terms: &mut BTreeSet<String>| {
+        for token in normalized_alnum_tokens(value, 3) {
+            if !token.is_empty() {
+                terms.insert(token);
+            }
+        }
+    };
+
+    for entity in &query_ir.target_entities {
+        push_terms(&entity.label, &mut terms);
+    }
+    if let Some(comparison) = &query_ir.comparison {
+        if let Some(value) = &comparison.a {
+            push_terms(value, &mut terms);
+        }
+        if let Some(value) = &comparison.b {
+            push_terms(value, &mut terms);
+        }
+        push_terms(&comparison.dimension, &mut terms);
+    }
+    if let Some(document_focus) = &query_ir.document_focus {
+        push_terms(&document_focus.hint, &mut terms);
+    }
+    for literal in &query_ir.literal_constraints {
+        push_terms(&literal.text, &mut terms);
+    }
+    for target_type in &query_ir.target_types {
+        push_terms(target_type, &mut terms);
+    }
+
+    terms.into_iter().collect()
 }
 
 pub(crate) fn excerpt_for(content: &str, max_chars: usize) -> String {

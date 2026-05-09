@@ -62,7 +62,7 @@ pub enum DoclingExtractionError {
     LimiterClosed,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct DoclingExtractionPayload {
     markdown: String,
@@ -154,11 +154,7 @@ fn build_output(
     mime_type: Option<&str>,
     source_format: &str,
 ) -> Result<ExtractionOutput, DoclingExtractionError> {
-    let content = if payload.markdown.trim().is_empty() {
-        payload.text.unwrap_or_default()
-    } else {
-        payload.markdown
-    };
+    let content = select_docling_content(payload.markdown, payload.text);
     if content.trim().is_empty() {
         return Err(DoclingExtractionError::EmptyOutput);
     }
@@ -194,6 +190,12 @@ fn build_output(
         usage_json: serde_json::json!({}),
         extracted_images: Vec::new(),
     })
+}
+
+fn select_docling_content(markdown: String, text: Option<String>) -> String {
+    let text = text.unwrap_or_default();
+    let markdown_body = markdown.replace("<!-- image -->", "");
+    if markdown_body.trim().is_empty() || markdown.trim().is_empty() { text } else { markdown }
 }
 
 fn docling_extract_bin() -> String {
@@ -325,6 +327,44 @@ mod tests {
             line.signals.contains(&crate::shared::extraction::ExtractionLineSignal::TableRow)
         }));
         assert_eq!(output.source_map["adapter"], "docling");
+    }
+
+    #[test]
+    fn builds_extraction_output_from_docling_text_when_markdown_is_only_image_placeholder() {
+        let payload = DoclingExtractionPayload {
+            markdown: "<!-- image -->".to_string(),
+            text: Some("Formats PDF / DOCX / PPTX / PNG / JPG".to_string()),
+            page_count: Some(1),
+            status: Some("success".to_string()),
+            input_format: Some("pdf".to_string()),
+            docling_version: Some("2.91.0".to_string()),
+            warnings: Vec::new(),
+            timings: serde_json::json!({"total": 1.5}),
+        };
+
+        let output = build_output(payload, Some("formats.pdf"), Some("application/pdf"), "pdf")
+            .expect("docling output");
+
+        assert_eq!(output.content_text, "Formats PDF / DOCX / PPTX / PNG / JPG");
+    }
+
+    #[test]
+    fn rejects_docling_output_when_markdown_is_only_image_placeholder_without_text() {
+        let payload = DoclingExtractionPayload {
+            markdown: "<!-- image -->".to_string(),
+            text: None,
+            page_count: Some(1),
+            status: Some("success".to_string()),
+            input_format: Some("pdf".to_string()),
+            docling_version: Some("2.91.0".to_string()),
+            warnings: Vec::new(),
+            timings: serde_json::json!({"total": 1.5}),
+        };
+
+        let error = build_output(payload, Some("empty.pdf"), Some("application/pdf"), "pdf")
+            .expect_err("placeholder-only output should be rejected");
+
+        assert!(matches!(error, DoclingExtractionError::EmptyOutput));
     }
 
     #[test]

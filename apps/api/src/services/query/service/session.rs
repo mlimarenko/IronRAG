@@ -283,21 +283,25 @@ fn build_conversation_runtime_context_from_views(
         None
     };
 
-    let coreference_entities = previous_turns
-        .iter()
-        .rev()
-        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-        .map(|turn| {
-            let focused_source = (!follow_up_focus_tokens.is_empty())
-                .then(|| {
-                    focused_conversation_turn_text(&turn.content_text, &follow_up_focus_tokens)
-                })
-                .flatten();
-            extract_entities_from_previous_answer(
-                focused_source.as_deref().unwrap_or(&turn.content_text),
-            )
-        })
-        .unwrap_or_default();
+    let coreference_entities = if is_follow_up {
+        previous_turns
+            .iter()
+            .rev()
+            .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+            .map(|turn| {
+                let focused_source = (!follow_up_focus_tokens.is_empty())
+                    .then(|| {
+                        focused_conversation_turn_text(&turn.content_text, &follow_up_focus_tokens)
+                    })
+                    .flatten();
+                extract_entities_from_previous_answer(
+                    focused_source.as_deref().unwrap_or(&turn.content_text),
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let effective_query_text = if is_follow_up {
         render_effective_query_text(&previous_turns, &current_text).unwrap_or(current_text)

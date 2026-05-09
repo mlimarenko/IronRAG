@@ -29,9 +29,9 @@ use super::{
     summarize_typed_technical_facts,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct KnowledgeContextBundleDetailResponse {
+pub struct KnowledgeContextBundleDetailResponse {
     bundle: KnowledgeContextBundleRow,
     traces: Vec<KnowledgeRetrievalTraceRow>,
     chunk_references: Vec<KnowledgeBundleChunkReferenceRow>,
@@ -40,9 +40,9 @@ pub(super) struct KnowledgeContextBundleDetailResponse {
     evidence_references: Vec<KnowledgeBundleEvidenceReferenceRow>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct KnowledgeDocumentDetailResponse {
+pub struct KnowledgeDocumentDetailResponse {
     document: KnowledgeDocumentRow,
     revisions: Vec<KnowledgeRevisionRow>,
     latest_revision: Option<KnowledgeRevisionRow>,
@@ -52,13 +52,25 @@ pub(super) struct KnowledgeDocumentDetailResponse {
     graph_evidence_summary: KnowledgeGraphEvidenceSummary,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/context-bundles",
+    tag = "knowledge",
+    operation_id = "listKnowledgeContextBundles",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Context bundles for the library", body = [KnowledgeContextBundleRow]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.knowledge.list_context_bundles",
     skip_all,
     fields(library_id = %library_id, item_count)
 )]
-pub(super) async fn list_context_bundles(
+pub async fn list_context_bundles(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -80,7 +92,19 @@ pub(super) async fn list_context_bundles(
     skip_all,
     fields(library_id = %library_id, item_count)
 )]
-pub(super) async fn list_documents(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/documents",
+    tag = "knowledge",
+    operation_id = "listKnowledgeDocuments",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Knowledge documents for the library", body = [KnowledgeDocumentRow]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn list_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -103,7 +127,19 @@ pub(super) async fn list_documents(
     skip_all,
     fields(library_id = %library_id)
 )]
-pub(super) async fn get_library_summary(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/summary",
+    tag = "knowledge",
+    operation_id = "getKnowledgeLibrarySummary",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Knowledge library summary", body = KnowledgeLibrarySummaryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn get_library_summary(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -131,7 +167,23 @@ pub(super) async fn get_library_summary(
     skip_all,
     fields(library_id = %library_id, document_id = %document_id)
 )]
-pub(super) async fn get_document(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/documents/{documentId}",
+    tag = "knowledge",
+    operation_id = "getKnowledgeDocument",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        ("documentId" = uuid::Uuid, Path, description = "Document identifier"),
+    ),
+    responses(
+        (status = 200, description = "Knowledge document detail", body = KnowledgeDocumentDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn get_document(
     auth: AuthContext,
     State(state): State<AppState>,
     Path((library_id, document_id)): Path<(Uuid, Uuid)>,
@@ -196,7 +248,20 @@ pub(super) async fn get_document(
     skip_all,
     fields(bundle_id = %bundle_id)
 )]
-pub(super) async fn get_context_bundle(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/context-bundles/{bundleId}",
+    tag = "knowledge",
+    operation_id = "getKnowledgeContextBundle",
+    params(("bundleId" = uuid::Uuid, Path, description = "Context bundle identifier")),
+    responses(
+        (status = 200, description = "Context bundle detail", body = KnowledgeContextBundleDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the bundle"),
+        (status = 404, description = "Bundle not found"),
+    ),
+)]
+pub async fn get_context_bundle(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(bundle_id): Path<Uuid>,
@@ -235,7 +300,20 @@ pub(super) async fn get_context_bundle(
     skip_all,
     fields(library_id = %library_id, item_count)
 )]
-pub(super) async fn list_library_generations(
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/generations",
+    tag = "knowledge",
+    operation_id = "listKnowledgeLibraryGenerations",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Knowledge generation history for the library", body = [KnowledgeLibraryGeneration]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
+pub async fn list_library_generations(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,

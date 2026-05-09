@@ -2,23 +2,21 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domains::query::{QueryPlanningMetadata, RuntimeQueryMode};
-const MAX_TOP_K: usize = 48;
-const DEFAULT_TOP_K: usize = 8;
+use crate::domains::query::{DEFAULT_TOP_K, MAX_TOP_K, QueryPlanningMetadata, RuntimeQueryMode};
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 22_000;
 /// Minimum token length after stripping punctuation. Tokens shorter than
 /// this mostly carry no retrieval signal; a length cutoff avoids a
 /// language-specific lexicon.
 const TOKEN_MIN_LEN: usize = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryIntentProfile {
     pub exact_literal_technical: bool,
     pub multi_document_technical: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryPlanTaskInput {
     pub question: String,
@@ -27,7 +25,7 @@ pub struct QueryPlanTaskInput {
     pub metadata: Option<QueryPlanningMetadata>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryPlanFailureCode {
     InvalidTopK,
@@ -42,14 +40,14 @@ impl QueryPlanFailureCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryPlanFailure {
     pub code: String,
     pub summary: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeQueryPlan {
     pub requested_mode: RuntimeQueryMode,
@@ -308,19 +306,19 @@ mod tests {
 
         assert_eq!(plan.requested_mode, RuntimeQueryMode::Mix);
         assert_eq!(plan.planned_mode, RuntimeQueryMode::Mix);
-        assert_eq!(plan.top_k, 48);
+        assert_eq!(plan.top_k, MAX_TOP_K);
     }
 
     #[test]
     fn build_query_plan_keeps_top_k_ir_agnostic() {
         let plan = build_query_plan("What's new in the last 5 releases?", None, None, None);
-        assert_eq!(plan.top_k, 8);
+        assert_eq!(plan.top_k, DEFAULT_TOP_K);
 
         let explicit_low = build_query_plan("latest 5 releases", None, Some(6), None);
         assert_eq!(explicit_low.top_k, 6);
 
         let capped = build_query_plan("latest 100 releases", None, None, None);
-        assert_eq!(capped.top_k, 8);
+        assert_eq!(capped.top_k, DEFAULT_TOP_K);
     }
 
     #[test]

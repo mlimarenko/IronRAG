@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use uuid::Uuid;
 
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     infra::repositories::{
         self, RuntimeGraphEdgeRow, RuntimeGraphEvidenceRow, RuntimeGraphNodeRow, catalog_repository,
     },
-    services::graph::projection::active_projection_version,
+    services::graph::{error::GraphServiceError, projection::active_projection_version},
 };
 
 #[derive(Debug, Clone, Default)]
@@ -75,13 +75,13 @@ impl GraphSummaryService {
         state: &AppState,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
-    ) -> anyhow::Result<u64> {
+    ) -> Result<u64, GraphServiceError> {
         let Some(source_truth_version) = refresh.source_truth_version else {
             return Ok(0);
         };
 
         if refresh.is_targeted() {
-            repositories::supersede_runtime_graph_canonical_summaries_for_targets(
+            Ok(repositories::supersede_runtime_graph_canonical_summaries_for_targets(
                 &state.persistence.postgres,
                 library_id,
                 source_truth_version,
@@ -89,15 +89,17 @@ impl GraphSummaryService {
                 &refresh.edge_ids,
             )
             .await
-            .context("failed to supersede targeted canonical summaries after source-truth change")
+            .context(
+                "failed to supersede targeted canonical summaries after source-truth change",
+            )?)
         } else if refresh.broad_refresh {
-            repositories::supersede_runtime_graph_canonical_summaries_for_library(
+            Ok(repositories::supersede_runtime_graph_canonical_summaries_for_library(
                 &state.persistence.postgres,
                 library_id,
                 source_truth_version,
             )
             .await
-            .context("failed to supersede library canonical summaries after source-truth change")
+            .context("failed to supersede library canonical summaries after source-truth change")?)
         } else {
             Ok(0)
         }
@@ -113,7 +115,7 @@ impl GraphSummaryService {
         state: &AppState,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
-    ) -> anyhow::Result<u64> {
+    ) -> Result<u64, GraphServiceError> {
         let Some(source_truth_version) = refresh.source_truth_version else {
             return Ok(0);
         };
@@ -123,7 +125,7 @@ impl GraphSummaryService {
                 .await
                 .context("failed to load library while refreshing canonical summaries")?
         else {
-            return Err(anyhow!("library {library_id} not found while refreshing summaries"));
+            return Err(GraphServiceError::LibraryNotFound { library_id });
         };
 
         let snapshot =

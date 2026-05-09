@@ -1,7 +1,9 @@
 pub(crate) mod backfill;
 pub mod community_detection;
 pub(crate) mod entity_resolution;
+pub mod error;
 pub(crate) mod extract;
+pub mod gc;
 pub(crate) mod identity;
 pub(crate) mod maintenance;
 pub(super) mod merge;

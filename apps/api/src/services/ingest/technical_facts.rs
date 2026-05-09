@@ -4,10 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
     domains::knowledge::TypedTechnicalFact,
+    services::ingest::cancellation::{StageError, ensure_not_cancelled},
     shared::extraction::{
         structured_document::{StructuredBlockData, StructuredBlockKind},
         table_summary::is_table_summary_text,
@@ -31,7 +33,7 @@ const HTTP_METHODS: [&str; 8] =
     ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT"];
 const PROTOCOLS: [&str; 8] = ["http", "https", "tcp", "udp", "ws", "wss", "grpc", "soap"];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractTechnicalFactsCommand {
     pub revision_id: Uuid,
@@ -41,14 +43,14 @@ pub struct ExtractTechnicalFactsCommand {
     pub blocks: Vec<StructuredBlockData>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractTechnicalFactsResult {
     pub facts: Vec<TypedTechnicalFact>,
     pub conflicts: Vec<TechnicalFactConflict>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TechnicalFactExtractionFailureCode {
     EmptyBlocks,
@@ -63,7 +65,7 @@ impl TechnicalFactExtractionFailureCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TechnicalFactExtractionFailure {
     pub code: String,
@@ -105,16 +107,19 @@ impl TechnicalFactService {
         Self
     }
 
-    #[must_use]
     pub fn extract_from_blocks(
         &self,
         command: ExtractTechnicalFactsCommand,
-    ) -> ExtractTechnicalFactsResult {
+        cancellation_token: &CancellationToken,
+    ) -> Result<ExtractTechnicalFactsResult, StageError> {
+        ensure_not_cancelled(cancellation_token)?;
         let mut candidates = Vec::new();
         for block in &command.blocks {
+            ensure_not_cancelled(cancellation_token)?;
             let block_text = preferred_block_text(block);
             let lines = logical_lines(&block_text);
             for line in &lines {
+                ensure_not_cancelled(cancellation_token)?;
                 // Block-family dispatch: each block kind runs only the
                 // extractors that are semantically relevant to it.
                 // The old loop called all 14 extractors on every line,
@@ -199,10 +204,13 @@ impl TechnicalFactService {
             }
         }
 
+        ensure_not_cancelled(cancellation_token)?;
         let mut facts_with_scope = finalize_candidates(&command, candidates);
+        ensure_not_cancelled(cancellation_token)?;
         let conflicts = assign_conflicts(&mut facts_with_scope);
         let mut facts =
             facts_with_scope.into_iter().map(|(fact, _scope_signature)| fact).collect::<Vec<_>>();
+        ensure_not_cancelled(cancellation_token)?;
         facts.sort_by(|left, right| {
             left.fact_kind
                 .as_str()
@@ -211,12 +219,13 @@ impl TechnicalFactService {
                 .then_with(|| left.fact_id.cmp(&right.fact_id))
         });
 
-        ExtractTechnicalFactsResult { facts, conflicts }
+        Ok(ExtractTechnicalFactsResult { facts, conflicts })
     }
 
     pub fn extract_runtime_stage(
         &self,
         command: ExtractTechnicalFactsCommand,
+        cancellation_token: &CancellationToken,
     ) -> Result<ExtractTechnicalFactsResult, TechnicalFactExtractionFailure> {
         if command.blocks.is_empty() {
             return Err(TechnicalFactExtractionFailure {
@@ -226,7 +235,12 @@ impl TechnicalFactService {
             });
         }
 
-        Ok(self.extract_from_blocks(command))
+        self.extract_from_blocks(command, cancellation_token).map_err(|error| {
+            TechnicalFactExtractionFailure {
+                code: "stage_cancelled".to_string(),
+                summary: error.to_string(),
+            }
+        })
     }
 }
 
@@ -1009,6 +1023,7 @@ mod tests {
         structured_document::{StructuredBlockData, StructuredBlockKind},
         table_markdown::parse_markdown_table_row,
     };
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     // extracts_branded_identifiers_from_catalog_link_list_items — REMOVED.
@@ -1020,68 +1035,79 @@ mod tests {
         // Verify the branded heuristic is truly gone — no `Identifier`
         // facts from heading phrases or list item links.
         let service = TechnicalFactService::new();
-        let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
-            revision_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            blocks: vec![
-                StructuredBlockData {
-                    block_id: Uuid::now_v7(),
-                    ordinal: 0,
-                    block_kind: StructuredBlockKind::Heading,
-                    text: "Acme Software Products - Acme Software Products - Example".to_string(),
-                    normalized_text: "Acme Software Products - Acme Software Products - Example"
-                        .to_string(),
-                    heading_trail: vec![
-                        "Acme Software Products - Acme Software Products - Example".to_string(),
+        let result = service
+            .extract_from_blocks(
+                ExtractTechnicalFactsCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    blocks: vec![
+                        StructuredBlockData {
+                            block_id: Uuid::now_v7(),
+                            ordinal: 0,
+                            block_kind: StructuredBlockKind::Heading,
+                            text: "Acme Software Products - Acme Software Products - Example"
+                                .to_string(),
+                            normalized_text:
+                                "Acme Software Products - Acme Software Products - Example"
+                                    .to_string(),
+                            heading_trail: vec![
+                                "Acme Software Products - Acme Software Products - Example"
+                                    .to_string(),
+                            ],
+                            section_path: vec!["acme-software-products".to_string()],
+                            page_number: None,
+                            source_span: None,
+                            parent_block_id: None,
+                            table_coordinates: None,
+                            code_language: None,
+                            is_boilerplate: false,
+                        },
+                        StructuredBlockData {
+                            block_id: Uuid::now_v7(),
+                            ordinal: 1,
+                            block_kind: StructuredBlockKind::ListItem,
+                            text: "- [Control Center](https://docs.example.test/control-center)"
+                                .to_string(),
+                            normalized_text:
+                                "- [Control Center](https://docs.example.test/control-center)"
+                                    .to_string(),
+                            heading_trail: vec![
+                                "Acme Software Products - Acme Software Products - Example"
+                                    .to_string(),
+                            ],
+                            section_path: vec!["acme-software-products".to_string()],
+                            page_number: None,
+                            source_span: None,
+                            parent_block_id: None,
+                            table_coordinates: None,
+                            code_language: None,
+                            is_boilerplate: false,
+                        },
+                        StructuredBlockData {
+                            block_id: Uuid::now_v7(),
+                            ordinal: 2,
+                            block_kind: StructuredBlockKind::ListItem,
+                            text: "- [POS](https://docs.example.test/pos)".to_string(),
+                            normalized_text: "- [POS](https://docs.example.test/pos)".to_string(),
+                            heading_trail: vec![
+                                "Acme Software Products - Acme Software Products - Example"
+                                    .to_string(),
+                            ],
+                            section_path: vec!["acme-software-products".to_string()],
+                            page_number: None,
+                            source_span: None,
+                            parent_block_id: None,
+                            table_coordinates: None,
+                            code_language: None,
+                            is_boilerplate: false,
+                        },
                     ],
-                    section_path: vec!["acme-software-products".to_string()],
-                    page_number: None,
-                    source_span: None,
-                    parent_block_id: None,
-                    table_coordinates: None,
-                    code_language: None,
-                    is_boilerplate: false,
                 },
-                StructuredBlockData {
-                    block_id: Uuid::now_v7(),
-                    ordinal: 1,
-                    block_kind: StructuredBlockKind::ListItem,
-                    text: "- [Control Center](https://docs.example.test/control-center)"
-                        .to_string(),
-                    normalized_text: "- [Control Center](https://docs.example.test/control-center)"
-                        .to_string(),
-                    heading_trail: vec![
-                        "Acme Software Products - Acme Software Products - Example".to_string(),
-                    ],
-                    section_path: vec!["acme-software-products".to_string()],
-                    page_number: None,
-                    source_span: None,
-                    parent_block_id: None,
-                    table_coordinates: None,
-                    code_language: None,
-                    is_boilerplate: false,
-                },
-                StructuredBlockData {
-                    block_id: Uuid::now_v7(),
-                    ordinal: 2,
-                    block_kind: StructuredBlockKind::ListItem,
-                    text: "- [POS](https://docs.example.test/pos)".to_string(),
-                    normalized_text: "- [POS](https://docs.example.test/pos)".to_string(),
-                    heading_trail: vec![
-                        "Acme Software Products - Acme Software Products - Example".to_string(),
-                    ],
-                    section_path: vec!["acme-software-products".to_string()],
-                    page_number: None,
-                    source_span: None,
-                    parent_block_id: None,
-                    table_coordinates: None,
-                    code_language: None,
-                    is_boilerplate: false,
-                },
-            ],
-        });
+                &CancellationToken::new(),
+            )
+            .expect("technical facts extracted");
 
         let identifiers = result
             .facts
@@ -1100,28 +1126,35 @@ mod tests {
     #[test]
     fn extracts_endpoint_methods_and_query_parameter_names() {
         let service = TechnicalFactService::new();
-        let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
-            revision_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            blocks: vec![StructuredBlockData {
-                block_id: Uuid::now_v7(),
-                ordinal: 0,
-                block_kind: StructuredBlockKind::EndpointBlock,
-                text: "GET https://api.example.test/orders?pageNumber=1&pageSize=25".to_string(),
-                normalized_text: "GET https://api.example.test/orders?pageNumber=1&pageSize=25"
-                    .to_string(),
-                heading_trail: vec!["Orders".to_string()],
-                section_path: vec!["orders".to_string()],
-                page_number: None,
-                source_span: None,
-                parent_block_id: None,
-                table_coordinates: None,
-                code_language: None,
-                is_boilerplate: false,
-            }],
-        });
+        let result = service
+            .extract_from_blocks(
+                ExtractTechnicalFactsCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    blocks: vec![StructuredBlockData {
+                        block_id: Uuid::now_v7(),
+                        ordinal: 0,
+                        block_kind: StructuredBlockKind::EndpointBlock,
+                        text: "GET https://api.example.test/orders?pageNumber=1&pageSize=25"
+                            .to_string(),
+                        normalized_text:
+                            "GET https://api.example.test/orders?pageNumber=1&pageSize=25"
+                                .to_string(),
+                        heading_trail: vec!["Orders".to_string()],
+                        section_path: vec!["orders".to_string()],
+                        page_number: None,
+                        source_span: None,
+                        parent_block_id: None,
+                        table_coordinates: None,
+                        code_language: None,
+                        is_boilerplate: false,
+                    }],
+                },
+                &CancellationToken::new(),
+            )
+            .expect("technical facts extracted");
 
         let fact_kinds = result
             .facts
@@ -1181,7 +1214,8 @@ mod tests {
                     is_boilerplate: false,
                 },
             ],
-        });
+        }, &CancellationToken::new())
+        .expect("technical facts extracted");
 
         assert!(!result.facts.iter().any(|fact| {
             fact.fact_kind.as_str() == "parameter_name" && fact.display_value == "Sheet"
@@ -1215,7 +1249,8 @@ mod tests {
                 code_language: None,
                 is_boilerplate: false,
             }],
-        });
+        }, &CancellationToken::new())
+        .expect("technical facts extracted");
 
         let fact_kinds = result
             .facts
@@ -1256,13 +1291,17 @@ mod tests {
         blocks: Vec<StructuredBlockData>,
     ) -> Vec<crate::domains::knowledge::TypedTechnicalFact> {
         TechnicalFactService::new()
-            .extract_from_blocks(ExtractTechnicalFactsCommand {
-                revision_id: Uuid::now_v7(),
-                document_id: Uuid::now_v7(),
-                workspace_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                blocks,
-            })
+            .extract_from_blocks(
+                ExtractTechnicalFactsCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    blocks,
+                },
+                &CancellationToken::new(),
+            )
+            .expect("technical facts extracted")
             .facts
     }
 

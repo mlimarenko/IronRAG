@@ -164,7 +164,7 @@ async fn canonical_content_lifecycle_head_promotion_fails_loudly_when_knowledge_
             .await
             .context("failed to drop Arango database before head promotion")?;
 
-        let error = fixture
+        let error = match fixture
             .state
             .canonical_services
             .content
@@ -179,7 +179,10 @@ async fn canonical_content_lifecycle_head_promotion_fails_loudly_when_knowledge_
                 },
             )
             .await
-            .expect_err("head promotion must fail when knowledge sync fails");
+        {
+            Ok(_) => anyhow::bail!("head promotion must fail when knowledge sync fails"),
+            Err(error) => error,
+        };
         assert!(matches!(error, ApiError::InternalMessage(_)));
         assert!(
             error
@@ -909,7 +912,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             .get_async_operation(&fixture.state, delete_operation_id)
             .await
             .context("failed to reload delete async operation")?;
-        assert_eq!(delete_operation.status, "ready");
+        assert_eq!(delete_operation.status.as_str(), "ready");
 
         let head_after_delete = fixture
             .state
@@ -949,7 +952,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             .get_async_operation(&fixture.state, replace_async_operation_id)
             .await
             .context("failed to reload superseded replace async operation")?;
-        assert_eq!(replace_async_operation.status, "failed");
+        assert_eq!(replace_async_operation.status.as_str(), "failed");
         assert_eq!(replace_async_operation.failure_code.as_deref(), Some("document_deleted"));
         let replace_job_handle_after_delete = fixture
             .state

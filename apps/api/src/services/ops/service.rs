@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 
 use chrono::Utc;
+use ironrag_contracts::documents::DocumentReadiness;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::ops::{
-        OpsAsyncOperation, OpsAsyncOperationProgress, OpsLibraryState, OpsLibraryWarning,
+        OpsAsyncOperation, OpsAsyncOperationProgress, OpsAsyncOperationStatus, OpsLibraryState,
+        OpsLibraryWarning,
     },
     domains::{
         content::{
@@ -61,7 +63,7 @@ pub struct DocumentKnowledgeCoverageState {
     pub failed: bool,
     pub readable: bool,
     pub graph_ready: bool,
-    pub readiness_kind: String,
+    pub readiness_kind: DocumentReadiness,
     pub preparation_state: String,
     pub graph_coverage_kind: String,
     pub typed_fact_coverage: Option<f64>,
@@ -95,19 +97,19 @@ pub(crate) fn classify_document_knowledge_signals(
     let graph_coverage_failed = failed || signals.graph_failed || signals.preparation_failed;
 
     let readiness_kind = if failed {
-        "failed"
+        DocumentReadiness::Failed
     } else if signals.processing_active && readable {
-        "readable"
+        DocumentReadiness::Readable
     } else if signals.processing_active {
-        "processing"
+        DocumentReadiness::Processing
     } else if graph_ready {
-        "graph_ready"
+        DocumentReadiness::GraphReady
     } else if graph_sparse {
-        "graph_sparse"
+        DocumentReadiness::GraphSparse
     } else if readable {
-        "readable"
+        DocumentReadiness::Readable
     } else {
-        "processing"
+        DocumentReadiness::Processing
     };
     let graph_coverage_kind = if graph_coverage_failed {
         "failed"
@@ -144,7 +146,7 @@ pub(crate) fn classify_document_knowledge_signals(
         failed,
         readable,
         graph_ready,
-        readiness_kind: readiness_kind.to_string(),
+        readiness_kind,
         preparation_state,
         graph_coverage_kind: graph_coverage_kind.to_string(),
         typed_fact_coverage,
@@ -180,7 +182,7 @@ impl OpsService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(map_async_operation_row(row))
+        map_async_operation_row(row)
     }
 
     pub async fn update_async_operation(
@@ -200,7 +202,7 @@ impl OpsService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("async_operation", command.operation_id))?;
-        Ok(map_async_operation_row(row))
+        map_async_operation_row(row)
     }
 
     pub async fn get_async_operation(
@@ -213,7 +215,7 @@ impl OpsService {
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("async_operation", operation_id))?;
-        Ok(map_async_operation_row(row))
+        map_async_operation_row(row)
     }
 
     /// Aggregated child-operation counts for a parent batch `ops_async_operation`.
@@ -249,7 +251,7 @@ impl OpsService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(row.map(map_async_operation_row))
+        row.map(map_async_operation_row).transpose()
     }
 
     pub async fn get_library_state_snapshot(
@@ -467,7 +469,9 @@ impl OpsService {
             let Some(readiness) = summary.readiness_summary.as_ref() else {
                 continue;
             };
-            *document_counts_by_readiness.entry(readiness.readiness_kind.clone()).or_default() += 1;
+            *document_counts_by_readiness
+                .entry(readiness.readiness_kind.as_str().to_string())
+                .or_default() += 1;
             match readiness.graph_coverage_kind.as_str() {
                 "graph_ready" => graph_ready_document_count += 1,
                 "graph_sparse" => graph_sparse_document_count += 1,
@@ -626,13 +630,17 @@ fn build_library_warnings_from_aggregate(
     warnings
 }
 
-fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyncOperation {
-    OpsAsyncOperation {
+fn map_async_operation_row(
+    row: ops_repository::OpsAsyncOperationRow,
+) -> Result<OpsAsyncOperation, ApiError> {
+    let status = OpsAsyncOperationStatus::from_db(&row.status)
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    Ok(OpsAsyncOperation {
         id: row.id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         operation_kind: row.operation_kind,
-        status: row.status,
+        status,
         surface_kind: Some(row.surface_kind),
         subject_kind: Some(row.subject_kind),
         subject_id: row.subject_id,
@@ -640,7 +648,7 @@ fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyn
         failure_code: row.failure_code,
         created_at: row.created_at,
         completed_at: row.completed_at,
-    }
+    })
 }
 
 fn derive_degraded_state(
@@ -694,7 +702,7 @@ mod tests {
     use crate::domains::knowledge::KnowledgeLibraryGeneration;
     use crate::domains::ops::OpsLibraryWarning;
     use chrono::Utc;
-    use ironrag_contracts::documents::LibraryDocumentMetrics;
+    use ironrag_contracts::documents::{DocumentReadiness, LibraryDocumentMetrics};
     use uuid::Uuid;
 
     fn coverage_with_processing(processing_count: i64) -> LibraryCoverageFast {
@@ -737,7 +745,7 @@ mod tests {
 
         assert!(!state.failed);
         assert!(state.readable);
-        assert_eq!(state.readiness_kind, "readable");
+        assert_eq!(state.readiness_kind, DocumentReadiness::Readable);
         assert_eq!(state.graph_coverage_kind, "processing");
     }
 
@@ -751,7 +759,7 @@ mod tests {
 
         assert!(!state.failed);
         assert!(state.readable);
-        assert_eq!(state.readiness_kind, "readable");
+        assert_eq!(state.readiness_kind, DocumentReadiness::Readable);
         assert_eq!(state.graph_coverage_kind, "failed");
     }
 
@@ -764,7 +772,7 @@ mod tests {
 
         assert!(state.failed);
         assert!(!state.readable);
-        assert_eq!(state.readiness_kind, "failed");
+        assert_eq!(state.readiness_kind, DocumentReadiness::Failed);
     }
 
     #[test]
@@ -777,7 +785,7 @@ mod tests {
 
         assert!(!state.failed);
         assert!(state.readable);
-        assert_eq!(state.readiness_kind, "readable");
+        assert_eq!(state.readiness_kind, DocumentReadiness::Readable);
     }
 
     #[test]

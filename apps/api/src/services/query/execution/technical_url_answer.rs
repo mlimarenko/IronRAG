@@ -7,6 +7,8 @@ use super::{
     focused_answer_document_id,
     question_intent::{
         ExactUrlLookupKind, classify_exact_url_lookup, classify_question_or_ir_intents,
+        query_ir_allows_deterministic_endpoint_lookup,
+        query_ir_disallows_graph_id_like_endpoint_candidate,
     },
     question_requests_multi_document_scope,
     technical_answer::document_focus_preference,
@@ -27,6 +29,9 @@ pub(super) fn build_exact_url_answer(
 ) -> Option<String> {
     let intents = classify_question_or_ir_intents(question, query_ir);
     let url_lookup_kind = classify_exact_url_lookup(query_ir, &intents)?;
+    if !query_ir_allows_deterministic_endpoint_lookup(query_ir) {
+        return None;
+    }
     if question_requests_multi_document_scope(question, Some(query_ir)) {
         return None;
     }
@@ -60,7 +65,13 @@ fn select_exact_url_literal(
         evidence,
         &document_labels,
         TechnicalFactKind::Url,
-        |fact| !wants_wsdl || fact.display_value.to_lowercase().contains("wsdl"),
+        |fact| {
+            (!wants_wsdl || fact.display_value.to_lowercase().contains("wsdl"))
+                && !query_ir_disallows_graph_id_like_endpoint_candidate(
+                    query_ir,
+                    &fact.display_value,
+                )
+        },
         |fact, document_label| {
             exact_url_candidate_score(
                 &fact.display_value,

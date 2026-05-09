@@ -1,4 +1,5 @@
 pub mod delivery;
+pub mod error;
 pub mod outbound;
 pub mod signature;
 pub mod ssrf;

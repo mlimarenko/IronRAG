@@ -1,8 +1,8 @@
-use std::str::FromStr;
-
 mod errors;
 mod mime_detection;
 mod normalization;
+
+use std::str::FromStr;
 
 use hex;
 use sha2::{Digest, Sha256};
@@ -292,6 +292,7 @@ pub struct FileExtractionRequest<'a> {
     pub vision_provider: Option<&'a ProviderModelSelection>,
     pub vision_api_key: Option<&'a str>,
     pub vision_base_url: Option<&'a str>,
+    pub vision_extra_parameters_json: Option<&'a serde_json::Value>,
     pub file_name: Option<&'a str>,
     pub mime_type: Option<&'a str>,
     pub file_bytes: Vec<u8>,
@@ -438,6 +439,7 @@ pub async fn build_runtime_file_extraction_plan(
         vision_provider,
         vision_api_key,
         vision_base_url,
+        vision_extra_parameters_json,
         file_name,
         mime_type,
         file_bytes,
@@ -465,6 +467,7 @@ pub async fn build_runtime_file_extraction_plan(
                     vision_provider,
                     vision_api_key,
                     vision_base_url,
+                    vision_extra_parameters_json,
                     file_kind,
                     mime_type,
                     &file_bytes,
@@ -487,6 +490,7 @@ pub async fn build_runtime_file_extraction_plan(
                 vision_provider,
                 vision_api_key,
                 vision_base_url,
+                vision_extra_parameters_json,
                 file_kind,
                 mime_type,
                 &file_bytes,
@@ -644,6 +648,7 @@ async fn extract_image_with_vision_provider(
     vision_provider: Option<&ProviderModelSelection>,
     api_key: Option<&str>,
     base_url: Option<&str>,
+    extra_parameters_json: Option<&serde_json::Value>,
     file_kind: UploadFileKind,
     mime_type: Option<&str>,
     file_bytes: &[u8],
@@ -656,12 +661,15 @@ async fn extract_image_with_vision_provider(
         });
     };
     let detected_mime = mime_type.unwrap_or("image/png");
+    let empty_extra_parameters = serde_json::json!({});
+    let extra_parameters_json = extra_parameters_json.unwrap_or(&empty_extra_parameters);
     let output = extraction::image::extract_image_with_provider(
         gateway,
         vision_provider.provider_kind.as_str(),
         &vision_provider.model_name,
         api_key.unwrap_or_default(),
         base_url,
+        extra_parameters_json,
         detected_mime,
         file_bytes,
     )
@@ -1338,6 +1346,7 @@ mod tests {
             vision_provider: None,
             vision_api_key: None,
             vision_base_url: None,
+            vision_extra_parameters_json: None,
             file_name: Some("inventory.xlsx"),
             mime_type: Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             file_bytes: valid_xlsx_bytes(),
@@ -1399,9 +1408,12 @@ mod tests {
     #[tokio::test]
     async fn runtime_plan_uses_vision_provider_for_non_docling_images() {
         let provider = ProviderModelSelection {
-            provider_kind: crate::domains::provider_profiles::SupportedProviderKind::OpenAi,
+            provider_kind: "openai".to_string(),
             model_name: "gpt-5.4-mini".to_string(),
         };
+        let runtime_profile = serde_json::json!({
+            "_providerProfile": {"runtime": {"kind": "openai_compatible"}}
+        });
 
         let policy = LibraryRecognitionPolicy::default();
         let result = build_runtime_file_extraction_plan(FileExtractionRequest {
@@ -1409,6 +1421,7 @@ mod tests {
             vision_provider: Some(&provider),
             vision_api_key: Some("test-key"),
             vision_base_url: None,
+            vision_extra_parameters_json: Some(&runtime_profile),
             file_name: Some("diagram.gif"),
             mime_type: Some("image/gif"),
             file_bytes: valid_png_bytes(),
@@ -1441,9 +1454,12 @@ mod tests {
     #[tokio::test]
     async fn runtime_plan_uses_vision_policy_for_static_raster_images() {
         let provider = ProviderModelSelection {
-            provider_kind: crate::domains::provider_profiles::SupportedProviderKind::OpenAi,
+            provider_kind: "openai".to_string(),
             model_name: "gpt-5.4-mini".to_string(),
         };
+        let runtime_profile = serde_json::json!({
+            "_providerProfile": {"runtime": {"kind": "openai_compatible"}}
+        });
         let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
 
         let result = build_runtime_file_extraction_plan(FileExtractionRequest {
@@ -1451,6 +1467,7 @@ mod tests {
             vision_provider: Some(&provider),
             vision_api_key: Some("test-key"),
             vision_base_url: None,
+            vision_extra_parameters_json: Some(&runtime_profile),
             file_name: Some("scan.png"),
             mime_type: Some("image/png"),
             file_bytes: valid_png_bytes(),
@@ -1473,6 +1490,7 @@ mod tests {
             vision_provider: None,
             vision_api_key: None,
             vision_base_url: None,
+            vision_extra_parameters_json: None,
             file_name: Some("scan.png"),
             mime_type: Some("image/png"),
             file_bytes: valid_png_bytes(),

@@ -14,6 +14,10 @@ use crate::{
         ModelAvailabilityState, ModelPreset, PriceCatalogEntry, ProviderCatalogEntry,
         ProviderCredential, ResolvedModelCatalogEntry,
     },
+    domains::provider_profiles::{
+        ProviderBaseUrlPolicy, ProviderCapabilities, ProviderCredentialPolicy,
+        ProviderModelDiscovery, ProviderRuntimeProfile,
+    },
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -32,8 +36,9 @@ use crate::{
     services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct ModelsQuery {
     pub provider_catalog_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
@@ -41,22 +46,24 @@ pub struct ModelsQuery {
     pub credential_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct PricesQuery {
     pub model_catalog_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct AiScopeQuery {
     pub scope_kind: Option<AiScopeKind>,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProviderCredentialRequest {
     pub scope_kind: AiScopeKind,
@@ -68,7 +75,7 @@ pub struct CreateProviderCredentialRequest {
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProviderCredentialRequest {
     pub label: String,
@@ -77,7 +84,7 @@ pub struct UpdateProviderCredentialRequest {
     pub credential_state: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateWorkspacePriceOverrideRequest {
     pub workspace_id: Uuid,
@@ -89,7 +96,7 @@ pub struct CreateWorkspacePriceOverrideRequest {
     pub effective_to: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateWorkspacePriceOverrideRequest {
     pub model_catalog_id: Uuid,
@@ -100,7 +107,7 @@ pub struct UpdateWorkspacePriceOverrideRequest {
     pub effective_to: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateModelPresetRequest {
     pub scope_kind: AiScopeKind,
@@ -116,7 +123,7 @@ pub struct CreateModelPresetRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateModelPresetRequest {
     pub preset_name: String,
@@ -128,7 +135,7 @@ pub struct UpdateModelPresetRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBindingAssignmentRequest {
     pub scope_kind: AiScopeKind,
@@ -139,7 +146,7 @@ pub struct CreateBindingAssignmentRequest {
     pub model_preset_id: Uuid,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateBindingAssignmentRequest {
     pub provider_credential_id: Uuid,
@@ -147,7 +154,7 @@ pub struct UpdateBindingAssignmentRequest {
     pub binding_state: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCatalogEntryResponse {
     pub id: Uuid,
@@ -158,9 +165,15 @@ pub struct ProviderCatalogEntryResponse {
     pub default_base_url: Option<String>,
     pub api_key_required: bool,
     pub base_url_required: bool,
+    pub credential_policy: ProviderCredentialPolicy,
+    pub base_url_policy: ProviderBaseUrlPolicy,
+    pub model_discovery: ProviderModelDiscovery,
+    pub capabilities: ProviderCapabilities,
+    pub runtime: ProviderRuntimeProfile,
+    pub ui_hints: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalogEntryResponse {
     pub id: Uuid,
@@ -175,7 +188,7 @@ pub struct ModelCatalogEntryResponse {
     pub available_credential_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceCatalogEntryResponse {
     pub id: Uuid,
@@ -192,7 +205,7 @@ pub struct PriceCatalogEntryResponse {
     pub workspace_id: Option<Uuid>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCredentialResponse {
     pub id: Uuid,
@@ -208,7 +221,7 @@ pub struct ProviderCredentialResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPresetResponse {
     pub id: Uuid,
@@ -226,7 +239,7 @@ pub struct ModelPresetResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AiBindingAssignmentResponse {
     pub id: Uuid,
@@ -239,7 +252,7 @@ pub struct AiBindingAssignmentResponse {
     pub binding_state: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BindingValidationResponse {
     pub id: Uuid,
@@ -268,8 +281,18 @@ pub fn router() -> Router<AppState> {
         .route("/ai/bindings/{binding_id}/validate", post(validate_binding_assignment))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ai/providers",
+    tag = "ai",
+    operation_id = "listAiProviders",
+    responses(
+        (status = 200, description = "Available AI providers", body = [ProviderCatalogEntryResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.list_providers", skip_all)]
-async fn list_providers(
+pub async fn list_providers(
     auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ProviderCatalogEntryResponse>>, ApiError> {
@@ -278,13 +301,25 @@ async fn list_providers(
     Ok(Json(entries.into_iter().map(map_provider).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ai/models",
+    tag = "ai",
+    operation_id = "listAiModels",
+    params(ModelsQuery),
+    responses(
+        (status = 200, description = "Resolved AI models for the requested context", body = [ModelCatalogEntryResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot view the requested workspace/library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_models",
     skip_all,
     fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
 )]
-async fn list_models(
+pub async fn list_models(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ModelsQuery>,
@@ -312,13 +347,24 @@ async fn list_models(
     Ok(Json(entries.into_iter().map(map_model).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ai/prices",
+    tag = "ai",
+    operation_id = "listAiPrices",
+    params(PricesQuery),
+    responses(
+        (status = 200, description = "Price catalog entries for the requested model/workspace", body = [PriceCatalogEntryResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_prices",
     skip_all,
     fields(workspace_id = ?query.workspace_id)
 )]
-async fn list_prices(
+pub async fn list_prices(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<PricesQuery>,
@@ -339,13 +385,25 @@ async fn list_prices(
     Ok(Json(entries.into_iter().map(map_price).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ai/model-presets",
+    tag = "ai",
+    operation_id = "listAiModelPresets",
+    params(AiScopeQuery),
+    responses(
+        (status = 200, description = "Visible model presets for the requested scope", body = [ModelPresetResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the requested scope"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_model_presets",
     skip_all,
     fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
 )]
-async fn list_model_presets(
+pub async fn list_model_presets(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AiScopeQuery>,
@@ -373,13 +431,25 @@ async fn list_model_presets(
     Ok(Json(entries.into_iter().map(map_model_preset).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ai/credentials",
+    tag = "ai",
+    operation_id = "listAiCredentials",
+    params(AiScopeQuery),
+    responses(
+        (status = 200, description = "Visible provider credentials for the requested scope", body = [ProviderCredentialResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the requested scope"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_credentials",
     skip_all,
     fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
 )]
-async fn list_credentials(
+pub async fn list_credentials(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AiScopeQuery>,
@@ -407,13 +477,26 @@ async fn list_credentials(
     Ok(Json(entries.into_iter().map(map_provider_credential).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ai/bindings",
+    tag = "ai",
+    operation_id = "listAiLibraryBindings",
+    params(AiScopeQuery),
+    responses(
+        (status = 200, description = "Binding assignments for the requested scope", body = [AiBindingAssignmentResponse]),
+        (status = 400, description = "scopeKind query parameter is required"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the requested scope"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_binding_assignments",
     skip_all,
     fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
 )]
-async fn list_binding_assignments(
+pub async fn list_binding_assignments(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AiScopeQuery>,
@@ -429,13 +512,25 @@ async fn list_binding_assignments(
     Ok(Json(entries.into_iter().map(map_binding_assignment).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/ai/credentials",
+    tag = "ai",
+    operation_id = "createAiCredential",
+    request_body = CreateProviderCredentialRequest,
+    responses(
+        (status = 200, description = "Newly created provider credential", body = ProviderCredentialResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer credentials in the requested scope"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.create_credential",
     skip_all,
     fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
 )]
-async fn create_credential(
+pub async fn create_credential(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -497,7 +592,21 @@ async fn create_credential(
     skip_all,
     fields(credential_id = %credential_id)
 )]
-async fn update_credential(
+#[utoipa::path(
+    put,
+    path = "/v1/ai/credentials/{credentialId}",
+    tag = "ai",
+    operation_id = "updateAiCredential",
+    params(("credentialId" = uuid::Uuid, Path, description = "Provider credential identifier")),
+    request_body = UpdateProviderCredentialRequest,
+    responses(
+        (status = 200, description = "Updated provider credential", body = ProviderCredentialResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer credentials in the credential's scope"),
+        (status = 404, description = "Credential not found"),
+    ),
+)]
+pub async fn update_credential(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -558,7 +667,19 @@ async fn update_credential(
     skip_all,
     fields(workspace_id = %payload.workspace_id)
 )]
-async fn create_price_override(
+#[utoipa::path(
+    post,
+    path = "/v1/ai/prices",
+    tag = "ai",
+    operation_id = "createAiPriceOverride",
+    request_body = CreateWorkspacePriceOverrideRequest,
+    responses(
+        (status = 200, description = "Newly created workspace price override", body = PriceCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer pricing for the workspace"),
+    ),
+)]
+pub async fn create_price_override(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -610,7 +731,21 @@ async fn create_price_override(
     skip_all,
     fields(price_id = %price_id)
 )]
-async fn update_price_override(
+#[utoipa::path(
+    put,
+    path = "/v1/ai/prices/{priceId}",
+    tag = "ai",
+    operation_id = "updateAiPriceOverride",
+    params(("priceId" = uuid::Uuid, Path, description = "Price catalog entry identifier")),
+    request_body = UpdateWorkspacePriceOverrideRequest,
+    responses(
+        (status = 200, description = "Updated workspace price override", body = PriceCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer pricing for the workspace"),
+        (status = 404, description = "Price override not found"),
+    ),
+)]
+pub async fn update_price_override(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -671,7 +806,19 @@ async fn update_price_override(
     skip_all,
     fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
 )]
-async fn create_model_preset(
+#[utoipa::path(
+    post,
+    path = "/v1/ai/model-presets",
+    tag = "ai",
+    operation_id = "createAiModelPreset",
+    request_body = CreateModelPresetRequest,
+    responses(
+        (status = 200, description = "Newly created model preset", body = ModelPresetResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer presets in the requested scope"),
+    ),
+)]
+pub async fn create_model_preset(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -730,7 +877,21 @@ async fn create_model_preset(
     skip_all,
     fields(preset_id = %preset_id)
 )]
-async fn update_model_preset(
+#[utoipa::path(
+    put,
+    path = "/v1/ai/model-presets/{presetId}",
+    tag = "ai",
+    operation_id = "updateAiModelPreset",
+    params(("presetId" = uuid::Uuid, Path, description = "Model preset identifier")),
+    request_body = UpdateModelPresetRequest,
+    responses(
+        (status = 200, description = "Updated model preset", body = ModelPresetResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer presets in the preset's scope"),
+        (status = 404, description = "Preset not found"),
+    ),
+)]
+pub async fn update_model_preset(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -787,7 +948,19 @@ async fn update_model_preset(
     skip_all,
     fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
 )]
-async fn create_binding_assignment(
+#[utoipa::path(
+    post,
+    path = "/v1/ai/bindings",
+    tag = "ai",
+    operation_id = "createAiLibraryBinding",
+    request_body = CreateBindingAssignmentRequest,
+    responses(
+        (status = 200, description = "Newly created binding assignment", body = AiBindingAssignmentResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer bindings in the requested scope"),
+    ),
+)]
+pub async fn create_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -847,7 +1020,21 @@ async fn create_binding_assignment(
     skip_all,
     fields(binding_id = %binding_id)
 )]
-async fn update_binding_assignment(
+#[utoipa::path(
+    put,
+    path = "/v1/ai/bindings/{bindingId}",
+    tag = "ai",
+    operation_id = "updateAiLibraryBinding",
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding assignment identifier")),
+    request_body = UpdateBindingAssignmentRequest,
+    responses(
+        (status = 200, description = "Updated binding assignment", body = AiBindingAssignmentResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer bindings in the binding's scope"),
+        (status = 404, description = "Binding not found"),
+    ),
+)]
+pub async fn update_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -908,7 +1095,20 @@ async fn update_binding_assignment(
     skip_all,
     fields(binding_id = %binding_id)
 )]
-async fn delete_binding_assignment(
+#[utoipa::path(
+    delete,
+    path = "/v1/ai/bindings/{bindingId}",
+    tag = "ai",
+    operation_id = "deleteAiLibraryBinding",
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding assignment identifier")),
+    responses(
+        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer bindings in the binding's scope"),
+        (status = 404, description = "Binding not found"),
+    ),
+)]
+pub async fn delete_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -955,7 +1155,20 @@ async fn delete_binding_assignment(
     skip_all,
     fields(binding_id = %binding_id)
 )]
-async fn validate_binding_assignment(
+#[utoipa::path(
+    post,
+    path = "/v1/ai/bindings/{bindingId}/validate",
+    tag = "ai",
+    operation_id = "validateAiLibraryBinding",
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding assignment identifier")),
+    responses(
+        (status = 200, description = "Binding validation result", body = BindingValidationResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot validate bindings in the binding's scope"),
+        (status = 404, description = "Binding not found"),
+    ),
+)]
+pub async fn validate_binding_assignment(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -1051,6 +1264,12 @@ fn map_provider(entry: ProviderCatalogEntry) -> ProviderCatalogEntryResponse {
         default_base_url: entry.default_base_url,
         api_key_required: entry.api_key_required,
         base_url_required: entry.base_url_required,
+        credential_policy: entry.credential_policy,
+        base_url_policy: entry.base_url_policy,
+        model_discovery: entry.model_discovery,
+        capabilities: entry.capabilities,
+        runtime: entry.runtime,
+        ui_hints: entry.ui_hints,
     }
 }
 

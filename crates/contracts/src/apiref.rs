@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::diagnostics::OperatorWarning;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiReferenceFormat {
     OpenApiYaml,
     OpenApiJson,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiReferenceStatus {
     Loading,
@@ -17,7 +17,7 @@ pub enum ApiReferenceStatus {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiReferenceSurface {
     pub status: ApiReferenceStatus,

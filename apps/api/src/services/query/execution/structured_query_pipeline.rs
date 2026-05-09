@@ -77,6 +77,8 @@ pub(crate) async fn finalize_structured_query(
         collect_ordered_source_units(&assembly_stage.rerank.retrieval.bundle.chunks);
     let graph_evidence_context_lines =
         assembly_stage.rerank.retrieval.graph_evidence_context_lines.clone();
+    let graph_entity_references = assembly_stage.rerank.retrieval.bundle.entities.clone();
+    let graph_relation_references = assembly_stage.rerank.retrieval.bundle.relationships.clone();
 
     Ok(RuntimeStructuredQueryResult {
         planned_mode: assembly_stage.rerank.retrieval.planning.plan.planned_mode,
@@ -92,6 +94,8 @@ pub(crate) async fn finalize_structured_query(
         context_chunks,
         ordered_source_units,
         graph_evidence_context_lines,
+        graph_entity_references,
+        graph_relation_references,
     })
 }
 
@@ -180,37 +184,14 @@ pub(crate) async fn plan_structured_query(
                 hyde_recommended = true,
                 "HyDE activated for this query"
             );
-            match generate_hyde_passage(state, library_id, question).await {
-                Some(passage) => {
-                    tracing::debug!(
-                        stage = "hyde",
-                        passage_len = passage.len(),
-                        "HyDE passage generated"
-                    );
-                    tracing::trace!(stage = "hyde", passage = %passage, "HyDE passage content");
-                    match embed_question(state, library_id, &provider_profile, &passage).await {
-                        Ok(hyde_result) => {
-                            tracing::debug!(stage = "hyde_embed", "HyDE embedding computed");
-                            Some(hyde_result.embedding)
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                stage = "hyde",
-                                error = %error,
-                                "HyDE embedding failed, falling back to question embedding"
-                            );
-                            None
-                        }
-                    }
-                }
-                None => {
-                    tracing::warn!(
-                        stage = "hyde",
-                        "HyDE passage generation failed or timed out, using raw query embedding"
-                    );
-                    None
-                }
-            }
+            let passage = generate_hyde_passage(state, library_id, question).await?;
+            tracing::debug!(stage = "hyde", passage_len = passage.len(), "HyDE passage generated");
+            tracing::trace!(stage = "hyde", passage = %passage, "HyDE passage content");
+            let hyde_result = embed_question(state, library_id, &provider_profile, &passage)
+                .await
+                .context("failed to embed HyDE passage")?;
+            tracing::debug!(stage = "hyde_embed", "HyDE embedding computed");
+            Some(hyde_result.embedding)
         } else {
             tracing::debug!(
                 stage = "hyde",
@@ -268,19 +249,8 @@ pub(crate) async fn retrieve_structured_query(
     let graph_index = &planning.graph_index;
     let document_index = &planning.document_index;
     let candidate_limit = planning.candidate_limit;
-    let document_filter_ids = explicit_target_document_ids_from_values(
-        question,
-        document_index.values().flat_map(|document| {
-            [
-                document.file_name.as_deref(),
-                document.title.as_deref(),
-                Some(document.external_key.as_str()),
-            ]
-            .into_iter()
-            .flatten()
-            .map(move |value| (document.document_id, value))
-        }),
-    );
+    let document_filter_ids =
+        resolve_scoped_target_document_ids(question, query_ir, document_index);
     let locked_target_document_ids =
         (!document_filter_ids.is_empty()).then_some(&document_filter_ids);
 
@@ -407,6 +377,7 @@ pub(crate) async fn retrieve_structured_query(
         query_ir,
         graph_index,
         document_index,
+        &document_filter_ids,
         &plan.keywords,
     )
     .await?;
@@ -485,7 +456,7 @@ async fn assemble_structured_query(
         focused_document_id,
     )
     .await;
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
     let literal_focus_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let technical_literal_chunks = select_technical_literal_chunks(
         question,
@@ -500,7 +471,7 @@ async fn assemble_structured_query(
         collect_technical_literal_groups(question, query_ir, &technical_literal_chunks);
     let technical_literals_text =
         render_exact_technical_literals_section(&technical_literal_groups);
-    truncate_bundle(bundle, effective_top_k);
+    truncate_bundle(bundle, effective_top_k, Some(query_ir));
 
     let grouped_references = group_visible_references_for_query(
         &build_grouped_reference_candidates(

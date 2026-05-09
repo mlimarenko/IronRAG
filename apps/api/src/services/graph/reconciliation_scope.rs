@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{self, RuntimeGraphEvidenceLifecycleRow},
+    services::graph::error::GraphServiceError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +86,7 @@ impl GraphReconciliationScopeService {
         document_id: Uuid,
         source_revision_id: Uuid,
         target_revision_id: Uuid,
-    ) -> anyhow::Result<MutationImpactScopeDetection> {
+    ) -> Result<MutationImpactScopeDetection, GraphServiceError> {
         let source_evidence = repositories::list_active_runtime_graph_evidence_by_content_revision(
             &state.persistence.postgres,
             library_id,
@@ -137,7 +138,7 @@ impl GraphReconciliationScopeService {
         library_id: Uuid,
         document_id: Uuid,
         source_revision_id: Uuid,
-    ) -> anyhow::Result<MutationImpactScopeDetection> {
+    ) -> Result<MutationImpactScopeDetection, GraphServiceError> {
         let source_evidence = repositories::list_active_runtime_graph_evidence_by_content_revision(
             &state.persistence.postgres,
             library_id,

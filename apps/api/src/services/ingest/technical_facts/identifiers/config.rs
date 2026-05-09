@@ -34,7 +34,9 @@ fn extract_parsed_keys(
     parsed_keys: Option<Vec<String>>,
     suffix: &str,
 ) -> Vec<FactCandidate> {
-    let Some(keys) = parsed_keys else { return Vec::new() };
+    let Some(keys) = parsed_keys else {
+        return Vec::new();
+    };
     let trimmed = line.trim();
     keys.into_iter()
         .filter(|k| trimmed.contains(k.as_str()) && is_config_key_name(k))

@@ -78,11 +78,6 @@ pub(super) fn technical_keyword_weight(lowered_text: &str, keyword: &str) -> usi
     0
 }
 
-pub(super) fn question_mentions_pagination(question: &str) -> bool {
-    let lowered = question.to_lowercase();
-    ["bypage", "page", "pagesize", "pagenumber"].iter().any(|marker| lowered.contains(marker))
-}
-
 pub(super) fn technical_literal_focus_keyword_segments(
     question: &str,
     ir: Option<&QueryIR>,
@@ -164,25 +159,18 @@ pub(super) fn document_local_focus_keywords(
 pub(super) fn technical_chunk_selection_score(
     text: &str,
     keywords: &[String],
-    pagination_requested: bool,
+    _pagination_requested: bool,
 ) -> isize {
     let lowered = text.to_lowercase();
     let keyword_count = keywords.len();
-    let mut score = keywords
+    keywords
         .iter()
         .enumerate()
         .map(|(index, keyword)| {
             let priority = keyword_count.saturating_sub(index).max(1) as isize;
             (technical_keyword_weight(&lowered, keyword) as isize) * priority
         })
-        .sum::<isize>();
-    let has_pagination_marker = ["bypage", "pagesize", "pagenumber", "number_starting"]
-        .iter()
-        .any(|marker| lowered.contains(marker));
-    if has_pagination_marker {
-        score += if pagination_requested { 12 } else { -40 };
-    }
-    score
+        .sum::<isize>()
 }
 
 pub(super) fn select_document_balanced_chunks<'a>(

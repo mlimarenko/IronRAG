@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeDocumentRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -26,7 +26,7 @@ pub struct KnowledgeDocumentRow {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRevisionRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -64,14 +64,14 @@ pub struct KnowledgeRevisionRow {
 /// Slim AQL projection used by the prepared-segments inspector to
 /// map `support_block_ids` back to chunk ids without pulling the
 /// full chunk text over the wire.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeChunkSupportReferenceRow {
     pub chunk_id: Uuid,
     #[serde(default)]
     pub support_block_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeChunkRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -119,7 +119,7 @@ pub struct KnowledgeChunkRow {
     pub occurred_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeStructuredRevisionRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -143,7 +143,7 @@ pub struct KnowledgeStructuredRevisionRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeStructuredBlockRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -172,7 +172,7 @@ pub struct KnowledgeStructuredBlockRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeTechnicalFactRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -200,7 +200,7 @@ pub struct KnowledgeTechnicalFactRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeLibraryGenerationRow {
     #[serde(rename = "_key")]
     pub key: String,

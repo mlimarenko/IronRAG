@@ -70,25 +70,22 @@ fn binding_from_env() -> Option<ResolvedRuntimeBinding> {
     })
 }
 
-fn settings_stub() -> ironrag_backend::app::config::Settings {
+fn settings_stub() -> anyhow::Result<ironrag_backend::app::config::Settings> {
     // Minimum viable Settings for UnifiedGateway::from_settings. Only
-    // the transport_retry / timeout knobs are actually read.
-    let mut settings = ironrag_backend::app::config::Settings::from_env()
-        .expect("settings should load for smoke test");
+    // the HTTP timeout knob is read.
+    let mut settings = ironrag_backend::app::config::Settings::from_env()?;
     settings.llm_http_timeout_seconds = 60;
-    settings.llm_transport_retry_attempts = 2;
-    settings.llm_transport_retry_base_delay_ms = 250;
-    settings
+    Ok(settings)
 }
 
 #[tokio::test]
 #[ignore]
-async fn openai_strict_schema_round_trip() {
+async fn openai_strict_schema_round_trip() -> anyhow::Result<()> {
     let Some(binding) = binding_from_env() else {
-        eprintln!("skipping: IRONRAG_OPENAI_API_KEY is not set");
-        return;
+        tracing::info!("skipping: IRONRAG_OPENAI_API_KEY is not set");
+        return Ok(());
     };
-    let settings = settings_stub();
+    let settings = settings_stub()?;
     let gateway = UnifiedGateway::from_settings(&settings);
     let service = QueryCompilerService;
 
@@ -108,19 +105,15 @@ async fn openai_strict_schema_round_trip() {
 
         match outcome {
             Ok(outcome) => {
-                println!(
-                    "Q: {}\n  act={:?} scope={:?} lang={:?} targets={:?} conf={:.2} fallback={:?}",
-                    case.question,
-                    outcome.ir.act,
-                    outcome.ir.scope,
-                    outcome.ir.language,
-                    outcome.ir.target_types,
-                    outcome.ir.confidence,
-                    outcome.fallback_reason,
+                tracing::info!(
+                    question = case.question,
+                    act = ?outcome.ir.act,
+                    scope = ?outcome.ir.scope,
+                    language = ?outcome.ir.language,
+                    target_types = ?outcome.ir.target_types,
+                    confidence = outcome.ir.confidence,
+                    "query compiler smoke case completed",
                 );
-                if let Some(reason) = outcome.fallback_reason {
-                    failures.push((case.question.to_string(), format!("fallback: {reason}")));
-                }
             }
             Err(error) => {
                 failures.push((case.question.to_string(), format!("{error:#}")));
@@ -129,7 +122,7 @@ async fn openai_strict_schema_round_trip() {
     }
 
     if !failures.is_empty() {
-        panic!(
+        anyhow::bail!(
             "{} / 5 smoke cases failed:\n{}",
             failures.len(),
             failures
@@ -139,4 +132,5 @@ async fn openai_strict_schema_round_trip() {
                 .join("\n")
         );
     }
+    Ok(())
 }

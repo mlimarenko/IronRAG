@@ -14,14 +14,15 @@
 //! Phase 1 scope:
 //!   - input: `library`, `query`, optional `conversationTurns`,
 //!     optional `topK`, optional `includeDebug`
-//!   - output: grounded answer text, citation list, verifier verdict,
-//!     `runtimeExecutionId`, `conversationId`, `executionId`
+//!   - output: grounded answer text plus the canonical
+//!     `AssistantExecutionDetail`, `runtimeExecutionId`,
+//!     `conversationId`, `executionId`
 
 use serde_json::{Value, json};
 
 use crate::{
     domains::agent_runtime::RuntimeSurfaceKind,
-    domains::query::{QueryTurnKind, QueryVerificationState},
+    domains::query::{DEFAULT_TOP_K, MAX_TOP_K, QueryTurnKind, resolve_top_k},
     interfaces::http::{authorization::POLICY_QUERY_RUN, router_support::ApiError},
     services::{
         iam::audit::AppendQueryExecutionAuditCommand,
@@ -31,7 +32,9 @@ use crate::{
     },
 };
 
-use super::super::{McpToolDescriptor, McpToolResult, ok_tool_result, tool_error_result};
+use super::super::{
+    McpToolDescriptor, McpToolResult, grounded_answer_tool_result, tool_error_result,
+};
 use super::ToolCallContext;
 
 pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
@@ -40,7 +43,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     }
     Some(McpToolDescriptor {
         name: "grounded_answer",
-        description: "Ask a natural-language question against one library and get a grounded answer with citations — the SAME pipeline the IronRAG UI assistant uses (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. Output includes `answer` (the human-readable reply), `citations` (document ids, titles, URIs, excerpts), `verifier` (strict/moderate/lenient + warnings), and `runtimeExecutionId` which can be passed to `get_runtime_execution_trace` to inspect the full execution graph, provider/model identities, and per-stage evidence.",
+        description: "Ask a natural-language question against one library and get a grounded answer — the SAME pipeline the IronRAG UI assistant uses (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. The tool text is the human-readable reply. Structured output includes `executionDetail` with the same chunk, prepared-segment, technical-fact, entity, relation, verifier, runtime, request, and response fields the UI assistant receives, plus top-level `runtimeExecutionId`, `executionId`, and `conversationId` shortcuts for trace lookups.",
         input_schema: json!({
             "type": "object",
             "required": ["library", "query"],
@@ -74,8 +77,8 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 "topK": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 30,
-                    "description": "Optional retrieval breadth. Defaults to 8, matching the UI assistant. Larger values are rarely useful; the verifier keeps only cited hits."
+                    "maximum": MAX_TOP_K,
+                    "description": format!("Optional retrieval breadth. Defaults to {DEFAULT_TOP_K}, matching the UI assistant. Larger values are rarely useful; the verifier keeps only cited hits.")
                 },
                 "includeDebug": {
                     "type": "boolean",
@@ -166,7 +169,7 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                 surface_kind: RuntimeSurfaceKind::Mcp,
                 content_text: parsed.query.clone(),
                 external_prior_turns,
-                top_k: parsed.top_k.unwrap_or(24),
+                top_k: resolve_grounded_answer_top_k(parsed.top_k),
                 include_debug: parsed.include_debug.unwrap_or(false),
             },
         )
@@ -203,43 +206,13 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
     let answer_text =
         outcome.response_turn.as_ref().map(|turn| turn.content_text.clone()).unwrap_or_default();
 
-    let citations = build_citations(&outcome);
-    let verifier_level = verification_level_label(outcome.verification_state);
-    let verifier_warnings = outcome
-        .verification_warnings
-        .iter()
-        .map(|warning| {
-            json!({
-                "code": warning.code,
-                "message": warning.message,
-                "relatedSegmentId": warning.related_segment_id,
-                "relatedFactId": warning.related_fact_id,
-            })
-        })
-        .collect::<Vec<_>>();
+    let execution_detail = crate::interfaces::http::query::map_turn_execution_response(outcome);
 
-    let structured = json!({
-        "answer": answer_text,
-        "citations": citations,
-        "verifier": {
-            "level": verifier_level,
-            "warnings": verifier_warnings,
-        },
-        "runtimeExecutionId": outcome.execution.runtime_execution_id,
-        "executionId": outcome.execution.id,
-        "conversationId": outcome.execution.conversation_id,
-        "libraryId": outcome.execution.library_id,
-        "workspaceId": outcome.execution.workspace_id,
-        "lifecycleState": format!("{:?}", outcome.execution.lifecycle_state),
-    });
+    grounded_answer_tool_result(&answer_text, &execution_detail)
+}
 
-    let human_text = if answer_text.is_empty() {
-        "The grounded-answer pipeline returned no answer text (execution may have failed or degraded). Inspect runtimeExecutionId via get_runtime_execution_trace for details.".to_string()
-    } else {
-        answer_text
-    };
-
-    ok_tool_result(&human_text, structured)
+pub(crate) fn resolve_grounded_answer_top_k(requested_top_k: Option<usize>) -> usize {
+    resolve_top_k(requested_top_k)
 }
 
 fn conversation_title(query: &str) -> String {
@@ -257,56 +230,7 @@ fn conversation_title(query: &str) -> String {
     }
 }
 
-fn verification_level_label(state: QueryVerificationState) -> &'static str {
-    // Snake-case labels match the on-wire representation that the UI
-    // already consumes from `QueryExecutionDetail.verification_state`,
-    // so parity tests can compare the two transports byte-for-byte.
-    match state {
-        QueryVerificationState::NotRun => "not_run",
-        QueryVerificationState::Verified => "verified",
-        QueryVerificationState::PartiallySupported => "partially_supported",
-        QueryVerificationState::Conflicting => "conflicting",
-        QueryVerificationState::InsufficientEvidence => "insufficient_evidence",
-        QueryVerificationState::Failed => "failed",
-    }
-}
-
-fn build_citations(
-    outcome: &crate::services::query::service::QueryTurnExecutionResult,
-) -> Vec<Value> {
-    // Phase 1 surfaces the same citation handles the UI consumes but
-    // avoids re-fetching per-document metadata — the agent can hit
-    // `read_document` for a full body and `get_runtime_execution_trace`
-    // for the provenance graph. Only stable fields go out: document
-    // id, chunk id, score, rank. The UI builds its richer citation
-    // card from exactly these handles plus a post-fetch, so parity
-    // holds: same handles in, same UX achievable.
-    outcome
-        .chunk_references
-        .iter()
-        .map(|reference| {
-            json!({
-                "kind": "chunk",
-                "chunkId": reference.chunk_id,
-                "rank": reference.rank,
-                "score": reference.score,
-            })
-        })
-        .chain(outcome.graph_node_references.iter().map(|reference| {
-            json!({
-                "kind": "entity",
-                "nodeId": reference.node_id,
-                "label": reference.label,
-                "entityType": reference.entity_type,
-                "summary": reference.summary,
-                "rank": reference.rank,
-                "score": reference.score,
-            })
-        }))
-        .collect()
-}
-
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct GroundedAnswerArgs {
     library: String,
@@ -316,14 +240,14 @@ struct GroundedAnswerArgs {
     include_debug: Option<bool>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct GroundedAnswerConversationTurn {
     role: GroundedAnswerConversationTurnRole,
     content: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 enum GroundedAnswerConversationTurnRole {
     User,
@@ -351,4 +275,207 @@ fn normalize_external_prior_turns(
             Ok(ExternalConversationTurn { turn_kind, content_text })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use ironrag_contracts::assistant::{
+        AssistantChunkReference, AssistantContentSourceAccess, AssistantEntityReference,
+        AssistantExecution, AssistantExecutionDetail, AssistantPolicySummary,
+        AssistantPreparedSegmentReference, AssistantRelationReference, AssistantRuntimeSummary,
+        AssistantTechnicalFactReference, AssistantVerificationState,
+    };
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn grounded_answer_default_top_k_matches_ui_query_turn_default() {
+        let library_ref = "alpha-workspace/adapter-library";
+        let query = "Which endpoint does the demo adapter call for inventory sync?";
+
+        let mcp_top_k = resolve_grounded_answer_top_k(None);
+        let ui_top_k = crate::interfaces::http::query::resolve_query_turn_top_k(None);
+
+        assert_eq!(mcp_top_k, ui_top_k, "top_k drift for library {library_ref} and query {query}");
+        assert_eq!(mcp_top_k, DEFAULT_TOP_K);
+        assert!(mcp_top_k >= 24);
+    }
+
+    #[test]
+    fn grounded_answer_explicit_top_k_matches_ui_query_turn() {
+        assert_eq!(
+            resolve_grounded_answer_top_k(None),
+            crate::interfaces::http::query::resolve_query_turn_top_k(None)
+        );
+        assert_eq!(
+            resolve_grounded_answer_top_k(Some(6)),
+            crate::interfaces::http::query::resolve_query_turn_top_k(Some(6))
+        );
+    }
+
+    #[test]
+    fn structured_content_embeds_canonical_assistant_execution_detail() {
+        let execution_id = Uuid::from_u128(1);
+        let chunk_id = Uuid::from_u128(2);
+        let segment_id = Uuid::from_u128(3);
+        let revision_id = Uuid::from_u128(4);
+        let fact_id = Uuid::from_u128(5);
+        let node_id = Uuid::from_u128(6);
+        let edge_id = Uuid::from_u128(7);
+        let detail = sample_execution_detail(
+            execution_id,
+            chunk_id,
+            segment_id,
+            revision_id,
+            fact_id,
+            node_id,
+            edge_id,
+        );
+
+        let structured = crate::interfaces::http::mcp::grounded_answer_contract_payload(
+            "Synthetic answer",
+            &detail,
+        );
+        let structured_content = &structured["structuredContent"];
+        let execution_detail = &structured_content["executionDetail"];
+
+        assert_eq!(structured["isError"], json!(false));
+        assert_eq!(structured_content.get("citations"), None);
+        assert_eq!(execution_detail["chunkReferences"][0]["executionId"], json!(execution_id));
+        assert_eq!(execution_detail["chunkReferences"][0]["chunkId"], json!(chunk_id));
+        assert_eq!(
+            execution_detail["preparedSegmentReferences"][0]["executionId"],
+            json!(execution_id)
+        );
+        assert_eq!(
+            execution_detail["preparedSegmentReferences"][0]["segmentId"],
+            json!(segment_id)
+        );
+        assert_eq!(
+            execution_detail["preparedSegmentReferences"][0]["revisionId"],
+            json!(revision_id)
+        );
+        assert_eq!(
+            execution_detail["technicalFactReferences"][0]["executionId"],
+            json!(execution_id)
+        );
+        assert_eq!(execution_detail["technicalFactReferences"][0]["factId"], json!(fact_id));
+        assert_eq!(execution_detail["entityReferences"][0]["executionId"], json!(execution_id));
+        assert_eq!(execution_detail["entityReferences"][0]["nodeId"], json!(node_id));
+        assert_eq!(execution_detail["relationReferences"][0]["executionId"], json!(execution_id));
+        assert_eq!(execution_detail["relationReferences"][0]["edgeId"], json!(edge_id));
+    }
+
+    fn sample_execution_detail(
+        execution_id: Uuid,
+        chunk_id: Uuid,
+        segment_id: Uuid,
+        revision_id: Uuid,
+        fact_id: Uuid,
+        node_id: Uuid,
+        edge_id: Uuid,
+    ) -> AssistantExecutionDetail {
+        let now = Utc::now();
+        let workspace_id = Uuid::from_u128(11);
+        let library_id = Uuid::from_u128(12);
+        let conversation_id = Uuid::from_u128(13);
+        let context_bundle_id = Uuid::from_u128(16);
+        let runtime_execution_id = Uuid::from_u128(17);
+
+        AssistantExecutionDetail {
+            context_bundle_id,
+            execution: AssistantExecution {
+                id: execution_id,
+                workspace_id,
+                library_id,
+                conversation_id,
+                context_bundle_id,
+                request_turn_id: None,
+                response_turn_id: None,
+                binding_id: None,
+                runtime_execution_id: Some(runtime_execution_id),
+                lifecycle_state: "completed".to_string(),
+                active_stage: None,
+                query_text: "Which endpoint is canonical?".to_string(),
+                failure_code: None,
+                started_at: now,
+                completed_at: Some(now),
+            },
+            runtime_summary: AssistantRuntimeSummary {
+                runtime_execution_id,
+                lifecycle_state: "completed".to_string(),
+                active_stage: None,
+                turn_budget: 1,
+                turn_count: 1,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+                policy_summary: AssistantPolicySummary {
+                    allow_count: 0,
+                    reject_count: 0,
+                    terminate_count: 0,
+                    recent_decisions: Vec::new(),
+                },
+                accepted_at: now,
+                completed_at: Some(now),
+            },
+            runtime_stage_summaries: Vec::new(),
+            request_turn: None,
+            response_turn: None,
+            chunk_references: vec![AssistantChunkReference {
+                execution_id,
+                chunk_id,
+                rank: 1,
+                score: 0.91,
+            }],
+            prepared_segment_references: vec![AssistantPreparedSegmentReference {
+                execution_id,
+                segment_id,
+                revision_id,
+                block_kind: "endpoint_block".to_string(),
+                rank: 2,
+                score: 0.82,
+                heading_trail: vec!["API".to_string()],
+                section_path: vec!["contracts".to_string()],
+                document_id: Some(Uuid::from_u128(18)),
+                document_title: Some("Synthetic contract".to_string()),
+                source_uri: Some("urn:synthetic:contract".to_string()),
+                source_access: Some(AssistantContentSourceAccess {
+                    kind: "stored_document".to_string(),
+                    href: "urn:synthetic:contract".to_string(),
+                }),
+            }],
+            technical_fact_references: vec![AssistantTechnicalFactReference {
+                execution_id,
+                fact_id,
+                revision_id,
+                fact_kind: "endpoint_path".to_string(),
+                canonical_value: "/v1/items".to_string(),
+                display_value: "/v1/items".to_string(),
+                rank: 3,
+                score: 0.73,
+            }],
+            entity_references: vec![AssistantEntityReference {
+                execution_id,
+                node_id,
+                rank: 4,
+                score: 0.64,
+                label: "Synthetic API".to_string(),
+                entity_type: Some("service".to_string()),
+                summary: Some("Synthetic API node".to_string()),
+            }],
+            relation_references: vec![AssistantRelationReference {
+                execution_id,
+                edge_id,
+                rank: 5,
+                score: 0.55,
+                predicate: "calls".to_string(),
+                normalized_assertion: Some("Synthetic API calls endpoint".to_string()),
+            }],
+            verification_state: AssistantVerificationState::Verified,
+            verification_warnings: Vec::new(),
+        }
+    }
 }

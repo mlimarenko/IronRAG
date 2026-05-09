@@ -1,0 +1,15 @@
+{
+  "entry": [
+    "src/app/main.tsx",
+    "src/index.css",
+    "src/**/*.test.tsx",
+    "src/**/*.stories.tsx",
+    "tests/e2e/**/*.spec.ts",
+    "scripts/gen-msw-handlers.mjs"
+  ],
+  "project": ["src/**/*.{ts,tsx,css}", "scripts/**/*.mjs"],
+  "ignore": [
+    "src/shared/api/generated/**",
+    "src/shared/api/mocks/handlers.ts"
+  ]
+}

@@ -267,6 +267,7 @@ mod tests {
     fn answer_surface_exposes_only_catalog_and_grounded_answer_tools() {
         let tools =
             visible_tool_names(&auth_with_query_and_memory_access(), McpToolSurface::Answer);
+        let canonical = crate::interfaces::http::mcp::MCP_ANSWER_TOOL_NAMES;
 
         assert!(tools.iter().any(|name| name == "grounded_answer"));
         assert!(tools.iter().any(|name| name == "list_workspaces"));
@@ -274,6 +275,8 @@ mod tests {
         assert!(!tools.iter().any(|name| name == "list_documents"));
         assert!(!tools.iter().any(|name| name == "search_documents"));
         assert!(!tools.iter().any(|name| name == READ_DOCUMENT_TOOL_NAME));
+        assert!(!canonical.contains(&"list_documents"));
+        assert_eq!(canonical.len(), tools.len());
     }
 
     #[test]

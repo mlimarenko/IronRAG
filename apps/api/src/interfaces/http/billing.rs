@@ -18,16 +18,18 @@ use crate::{
     services::ops::billing::{DocumentCostSummary, LibraryCostSummary, WorkspaceCostSummary},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
-struct LibraryCostQuery {
-    library_id: Uuid,
+#[into_params(parameter_in = Query)]
+pub struct LibraryCostQuery {
+    pub library_id: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
-struct WorkspaceCostQuery {
-    workspace_id: Uuid,
+#[into_params(parameter_in = Query)]
+pub struct WorkspaceCostQuery {
+    pub workspace_id: Uuid,
 }
 
 pub fn router() -> Router<AppState> {
@@ -43,13 +45,28 @@ pub fn router() -> Router<AppState> {
         .route("/billing/workspace-cost-summary", get(get_workspace_cost_summary))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/billing/executions/{executionKind}/{executionId}/provider-calls",
+    tag = "billing",
+    operation_id = "listBillingProviderCalls",
+    params(
+        ("executionKind" = String, Path, description = "Execution kind (query | runtime)"),
+        ("executionId" = uuid::Uuid, Path, description = "Execution identifier"),
+    ),
+    responses(
+        (status = 200, description = "Provider calls billed against the execution", body = [crate::domains::billing::BillingProviderCall]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the execution's library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_provider_calls",
     skip_all,
     fields(execution_kind = %execution_kind, execution_id = %execution_id)
 )]
-async fn list_provider_calls(
+pub async fn list_provider_calls(
     auth: AuthContext,
     State(state): State<AppState>,
     Path((execution_kind, execution_id)): Path<(String, Uuid)>,
@@ -68,13 +85,28 @@ async fn list_provider_calls(
     Ok(Json(calls))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/billing/executions/{executionKind}/{executionId}/charges",
+    tag = "billing",
+    operation_id = "listBillingCharges",
+    params(
+        ("executionKind" = String, Path, description = "Execution kind (query | runtime)"),
+        ("executionId" = uuid::Uuid, Path, description = "Execution identifier"),
+    ),
+    responses(
+        (status = 200, description = "Aggregated billing charges for the execution", body = [crate::domains::billing::BillingCharge]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the execution's library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_charges",
     skip_all,
     fields(execution_kind = %execution_kind, execution_id = %execution_id)
 )]
-async fn list_charges(
+pub async fn list_charges(
     auth: AuthContext,
     State(state): State<AppState>,
     Path((execution_kind, execution_id)): Path<(String, Uuid)>,
@@ -93,13 +125,28 @@ async fn list_charges(
     Ok(Json(charges))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/billing/executions/{executionKind}/{executionId}",
+    tag = "billing",
+    operation_id = "getBillingExecutionCost",
+    params(
+        ("executionKind" = String, Path, description = "Execution kind (query | runtime)"),
+        ("executionId" = uuid::Uuid, Path, description = "Execution identifier"),
+    ),
+    responses(
+        (status = 200, description = "Total billing cost for the execution", body = crate::domains::billing::BillingExecutionCost),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the execution's library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_execution_cost",
     skip_all,
     fields(execution_kind = %execution_kind, execution_id = %execution_id)
 )]
-async fn get_execution_cost(
+pub async fn get_execution_cost(
     auth: AuthContext,
     State(state): State<AppState>,
     Path((execution_kind, execution_id)): Path<(String, Uuid)>,
@@ -118,13 +165,25 @@ async fn get_execution_cost(
     Ok(Json(cost))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/billing/library-document-costs",
+    tag = "billing",
+    operation_id = "listBillingLibraryDocumentCosts",
+    params(LibraryCostQuery),
+    responses(
+        (status = 200, description = "Per-document cost summaries for the library", body = [crate::services::ops::billing::DocumentCostSummary]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_library_document_costs",
     skip_all,
     fields(library_id = %query.library_id, item_count)
 )]
-async fn list_library_document_costs(
+pub async fn list_library_document_costs(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<LibraryCostQuery>,
@@ -140,13 +199,25 @@ async fn list_library_document_costs(
     Ok(Json(costs))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/billing/library-cost-summary",
+    tag = "billing",
+    operation_id = "getLibraryCostSummary",
+    params(LibraryCostQuery),
+    responses(
+        (status = 200, description = "Aggregated cost summary for the library", body = crate::services::ops::billing::LibraryCostSummary),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_library_cost_summary",
     skip_all,
     fields(library_id = %query.library_id)
 )]
-async fn get_library_cost_summary(
+pub async fn get_library_cost_summary(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<LibraryCostQuery>,
@@ -157,13 +228,25 @@ async fn get_library_cost_summary(
     Ok(Json(summary))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/billing/workspace-cost-summary",
+    tag = "billing",
+    operation_id = "getWorkspaceCostSummary",
+    params(WorkspaceCostQuery),
+    responses(
+        (status = 200, description = "Aggregated cost summary for the workspace", body = crate::services::ops::billing::WorkspaceCostSummary),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the workspace"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_workspace_cost_summary",
     skip_all,
     fields(workspace_id = %query.workspace_id)
 )]
-async fn get_workspace_cost_summary(
+pub async fn get_workspace_cost_summary(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<WorkspaceCostQuery>,

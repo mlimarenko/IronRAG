@@ -14,14 +14,18 @@ use crate::{
         },
         repositories::query_repository,
     },
-    services::query::execution::QueryChunkReferenceSnapshot,
+    services::query::execution::{
+        QueryChunkReferenceSnapshot, RuntimeMatchedEntity, RuntimeMatchedRelationship,
+    },
 };
 
 use super::{
     MAX_DETAIL_PREPARED_SEGMENT_REFERENCES, MAX_DETAIL_TECHNICAL_FACT_REFERENCES,
     RankedBundleReference,
     context::{
-        derive_fact_rank_refs, seed_chunk_refs_from_answer_context, selected_fact_ids_for_detail,
+        derive_fact_rank_refs, seed_chunk_refs_from_answer_context,
+        seed_entity_refs_from_answer_graph, seed_relation_endpoint_refs_from_answer_graph,
+        seed_relation_refs_from_answer_graph, selected_fact_ids_for_detail,
     },
     formatting::{
         build_prepared_segment_references, parse_query_verification_state,
@@ -51,6 +55,80 @@ fn seed_chunk_refs_from_answer_context_uses_answer_chunks_as_canonical_source() 
     assert_eq!(second.rank, 1);
     assert_eq!(second.score, 0.90);
     assert!(second.reasons.contains("answer_context"));
+}
+
+#[test]
+fn seed_entity_refs_from_answer_graph_uses_selected_graph_context() {
+    let node_id = Uuid::now_v7();
+    let refs = vec![RuntimeMatchedEntity {
+        node_id,
+        label: "Alpha Gateway".to_string(),
+        node_type: "component".to_string(),
+        score: Some(0.82),
+    }];
+    let mut seeded = HashMap::new();
+
+    seed_entity_refs_from_answer_graph(&refs, &mut seeded);
+
+    let reference = seeded.get(&node_id).expect("selected graph entity");
+    assert_eq!(reference.rank, 1);
+    assert!((reference.score - 0.82).abs() < 0.000_001);
+    assert!(reference.reasons.contains("answer_graph_context"));
+}
+
+#[test]
+fn seed_relation_refs_from_answer_graph_uses_selected_graph_context() {
+    let edge_id = Uuid::now_v7();
+    let refs = vec![RuntimeMatchedRelationship {
+        edge_id,
+        relation_type: "depends_on".to_string(),
+        from_node_id: Uuid::now_v7(),
+        from_label: "Alpha Service".to_string(),
+        to_node_id: Uuid::now_v7(),
+        to_label: "Beta Store".to_string(),
+        summary: Some("Alpha Service reads configuration from Beta Store.".to_string()),
+        support_count: 2,
+        score: Some(0.76),
+    }];
+    let mut seeded = HashMap::new();
+
+    seed_relation_refs_from_answer_graph(&refs, &mut seeded);
+
+    let reference = seeded.get(&edge_id).expect("selected graph relation");
+    assert_eq!(reference.rank, 1);
+    assert!((reference.score - 0.76).abs() < 0.000_001);
+    assert!(reference.reasons.contains("answer_graph_context"));
+}
+
+#[test]
+fn seed_relation_endpoint_refs_from_answer_graph_prioritizes_relation_nodes() {
+    let from_node_id = Uuid::now_v7();
+    let to_node_id = Uuid::now_v7();
+    let relation_id = Uuid::now_v7();
+    let relation_refs = vec![RuntimeMatchedRelationship {
+        edge_id: relation_id,
+        relation_type: "routes_to".to_string(),
+        from_node_id,
+        from_label: "Anchor Node".to_string(),
+        to_node_id,
+        to_label: "Target Node".to_string(),
+        summary: Some("Anchor routes to target through a synthetic link.".to_string()),
+        support_count: 3,
+        score: Some(0.92),
+    }];
+    let mut entity_refs = HashMap::new();
+
+    seed_relation_endpoint_refs_from_answer_graph(&relation_refs, &mut entity_refs);
+
+    let from_reference = entity_refs.get(&from_node_id).expect("from-node endpoint");
+    let to_reference = entity_refs.get(&to_node_id).expect("to-node endpoint");
+
+    assert_eq!(from_reference.rank, 1);
+    assert_eq!(to_reference.rank, 1);
+    assert!((from_reference.score - 0.92).abs() < 0.000_001);
+    assert!((to_reference.score - 0.92).abs() < 0.000_001);
+    assert!(from_reference.reasons.contains("answer_relation_endpoint"));
+    assert!(to_reference.reasons.contains("answer_relation_endpoint"));
 }
 
 #[test]
@@ -517,4 +595,53 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
 
     assert_eq!(context.effective_query_text, "tell me how to move items in the product");
     assert_eq!(context.prompt_history_text, None);
+}
+
+#[test]
+fn build_conversation_runtime_context_standalone_question_after_assistant_answer_drops_coreference()
+{
+    let conversation_id = Uuid::now_v7();
+    let first_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "how do I configure connector alpha".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Connector Alpha uses `alphaSecret` in section [Alpha].".to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let standalone_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "what is the dashboard session timeout setting".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[first_turn, assistant_turn, standalone_turn.clone()],
+        standalone_turn.id,
+    );
+
+    assert_eq!(context.effective_query_text, "what is the dashboard session timeout setting");
+    assert_eq!(context.prompt_history_text, None);
+    assert!(context.coreference_entities.is_empty());
+    assert!(
+        !context.effective_query_text.contains("alphaSecret"),
+        "standalone query should not be rewritten with prior entities"
+    );
 }

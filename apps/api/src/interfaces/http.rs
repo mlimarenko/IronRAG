@@ -21,7 +21,7 @@ pub mod catalog;
     clippy::result_large_err
 )]
 pub mod content;
-mod health;
+pub mod health;
 #[allow(
     clippy::missing_const_for_fn,
     clippy::needless_pass_by_value,
@@ -48,7 +48,8 @@ pub mod knowledge;
     clippy::too_many_lines
 )]
 pub mod mcp;
-mod openapi;
+pub mod middleware;
+pub mod openapi;
 pub mod ops;
 #[allow(clippy::large_enum_variant, clippy::needless_pass_by_value, clippy::redundant_clone)]
 pub mod query;

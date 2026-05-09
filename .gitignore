@@ -1,5 +1,6 @@
 # Rust
 /target
+/.cargo-target
 **/target
 **/.cargo-target
 Cargo.lock
@@ -15,21 +16,28 @@ Cargo.lock
 !.env.example
 
 # Package manager residue
-node_modules
+/node_modules
+/apps/web/node_modules
 .pnpm-store
 
 # Build and QA artifacts
-dist
-coverage
-playwright-report
-test-results
-tmp/
-tmp-*
+/tmp
+/tmp-*
+/coverage
+/storybook-static
+/apps/web/coverage
+/apps/web/dist
+/apps/web/storybook-static
+/apps/web/playwright-report
+/apps/web/test-results
+/apps/web/.vite
 
 # IDE / local metadata
 .vscode
 .idea
 .DS_Store
+*.swp
+*.swo
 .audit/
 **/.audit/
 __pycache__/
@@ -42,3 +50,5 @@ __pycache__/
 .tools/bin/**
 .tools/tmp/**
 .claude/
+.omc/
+.omx/

@@ -1,10 +1,11 @@
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result as AnyhowResult, anyhow, bail};
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -22,8 +23,13 @@ use crate::{
     },
     infra::repositories::{ai_repository, content_repository},
     integrations::llm::EmbeddingBatchRequest,
-    services::knowledge::service::RefreshKnowledgeLibraryGenerationCommand,
+    services::{
+        ingest::cancellation::{StageError, ensure_not_cancelled},
+        knowledge::service::RefreshKnowledgeLibraryGenerationCommand,
+    },
 };
+
+use super::error::QueryServiceError;
 
 /// Per-batch size used for chunk embedding requests. Keeps each call below
 /// the typical 8k-token provider soft cap even when chunks run long and
@@ -91,7 +97,7 @@ impl SearchService {
         query: &str,
         query_ir: &QueryIR,
         limit: usize,
-    ) -> Result<QueryEvidenceSearchResult> {
+    ) -> std::result::Result<QueryEvidenceSearchResult, QueryServiceError> {
         let normalized_limit = limit.max(1);
         // Bias fact retrieval for exact-literal technical asks (known URLs /
         // paths / ports / config keys). Signal comes straight from the
@@ -165,15 +171,17 @@ impl SearchService {
         state: &AppState,
         provider_kind: &str,
         model_name: &str,
-    ) -> Result<Uuid> {
-        resolve_embedding_model_catalog_id(state, provider_kind, model_name).await
+    ) -> std::result::Result<Uuid, QueryServiceError> {
+        resolve_embedding_model_catalog_id(state, provider_kind, model_name)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn persist_chunk_embeddings(
         &self,
         state: &AppState,
         writes: &[ChunkEmbeddingWrite],
-    ) -> Result<usize> {
+    ) -> std::result::Result<usize, QueryServiceError> {
         let mut written = 0usize;
         for write in writes {
             let chunk = load_knowledge_chunk(state, write.chunk_id).await?;
@@ -223,7 +231,7 @@ impl SearchService {
         &self,
         state: &AppState,
         writes: &[GraphNodeEmbeddingWrite],
-    ) -> Result<usize> {
+    ) -> std::result::Result<usize, QueryServiceError> {
         let mut written = 0usize;
         for write in writes {
             let entity = state
@@ -283,7 +291,7 @@ impl SearchService {
         state: &AppState,
         chunk_id: Uuid,
         model_catalog_id: Uuid,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), QueryServiceError> {
         let embedding_model_key = model_catalog_id.to_string();
         let rows = state
             .arango_search_store
@@ -292,11 +300,11 @@ impl SearchService {
             .with_context(|| format!("failed to load chunk vectors for {}", chunk_id))?;
         let has_model = rows.iter().any(|row| row.embedding_model_key == embedding_model_key);
         if !has_model {
-            return Err(anyhow!(
-                "chunk {} has no canonical vector for model {}",
-                chunk_id,
-                model_catalog_id
-            ));
+            return Err(QueryServiceError::NotFound {
+                message: format!(
+                    "chunk {chunk_id} has no canonical vector for model {model_catalog_id}"
+                ),
+            });
         }
         Ok(())
     }
@@ -306,7 +314,7 @@ impl SearchService {
         state: &AppState,
         node_id: Uuid,
         model_catalog_id: Uuid,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), QueryServiceError> {
         let embedding_model_key = model_catalog_id.to_string();
         let rows = state
             .arango_search_store
@@ -315,11 +323,11 @@ impl SearchService {
             .with_context(|| format!("failed to load entity vectors for {}", node_id))?;
         let has_model = rows.iter().any(|row| row.embedding_model_key == embedding_model_key);
         if !has_model {
-            return Err(anyhow!(
-                "entity {} has no canonical vector for model {}",
-                node_id,
-                model_catalog_id
-            ));
+            return Err(QueryServiceError::NotFound {
+                message: format!(
+                    "entity {node_id} has no canonical vector for model {model_catalog_id}"
+                ),
+            });
         }
         Ok(())
     }
@@ -340,7 +348,9 @@ impl SearchService {
         state: &AppState,
         library_id: Uuid,
         revision_id: Uuid,
-    ) -> Result<EmbedChunksStageOutcome> {
+        cancellation_token: &CancellationToken,
+    ) -> std::result::Result<EmbedChunksStageOutcome, QueryServiceError> {
+        ensure_not_cancelled(cancellation_token)?;
         let revision = state
             .arango_document_store
             .get_revision(revision_id)
@@ -352,6 +362,7 @@ impl SearchService {
             .list_chunks_by_revision(revision_id)
             .await
             .with_context(|| format!("failed to list chunks for revision {revision_id}"))?;
+        ensure_not_cancelled(cancellation_token)?;
         if chunks.is_empty() {
             return Ok(EmbedChunksStageOutcome::default());
         }
@@ -364,11 +375,12 @@ impl SearchService {
             .ok_or_else(|| {
                 anyhow!("active embedding binding is not configured for library {library_id}")
             })?;
+        ensure_not_cancelled(cancellation_token)?;
         let model_catalog_id = binding.model_catalog_id;
         let embedding_model_key = model_catalog_id.to_string();
         let parallelism = state.settings.ingestion_embedding_parallelism.max(1);
         let freshness_generation = revision.revision_number;
-        let reused_chunk_ids = reuse_chunk_vectors_from_parent_revision(
+        let reused_chunk_ids = match reuse_chunk_vectors_from_parent_revision(
             state,
             revision_id,
             chunks.as_slice(),
@@ -376,7 +388,14 @@ impl SearchService {
             &embedding_model_key,
             freshness_generation,
         )
-        .await?;
+        .await
+        {
+            Ok(reused_chunk_ids) => reused_chunk_ids,
+            Err(error) => {
+                return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+            }
+        };
+        ensure_not_cancelled(cancellation_token)?;
         let chunks_to_embed: Vec<&KnowledgeChunkRow> =
             chunks.iter().filter(|chunk| !reused_chunk_ids.contains(&chunk.chunk_id)).collect();
 
@@ -409,26 +428,31 @@ impl SearchService {
             let api_key = api_key_owned.clone();
             let base_url = base_url_owned.clone();
             let extra_parameters_json = extra_parameters_json_owned.clone();
+            let cancellation_token = cancellation_token.clone();
             async move {
+                ensure_not_cancelled(&cancellation_token)?;
                 let inputs: Vec<String> =
                     batch.iter().map(|index| chunks_ref[*index].normalized_text.clone()).collect();
                 let first_offset = batch.first().copied().unwrap_or_default();
-                let response = state
-                    .llm_gateway
-                    .embed_many(EmbeddingBatchRequest {
+                let request = EmbeddingBatchRequest {
                         provider_kind,
                         model_name,
                         inputs,
                         api_key_override: api_key,
                         base_url_override: base_url,
                         extra_parameters_json,
-                    })
-                    .await
-                    .with_context(|| {
+                    };
+                let response = tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        return Err(anyhow::Error::new(StageError::Cancelled));
+                    }
+                    result = state.llm_gateway.embed_many(request) => result.with_context(|| {
                         format!(
                             "failed to embed chunk batch for revision {revision_id} starting at offset {first_offset}"
                         )
-                    })?;
+                    })?,
+                };
+                ensure_not_cancelled(&cancellation_token)?;
                 anyhow::Ok((batch, response))
             }
         }))
@@ -445,13 +469,24 @@ impl SearchService {
         let mut chunks_embedded = 0usize;
 
         for batch_result in batch_responses {
-            let (batch, batch_response) = batch_result?;
+            fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
+            let (batch, batch_response) = match batch_result {
+                Ok(batch_response) => batch_response,
+                Err(error) => {
+                    return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+                }
+            };
             if batch_response.embeddings.len() != batch.len() {
-                bail!(
-                    "embedding batch returned {} vectors for {} chunks",
-                    batch_response.embeddings.len(),
-                    batch.len(),
-                );
+                return fail_embed_chunks_after_cleanup(
+                    state,
+                    revision_id,
+                    anyhow!(
+                        "embedding batch returned {} vectors for {} chunks",
+                        batch_response.embeddings.len(),
+                        batch.len(),
+                    ),
+                )
+                .await;
             }
             if let Some(prompt) =
                 batch_response.usage_json.get("prompt_tokens").and_then(|v| v.as_i64())
@@ -474,7 +509,16 @@ impl SearchService {
 
             let mut batch_rows: Vec<KnowledgeChunkVectorRow> = Vec::with_capacity(batch.len());
             for (chunk_index, vector) in batch.iter().zip(batch_response.embeddings.iter()) {
+                fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
                 let chunk = chunks_ref[*chunk_index];
+                let dimensions = match embedding_dimensions(vector.as_slice()).with_context(|| {
+                    format!("failed to resolve chunk embedding dimensions for {}", chunk.chunk_id)
+                }) {
+                    Ok(dimensions) => dimensions,
+                    Err(error) => {
+                        return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+                    }
+                };
                 batch_rows.push(KnowledgeChunkVectorRow {
                     key: build_chunk_vector_key(
                         chunk.chunk_id,
@@ -490,12 +534,7 @@ impl SearchService {
                     revision_id: chunk.revision_id,
                     embedding_model_key: embedding_model_key.clone(),
                     vector_kind: VECTOR_KIND_CHUNK.to_string(),
-                    dimensions: embedding_dimensions(vector.as_slice()).with_context(|| {
-                        format!(
-                            "failed to resolve chunk embedding dimensions for {}",
-                            chunk.chunk_id
-                        )
-                    })?,
+                    dimensions,
                     vector: vector.clone(),
                     freshness_generation,
                     created_at: Utc::now(),
@@ -506,25 +545,36 @@ impl SearchService {
             // Collapse N sequential `upsert_chunk_vector` AQLs into one
             // bulk FOR/UPSERT round-trip per embedding batch.
             if !batch_rows.is_empty() {
-                state
+                fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
+                if let Err(error) = state
                     .arango_search_store
                     .upsert_chunk_vectors_bulk(&batch_rows)
                     .await
-                    .context("failed to bulk-persist chunk vectors")?;
+                    .context("failed to bulk-persist chunk vectors")
+                {
+                    return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+                }
                 chunks_embedded += batch_rows.len();
+                fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
             }
         }
 
+        fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
         let covered_chunk_count = chunks_embedded.saturating_add(reused_chunk_ids.len());
         if covered_chunk_count != chunks.len() {
-            bail!(
+            return fail_embed_chunks_after_cleanup(
+                state,
+                revision_id,
+                anyhow!(
                 "embedding coverage mismatch for revision {revision_id}: {} chunks, {} embedded, {} reused",
                 chunks.len(),
                 chunks_embedded,
                 reused_chunk_ids.len(),
-            );
+                ),
+            )
+            .await;
         }
-        let persisted_vector_count = state
+        let persisted_vector_count = match state
             .arango_search_store
             .count_chunk_vectors_by_revision(
                 revision_id,
@@ -537,13 +587,24 @@ impl SearchService {
                 format!(
                     "failed to verify persisted chunk-vector coverage for revision {revision_id}"
                 )
-            })?;
+            }) {
+            Ok(persisted_vector_count) => persisted_vector_count,
+            Err(error) => {
+                return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+            }
+        };
+        ensure_not_cancelled(cancellation_token)?;
         if persisted_vector_count != chunks.len() {
-            bail!(
+            return fail_embed_chunks_after_cleanup(
+                state,
+                revision_id,
+                anyhow!(
                 "persisted chunk-vector coverage mismatch for revision {revision_id}: {} chunks, {} current vectors",
                 chunks.len(),
                 persisted_vector_count,
-            );
+                ),
+            )
+            .await;
         }
 
         let prompt_tokens = saw_prompt.then(|| i32::try_from(prompt_token_sum).unwrap_or(i32::MAX));
@@ -586,7 +647,7 @@ impl SearchService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<usize> {
+    ) -> std::result::Result<usize, QueryServiceError> {
         let embedding_binding = state
             .canonical_services
             .ai_catalog
@@ -790,7 +851,7 @@ impl SearchService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<usize> {
+    ) -> std::result::Result<usize, QueryServiceError> {
         let embedding_binding = state
             .canonical_services
             .ai_catalog
@@ -830,11 +891,13 @@ impl SearchService {
                 .await
                 .context("failed to rebuild entity vectors")?;
             if batch_response.embeddings.len() != entity_batch.len() {
-                return Err(anyhow!(
-                    "embedding batch returned {} vectors for {} entities",
-                    batch_response.embeddings.len(),
-                    entity_batch.len()
-                ));
+                return Err(QueryServiceError::ProviderUnavailable {
+                    message: format!(
+                        "embedding batch returned {} vectors for {} entities",
+                        batch_response.embeddings.len(),
+                        entity_batch.len()
+                    ),
+                });
             }
 
             for (entity, embedding) in entity_batch.iter().zip(batch_response.embeddings.iter()) {
@@ -894,7 +957,7 @@ async fn resolve_embedding_model_catalog_id(
     state: &AppState,
     provider_kind: &str,
     model_name: &str,
-) -> Result<Uuid> {
+) -> AnyhowResult<Uuid> {
     let provider = ai_repository::list_provider_catalog(&state.persistence.postgres)
         .await
         .context("failed to list provider catalog while resolving embedding model")?
@@ -928,6 +991,46 @@ fn build_chunk_vector_key(
     format!("{chunk_id}:{model_catalog_id}:{freshness_generation}")
 }
 
+async fn fail_embed_chunks_after_cleanup<T>(
+    state: &AppState,
+    revision_id: Uuid,
+    error: anyhow::Error,
+) -> std::result::Result<T, QueryServiceError> {
+    match state.arango_search_store.delete_chunk_vectors_by_revision(revision_id).await {
+        Ok(deleted) if deleted > 0 => {
+            tracing::warn!(
+                revision_id = %revision_id,
+                deleted,
+                "removed partial chunk vectors after failed embed_chunk stage",
+            );
+        }
+        Ok(_) => {}
+        Err(cleanup_error) => {
+            return Err(error.context(format!(
+                "failed to remove partial chunk vectors for revision {revision_id}: {cleanup_error:#}"
+            )).into());
+        }
+    }
+    Err(error.into())
+}
+
+async fn fail_embed_chunks_if_cancelled(
+    state: &AppState,
+    revision_id: Uuid,
+    cancellation_token: &CancellationToken,
+) -> std::result::Result<(), QueryServiceError> {
+    if cancellation_token.is_cancelled() {
+        fail_embed_chunks_after_cleanup(
+            state,
+            revision_id,
+            anyhow::Error::new(StageError::Cancelled),
+        )
+        .await
+    } else {
+        Ok(())
+    }
+}
+
 fn build_entity_vector_key(
     entity_id: Uuid,
     model_catalog_id: Uuid,
@@ -936,7 +1039,7 @@ fn build_entity_vector_key(
     format!("{entity_id}:{model_catalog_id}:{freshness_generation}")
 }
 
-fn embedding_dimensions(vector: &[f32]) -> Result<i32> {
+fn embedding_dimensions(vector: &[f32]) -> AnyhowResult<i32> {
     if vector.is_empty() {
         return Err(anyhow!("embedding vector must not be empty"));
     }
@@ -950,7 +1053,7 @@ async fn reuse_chunk_vectors_from_parent_revision(
     model_catalog_id: Uuid,
     embedding_model_key: &str,
     freshness_generation: i64,
-) -> Result<BTreeSet<Uuid>> {
+) -> AnyhowResult<BTreeSet<Uuid>> {
     if new_chunks.is_empty() {
         return Ok(BTreeSet::new());
     }
@@ -969,7 +1072,9 @@ async fn reuse_chunk_vectors_from_parent_revision(
 
     let mut new_chunks_by_checksum: HashMap<String, Vec<&KnowledgeChunkRow>> = HashMap::new();
     for chunk in new_chunks {
-        let Some(checksum) = chunk_text_reuse_key(chunk) else { continue };
+        let Some(checksum) = chunk_text_reuse_key(chunk) else {
+            continue;
+        };
         new_chunks_by_checksum.entry(checksum).or_default().push(chunk);
     }
     if new_chunks_by_checksum.is_empty() {
@@ -990,7 +1095,9 @@ async fn reuse_chunk_vectors_from_parent_revision(
     let mut parent_chunk_by_id: HashMap<Uuid, &KnowledgeChunkRow> = HashMap::new();
     let mut parent_ids_by_checksum: HashMap<String, Uuid> = HashMap::new();
     for parent_chunk in &parent_chunks {
-        let Some(checksum) = chunk_text_reuse_key(parent_chunk) else { continue };
+        let Some(checksum) = chunk_text_reuse_key(parent_chunk) else {
+            continue;
+        };
         if !new_chunks_by_checksum.contains_key(&checksum) {
             continue;
         }
@@ -1110,7 +1217,7 @@ fn chunk_text_reuse_key(chunk: &KnowledgeChunkRow) -> Option<String> {
     })
 }
 
-async fn load_knowledge_chunk(state: &AppState, chunk_id: Uuid) -> Result<KnowledgeChunkRow> {
+async fn load_knowledge_chunk(state: &AppState, chunk_id: Uuid) -> AnyhowResult<KnowledgeChunkRow> {
     let cursor = state
         .arango_document_store
         .client()
@@ -1133,7 +1240,7 @@ async fn load_knowledge_chunk(state: &AppState, chunk_id: Uuid) -> Result<Knowle
 async fn list_knowledge_chunks_by_library(
     state: &AppState,
     library_id: Uuid,
-) -> Result<Vec<KnowledgeChunkRow>> {
+) -> AnyhowResult<Vec<KnowledgeChunkRow>> {
     let cursor = state
         .arango_document_store
         .client()
@@ -1155,7 +1262,7 @@ async fn list_knowledge_chunks_by_library(
 async fn resolve_chunk_vector_generation(
     state: &AppState,
     chunk: &KnowledgeChunkRow,
-) -> Result<i64> {
+) -> AnyhowResult<i64> {
     if let Some(generation) = chunk.vector_generation.or(chunk.text_generation) {
         return Ok(generation);
     }
@@ -1177,7 +1284,7 @@ async fn resolve_chunk_vector_generation(
 async fn mark_revisions_vector_ready(
     state: &AppState,
     revision_ids: &BTreeSet<Uuid>,
-) -> Result<()> {
+) -> AnyhowResult<()> {
     for revision_id in revision_ids {
         let revision = state
             .arango_document_store
@@ -1214,7 +1321,7 @@ async fn refresh_library_vector_generation_if_present(
     library_id: Uuid,
     workspace_id: Uuid,
     vector_generation: i64,
-) -> Result<()> {
+) -> AnyhowResult<()> {
     let Some(existing) = state
         .canonical_services
         .knowledge
@@ -1249,7 +1356,7 @@ async fn refresh_library_vector_generation_if_present(
     Ok(())
 }
 
-fn decode_optional_single_result<T>(cursor: serde_json::Value) -> Result<Option<T>>
+fn decode_optional_single_result<T>(cursor: serde_json::Value) -> AnyhowResult<Option<T>>
 where
     T: DeserializeOwned,
 {
@@ -1262,7 +1369,7 @@ where
     Ok((!rows.is_empty()).then(|| rows.remove(0)))
 }
 
-fn decode_many_results<T>(cursor: serde_json::Value) -> Result<Vec<T>>
+fn decode_many_results<T>(cursor: serde_json::Value) -> AnyhowResult<Vec<T>>
 where
     T: DeserializeOwned,
 {

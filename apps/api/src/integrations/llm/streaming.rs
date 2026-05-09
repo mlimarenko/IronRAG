@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use std::time::Duration;
 
 use super::extract_message_content_text;
 
@@ -261,53 +260,4 @@ pub(super) async fn drain_tool_use_stream(
         let _ = consume_tool_use_stream_frame(&buffer, &mut state, on_text_delta)?;
     }
     Ok(state)
-}
-
-pub(super) const fn is_retryable_upstream_status(status_code: u16) -> bool {
-    matches!(
-        status_code,
-        408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 529
-    )
-}
-
-pub(super) fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
-    error.is_timeout()
-        || error.is_connect()
-        || is_retryable_transport_error_text(&error.to_string())
-}
-
-pub(super) fn is_retryable_transport_error_text(message: &str) -> bool {
-    let normalized = message.to_ascii_lowercase();
-    normalized.contains("connection closed before message completed")
-        || normalized.contains("connection reset")
-        || normalized.contains("broken pipe")
-        || normalized.contains("unexpected eof")
-        || normalized.contains("http2")
-        || normalized.contains("sendrequest")
-        || normalized.contains("error sending request")
-        // `rustls` uncategorized "peer dropped the TLS session" cases. We
-        // observe this in production when the LLM provider terminates the
-        // TLS session abruptly mid-response under load: the actual reqwest
-        // error surfaces as `error decoding response body: ... peer closed
-        // connection without sending TLS close_notify`. Without these two
-        // patterns the transport retry layer falls through and the
-        // `extract_graph` stage gives up after ~51 s at the outer recovery
-        // instead of cycling the [1,3,10,30,90] s schedule against a
-        // recovering provider.
-        || normalized.contains("peer closed connection")
-        || normalized.contains("close_notify")
-}
-
-/// Fixed canonical backoff schedule for retryable LLM provider failures
-/// (timeouts, 4xx transient, 5xx). Each entry is the delay to wait *after*
-/// the N-th failed attempt before the next retry. After exhausting the
-/// schedule the caller surfaces the final error. Total worst-case backoff:
-/// 1 + 3 + 10 + 30 + 90 = 134 seconds across 5 retries, covering typical
-/// provider warm-up, rate-limit windows, and long transient outages.
-const TRANSPORT_RETRY_SCHEDULE_SECS: &[u64] = &[1, 3, 10, 30, 90];
-
-pub(super) fn transport_retry_delay(_base_delay_ms: u64, attempt: usize) -> Duration {
-    let idx = if attempt == 0 { 0 } else { attempt - 1 };
-    let idx = idx.min(TRANSPORT_RETRY_SCHEDULE_SECS.len() - 1);
-    Duration::from_secs(TRANSPORT_RETRY_SCHEDULE_SECS[idx])
 }

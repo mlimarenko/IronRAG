@@ -8,7 +8,7 @@ use crate::{
     domains::ingest::{IngestAttempt, IngestJob, IngestStageEvent},
     domains::ops::{
         ASYNC_OP_STATUS_FAILED, ASYNC_OP_STATUS_PROCESSING, ASYNC_OP_STATUS_READY,
-        OpsAsyncOperation,
+        OpsAsyncOperation, OpsAsyncOperationStatus,
     },
     infra::repositories::{
         ingest_repository::{
@@ -697,15 +697,16 @@ impl IngestService {
         .map(|row| (row.job_id, map_attempt_row(row)))
         .collect::<HashMap<_, _>>();
 
-        let async_operations_by_id = ops_repository::list_async_operations_by_ids(
+        let async_operation_rows = ops_repository::list_async_operations_by_ids(
             &state.persistence.postgres,
             &async_operation_ids,
         )
         .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .into_iter()
-        .map(|row| (row.id, map_async_operation_row(row)))
-        .collect::<HashMap<_, _>>();
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let mut async_operations_by_id = HashMap::with_capacity(async_operation_rows.len());
+        for row in async_operation_rows {
+            async_operations_by_id.insert(row.id, map_async_operation_row(row)?);
+        }
 
         Ok(jobs
             .into_iter()
@@ -829,13 +830,17 @@ fn map_attempt_row(row: ingest_repository::IngestAttemptRow) -> IngestAttempt {
     }
 }
 
-fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyncOperation {
-    OpsAsyncOperation {
+fn map_async_operation_row(
+    row: ops_repository::OpsAsyncOperationRow,
+) -> Result<OpsAsyncOperation, ApiError> {
+    let status = OpsAsyncOperationStatus::from_db(&row.status)
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    Ok(OpsAsyncOperation {
         id: row.id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         operation_kind: row.operation_kind,
-        status: row.status,
+        status,
         surface_kind: Some(row.surface_kind),
         subject_kind: Some(row.subject_kind),
         subject_id: row.subject_id,
@@ -843,7 +848,7 @@ fn map_async_operation_row(row: ops_repository::OpsAsyncOperationRow) -> OpsAsyn
         failure_code: row.failure_code,
         created_at: row.created_at,
         completed_at: row.completed_at,
-    }
+    })
 }
 
 fn map_stage_event_row(row: ingest_repository::IngestStageEventRow) -> IngestStageEvent {

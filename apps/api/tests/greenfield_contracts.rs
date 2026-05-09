@@ -51,8 +51,7 @@ const FORBIDDEN_LEGACY_VOCABULARY: &[&str] = &[
 
 #[must_use]
 pub fn load_openapi_contract_text() -> String {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts").join("ironrag.openapi.yaml");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts").join("openapi.gen.yaml");
     fs::read_to_string(&path).unwrap_or_default()
 }
 
@@ -323,18 +322,6 @@ paths:
 }
 
 #[test]
-fn actual_contract_contains_greenfield_scaffold_markers() {
-    let contract = load_openapi_contract_text();
-    let result = validate_greenfield_openapi_scaffold(&contract);
-
-    assert!(
-        result.is_ok(),
-        "expected actual contract to contain greenfield scaffold markers: {:?}",
-        result.err().unwrap_or_default()
-    );
-}
-
-#[test]
 fn actual_contract_no_longer_reports_legacy_vocabulary_debt() {
     let contract = load_openapi_contract_text();
     let result = detect_legacy_vocabulary_occurrences(&contract);
@@ -345,11 +332,14 @@ fn actual_contract_no_longer_reports_legacy_vocabulary_debt() {
     );
 }
 
-#[test]
-fn actual_fresh_deploy_contract_surface_uses_workspace_and_library_only() {
-    let contract = load_openapi_contract_text();
-    assert_fresh_deploy_surface_uses_canonical_vocabulary(&contract);
-}
+// `actual_contract_contains_greenfield_scaffold_markers` and
+// `actual_fresh_deploy_contract_surface_uses_workspace_and_library_only` were
+// removed in sub-sprint 1d. They guarded the hand-maintained
+// `apps/api/contracts/ironrag.openapi.yaml` for `x-greenfield-scaffold` markers
+// and a fresh-bootstrap discovery block. The yaml is now generated from
+// `#[utoipa::path]` annotations on Rust handlers, so the guards belong on the
+// Rust source. The legacy vocabulary check above still applies to the emitted
+// document and continues to gate vocabulary regressions.
 
 #[test]
 fn actual_contract_exposes_canonical_session_and_admin_support_routes() {

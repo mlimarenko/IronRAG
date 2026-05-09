@@ -61,29 +61,29 @@ pub(super) fn ensure_batch_document_id_limit(document_count: usize) -> Result<()
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchDeleteRequest {
+pub struct BatchDeleteRequest {
     pub document_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchCancelRequest {
+pub struct BatchCancelRequest {
     pub document_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchCancelResponse {
+pub struct BatchCancelResponse {
     pub cancelled_count: usize,
     pub failed_count: usize,
     pub results: Vec<BatchCancelResult>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchCancelResult {
+pub struct BatchCancelResult {
     pub document_id: Uuid,
     pub jobs_cancelled: u64,
     pub success: bool,
@@ -91,9 +91,9 @@ pub(super) struct BatchCancelResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchReprocessRequest {
+pub struct BatchReprocessRequest {
     pub document_ids: Vec<Uuid>,
 }
 
@@ -104,9 +104,9 @@ pub(super) struct BatchReprocessRequest {
 /// final aggregated status. All child per-document mutations are linked back
 /// to the parent via `parent_async_operation_id`, so child counts can be
 /// aggregated with a single indexed query.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchDocumentOperationAcceptedResponse {
+pub struct BatchDocumentOperationAcceptedResponse {
     pub batch_operation_id: Uuid,
     pub total: usize,
     pub library_id: Uuid,
@@ -119,7 +119,19 @@ pub(super) struct BatchDocumentOperationAcceptedResponse {
     skip_all,
     fields(document_count = request.document_ids.len(), batch_operation_id)
 )]
-pub(super) async fn batch_delete_documents(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/batch-delete",
+    tag = "content",
+    operation_id = "batchDeleteContentDocuments",
+    request_body = BatchDeleteRequest,
+    responses(
+        (status = 202, description = "Batch deletion accepted", body = BatchDocumentOperationAcceptedResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized"),
+    ),
+)]
+pub async fn batch_delete_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(request): Json<BatchDeleteRequest>,
@@ -197,7 +209,19 @@ pub(super) async fn batch_delete_documents(
     skip_all,
     fields(document_count = request.document_ids.len(), cancelled_count, failed_count)
 )]
-pub(super) async fn batch_cancel_documents(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/batch-cancel",
+    tag = "content",
+    operation_id = "batchCancelContentDocuments",
+    request_body = BatchCancelRequest,
+    responses(
+        (status = 200, description = "Batch cancel result", body = BatchCancelResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized"),
+    ),
+)]
+pub async fn batch_cancel_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(request): Json<BatchCancelRequest>,
@@ -275,7 +299,19 @@ pub(super) async fn batch_cancel_documents(
     skip_all,
     fields(document_count = request.document_ids.len(), batch_operation_id)
 )]
-pub(super) async fn batch_reprocess_documents(
+#[utoipa::path(
+    post,
+    path = "/v1/content/documents/batch-reprocess",
+    tag = "content",
+    operation_id = "batchReprocessContentDocuments",
+    request_body = BatchReprocessRequest,
+    responses(
+        (status = 202, description = "Batch reprocess accepted", body = BatchDocumentOperationAcceptedResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized"),
+    ),
+)]
+pub async fn batch_reprocess_documents(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(request): Json<BatchReprocessRequest>,
@@ -908,7 +944,7 @@ async fn run_batch_reprocess_children(
 /// which falls back to the latest revision row when the head is `NULL`,
 /// and to `force_reset_inflight_for_retry` so an earlier stuck mutation
 /// doesn't block the new admission.
-pub(super) async fn reprocess_single_document(
+pub async fn reprocess_single_document(
     state: &AppState,
     parent_id: Option<Uuid>,
     principal_id: Uuid,

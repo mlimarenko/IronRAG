@@ -43,6 +43,10 @@ pub const KNOWLEDGE_NGRAM_ANALYZER: &str = "ironrag_ngram";
 pub const KNOWLEDGE_GRAPH_NAME: &str = "knowledge_graph";
 pub const KNOWLEDGE_CHUNK_VECTOR_INDEX: &str = "knowledge_chunk_vector_index";
 pub const KNOWLEDGE_ENTITY_VECTOR_INDEX: &str = "knowledge_entity_vector_index";
+pub const KNOWLEDGE_CHUNK_VECTOR_REVISION_GENERATION_INDEX: &str =
+    "knowledge_chunk_vector_revision_generation_index";
+pub const KNOWLEDGE_CHUNK_VECTOR_CHUNK_MODEL_INDEX: &str =
+    "knowledge_chunk_vector_chunk_model_index";
 pub const KNOWLEDGE_STRUCTURED_REVISION_REVISION_INDEX: &str =
     "knowledge_structured_revision_revision_index";
 pub const KNOWLEDGE_STRUCTURED_BLOCK_REVISION_ORDINAL_INDEX: &str =
@@ -131,6 +135,26 @@ pub const KNOWLEDGE_PERSISTENT_INDEXES: &[ArangoPersistentIndexSpec] = &[
         collection: KNOWLEDGE_CHUNK_COLLECTION,
         name: KNOWLEDGE_CHUNK_REVISION_INDEX,
         fields: &["revision_id", "chunk_index", "chunk_id"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+        name: KNOWLEDGE_CHUNK_VECTOR_REVISION_GENERATION_INDEX,
+        fields: &["revision_id", "embedding_model_key", "vector_kind", "freshness_generation"],
+        unique: false,
+        sparse: false,
+    },
+    ArangoPersistentIndexSpec {
+        collection: KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+        name: KNOWLEDGE_CHUNK_VECTOR_CHUNK_MODEL_INDEX,
+        fields: &[
+            "chunk_id",
+            "embedding_model_key",
+            "vector_kind",
+            "freshness_generation",
+            "created_at",
+        ],
         unique: false,
         sparse: false,
     },

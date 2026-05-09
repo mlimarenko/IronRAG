@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+    services::knowledge::error::KnowledgeServiceError,
 };
 
 #[derive(Debug, Clone)]
@@ -85,7 +86,7 @@ impl RuntimeGraphProjectionCache {
 pub async fn load_active_runtime_graph_projection(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<Arc<ActiveRuntimeGraphProjection>> {
+) -> Result<Arc<ActiveRuntimeGraphProjection>, KnowledgeServiceError> {
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await

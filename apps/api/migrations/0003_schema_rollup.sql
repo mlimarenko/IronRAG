@@ -2,7 +2,7 @@
 --
 -- Consolidates the post-init schema into one canonical migration for fresh
 -- clones: ingest-job document indexing, content-revision dedup indexing,
--- legacy table/column cleanup, billing library attribution,
+-- retired table/column cleanup, billing library attribution,
 -- query-conversation surface, graph topology indexes, web-candidate
 -- materialized state, and library-owned web-ingest URL ignore policy.
 
@@ -24,7 +24,7 @@ create index if not exists idx_content_revision_library_checksum
     on content_revision (library_id, checksum);
 
 -- ---------------------------------------------------------------------
--- Legacy cleanup: runtime_vector_target (pgvector-era store, nothing
+-- Retired-shape cleanup: runtime_vector_target (pgvector-era store, nothing
 -- reads it; vector search runs in Arango now), the `superseded_at`
 -- flag column that was always null on live rows, and the `is_active`
 -- flag on runtime_graph_evidence that was always true on live rows.

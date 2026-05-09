@@ -11,7 +11,10 @@ use crate::{
     domains::{
         ingest,
         knowledge::{KnowledgeLibraryGeneration, KnowledgeLibrarySummary},
-        ops::{OpsAsyncOperation, OpsAsyncOperationProgress, OpsLibraryState, OpsLibraryWarning},
+        ops::{
+            OpsAsyncOperation, OpsAsyncOperationProgress, OpsAsyncOperationStatus, OpsLibraryState,
+            OpsLibraryWarning,
+        },
     },
     interfaces::http::{
         auth::AuthContext,
@@ -24,9 +27,8 @@ use crate::{
 use ironrag_contracts::{
     diagnostics::{MessageLevel, OperatorWarning},
     documents::{
-        DashboardAttentionItem, DashboardMetric, DashboardSurface, DocumentReadiness,
-        DocumentStatus, DocumentSummary, DocumentsOverview, WebIngestRunState, WebIngestRunSummary,
-        WebRunCounts,
+        DashboardAttentionItem, DashboardMetric, DashboardSurface, DocumentSummary,
+        DocumentsOverview, WebIngestRunState, WebIngestRunSummary, WebRunCounts,
     },
     graph::{
         GraphConvergenceStatus, GraphGenerationSummary, GraphReadinessSummary, GraphStatus,
@@ -34,9 +36,9 @@ use ironrag_contracts::{
     },
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct OpsLibraryStateSummaryResponse {
+pub struct OpsLibraryStateSummaryResponse {
     pub library_id: Uuid,
     pub queue_depth: i64,
     pub running_attempts: i64,
@@ -48,9 +50,9 @@ struct OpsLibraryStateSummaryResponse {
     pub last_recomputed_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct OpsLibraryWarningResponse {
+pub struct OpsLibraryWarningResponse {
     pub id: Uuid,
     pub library_id: Uuid,
     pub warning_kind: String,
@@ -59,9 +61,9 @@ struct OpsLibraryWarningResponse {
     pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct KnowledgeGenerationResponse {
+pub struct KnowledgeGenerationResponse {
     pub id: Uuid,
     pub library_id: Uuid,
     pub generation_kind: String,
@@ -71,9 +73,9 @@ struct KnowledgeGenerationResponse {
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct OpsLibraryStateResponse {
+pub struct OpsLibraryStateResponse {
     pub state: OpsLibraryStateSummaryResponse,
     pub knowledge_generations: Vec<KnowledgeGenerationResponse>,
     pub warnings: Vec<OpsLibraryWarningResponse>,
@@ -92,21 +94,34 @@ pub fn router() -> Router<AppState> {
 /// same response shape. `progress` is populated whenever at least one child
 /// operation references this row via `parent_async_operation_id`; for
 /// non-batch operations it reports zeros across the board.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct AsyncOperationDetailResponse {
+pub struct AsyncOperationDetailResponse {
     #[serde(flatten)]
     operation: OpsAsyncOperation,
     progress: OpsAsyncOperationProgress,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ops/operations/{operationId}",
+    tag = "ops",
+    operation_id = "getAsyncOperation",
+    params(("operationId" = uuid::Uuid, Path, description = "Async operation identifier")),
+    responses(
+        (status = 200, description = "Async operation detail with aggregated child progress", body = AsyncOperationDetailResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the operation"),
+        (status = 404, description = "Operation not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_async_operation",
     skip_all,
     fields(operation_id = %operation_id)
 )]
-async fn get_async_operation(
+pub async fn get_async_operation(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(operation_id): Path<Uuid>,
@@ -130,14 +145,14 @@ async fn get_async_operation(
         let parent_finalizing = operation.operation_kind == "batch_delete_documents"
             && operation.completed_at.is_none();
         let derived = if pending > 0 || parent_finalizing {
-            "processing"
+            OpsAsyncOperationStatus::Processing
         } else if progress.failed > 0 {
-            "failed"
+            OpsAsyncOperationStatus::Failed
         } else {
-            "ready"
+            OpsAsyncOperationStatus::Ready
         };
         if operation.status != derived {
-            operation.status = derived.to_string();
+            operation.status = derived;
         }
         if pending == 0 && !parent_finalizing && operation.completed_at.is_none() {
             operation.completed_at = Some(chrono::Utc::now());
@@ -147,13 +162,26 @@ async fn get_async_operation(
     Ok(Json(AsyncOperationDetailResponse { operation, progress }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ops/libraries/{libraryId}",
+    tag = "ops",
+    operation_id = "getLibraryState",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Library state snapshot with knowledge generations and warnings", body = OpsLibraryStateResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_library_state",
     skip_all,
     fields(library_id = %library_id)
 )]
-async fn get_library_state(
+pub async fn get_library_state(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -173,13 +201,26 @@ async fn get_library_state(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ops/libraries/{libraryId}/dashboard",
+    tag = "ops",
+    operation_id = "getLibraryDashboard",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Library dashboard surface (overview, attention items, recent documents, graph, web run summaries)", body = DashboardSurface),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_library_dashboard",
     skip_all,
     fields(library_id = %library_id, elapsed_ms)
 )]
-async fn get_library_dashboard(
+pub async fn get_library_dashboard(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -231,7 +272,7 @@ async fn get_library_dashboard(
         recent_page.items.into_iter().map(map_list_entry_to_dashboard_summary).collect();
     // `overview` is derived from the canonical `document_metrics` row
     // to keep the two fields on `DashboardSurface` consistent by
-    // construction. Legacy UI consumers that read `overview.*` see
+    // construction. Existing UI consumers that read `overview.*` see
     // the same numbers as new consumers that read `documentMetrics`.
     let overview = build_documents_overview_from_metrics(&document_metrics);
     let warnings = map_operator_warnings(&ops_warnings, &ops_snapshot.state);
@@ -264,8 +305,6 @@ async fn get_library_dashboard(
 fn map_list_entry_to_dashboard_summary(
     entry: crate::services::content::service::ContentDocumentListEntry,
 ) -> DocumentSummary {
-    let status = parse_list_entry_status(&entry.status);
-    let readiness = parse_list_entry_readiness(&entry.readiness);
     DocumentSummary {
         id: entry.id,
         workspace_id: Some(entry.workspace_id),
@@ -274,8 +313,8 @@ fn map_list_entry_to_dashboard_summary(
         file_type: entry.file_type.unwrap_or_else(|| "unknown".to_string()),
         file_size: entry.file_size.unwrap_or(0),
         uploaded_at: entry.uploaded_at,
-        status,
-        readiness,
+        status: entry.status,
+        readiness: entry.readiness,
         stage_label: entry.stage,
         progress_percent: None,
         cost_usd: None,
@@ -287,35 +326,7 @@ fn map_list_entry_to_dashboard_summary(
     }
 }
 
-fn parse_list_entry_status(value: &str) -> DocumentStatus {
-    // The dashboard contract enum now models `canceled` separately
-    // (prior versions folded it into `Failed`, which hid the
-    // difference between a pipeline rejection and an operator
-    // withdrawal and made batch-cancel rollouts indistinguishable
-    // from real failures on the dashboard). Unknown values still
-    // degrade to `Queued` so the dashboard can't crash on a future
-    // backend enum addition.
-    match value {
-        "ready" => DocumentStatus::Ready,
-        "processing" => DocumentStatus::Processing,
-        "queued" => DocumentStatus::Queued,
-        "failed" => DocumentStatus::Failed,
-        "canceled" => DocumentStatus::Canceled,
-        _ => DocumentStatus::Queued,
-    }
-}
-
-fn parse_list_entry_readiness(value: &str) -> DocumentReadiness {
-    match value {
-        "graph_ready" => DocumentReadiness::GraphReady,
-        "graph_sparse" => DocumentReadiness::GraphSparse,
-        "readable" => DocumentReadiness::Readable,
-        "failed" => DocumentReadiness::Failed,
-        _ => DocumentReadiness::Processing,
-    }
-}
-
-/// Canonical path: derive the legacy `DocumentsOverview` shape from
+/// Canonical path: derive the retained `DocumentsOverview` shape from
 /// a freshly-computed `LibraryDocumentMetrics`. Used by the dashboard
 /// handler so both fields on `DashboardSurface` are built from the
 /// same numbers. The previous `_from_counts` sibling was removed —

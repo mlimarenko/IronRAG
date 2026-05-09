@@ -1,18 +1,13 @@
-// `Response::builder()` is only called with hard-coded status codes,
-// header names, and header values in this file — all of which are
-// `const` / static and infallible by construction. The `expect()`s
-// on `.body()` document that invariant; they cannot panic in practice.
-// Swapping them to `?` would force every handler to pick an ApiError
-// for a code path that is unreachable by construction.
-#![allow(clippy::expect_used)]
-
 use std::error::Error as _;
 use std::time::Duration;
 
 use axum::{
     Json, Router, body,
     extract::{Request, State},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    http::{
+        HeaderMap, HeaderName, HeaderValue, StatusCode, header,
+        response::Builder as ResponseBuilder,
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -21,6 +16,7 @@ use futures::stream::StreamExt;
 use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::error;
 use uuid::Uuid;
 
 /// Interval between SSE keep-alive comments emitted on the idle
@@ -58,7 +54,7 @@ pub(super) const MCP_SERVER_NAME: &str = "ironrag-mcp-memory";
 pub(super) const MCP_SERVER_VERSION: &str = "0.1.0";
 
 pub const MCP_ANSWER_TOOL_NAMES: &[&str] =
-    &["list_workspaces", "list_libraries", "list_documents", "grounded_answer"];
+    &["list_workspaces", "list_libraries", "grounded_answer"];
 
 pub const MCP_DIAGNOSTICS_TOOL_NAMES: &[&str] = &[
     "list_workspaces",
@@ -86,6 +82,20 @@ pub const MCP_DIAGNOSTICS_TOOL_NAMES: &[&str] = &[
     // assistant: same pipeline, same citations, same verifier.
     "grounded_answer",
 ];
+
+fn build_mcp_response_or_internal_error(
+    builder: ResponseBuilder,
+    body: body::Body,
+    response_kind: &'static str,
+) -> Response {
+    match builder.body(body) {
+        Ok(response) => response,
+        Err(error) => {
+            error!(response_kind, ?error, "failed to build MCP response");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
 
 pub const MCP_CANONICAL_METHOD_NAMES: &[&str] = &["initialize", "tools/list", "tools/call"];
 
@@ -141,7 +151,7 @@ impl McpToolSurface {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpJsonRpcRequest {
     pub jsonrpc: String,
@@ -150,7 +160,7 @@ pub(super) struct McpJsonRpcRequest {
     pub params: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpJsonRpcResponse {
     jsonrpc: &'static str,
@@ -162,7 +172,7 @@ pub(super) struct McpJsonRpcResponse {
     error: Option<McpJsonRpcError>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpJsonRpcError {
     code: i32,
@@ -171,7 +181,7 @@ pub(super) struct McpJsonRpcError {
     data: Option<Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpToolCallParams {
     pub name: String,
@@ -179,7 +189,7 @@ pub(super) struct McpToolCallParams {
     pub arguments: Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpCapabilitiesHttpResponse {
     route: &'static str,
@@ -191,14 +201,14 @@ struct McpCapabilitiesHttpResponse {
     capabilities: McpCapabilitySnapshot,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpServerInfo {
     pub name: &'static str,
     pub version: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpToolDescriptor {
     pub name: &'static str,
@@ -206,7 +216,7 @@ pub(crate) struct McpToolDescriptor {
     pub input_schema: Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpToolResult {
     pub content: Vec<McpContentBlock>,
@@ -214,7 +224,7 @@ pub(crate) struct McpToolResult {
     pub is_error: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpContentBlock {
     #[serde(rename = "type")]
@@ -274,6 +284,7 @@ pub fn router() -> Router<AppState> {
 /// bundled clients open the stream before propagating the session's
 /// Bearer, and a 401 here was a prior fatal mode. The handler
 /// discloses nothing beyond the presence of an idle SSE endpoint.
+// openapi-skip: MCP SSE keep-alive transport is shared by both MCP surfaces and has no JSON response contract.
 #[tracing::instrument(level = "debug", name = "http.mcp.get_stream", skip_all)]
 async fn handle_get_stream(headers: HeaderMap) -> Response {
     let request_id = ensure_or_generate_request_id(&headers);
@@ -291,18 +302,20 @@ async fn handle_get_stream(headers: HeaderMap) -> Response {
     });
     let stream = ready.chain(heartbeat);
 
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-        .header(header::CONNECTION, "keep-alive")
-        // X-Accel-Buffering: no tells nginx/traefik style proxies to
-        // flush bytes as they arrive instead of buffering the stream —
-        // without this the `: ready` comment can sit in a proxy buffer
-        // for 30+ seconds, re-triggering client-side reconnect loops.
-        .header(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no"))
-        .body(body::Body::from_stream(stream))
-        .expect("streaming SSE response must build");
+    let mut response = build_mcp_response_or_internal_error(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+            .header(header::CONNECTION, "keep-alive")
+            // X-Accel-Buffering: no tells nginx/traefik style proxies to
+            // flush bytes as they arrive instead of buffering the stream —
+            // without this the `: ready` comment can sit in a proxy buffer
+            // for 30+ seconds, re-triggering client-side reconnect loops.
+            .header(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no")),
+        body::Body::from_stream(stream),
+        "mcp_get_stream",
+    );
     attach_request_id_header(response.headers_mut(), &request_id);
     response
 }
@@ -314,6 +327,7 @@ async fn handle_get_stream(headers: HeaderMap) -> Response {
 /// same reason as `handle_get_stream` — clients may issue DELETE during
 /// shutdown with a stale or missing header and the cleanup flow must
 /// still terminate cleanly on the client side.
+// openapi-skip: MCP session cleanup is a shared no-op transport hook rather than a resource operation.
 #[tracing::instrument(level = "debug", name = "http.mcp.delete_session", skip_all)]
 async fn handle_delete_session(headers: HeaderMap) -> Response {
     let request_id = ensure_or_generate_request_id(&headers);
@@ -351,8 +365,18 @@ async fn capability_snapshot(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/mcp/capabilities",
+    tag = "automation",
+    operation_id = "getMcpCapabilities",
+    responses(
+        (status = 200, description = "MCP capability snapshot scoped to the caller's principal", body = crate::mcp_types::McpCapabilitySnapshot),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.mcp.get_capabilities", skip_all)]
-async fn get_answer_capabilities(
+pub async fn get_answer_capabilities(
     auth: AuthContext,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -360,8 +384,18 @@ async fn get_answer_capabilities(
     get_capabilities_for_surface(auth, State(state), headers, McpToolSurface::Answer).await
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/mcp/diagnostics/capabilities",
+    tag = "automation",
+    operation_id = "getMcpDiagnosticsCapabilities",
+    responses(
+        (status = 200, description = "Diagnostics MCP capability snapshot scoped to the caller's principal", body = crate::mcp_types::McpCapabilitySnapshot),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.mcp.get_diagnostics_capabilities", skip_all)]
-async fn get_diagnostics_capabilities(
+pub async fn get_diagnostics_capabilities(
     auth: AuthContext,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -416,8 +450,19 @@ async fn get_capabilities_for_surface(
     response
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/mcp",
+    tag = "automation",
+    operation_id = "postMcpRequest",
+    request_body(content = serde_json::Value, content_type = "application/json", description = "JSON-RPC 2.0 request envelope (method, params, id)"),
+    responses(
+        (status = 200, description = "JSON-RPC response for the MCP tool surface", body = serde_json::Value),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.mcp.handle_jsonrpc", skip_all)]
-async fn handle_answer_jsonrpc(
+pub async fn handle_answer_jsonrpc(
     auth: AuthContext,
     State(state): State<AppState>,
     request: Request,
@@ -425,8 +470,19 @@ async fn handle_answer_jsonrpc(
     handle_jsonrpc_for_surface(auth, State(state), request, McpToolSurface::Answer).await
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/mcp/diagnostics",
+    tag = "automation",
+    operation_id = "postMcpDiagnosticsRequest",
+    request_body(content = serde_json::Value, content_type = "application/json", description = "JSON-RPC 2.0 request envelope for the diagnostics MCP tool surface"),
+    responses(
+        (status = 200, description = "JSON-RPC response for the diagnostics MCP tool surface", body = serde_json::Value),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.mcp.handle_diagnostics_jsonrpc", skip_all)]
-async fn handle_diagnostics_jsonrpc(
+pub async fn handle_diagnostics_jsonrpc(
     auth: AuthContext,
     State(state): State<AppState>,
     request: Request,
@@ -552,11 +608,13 @@ fn finalize_mcp_response(
         )
     });
     let mut response = match accept {
-        McpAcceptPreference::Json => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(body::Body::from(body_json))
-            .expect("static JSON response must build"),
+        McpAcceptPreference::Json => build_mcp_response_or_internal_error(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json"),
+            body::Body::from(body_json),
+            "mcp_json",
+        ),
         McpAcceptPreference::EventStream => {
             // Single-event SSE response. MCP Streamable HTTP treats
             // POST replies as short-lived streams: one `message`
@@ -566,13 +624,15 @@ fn finalize_mcp_response(
             // client receives the final frame and the connection
             // ends.
             let sse_body = format!("event: message\ndata: {body_json}\n\n");
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/event-stream")
-                .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-                .header(header::CONNECTION, "keep-alive")
-                .body(body::Body::from(sse_body))
-                .expect("static SSE response must build")
+            build_mcp_response_or_internal_error(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+                    .header(header::CONNECTION, "keep-alive"),
+                body::Body::from(sse_body),
+                "mcp_sse",
+            )
         }
     };
     if let Some(sid) = session_id {
@@ -661,6 +721,54 @@ pub(super) fn ok_tool_result(message: &str, structured_content: Value) -> McpToo
         structured_content,
         is_error: false,
     }
+}
+
+/// Builds the JSON-serializable MCP `grounded_answer` tool result from
+/// the same assistant execution detail returned by the UI query API.
+///
+/// The live MCP handler calls `grounded_answer_tool_result` directly.
+/// This public JSON form gives integration tests a DB-free contract path
+/// for snapshotting the MCP wrapper without duplicating the production
+/// serializer. It is a test contract surface, not a stable application API.
+#[doc(hidden)]
+#[must_use]
+pub fn grounded_answer_contract_payload(
+    answer_text: &str,
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+) -> Value {
+    json!(grounded_answer_tool_result(answer_text, execution_detail))
+}
+
+pub(crate) fn grounded_answer_tool_result(
+    answer_text: &str,
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+) -> McpToolResult {
+    ok_tool_result(
+        &grounded_answer_human_text(answer_text),
+        grounded_answer_structured_content(execution_detail),
+    )
+}
+
+fn grounded_answer_human_text(answer_text: &str) -> String {
+    if answer_text.is_empty() {
+        "The grounded-answer pipeline returned no answer text (execution may have failed or degraded). Inspect runtimeExecutionId via get_runtime_execution_trace for details.".to_string()
+    } else {
+        answer_text.to_string()
+    }
+}
+
+fn grounded_answer_structured_content(
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+) -> Value {
+    json!({
+        "executionDetail": execution_detail,
+        "runtimeExecutionId": execution_detail.execution.runtime_execution_id,
+        "executionId": execution_detail.execution.id,
+        "conversationId": execution_detail.execution.conversation_id,
+        "libraryId": execution_detail.execution.library_id,
+        "workspaceId": execution_detail.execution.workspace_id,
+        "lifecycleState": execution_detail.execution.lifecycle_state,
+    })
 }
 
 pub(super) fn tool_error_result(error: ApiError) -> McpToolResult {

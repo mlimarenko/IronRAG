@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
@@ -8,6 +7,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+    services::graph::error::GraphServiceError,
 };
 
 /// Stateless community detection service using label propagation.
@@ -19,7 +19,11 @@ impl CommunityDetectionService {
     /// Uses label propagation: each node starts in its own community, then
     /// iteratively adopts the most common community among its weighted
     /// neighbours. Convergence usually happens within a handful of iterations.
-    pub async fn detect_communities(&self, state: &AppState, library_id: Uuid) -> Result<()> {
+    pub async fn detect_communities(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<(), GraphServiceError> {
         let pool = &state.persistence.postgres;
 
         let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
@@ -78,7 +82,10 @@ impl CommunityDetectionService {
 
 /// Run community detection after ingestion, mirroring the entity resolution
 /// pattern. Skips libraries with fewer than 10 nodes.
-pub async fn detect_after_ingestion(state: &AppState, library_id: Uuid) -> Result<()> {
+pub async fn detect_after_ingestion(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<(), GraphServiceError> {
     let pool = &state.persistence.postgres;
     let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
     let node_count = snapshot.as_ref().map_or(0, |s| s.node_count);
@@ -167,7 +174,7 @@ async fn persist_communities(
     projection_version: i64,
     community: &HashMap<Uuid, usize>,
     sizes: &HashMap<usize, usize>,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     sqlx::query(
         "DELETE FROM runtime_graph_community
          WHERE library_id = $1 AND projection_version = $2",
@@ -210,7 +217,10 @@ async fn persist_communities(
 
 /// Generate deterministic summaries for detected communities using top entities
 /// and the relationships between them. Returns the number of communities updated.
-pub async fn generate_community_summaries(state: &AppState, library_id: Uuid) -> Result<usize> {
+pub async fn generate_community_summaries(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<usize, GraphServiceError> {
     let pool = &state.persistence.postgres;
 
     let communities = sqlx::query_as::<_, (Uuid, Vec<Uuid>, i32)>(

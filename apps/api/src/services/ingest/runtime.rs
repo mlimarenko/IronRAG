@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -15,6 +16,10 @@ use crate::{
     },
     infra::repositories::{RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
     integrations::llm::EmbeddingBatchRequest,
+    services::ingest::{
+        cancellation::{StageError, ensure_not_cancelled},
+        error::IngestServiceError,
+    },
     shared::json_coercion::from_value_or_default,
 };
 
@@ -174,11 +179,10 @@ async fn resolve_library_binding_selection(
         .with_context(|| {
             format!("active {binding_label} binding is not configured for library {library_id}")
         })?;
-    let provider_kind = binding.provider_kind.parse().map_err(|error: String| {
-        anyhow::anyhow!("invalid provider kind for {binding_label}: {error}")
-    })?;
-
-    Ok(ProviderModelSelection { provider_kind, model_name: binding.model_name })
+    Ok(ProviderModelSelection {
+        provider_kind: binding.provider_kind,
+        model_name: binding.model_name,
+    })
 }
 
 async fn resolve_optional_library_binding_selection(
@@ -196,22 +200,21 @@ async fn resolve_optional_library_binding_selection(
     else {
         return Ok(None);
     };
-    let provider_kind = binding.provider_kind.parse().map_err(|error: String| {
-        anyhow::anyhow!("invalid provider kind for {binding_label}: {error}")
-    })?;
-    Ok(Some(ProviderModelSelection { provider_kind, model_name: binding.model_name }))
+    Ok(Some(ProviderModelSelection {
+        provider_kind: binding.provider_kind,
+        model_name: binding.model_name,
+    }))
 }
 
 pub async fn resolve_effective_provider_profile(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<EffectiveProviderProfile> {
+) -> Result<EffectiveProviderProfile, IngestServiceError> {
     // Required bindings block ingest / query flow: ExtractGraph,
-    // EmbedChunk, QueryAnswer. QueryCompile and Vision are optional —
-    // the compiler falls back to a deterministic IR when its binding
-    // is missing, and Vision only fires on multimodal ingest paths
-    // (text-only libraries and local Ollama setups without a
-    // vision-capable model must keep working).
+    // EmbedChunk, QueryRetrieve, QueryCompile, QueryAnswer. Vision is
+    // optional because it only fires on multimodal ingest paths; text-only
+    // libraries and local setups without a vision-capable model must keep
+    // working.
     Ok(EffectiveProviderProfile {
         indexing: resolve_library_binding_selection(
             state,
@@ -225,7 +228,13 @@ pub async fn resolve_effective_provider_profile(
             AiBindingPurpose::EmbedChunk,
         )
         .await?,
-        query_compile: resolve_optional_library_binding_selection(
+        query_retrieve: resolve_library_binding_selection(
+            state,
+            library_id,
+            AiBindingPurpose::QueryRetrieve,
+        )
+        .await?,
+        query_compile: resolve_library_binding_selection(
             state,
             library_id,
             AiBindingPurpose::QueryCompile,
@@ -259,7 +268,7 @@ pub async fn resolve_effective_runtime_task_context(
     state: &AppState,
     library_id: Uuid,
     task_spec: &RuntimeTaskSpec,
-) -> anyhow::Result<RuntimeTaskExecutionContext> {
+) -> Result<RuntimeTaskExecutionContext, IngestServiceError> {
     Ok(RuntimeTaskExecutionContext {
         provider_profile: resolve_effective_provider_profile(state, library_id).await?,
         runtime_overrides: bounded_runtime_overrides(state, task_spec),
@@ -270,7 +279,9 @@ pub async fn embed_runtime_graph_nodes(
     state: &AppState,
     provider_profile: &EffectiveProviderProfile,
     nodes: &[RuntimeGraphNodeRow],
-) -> anyhow::Result<RuntimeStageUsageSummary> {
+    cancellation_token: &CancellationToken,
+) -> Result<RuntimeStageUsageSummary, IngestServiceError> {
+    ensure_not_cancelled(cancellation_token)?;
     let nodes_to_embed =
         nodes.iter().filter(|node| node.node_type != "document").collect::<Vec<_>>();
     let Some(first_node) = nodes_to_embed.first() else {
@@ -290,6 +301,7 @@ pub async fn embed_runtime_graph_nodes(
                 first_node.library_id
             )
         })?;
+    ensure_not_cancelled(cancellation_token)?;
     let mut usage = RuntimeStageUsageSummary::with_model(
         &embedding_binding.provider_kind,
         &embedding_binding.model_name,
@@ -305,6 +317,7 @@ pub async fn embed_runtime_graph_nodes(
     let mut batches: Vec<NodeBatch> = Vec::new();
     let mut current: NodeBatch = Vec::with_capacity(EMBEDDING_BATCH_SIZE);
     for (index, node) in nodes_to_embed.iter().enumerate() {
+        ensure_not_cancelled(cancellation_token)?;
         current.push((index, build_graph_node_embedding_input(node)));
         if current.len() == EMBEDDING_BATCH_SIZE {
             batches.push(std::mem::replace(&mut current, Vec::with_capacity(EMBEDDING_BATCH_SIZE)));
@@ -326,23 +339,28 @@ pub async fn embed_runtime_graph_nodes(
         let api_key = api_key_owned.clone();
         let base_url = base_url_owned.clone();
         let extra_parameters_json = extra_parameters_json_owned.clone();
+        let cancellation_token = cancellation_token.clone();
         async move {
+            ensure_not_cancelled(&cancellation_token)?;
             let inputs: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
             let first_index = batch.first().map(|(index, _)| *index).unwrap_or_default();
-            let response = state
-                .llm_gateway
-                .embed_many(EmbeddingBatchRequest {
-                    provider_kind,
-                    model_name,
-                    inputs,
-                    api_key_override: api_key,
-                    base_url_override: base_url,
-                    extra_parameters_json,
-                })
-                .await
-                .with_context(|| {
+            let request = EmbeddingBatchRequest {
+                provider_kind,
+                model_name,
+                inputs,
+                api_key_override: api_key,
+                base_url_override: base_url,
+                extra_parameters_json,
+            };
+            let response = tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    return Err(anyhow::Error::new(StageError::Cancelled));
+                }
+                result = state.llm_gateway.embed_many(request) => result.with_context(|| {
                     format!("failed to embed graph node batch starting at offset {first_index}")
-                })?;
+                })?,
+            };
+            ensure_not_cancelled(&cancellation_token)?;
             anyhow::Ok((batch, response))
         }
     }))
@@ -351,13 +369,16 @@ pub async fn embed_runtime_graph_nodes(
     .await;
 
     for batch_result in batch_responses {
+        ensure_not_cancelled(cancellation_token)?;
         let (batch, batch_response) = batch_result?;
         if batch_response.embeddings.len() != batch.len() {
-            bail!(
-                "embedding batch returned {} vectors for {} graph nodes",
-                batch_response.embeddings.len(),
-                batch.len(),
-            );
+            return Err(IngestServiceError::ProviderUnavailable {
+                message: format!(
+                    "embedding batch returned {} vectors for {} graph nodes",
+                    batch_response.embeddings.len(),
+                    batch.len(),
+                ),
+            });
         }
         // Graph similarity runs through the Arango vector path; this stage
         // keeps provider usage accounting without persisting graph embeddings.
@@ -373,7 +394,9 @@ pub async fn embed_runtime_graph_edges(
     provider_profile: &EffectiveProviderProfile,
     nodes: &[RuntimeGraphNodeRow],
     edges: &[RuntimeGraphEdgeRow],
-) -> anyhow::Result<RuntimeStageUsageSummary> {
+    cancellation_token: &CancellationToken,
+) -> Result<RuntimeStageUsageSummary, IngestServiceError> {
+    ensure_not_cancelled(cancellation_token)?;
     let node_index = nodes.iter().map(|node| (node.id, node)).collect::<HashMap<_, _>>();
     let Some(first_edge) = edges.first() else {
         return Ok(RuntimeStageUsageSummary::with_model(
@@ -392,6 +415,7 @@ pub async fn embed_runtime_graph_edges(
                 first_edge.library_id
             )
         })?;
+    ensure_not_cancelled(cancellation_token)?;
     let mut usage = RuntimeStageUsageSummary::with_model(
         &embedding_binding.provider_kind,
         &embedding_binding.model_name,
@@ -405,6 +429,7 @@ pub async fn embed_runtime_graph_edges(
     let mut batches: Vec<EdgeBatch> = Vec::new();
     let mut current: EdgeBatch = Vec::with_capacity(EMBEDDING_BATCH_SIZE);
     for (index, edge) in edges.iter().enumerate() {
+        ensure_not_cancelled(cancellation_token)?;
         current.push((index, build_graph_edge_embedding_input(edge, &node_index)));
         if current.len() == EMBEDDING_BATCH_SIZE {
             batches.push(std::mem::replace(&mut current, Vec::with_capacity(EMBEDDING_BATCH_SIZE)));
@@ -426,23 +451,28 @@ pub async fn embed_runtime_graph_edges(
         let api_key = api_key_owned.clone();
         let base_url = base_url_owned.clone();
         let extra_parameters_json = extra_parameters_json_owned.clone();
+        let cancellation_token = cancellation_token.clone();
         async move {
+            ensure_not_cancelled(&cancellation_token)?;
             let inputs: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
             let first_index = batch.first().map(|(index, _)| *index).unwrap_or_default();
-            let response = state
-                .llm_gateway
-                .embed_many(EmbeddingBatchRequest {
-                    provider_kind,
-                    model_name,
-                    inputs,
-                    api_key_override: api_key,
-                    base_url_override: base_url,
-                    extra_parameters_json,
-                })
-                .await
-                .with_context(|| {
+            let request = EmbeddingBatchRequest {
+                provider_kind,
+                model_name,
+                inputs,
+                api_key_override: api_key,
+                base_url_override: base_url,
+                extra_parameters_json,
+            };
+            let response = tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    return Err(anyhow::Error::new(StageError::Cancelled));
+                }
+                result = state.llm_gateway.embed_many(request) => result.with_context(|| {
                     format!("failed to embed graph edge batch starting at offset {first_index}")
-                })?;
+                })?,
+            };
+            ensure_not_cancelled(&cancellation_token)?;
             anyhow::Ok((batch, response))
         }
     }))
@@ -451,13 +481,16 @@ pub async fn embed_runtime_graph_edges(
     .await;
 
     for batch_result in batch_responses {
+        ensure_not_cancelled(cancellation_token)?;
         let (batch, batch_response) = batch_result?;
         if batch_response.embeddings.len() != batch.len() {
-            bail!(
-                "embedding batch returned {} vectors for {} graph edges",
-                batch_response.embeddings.len(),
-                batch.len(),
-            );
+            return Err(IngestServiceError::ProviderUnavailable {
+                message: format!(
+                    "embedding batch returned {} vectors for {} graph edges",
+                    batch_response.embeddings.len(),
+                    batch.len(),
+                ),
+            });
         }
         // Same rationale as the node-embedding path above: graph similarity
         // uses the Arango vector path, while this stage records usage only.

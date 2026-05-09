@@ -1,4 +1,7 @@
+//! Emits the backend migration fingerprint consumed by the runtime.
+
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,23 +11,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     collect_sql_files(migrations_dir, &mut migration_files)?;
     migration_files.sort();
 
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", migrations_dir.display());
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "cargo:rerun-if-changed=build.rs")?;
+    writeln!(stdout, "cargo:rerun-if-changed={}", migrations_dir.display())?;
 
     let mut hasher = Fnv64::default();
     for path in &migration_files {
-        println!("cargo:rerun-if-changed={}", path.display());
+        writeln!(stdout, "cargo:rerun-if-changed={}", path.display())?;
         let contents = fs::read(path)?;
         hasher.update(path.display().to_string().as_bytes());
         hasher.update(&contents.len().to_le_bytes());
         hasher.update(&contents);
     }
 
-    println!("cargo:rustc-env=IRONRAG_MIGRATIONS_FINGERPRINT={:016x}", hasher.finish());
+    writeln!(stdout, "cargo:rustc-env=IRONRAG_MIGRATIONS_FINGERPRINT={:016x}", hasher.finish())?;
     Ok(())
 }
 
-fn collect_sql_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
+fn collect_sql_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), io::Error> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

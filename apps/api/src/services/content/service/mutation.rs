@@ -730,7 +730,7 @@ impl ContentService {
             .await?
         };
 
-        if async_operation.status != ASYNC_OP_STATUS_READY
+        if async_operation.status.as_str() != ASYNC_OP_STATUS_READY
             || async_operation.completed_at.is_none()
             || async_operation.failure_code.is_some()
         {

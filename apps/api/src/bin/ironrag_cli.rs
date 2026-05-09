@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use ironrag_backend::app::config::Settings;
 use ironrag_backend::app::state::AppState;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;

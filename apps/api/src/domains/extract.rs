@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExtractContent {
     pub revision_id: Uuid,
     pub extract_state: String,
@@ -11,7 +11,7 @@ pub struct ExtractContent {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExtractChunkResult {
     pub id: Uuid,
     pub chunk_id: Uuid,
@@ -23,7 +23,7 @@ pub struct ExtractChunkResult {
     pub failure_code: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExtractNodeCandidate {
     pub id: Uuid,
     pub chunk_result_id: Uuid,
@@ -33,7 +33,7 @@ pub struct ExtractNodeCandidate {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExtractEdgeCandidate {
     pub id: Uuid,
     pub chunk_result_id: Uuid,
@@ -44,7 +44,7 @@ pub struct ExtractEdgeCandidate {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExtractResumeCursor {
     pub attempt_id: Uuid,
     pub last_completed_chunk_index: i32,

@@ -148,6 +148,31 @@ fn query_ir_focus_search_queries_use_typed_focus_before_broad_question() {
 }
 
 #[test]
+fn query_ir_focus_queries_ignore_spurious_literals_for_focused_document_answers() {
+    let mut query_ir =
+        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["secondary_heading"]);
+    query_ir.target_entities = vec![EntityMention {
+        label: "runtime PDF upload check".to_string(),
+        role: EntityRole::Object,
+    }];
+    query_ir.literal_constraints = vec![
+        LiteralSpan {
+            text: "upload://upload_smoke_fixture.docx".to_string(),
+            kind: LiteralKind::Path,
+        },
+        LiteralSpan { text: "upload_smoke_fixture.docx".to_string(), kind: LiteralKind::Other },
+    ];
+
+    let focus_queries = query_ir_lexical_focus_queries(&query_ir);
+
+    assert_eq!(focus_queries.first().map(String::as_str), Some("runtime PDF upload check"));
+    assert!(
+        focus_queries.iter().all(|query| !query.contains("upload_smoke_fixture")),
+        "{focus_queries:?}"
+    );
+}
+
+#[test]
 fn build_graph_evidence_text_queries_keeps_raw_question_recall_anchor() {
     let plan = RuntimeQueryPlan {
         requested_mode: RuntimeQueryMode::Hybrid,
@@ -171,7 +196,7 @@ fn build_graph_evidence_text_queries_keeps_raw_question_recall_anchor() {
         act: QueryAct::ConfigureHow,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["setting".to_string()],
+        target_types: vec!["config_key".to_string()],
         target_entities: vec![EntityMention {
             label: "Alpha endpoint 9407".to_string(),
             role: EntityRole::Subject,
@@ -378,7 +403,7 @@ fn apply_rerank_outcome_reorders_bundle_before_final_truncation() {
             },
         },
     );
-    truncate_bundle(&mut bundle, 1);
+    truncate_bundle(&mut bundle, 1, None);
 
     assert_eq!(bundle.entities[0].node_id, entity_b);
     assert_eq!(bundle.chunks[0].chunk_id, chunk_b);

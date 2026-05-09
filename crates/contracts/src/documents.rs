@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::diagnostics::{MessageLevel, OperatorWarning};
 use crate::graph::GraphSurface;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DocumentReadiness {
     Processing,
@@ -15,13 +15,25 @@ pub enum DocumentReadiness {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl DocumentReadiness {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Processing => "processing",
+            Self::Readable => "readable",
+            Self::GraphSparse => "graph_sparse",
+            Self::GraphReady => "graph_ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DocumentStatus {
     Queued,
     Processing,
     Ready,
-    ReadyNoGraph,
     Failed,
     /// Ingest was cancelled by operator or superseded by a newer
     /// mutation. Distinct from `Failed` — the operator started it
@@ -32,7 +44,20 @@ pub enum DocumentStatus {
     Canceled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl DocumentStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Processing => "processing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentRevisionSummary {
     pub revision_id: Option<Uuid>,
@@ -46,7 +71,7 @@ pub struct DocumentRevisionSummary {
     pub checksum: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedSegment {
     pub id: Uuid,
@@ -58,7 +83,7 @@ pub struct PreparedSegment {
     pub chunk_count: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TechnicalFact {
     pub id: Uuid,
@@ -71,7 +96,7 @@ pub struct TechnicalFact {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebPageProvenance {
     pub run_id: Option<Uuid>,
@@ -80,7 +105,7 @@ pub struct WebPageProvenance {
     pub canonical_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSummary {
     pub id: Uuid,
@@ -102,7 +127,7 @@ pub struct DocumentSummary {
     pub source_format: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentsOverview {
     pub total_documents: i32,
@@ -127,7 +152,7 @@ pub struct DocumentsOverview {
 /// `in_flight` is intentionally NOT a field on this struct — it is a
 /// derived value `processing + queued`. Adding it would invite the
 /// same kind of double-counting drift we just finished removing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryDocumentMetrics {
     pub total: i64,
@@ -141,7 +166,7 @@ pub struct LibraryDocumentMetrics {
     pub recomputed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentFilterState {
     pub search_query: Option<String>,
@@ -150,7 +175,7 @@ pub struct DocumentFilterState {
     pub source_formats: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentDetail {
     pub summary: DocumentSummary,
@@ -162,7 +187,7 @@ pub struct DocumentDetail {
     pub technical_facts: Vec<TechnicalFact>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentsSurface {
     pub overview: DocumentsOverview,
@@ -174,7 +199,7 @@ pub struct DocumentsSurface {
     pub warnings: Vec<OperatorWarning>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebIngestRunState {
     Accepted,
@@ -186,7 +211,7 @@ pub enum WebIngestRunState {
     Canceled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebRunCounts {
     pub discovered: i32,
@@ -201,7 +226,7 @@ pub struct WebRunCounts {
     pub canceled: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebIngestPattern {
     pub kind: String,
@@ -210,7 +235,7 @@ pub struct WebIngestPattern {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebIngestRunSummary {
     pub run_id: Uuid,
@@ -227,7 +252,7 @@ pub struct WebIngestRunSummary {
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebIngestRunReceipt {
     pub run_id: Uuid,
@@ -240,7 +265,7 @@ pub struct WebIngestRunReceipt {
     pub cancel_requested_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardMetric {
     pub key: String,
@@ -249,7 +274,7 @@ pub struct DashboardMetric {
     pub level: MessageLevel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardAttentionItem {
     pub code: String,
@@ -259,7 +284,7 @@ pub struct DashboardAttentionItem {
     pub level: MessageLevel,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSurface {
     pub overview: DocumentsOverview,

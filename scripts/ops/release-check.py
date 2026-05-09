@@ -21,8 +21,10 @@ Unlike `profile-ui-endpoints.py` this script:
 Usage:
     python3 scripts/ops/release-check.py \\
         --base-url http://127.0.0.1:19000 \\
-        --login admin --password rustrag123 \\
+        --login admin \\
         --library-id <uuid>
+
+Set IRONRAG_PROBE_PASSWORD in the environment before running the suite.
 
 Exit codes:
     0  every check passed within budget.
@@ -57,6 +59,7 @@ BUDGET_FAST = (100, 300)       # tiny endpoints (health, session, version)
 BUDGET_STANDARD = (300, 1000)  # common REST (list, detail, admin)
 BUDGET_HEAVY = (1000, 5000)    # graph topology fetch, knowledge collections
 BUDGET_LLM = (5000, 60000)     # anything that goes through a model call
+PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
 
 VERDICT_OK = "ok"
 VERDICT_WARN = "warn"
@@ -90,6 +93,7 @@ class Suite:
     cookie_jar: str
     results: list[CheckResult] = field(default_factory=list)
     library_id: str = ""
+    library_catalog_ref: str = ""
     workspace_id: str = ""
     document_id: str = ""
     entity_id: str = ""
@@ -150,15 +154,15 @@ def curl_json_post(
         "POST",
         "-H",
         "Content-Type: application/json",
-        "--data",
-        body,
+        "--data-binary",
+        "@-",
         f"{base_url}{path}",
     ]
     if write_cookie_jar:
         args.extend(["-c", cookie_jar])
     else:
         args.extend(["-b", cookie_jar])
-    proc = subprocess.run(args, capture_output=True, check=False)
+    proc = subprocess.run(args, input=body.encode(), capture_output=True, check=False)
     try:
         raw = proc.stdout.decode("utf-8", errors="replace").strip()
         parts = raw.split()
@@ -265,6 +269,42 @@ def simple_get(
         )
     )
     return body
+
+
+def fetch_json(suite: Suite, path: str) -> Any:
+    status, _, _, body = curl_get(suite.base_url, suite.cookie_jar, path, capture_body=True)
+    if status != 200:
+        raise RuntimeError(f"GET {path} returned HTTP {status}")
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"GET {path} returned invalid JSON") from exc
+
+
+def discover_library_catalog_ref(suite: Suite) -> str:
+    if suite.library_catalog_ref:
+        return suite.library_catalog_ref
+    if not suite.library_id:
+        raise RuntimeError("library_id is required")
+
+    library_payload = fetch_json(suite, f"/v1/catalog/libraries/{suite.library_id}")
+    if not isinstance(library_payload, dict):
+        raise RuntimeError("catalog library payload must be an object")
+    workspace_id = library_payload.get("workspaceId")
+    library_slug = library_payload.get("slug")
+    if not isinstance(workspace_id, str) or not isinstance(library_slug, str):
+        raise RuntimeError("catalog library payload missing workspaceId or slug")
+
+    workspace_payload = fetch_json(suite, f"/v1/catalog/workspaces/{workspace_id}")
+    if not isinstance(workspace_payload, dict):
+        raise RuntimeError("catalog workspace payload must be an object")
+    workspace_slug = workspace_payload.get("slug")
+    if not isinstance(workspace_slug, str):
+        raise RuntimeError("catalog workspace payload missing slug")
+
+    suite.workspace_id = suite.workspace_id or workspace_id
+    suite.library_catalog_ref = f"{workspace_slug}/{library_slug}"
+    return suite.library_catalog_ref
 
 
 def check_catalog(suite: Suite) -> None:
@@ -525,6 +565,7 @@ def check_mcp(suite: Suite) -> None:
     jsonrpc("mcp.tools.list", "tools/list", {}, BUDGET_FAST)
 
     if suite.library_id:
+        library_catalog_ref = discover_library_catalog_ref(suite)
         jsonrpc(
             "mcp.list_libraries",
             "tools/call",
@@ -537,7 +578,7 @@ def check_mcp(suite: Suite) -> None:
             {
                 "name": "search_documents",
                 "arguments": {
-                    "libraryIds": [suite.library_id],
+                    "libraries": [library_catalog_ref],
                     "query": "hello",
                     "limit": 5,
                 },
@@ -551,9 +592,8 @@ def check_mcp(suite: Suite) -> None:
                 {
                     "name": "read_document",
                     "arguments": {
-                        "libraryId": suite.library_id,
                         "documentId": suite.document_id,
-                        "mode": "head",
+                        "mode": "excerpt",
                         "length": 500,
                     },
                 },
@@ -562,6 +602,13 @@ def check_mcp(suite: Suite) -> None:
 
 
 # --- Runner ----------------------------------------------------------------
+
+
+def require_probe_password() -> str:
+    password = os.environ.get(PROBE_PASSWORD_ENV)
+    if not password:
+        raise SystemExit(f"{PROBE_PASSWORD_ENV} is required")
+    return password
 
 
 def run(args: argparse.Namespace) -> int:
@@ -584,7 +631,7 @@ def run(args: argparse.Namespace) -> int:
         flush=True,
     )
 
-    check_login(suite, args.login, args.password)
+    check_login(suite, args.login, require_probe_password())
     # If login failed, bail out — everything else is authenticated.
     if not suite.results or suite.results[-1].verdict == VERDICT_FAIL:
         print("\n[!] login failed, aborting the rest of the suite", flush=True)
@@ -672,7 +719,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="IronRAG release readiness check")
     parser.add_argument("--base-url", default="http://127.0.0.1:19000")
     parser.add_argument("--login", default="admin")
-    parser.add_argument("--password", default="rustrag123")
     parser.add_argument(
         "--library-id",
         default=os.environ.get("IRONRAG_RELEASE_CHECK_LIBRARY_ID", ""),

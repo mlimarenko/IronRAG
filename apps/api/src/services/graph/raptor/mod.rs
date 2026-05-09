@@ -20,16 +20,15 @@
 //! filter for any chunk whose `raptor_level` is `Some(_)`, so they survive
 //! document re-ingests without becoming invisible.
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState,
-    domains::ai::AiBindingPurpose,
-    infra::arangodb::document_store::KnowledgeChunkRow,
-    integrations::llm::{ChatRequestSeed, build_text_chat_request},
+    app::state::AppState, domains::ai::AiBindingPurpose,
+    infra::arangodb::document_store::KnowledgeChunkRow, integrations::llm::build_text_chat_request,
+    services::graph::error::GraphServiceError,
 };
 
 /// Minimum number of chunks in a cluster before we ask the LLM to summarise it.
@@ -64,7 +63,7 @@ pub async fn build_raptor_tree(
     library_id: Uuid,
     level: u32,
     cluster_size: usize,
-) -> Result<RaptorBuildResult> {
+) -> Result<RaptorBuildResult, GraphServiceError> {
     info!(
         library_id = %library_id,
         level,
@@ -122,20 +121,7 @@ pub async fn build_raptor_tree(
             "Summarise the following text passages into a single coherent paragraph that captures the main topics, key facts, and relationships:\n\n{cluster_text}"
         );
 
-        let request = build_text_chat_request(
-            ChatRequestSeed {
-                provider_kind: binding.provider_kind.clone(),
-                model_name: binding.model_name.clone(),
-                api_key_override: binding.api_key.clone(),
-                base_url_override: binding.provider_base_url.clone(),
-                system_prompt: binding.system_prompt.clone(),
-                temperature: binding.temperature,
-                top_p: binding.top_p,
-                max_output_tokens_override: binding.max_output_tokens_override,
-                extra_parameters_json: binding.extra_parameters_json.clone(),
-            },
-            prompt,
-        );
+        let request = build_text_chat_request(binding.chat_request_seed(), prompt);
 
         let response = state
             .llm_gateway
@@ -238,9 +224,10 @@ fn partition_into_clusters(
     if !current.is_empty() {
         if current.len() < MIN_CLUSTER_SIZE && !clusters.is_empty() {
             // Merge small tail into the last cluster.
-            // clusters is non-empty (checked above), so last_mut() is always Some.
-            #[allow(clippy::unwrap_used)]
-            clusters.last_mut().unwrap().extend(current);
+            match clusters.last_mut() {
+                Some(last_cluster) => last_cluster.extend(current),
+                None => clusters.push(current),
+            }
         } else {
             clusters.push(current);
         }

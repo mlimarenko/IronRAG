@@ -18,7 +18,7 @@ use crate::{
 const GRAPH_EXTRACT_STAGE_CATALOG: &[RuntimeStageKind] =
     &[RuntimeStageKind::ExtractGraph, RuntimeStageKind::Recovery];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphExtractTaskInput {
     pub library_id: Uuid,

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
+use crate::domains::query_ir::{
+    QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceSpec,
+};
 use crate::infra::arangodb::document_store::KnowledgeDocumentRow;
 use crate::services::query::execution::types::RuntimeMatchedChunk;
 use crate::shared::extraction::table_summary::{
@@ -37,6 +39,17 @@ fn table_row_inventory_ir() -> QueryIR {
     QueryIR {
         act: QueryAct::Enumerate,
         target_types: vec!["table_row".to_string()],
+        ..describe_query_ir()
+    }
+}
+
+fn initial_table_rows_ir(row_count: u16) -> QueryIR {
+    QueryIR {
+        target_types: vec!["table_row".to_string()],
+        source_slice: Some(SourceSliceSpec {
+            direction: SourceSliceDirection::Head,
+            count: Some(row_count),
+        }),
         ..describe_query_ir()
     }
 }
@@ -140,7 +153,7 @@ fn build_table_row_grounded_answer_supports_canonical_row_tokens() {
         })
         .collect::<Vec<_>>();
 
-    let ir = describe_query_ir();
+    let ir = initial_table_rows_ir(5);
 
     assert_eq!(
         build_table_row_grounded_answer("Show the first 5 rows from sample-heavy-1.xls.", Some(&ir), &chunks),
@@ -152,7 +165,7 @@ fn build_table_row_grounded_answer_supports_canonical_row_tokens() {
 }
 
 #[test]
-fn build_table_row_grounded_answer_supports_russian_industry_synonym() {
+fn build_table_row_grounded_answer_matches_requested_headers() {
     let document_id = Uuid::now_v7();
     let chunks = vec![RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
@@ -222,7 +235,7 @@ fn build_table_row_grounded_answer_lists_values_for_targeted_single_value_sheets
 }
 
 #[test]
-fn build_table_row_grounded_answer_lists_values_for_russian_listed_marker() {
+fn build_table_row_grounded_answer_lists_values_for_table_row_enumeration_ir() {
     let document_id = Uuid::now_v7();
     let chunks = vec![
         RuntimeMatchedChunk {

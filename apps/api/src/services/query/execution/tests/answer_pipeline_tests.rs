@@ -154,6 +154,8 @@ fn build_answer_prompt_prioritizes_library_context() {
     assert!(prompt.contains("matched excerpt"));
     assert!(prompt.contains("Do not combine parts from different snippets"));
     assert!(prompt.contains("prefer the next distinct item after the excluded one"));
+    assert!(prompt.contains("For multi-role questions"));
+    assert!(prompt.contains("bind each role to the source entity or document"));
     assert!(prompt.contains("Question: What documents mention IronRAG?"));
     assert!(prompt.contains("Documents in library: 12"));
 }

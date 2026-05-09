@@ -12,6 +12,7 @@ use ironrag_backend::{
         arangodb::{
             bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
             client::ArangoClient,
+            search_store::KnowledgeChunkVectorRow,
         },
         persistence::Persistence,
     },
@@ -507,8 +508,33 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
             )
             .await
             .context("failed to write revision one")?;
-        write_chunk(&fixture, document_id, revision_one_id, 0, "Base memory about the engine.")
-            .await?;
+        let revision_one_chunk_id =
+            write_chunk(&fixture, document_id, revision_one_id, 0, "Base memory about the engine.")
+                .await?;
+        let embedding_model_id = Uuid::now_v7();
+        fixture
+            .state
+            .arango_search_store
+            .upsert_chunk_vector(&KnowledgeChunkVectorRow {
+                key: format!("{revision_one_chunk_id}:{embedding_model_id}:1"),
+                arango_id: None,
+                arango_rev: None,
+                vector_id: Uuid::now_v7(),
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                chunk_id: revision_one_chunk_id,
+                revision_id: revision_one_id,
+                embedding_model_key: embedding_model_id.to_string(),
+                vector_kind: "chunk_embedding".to_string(),
+                dimensions: 2,
+                vector: vec![0.1, 0.2],
+                freshness_generation: 1,
+                created_at: Utc::now(),
+                occurred_at: None,
+                occurred_until: None,
+            })
+            .await
+            .context("failed to write revision one chunk vector")?;
 
         fixture
             .state
@@ -628,6 +654,18 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
                 .context("failed to re-list revision one chunks")?
                 .is_empty()
         );
+        let revision_one_vectors = fixture
+            .state
+            .arango_search_store
+            .count_chunk_vectors_by_revision(
+                revision_one_id,
+                &embedding_model_id.to_string(),
+                "chunk_embedding",
+                1,
+            )
+            .await
+            .context("failed to count revision one chunk vectors after delete")?;
+        assert_eq!(revision_one_vectors, 0);
 
         fixture
             .state
@@ -669,6 +707,146 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
         assert_eq!(
             revisions.iter().map(|row| row.revision_number).collect::<Vec<_>>(),
             vec![3, 2, 1]
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres, redis, and arango"]
+async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revisions() -> Result<()> {
+    let fixture = KnowledgeLifecycleFixture::create().await?;
+
+    let result = async {
+        let document_id = Uuid::now_v7();
+        let external_key = format!("knowledge-revision-cap-doc-{}", document_id.simple());
+        let embedding_model_id = Uuid::now_v7();
+        let mut oldest_revision_id = None;
+        let mut oldest_chunk_id = None;
+
+        fixture
+            .state
+            .canonical_services
+            .knowledge
+            .create_document_shell(
+                &fixture.state,
+                CreateKnowledgeDocumentCommand {
+                    document_id,
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key,
+                    file_name: None,
+                    title: Some("Knowledge Revision Cap Document".to_string()),
+                    document_state: "active".to_string(),
+                },
+            )
+            .await
+            .context("failed to create revision cap document shell")?;
+
+        for revision_number in 1..=101 {
+            let revision_id = Uuid::now_v7();
+            fixture
+                .state
+                .canonical_services
+                .knowledge
+                .write_revision(
+                    &fixture.state,
+                    knowledge_revision_command(
+                        &fixture,
+                        document_id,
+                        revision_id,
+                        revision_number,
+                        "replace",
+                        &format!("Revision {revision_number}"),
+                        &format!("Revision {revision_number} synthetic cleanup text."),
+                    ),
+                )
+                .await
+                .with_context(|| format!("failed to write revision {revision_number}"))?;
+            let chunk_id = write_chunk(
+                &fixture,
+                document_id,
+                revision_id,
+                0,
+                &format!("Revision {revision_number} synthetic cleanup text."),
+            )
+            .await?;
+
+            if revision_number == 1 {
+                oldest_revision_id = Some(revision_id);
+                oldest_chunk_id = Some(chunk_id);
+                fixture
+                    .state
+                    .arango_search_store
+                    .upsert_chunk_vector(&KnowledgeChunkVectorRow {
+                        key: format!("{chunk_id}:{embedding_model_id}:1"),
+                        arango_id: None,
+                        arango_rev: None,
+                        vector_id: Uuid::now_v7(),
+                        workspace_id: fixture.workspace_id,
+                        library_id: fixture.library_id,
+                        chunk_id,
+                        revision_id,
+                        embedding_model_key: embedding_model_id.to_string(),
+                        vector_kind: "chunk_embedding".to_string(),
+                        dimensions: 2,
+                        vector: vec![0.1, 0.2],
+                        freshness_generation: 1,
+                        created_at: Utc::now(),
+                        occurred_at: None,
+                        occurred_until: None,
+                    })
+                    .await
+                    .context("failed to write oldest revision vector")?;
+            }
+        }
+
+        let revisions = fixture
+            .state
+            .arango_document_store
+            .list_revisions_by_document(document_id)
+            .await
+            .context("failed to list all document revisions")?;
+        assert_eq!(revisions.len(), 101);
+        assert_eq!(revisions.first().map(|row| row.revision_number), Some(101));
+        assert_eq!(revisions.last().map(|row| row.revision_number), Some(1));
+
+        for revision in &revisions {
+            fixture
+                .state
+                .canonical_services
+                .knowledge
+                .delete_revision_chunks(&fixture.state, revision.revision_id)
+                .await
+                .with_context(|| {
+                    format!("failed to delete chunks for revision {}", revision.revision_number)
+                })?;
+        }
+
+        let oldest_revision_id = oldest_revision_id.context("oldest revision id missing")?;
+        let oldest_chunk_id = oldest_chunk_id.context("oldest chunk id missing")?;
+        assert!(
+            fixture
+                .state
+                .arango_document_store
+                .list_chunks_by_revision(oldest_revision_id)
+                .await
+                .context("failed to re-list oldest revision chunks")?
+                .is_empty()
+        );
+        assert!(
+            fixture
+                .state
+                .arango_search_store
+                .list_chunk_vectors_by_chunk(oldest_chunk_id)
+                .await
+                .context("failed to list oldest revision vectors")?
+                .is_empty()
         );
 
         Ok(())

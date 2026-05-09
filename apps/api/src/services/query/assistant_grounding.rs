@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::domains::content::ContentSourceAccess;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssistantGroundingEvidence {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -12,7 +12,7 @@ pub(crate) struct AssistantGroundingEvidence {
     pub(crate) document_references: Vec<AssistantGroundingDocumentReference>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssistantGroundingDocumentReference {
     pub(crate) document_id: Uuid,

@@ -1,6 +1,7 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result as AnyhowResult, anyhow};
 
 use crate::domains::runtime_graph::RuntimeNodeType;
+use crate::services::graph::error::GraphServiceError;
 use crate::shared::extraction::text_quality::{
     is_low_confidence_text, is_structurally_unstable_fragment,
 };
@@ -22,51 +23,32 @@ pub(crate) fn normalize_graph_extraction_output(
         .map_err(|error| FailedNormalizationAttempt { parse_error: error.to_string() })
 }
 
-pub fn parse_graph_extraction_output(output_text: &str) -> Result<GraphExtractionCandidateSet> {
+pub fn parse_graph_extraction_output(
+    output_text: &str,
+) -> std::result::Result<GraphExtractionCandidateSet, GraphServiceError> {
     let parsed = extract_json_payload(output_text).map_err(|error| {
-        anyhow!("{}: {}", GraphExtractionTaskFailureCode::MalformedOutput.as_str(), error)
+        GraphServiceError::ProviderUnavailable {
+            message: format!(
+                "{}: {error}",
+                GraphExtractionTaskFailureCode::MalformedOutput.as_str()
+            ),
+        }
     })?;
-    // Some models (small-weight Ollama checkpoints, older instruction-
-    // tuned SLMs) emit `"nodes"` / `"relationships"` instead of the
-    // canonical `"entities"` / `"relations"`. Accept both spellings at
-    // the top level so the output from a locally-hosted model is not
-    // thrown away over a naming disagreement.
     let entities = parsed
         .get("entities")
-        .or_else(|| parsed.get("nodes"))
         .and_then(serde_json::Value::as_array)
         .map(|items| items.iter().filter_map(parse_entity_candidate).collect::<Vec<_>>())
         .unwrap_or_default();
     let relations = parsed
         .get("relations")
-        .or_else(|| parsed.get("relationships"))
-        .or_else(|| parsed.get("edges"))
         .and_then(serde_json::Value::as_array)
         .map(|items| items.iter().filter_map(parse_relation_candidate).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    // Post-extraction: refine "mentions" relations using summary heuristics
-    let relations = relations
-        .into_iter()
-        .map(|mut rel| {
-            let refined = refine_mentions_relation(
-                &rel.relation_type,
-                rel.summary.as_deref(),
-                &RuntimeNodeType::Entity, // placeholder — full type-aware refinement in graph_merge
-                &RuntimeNodeType::Entity,
-            );
-            if refined != rel.relation_type
-                && crate::services::graph::identity::is_canonical_relation_type(&refined)
-            {
-                rel.relation_type = refined;
-            }
-            rel
-        })
-        .collect::<Vec<_>>();
-
     let candidate_set = GraphExtractionCandidateSet { entities, relations };
-    validate_graph_extraction_candidate_set(&candidate_set)
-        .map_err(|failure| anyhow!(failure.summary.clone()))?;
+    validate_graph_extraction_candidate_set(&candidate_set).map_err(|failure| {
+        GraphServiceError::ProviderUnavailable { message: failure.summary.clone() }
+    })?;
     Ok(candidate_set)
 }
 
@@ -118,7 +100,7 @@ fn is_unstable_graph_label(value: &str) -> bool {
 
 pub fn validate_graph_extraction_candidate_set(
     candidate_set: &GraphExtractionCandidateSet,
-) -> Result<(), GraphExtractionTaskFailure> {
+) -> std::result::Result<(), GraphExtractionTaskFailure> {
     if candidate_set.entities.iter().any(|entity| entity.label.trim().is_empty())
         || candidate_set.relations.iter().any(|relation| {
             relation.source_label.trim().is_empty()
@@ -216,50 +198,11 @@ fn refine_entity_type(label: &str, current_type: RuntimeNodeType) -> RuntimeNode
 }
 
 fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandidate> {
-    if let Some(label) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) {
-        return Some(GraphEntityCandidate {
-            label: label.to_string(),
-            node_type: RuntimeNodeType::Entity,
-            sub_type: None,
-            aliases: Vec::new(),
-            summary: None,
-        });
-    }
-
-    // Accept `label` (canonical) or `name` (emitted by smaller instruct
-    // models). Same for `node_type` vs `type`.
-    let label = value
-        .get("label")
-        .or_else(|| value.get("name"))
-        .and_then(serde_json::Value::as_str)?
-        .trim();
+    let label = value.get("label").and_then(serde_json::Value::as_str)?.trim();
     if label.is_empty() {
         return None;
     }
-    let raw_node_type = value.get("node_type").or_else(|| value.get("type"));
-    let node_type = match raw_node_type.and_then(serde_json::Value::as_str) {
-        None => RuntimeNodeType::Entity,
-        Some(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                RuntimeNodeType::Entity
-            } else {
-                match trimmed.to_ascii_lowercase().as_str() {
-                    "person" => RuntimeNodeType::Person,
-                    "organization" => RuntimeNodeType::Organization,
-                    "location" => RuntimeNodeType::Location,
-                    "event" => RuntimeNodeType::Event,
-                    "artifact" => RuntimeNodeType::Artifact,
-                    "natural" => RuntimeNodeType::Natural,
-                    "process" => RuntimeNodeType::Process,
-                    "concept" => RuntimeNodeType::Concept,
-                    "attribute" => RuntimeNodeType::Attribute,
-                    "entity" => RuntimeNodeType::Entity,
-                    _ => RuntimeNodeType::Entity,
-                }
-            }
-        }
-    };
+    let node_type = parse_canonical_node_type(value.get("node_type")?.as_str()?.trim())?;
     let aliases = value
         .get("aliases")
         .and_then(serde_json::Value::as_array)
@@ -297,28 +240,9 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
 }
 
 fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCandidate> {
-    // Accept the canonical `source_label` / `target_label` /
-    // `relation_type` trio plus the common aliases emitted by smaller
-    // Ollama-hosted models (`source`/`from`, `target`/`to`,
-    // `relation`/`type`).
-    let source_label = value
-        .get("source_label")
-        .or_else(|| value.get("source"))
-        .or_else(|| value.get("from"))
-        .and_then(serde_json::Value::as_str)?
-        .trim();
-    let target_label = value
-        .get("target_label")
-        .or_else(|| value.get("target"))
-        .or_else(|| value.get("to"))
-        .and_then(serde_json::Value::as_str)?
-        .trim();
-    let relation_type = value
-        .get("relation_type")
-        .or_else(|| value.get("relation"))
-        .or_else(|| value.get("type"))
-        .and_then(serde_json::Value::as_str)?
-        .trim();
+    let source_label = value.get("source_label").and_then(serde_json::Value::as_str)?.trim();
+    let target_label = value.get("target_label").and_then(serde_json::Value::as_str)?.trim();
+    let relation_type = value.get("relation_type").and_then(serde_json::Value::as_str)?.trim();
     if source_label.is_empty() || target_label.is_empty() || relation_type.is_empty() {
         return None;
     }
@@ -327,7 +251,7 @@ fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCa
     if crate::services::graph::identity::is_noise_relation_type(&relation_slug) {
         return None;
     }
-    let normalized_relation_type = normalize_relation_candidate_type(relation_type)?;
+    let normalized_relation_type = canonical_relation_candidate_type(relation_type)?;
 
     Some(GraphRelationCandidate {
         source_label: source_label.to_string(),
@@ -342,85 +266,37 @@ fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCa
     })
 }
 
-fn normalize_relation_candidate_type(relation_type: &str) -> Option<String> {
-    let normalized = crate::services::graph::identity::normalize_relation_type(relation_type);
-    if normalized.is_empty()
-        || !relation_type_is_canonical_ascii(&normalized)
-        || !crate::services::graph::identity::is_canonical_relation_type(&normalized)
+fn canonical_relation_candidate_type(relation_type: &str) -> Option<String> {
+    if relation_type.is_empty()
+        || !relation_type_is_canonical_ascii(relation_type)
+        || !crate::services::graph::identity::is_canonical_relation_type(relation_type)
     {
         return None;
     }
-    Some(normalized)
+    Some(relation_type.to_string())
 }
 
-fn relation_type_is_canonical_ascii(normalized_relation_type: &str) -> bool {
-    normalized_relation_type.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+fn relation_type_is_canonical_ascii(relation_type: &str) -> bool {
+    relation_type.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
 }
 
-/// Post-extraction heuristic to reduce "mentions" overuse.
-/// When the LLM outputs "mentions" but the summary text suggests a more specific relation,
-/// upgrade to the more specific type.
-fn refine_mentions_relation(
-    relation_type: &str,
-    summary: Option<&str>,
-    source_type: &crate::domains::runtime_graph::RuntimeNodeType,
-    _target_type: &crate::domains::runtime_graph::RuntimeNodeType,
-) -> String {
-    if relation_type != "mentions" {
-        return relation_type.to_string();
+fn parse_canonical_node_type(raw: &str) -> Option<RuntimeNodeType> {
+    match raw {
+        "person" => Some(RuntimeNodeType::Person),
+        "organization" => Some(RuntimeNodeType::Organization),
+        "location" => Some(RuntimeNodeType::Location),
+        "event" => Some(RuntimeNodeType::Event),
+        "artifact" => Some(RuntimeNodeType::Artifact),
+        "natural" => Some(RuntimeNodeType::Natural),
+        "process" => Some(RuntimeNodeType::Process),
+        "concept" => Some(RuntimeNodeType::Concept),
+        "attribute" => Some(RuntimeNodeType::Attribute),
+        "entity" => Some(RuntimeNodeType::Entity),
+        _ => None,
     }
-
-    // Check summary for action verbs that suggest a more specific relation
-    if let Some(summary) = summary {
-        let s = summary.to_ascii_lowercase();
-        if s.contains("depends on") || s.contains("requires") || s.contains("needs") {
-            return "depends_on".to_string();
-        }
-        if s.contains("uses") || s.contains("utilizes") || s.contains("leverages") {
-            return "uses".to_string();
-        }
-        if s.contains("contains") || s.contains("includes") || s.contains("consists of") {
-            return "contains".to_string();
-        }
-        if s.contains("implements") || s.contains("implementation of") {
-            return "implements".to_string();
-        }
-        if s.contains("extends") || s.contains("inherits") {
-            return "extends".to_string();
-        }
-        if s.contains("returns") || s.contains("produces") || s.contains("outputs") {
-            return "returns".to_string();
-        }
-        if s.contains("configures") || s.contains("configuration") {
-            return "configures".to_string();
-        }
-        if s.contains("calls") || s.contains("invokes") {
-            return "calls".to_string();
-        }
-        if s.contains("authenticat") || s.contains("authoriz") {
-            return "authenticates".to_string();
-        }
-        if s.contains("defines") || s.contains("declares") || s.contains("specifies") {
-            return "defines".to_string();
-        }
-        if s.contains("provides") || s.contains("exposes") || s.contains("offers") {
-            return "provides".to_string();
-        }
-        if s.contains("deployed") || s.contains("runs on") || s.contains("hosted") {
-            return "deployed_on".to_string();
-        }
-    }
-
-    // Type-based heuristic: document → entity/code_symbol is usually "describes" not "mentions"
-    use crate::domains::runtime_graph::RuntimeNodeType;
-    if *source_type == RuntimeNodeType::Document {
-        return "describes".to_string();
-    }
-
-    relation_type.to_string()
 }
 
-fn extract_json_payload(output_text: &str) -> Result<serde_json::Value> {
+fn extract_json_payload(output_text: &str) -> AnyhowResult<serde_json::Value> {
     let trimmed = output_text.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("graph extraction output is empty"));

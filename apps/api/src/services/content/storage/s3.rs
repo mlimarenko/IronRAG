@@ -14,6 +14,7 @@ use super::{
     StashedContentDirectory,
     types::{ContentStorageProbe, ContentStorageProbeStatus, ContentStorageS3Settings},
 };
+use crate::services::content::error::ContentServiceError;
 
 #[derive(Clone, Debug)]
 pub struct S3ContentStorageProvider {
@@ -29,12 +30,16 @@ impl S3ContentStorageProvider {
     pub fn new(
         settings: ContentStorageS3Settings,
         object_key_prefix: impl Into<String>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, ContentServiceError> {
         if settings.endpoint.trim().is_empty() {
-            return Err(anyhow!("content_storage_s3_endpoint must not be empty"));
+            return Err(ContentServiceError::InvalidRequest {
+                message: "content_storage_s3_endpoint must not be empty".to_string(),
+            });
         }
         if settings.bucket.trim().is_empty() {
-            return Err(anyhow!("content_storage_s3_bucket must not be empty"));
+            return Err(ContentServiceError::InvalidRequest {
+                message: "content_storage_s3_bucket must not be empty".to_string(),
+            });
         }
         let credentials = Credentials::new(
             settings.access_key_id,
@@ -58,7 +63,7 @@ impl S3ContentStorageProvider {
         })
     }
 
-    pub async fn prepare_and_validate(&self) -> anyhow::Result<ContentStorageProbe> {
+    pub async fn prepare_and_validate(&self) -> Result<ContentStorageProbe, ContentServiceError> {
         self.ensure_bucket().await?;
         Ok(ContentStorageProbe { status: ContentStorageProbeStatus::Ok, message: None })
     }
@@ -76,7 +81,11 @@ impl S3ContentStorageProvider {
         }
     }
 
-    pub async fn persist(&self, storage_key: &str, file_bytes: &[u8]) -> anyhow::Result<()> {
+    pub async fn persist(
+        &self,
+        storage_key: &str,
+        file_bytes: &[u8],
+    ) -> Result<(), ContentServiceError> {
         if self.has(storage_key).await? {
             return Ok(());
         }
@@ -91,7 +100,7 @@ impl S3ContentStorageProvider {
         Ok(())
     }
 
-    pub async fn has(&self, storage_key: &str) -> anyhow::Result<bool> {
+    pub async fn has(&self, storage_key: &str) -> Result<bool, ContentServiceError> {
         let response = self
             .client
             .head_object()
@@ -108,15 +117,15 @@ impl S3ContentStorageProvider {
                 {
                     Ok(false)
                 } else {
-                    Err(anyhow!(error)).with_context(|| {
-                        format!("failed to inspect object storage key {storage_key}")
-                    })
+                    Err(anyhow!(error)
+                        .context(format!("failed to inspect object storage key {storage_key}"))
+                        .into())
                 }
             }
         }
     }
 
-    pub async fn read(&self, storage_key: &str) -> anyhow::Result<Vec<u8>> {
+    pub async fn read(&self, storage_key: &str) -> Result<Vec<u8>, ContentServiceError> {
         let response = self
             .client
             .get_object()
@@ -139,7 +148,7 @@ impl S3ContentStorageProvider {
         storage_key: &str,
         content_disposition: &str,
         content_type: &str,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, ContentServiceError> {
         let request = self
             .client
             .get_object()
@@ -162,7 +171,7 @@ impl S3ContentStorageProvider {
     pub async fn stash_prefix(
         &self,
         relative_directory: &str,
-    ) -> anyhow::Result<Option<StashedContentDirectory>> {
+    ) -> Result<Option<StashedContentDirectory>, ContentServiceError> {
         let listed = self.list_prefixed_objects(relative_directory).await?;
         if listed.is_empty() {
             return Ok(None);
@@ -185,7 +194,7 @@ impl S3ContentStorageProvider {
     pub async fn restore_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContentServiceError> {
         let stashed_prefix = stashed_directory.stashed_path.to_string_lossy().to_string();
         let objects = self.list_prefixed_objects(&stashed_prefix).await?;
         for source_key in &objects {
@@ -200,16 +209,16 @@ impl S3ContentStorageProvider {
             );
             self.copy_object(source_key, &target_key).await?;
         }
-        self.delete_objects(&objects).await
+        self.delete_objects(&objects).await.map_err(Into::into)
     }
 
     pub async fn purge_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContentServiceError> {
         let stashed_prefix = stashed_directory.stashed_path.to_string_lossy().to_string();
         let objects = self.list_prefixed_objects(&stashed_prefix).await?;
-        self.delete_objects(&objects).await
+        self.delete_objects(&objects).await.map_err(Into::into)
     }
 
     fn absolute_object_key(&self, storage_key: &str) -> String {

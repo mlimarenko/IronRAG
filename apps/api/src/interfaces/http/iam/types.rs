@@ -2,9 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domains::ai::AiBindingPurpose;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IamGrantResourceKind {
     System,
@@ -35,7 +33,7 @@ impl IamGrantResourceKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IamPermissionKind {
     WorkspaceAdmin,
@@ -74,7 +72,7 @@ impl IamPermissionKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IamPrincipalKind {
     User,
@@ -83,19 +81,21 @@ pub enum IamPrincipalKind {
     Bootstrap,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct ListTokensQuery {
     pub workspace_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct ListGrantsQuery {
     pub principal_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MintTokenRequest {
     pub workspace_id: Option<Uuid>,
@@ -107,7 +107,7 @@ pub struct MintTokenRequest {
     pub permission_kinds: Vec<IamPermissionKind>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateGrantRequest {
     pub principal_id: Uuid,
@@ -117,7 +117,7 @@ pub struct CreateGrantRequest {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PrincipalResponse {
     pub id: Uuid,
@@ -128,7 +128,7 @@ pub struct PrincipalResponse {
     pub disabled_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserResponse {
     pub principal_id: Uuid,
@@ -139,14 +139,14 @@ pub struct UserResponse {
     pub external_subject: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenWorkspaceSummaryResponse {
     pub id: Uuid,
     pub display_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenLibrarySummaryResponse {
     pub id: Uuid,
@@ -154,7 +154,7 @@ pub struct TokenLibrarySummaryResponse {
     pub display_name: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenScopeKind {
     System,
@@ -162,7 +162,7 @@ pub enum TokenScopeKind {
     Library,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenScopeResponse {
     pub kind: TokenScopeKind,
@@ -170,14 +170,14 @@ pub struct TokenScopeResponse {
     pub libraries: Vec<TokenLibrarySummaryResponse>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenIssuerResponse {
     pub principal_id: Uuid,
     pub display_label: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenGrantSummaryResponse {
     pub resource_kind: IamGrantResourceKind,
@@ -187,7 +187,7 @@ pub struct TokenGrantSummaryResponse {
     pub library: Option<TokenLibrarySummaryResponse>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceMembershipResponse {
     pub workspace_id: Uuid,
@@ -197,7 +197,7 @@ pub struct WorkspaceMembershipResponse {
     pub ended_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenResponse {
     pub principal_id: Uuid,
@@ -212,14 +212,14 @@ pub struct TokenResponse {
     pub grants: Vec<TokenGrantSummaryResponse>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MintTokenResponse {
     pub token: String,
     pub api_token: TokenResponse,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GrantResponse {
     pub id: Uuid,
@@ -232,7 +232,7 @@ pub struct GrantResponse {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeResponse {
     pub principal: PrincipalResponse,
@@ -241,14 +241,7 @@ pub struct MeResponse {
     pub effective_grants: Vec<GrantResponse>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapStatusResponse {
-    pub setup_required: bool,
-    pub ai_setup: Option<BootstrapAiSetupResponse>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginSessionRequest {
     pub login: String,
@@ -256,7 +249,7 @@ pub struct LoginSessionRequest {
     pub remember_me: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapSetupRequest {
     pub login: String,
@@ -265,39 +258,7 @@ pub struct BootstrapSetupRequest {
     pub ai_setup: Option<BootstrapSetupAiRequest>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderPresetResponse {
-    pub binding_purpose: AiBindingPurpose,
-    pub model_catalog_id: Uuid,
-    pub model_name: String,
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderPresetBundleResponse {
-    pub id: Uuid,
-    pub provider_kind: String,
-    pub display_name: String,
-    pub credential_source: String,
-    pub default_base_url: Option<String>,
-    pub api_key_required: bool,
-    pub base_url_required: bool,
-    pub presets: Vec<BootstrapProviderPresetResponse>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapAiSetupResponse {
-    pub preset_bundles: Vec<BootstrapProviderPresetBundleResponse>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapSetupAiRequest {
     pub provider_kind: String,
@@ -305,7 +266,7 @@ pub struct BootstrapSetupAiRequest {
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionUserResponse {
     pub principal_id: Uuid,
@@ -314,7 +275,7 @@ pub struct SessionUserResponse {
     pub display_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionResponse {
     pub session_id: Uuid,

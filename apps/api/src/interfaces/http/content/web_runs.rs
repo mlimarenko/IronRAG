@@ -15,12 +15,13 @@ use crate::{
         router_support::ApiError,
     },
     services::ingest::web::CreateWebIngestRunCommand,
-    shared::web::ingest::WebIngestUrlFilter,
+    shared::web::ingest::{WebBoundaryPolicy, WebIngestMode, WebIngestUrlFilter},
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ListWebIngestRunsQuery {
+#[into_params(parameter_in = Query)]
+pub struct ListWebIngestRunsQuery {
     pub library_id: Option<Uuid>,
     /// Upper bound on returned runs (newest first). Defaults to
     /// [`DEFAULT_WEB_RUNS_LIMIT`], clamped to [1, [`MAX_WEB_RUNS_LIMIT`]].
@@ -33,13 +34,13 @@ pub(super) struct ListWebIngestRunsQuery {
 const DEFAULT_WEB_RUNS_LIMIT: i64 = 50;
 const MAX_WEB_RUNS_LIMIT: i64 = 200;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CreateWebIngestRunRequest {
+pub struct CreateWebIngestRunRequest {
     pub library_id: Uuid,
     pub seed_url: String,
-    pub mode: String,
-    pub boundary_policy: Option<String>,
+    pub mode: WebIngestMode,
+    pub boundary_policy: Option<WebBoundaryPolicy>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
     pub url_filter: WebIngestUrlFilter,
@@ -52,7 +53,19 @@ pub(super) struct CreateWebIngestRunRequest {
     skip_all,
     fields(library_id = %request.library_id)
 )]
-pub(super) async fn create_web_ingest_run(
+#[utoipa::path(
+    post,
+    path = "/v1/content/web-runs",
+    tag = "content",
+    operation_id = "createContentWebIngestRun",
+    request_body = CreateWebIngestRunRequest,
+    responses(
+        (status = 200, description = "Newly created web ingest run", body = WebIngestRunReceipt),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn create_web_ingest_run(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(request): Json<CreateWebIngestRunRequest>,
@@ -68,8 +81,10 @@ pub(super) async fn create_web_ingest_run(
                 workspace_id: library.workspace_id,
                 library_id: library.id,
                 seed_url: request.seed_url,
-                mode: request.mode,
-                boundary_policy: request.boundary_policy,
+                mode: request.mode.as_str().to_string(),
+                boundary_policy: request
+                    .boundary_policy
+                    .map(|boundary_policy| boundary_policy.as_str().to_string()),
                 max_depth: request.max_depth,
                 max_pages: request.max_pages,
                 url_filter: request.url_filter,
@@ -100,7 +115,19 @@ pub(super) async fn create_web_ingest_run(
     skip_all,
     fields(library_id = ?query.library_id, item_count)
 )]
-pub(super) async fn list_web_ingest_runs(
+#[utoipa::path(
+    get,
+    path = "/v1/content/web-runs",
+    tag = "content",
+    operation_id = "listContentWebIngestRuns",
+    params(ListWebIngestRunsQuery),
+    responses(
+        (status = 200, description = "Web ingest runs visible to the caller", body = [WebIngestRunSummary]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized"),
+    ),
+)]
+pub async fn list_web_ingest_runs(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListWebIngestRunsQuery>,
@@ -123,7 +150,20 @@ pub(super) async fn list_web_ingest_runs(
     skip_all,
     fields(run_id = %run_id)
 )]
-pub(super) async fn get_web_ingest_run(
+#[utoipa::path(
+    get,
+    path = "/v1/content/web-runs/{runId}",
+    tag = "content",
+    operation_id = "getContentWebIngestRun",
+    params(("runId" = uuid::Uuid, Path, description = "Web ingest run identifier")),
+    responses(
+        (status = 200, description = "Web ingest run detail", body = WebIngestRun),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the run"),
+        (status = 404, description = "Run not found"),
+    ),
+)]
+pub async fn get_web_ingest_run(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
@@ -140,7 +180,20 @@ pub(super) async fn get_web_ingest_run(
     skip_all,
     fields(run_id = %run_id, item_count)
 )]
-pub(super) async fn list_web_ingest_run_pages(
+#[utoipa::path(
+    get,
+    path = "/v1/content/web-runs/{runId}/pages",
+    tag = "content",
+    operation_id = "listContentWebIngestRunPages",
+    params(("runId" = uuid::Uuid, Path, description = "Web ingest run identifier")),
+    responses(
+        (status = 200, description = "Pages discovered by the web ingest run", body = [WebDiscoveredPage]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the run"),
+        (status = 404, description = "Run not found"),
+    ),
+)]
+pub async fn list_web_ingest_run_pages(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
@@ -160,7 +213,20 @@ pub(super) async fn list_web_ingest_run_pages(
     skip_all,
     fields(run_id = %run_id)
 )]
-pub(super) async fn cancel_web_ingest_run(
+#[utoipa::path(
+    post,
+    path = "/v1/content/web-runs/{runId}/cancel",
+    tag = "content",
+    operation_id = "cancelContentWebIngestRun",
+    params(("runId" = uuid::Uuid, Path, description = "Web ingest run identifier")),
+    responses(
+        (status = 200, description = "Run cancellation receipt", body = WebIngestRunReceipt),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the run"),
+        (status = 404, description = "Run not found"),
+    ),
+)]
+pub async fn cancel_web_ingest_run(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,

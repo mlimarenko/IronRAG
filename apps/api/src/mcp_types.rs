@@ -15,7 +15,7 @@ use crate::domains::{
 };
 use crate::shared::web::ingest::{WebIngestPolicy, WebIngestUrlFilter};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCapabilitySnapshot {
     /// Omitted from the `initialize` response because agents never
@@ -38,7 +38,7 @@ pub struct McpCapabilitySnapshot {
     pub generated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpWorkspaceDescriptor {
     pub workspace_id: Uuid,
@@ -50,14 +50,14 @@ pub struct McpWorkspaceDescriptor {
     pub can_write_any_library: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpLibraryIngestionReadiness {
     pub ready: bool,
     pub missing_binding_purposes: Vec<AiBindingPurpose>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpLibraryDescriptor {
     pub library_id: Uuid,
@@ -82,13 +82,13 @@ pub struct McpLibraryDescriptor {
     pub supports_write: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListLibrariesRequest {
     pub workspace: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSearchDocumentsRequest {
     pub query: String,
@@ -117,14 +117,14 @@ impl McpSearchDocumentsRequest {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCreateWorkspaceRequest {
     pub workspace: String,
     pub title: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCreateLibraryRequest {
     pub library: String,
@@ -132,7 +132,7 @@ pub struct McpCreateLibraryRequest {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpReadabilityState {
     Readable,
@@ -141,7 +141,7 @@ pub enum McpReadabilityState {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpChunkReference {
     pub chunk_id: Uuid,
@@ -150,7 +150,7 @@ pub struct McpChunkReference {
     pub inclusion_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpEntityReference {
     pub entity_id: Uuid,
@@ -159,7 +159,7 @@ pub struct McpEntityReference {
     pub inclusion_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRelationReference {
     pub relation_id: Uuid,
@@ -168,7 +168,7 @@ pub struct McpRelationReference {
     pub inclusion_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpEvidenceReference {
     pub evidence_id: Uuid,
@@ -177,14 +177,14 @@ pub struct McpEvidenceReference {
     pub inclusion_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpContentSourceAccess {
     pub kind: String,
     pub href: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpTechnicalFactReference {
     pub fact_id: Uuid,
@@ -198,7 +198,7 @@ pub struct McpTechnicalFactReference {
 
 /// One search hit returned to an agent. Every optional/empty field is
 /// elided from the serialized JSON to keep the agent's context window tight.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpDocumentHit {
     pub document_id: Uuid,
@@ -219,7 +219,7 @@ pub struct McpDocumentHit {
     /// `read_document` as `startOffset` so the very first read window
     /// already lands on real content instead of the document's table
     /// of contents / front matter. `None` means the source chunks
-    /// lack span info (legacy data) or no chunk matched.
+    /// lack span info (older data) or no chunk matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_start_offset: Option<usize>,
     pub readability_state: McpReadabilityState,
@@ -239,7 +239,7 @@ pub struct McpDocumentHit {
     pub evidence_references: Vec<McpEvidenceReference>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSearchDocumentsResponse {
     pub query: String,
@@ -248,14 +248,14 @@ pub struct McpSearchDocumentsResponse {
     pub hits: Vec<McpDocumentHit>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpReadMode {
     Full,
     Excerpt,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpReadDocumentRequest {
     pub document_id: Option<Uuid>,
@@ -266,7 +266,7 @@ pub struct McpReadDocumentRequest {
     pub include_references: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUploadDocumentInput {
     pub file_name: Option<String>,
@@ -288,7 +288,7 @@ pub struct McpUploadDocumentInput {
     pub fetch_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUploadDocumentsRequest {
     pub library: String,
@@ -296,14 +296,14 @@ pub struct McpUploadDocumentsRequest {
     pub documents: Vec<McpUploadDocumentInput>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpDocumentMutationKind {
     Append,
     Replace,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUpdateDocumentRequest {
     pub library: String,
@@ -316,25 +316,25 @@ pub struct McpUpdateDocumentRequest {
     pub replacement_mime_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetMutationStatusRequest {
     pub receipt_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetRuntimeExecutionRequest {
     pub runtime_execution_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetRuntimeExecutionTraceRequest {
     pub runtime_execution_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSubmitWebIngestRunRequest {
     pub library: String,
@@ -347,25 +347,25 @@ pub struct McpSubmitWebIngestRunRequest {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetWebIngestRunRequest {
     pub run_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListWebIngestRunPagesRequest {
     pub run_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpCancelWebIngestRunRequest {
     pub run_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpSearchEntitiesRequest {
     pub library: String,
@@ -373,7 +373,7 @@ pub struct McpSearchEntitiesRequest {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListDocumentsRequest {
     /// When omitted, auto-filled from the token's sole library grant.
@@ -382,34 +382,34 @@ pub struct McpListDocumentsRequest {
     pub status_filter: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpDeleteDocumentRequest {
     pub document_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetGraphTopologyRequest {
     pub library: String,
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListRelationsRequest {
     pub library: String,
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetCommunitiesRequest {
     pub library: String,
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpMutationOperationKind {
     Upload,
@@ -417,7 +417,7 @@ pub enum McpMutationOperationKind {
     Replace,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpMutationReceiptStatus {
     Accepted,
@@ -427,7 +427,7 @@ pub enum McpMutationReceiptStatus {
     Superseded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpAuditActionKind {
     CapabilitySnapshot,
@@ -454,7 +454,7 @@ pub enum McpAuditActionKind {
     GetCommunities,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpAuditStatus {
     Succeeded,
@@ -469,7 +469,7 @@ pub struct McpAuditScope {
     pub document_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpReadDocumentResponse {
     pub document_id: Uuid,
@@ -513,7 +513,7 @@ pub struct McpReadDocumentResponse {
     pub evidence_references: Vec<McpEvidenceReference>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRuntimeExecutionSummary {
     pub runtime_execution_id: Uuid,
@@ -535,7 +535,7 @@ pub struct McpRuntimeExecutionSummary {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRuntimeStageSummary {
     pub stage_record_id: Uuid,
@@ -551,7 +551,7 @@ pub struct McpRuntimeStageSummary {
     pub output_summary: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRuntimeActionSummary {
     pub action_id: Uuid,
@@ -566,7 +566,7 @@ pub struct McpRuntimeActionSummary {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRuntimePolicySummary {
     pub decision_id: Uuid,
@@ -579,7 +579,7 @@ pub struct McpRuntimePolicySummary {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRuntimeExecutionTrace {
     pub execution: McpRuntimeExecutionSummary,
@@ -861,7 +861,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpMutationReceipt {
     pub receipt_id: Uuid,

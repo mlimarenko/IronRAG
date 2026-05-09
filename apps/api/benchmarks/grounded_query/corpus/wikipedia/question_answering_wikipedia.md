@@ -232,4 +232,3 @@ Natural language generation of reports or research.
 
 
 == References ==
-

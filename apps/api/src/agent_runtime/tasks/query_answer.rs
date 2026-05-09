@@ -15,7 +15,7 @@ use crate::{
 
 const QUERY_ANSWER_STAGE_CATALOG: &[RuntimeStageKind] = &[RuntimeStageKind::Answer];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryAnswerTaskInput {
     pub query_execution_id: Uuid,
@@ -24,7 +24,7 @@ pub struct QueryAnswerTaskInput {
     pub grounded_context_text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryAnswerTaskSuccess {
     pub answer_text: String,
@@ -32,7 +32,7 @@ pub struct QueryAnswerTaskSuccess {
     pub usage_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryAnswerTaskFailure {
     pub code: String,

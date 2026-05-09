@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Outbound webhook subscription — one subscriber URL registered against a workspace/library.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct WebhookSubscription {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -41,7 +41,7 @@ impl std::fmt::Debug for WebhookSubscription {
 }
 
 /// Delivery state for one outbound delivery attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookDeliveryState {
     Pending,
@@ -76,7 +76,7 @@ impl WebhookDeliveryState {
 }
 
 /// One outbound delivery attempt record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct WebhookDeliveryAttempt {
     pub id: Uuid,
     pub subscription_id: Uuid,

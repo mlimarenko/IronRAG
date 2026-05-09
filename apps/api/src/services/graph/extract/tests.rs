@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use super::graph_extraction_cache_hash;
 use super::parse::{
@@ -20,9 +21,7 @@ use super::types::*;
 use crate::{
     domains::ai::AiBindingPurpose,
     domains::{
-        provider_profiles::{
-            EffectiveProviderProfile, ProviderModelSelection, SupportedProviderKind,
-        },
+        provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
         runtime_graph::RuntimeNodeType,
         runtime_ingestion::RuntimeProviderFailureClass,
     },
@@ -86,7 +85,7 @@ fn sample_chunk() -> ChunkRow {
         document_id: uuid::Uuid::nil(),
         library_id: uuid::Uuid::nil(),
         ordinal: 0,
-        content: "OpenAI supplies embeddings for the annual report graph.".to_string(),
+        content: "Provider Alpha supplies embeddings for the annual report graph.".to_string(),
         token_count: None,
         metadata_json: serde_json::json!({}),
         created_at: chrono::Utc::now(),
@@ -96,24 +95,28 @@ fn sample_chunk() -> ChunkRow {
 fn sample_profile() -> EffectiveProviderProfile {
     EffectiveProviderProfile {
         indexing: ProviderModelSelection {
-            provider_kind: SupportedProviderKind::OpenAi,
-            model_name: "gpt-5.4-mini".to_string(),
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "alpha-chat-mini".to_string(),
         },
         embedding: ProviderModelSelection {
-            provider_kind: SupportedProviderKind::OpenAi,
-            model_name: "text-embedding-3-small".to_string(),
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "alpha-embedding-small".to_string(),
         },
-        query_compile: Some(ProviderModelSelection {
-            provider_kind: SupportedProviderKind::OpenAi,
-            model_name: "gpt-5.4-nano".to_string(),
-        }),
+        query_retrieve: ProviderModelSelection {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "alpha-embedding-small".to_string(),
+        },
+        query_compile: ProviderModelSelection {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "alpha-chat-small".to_string(),
+        },
         answer: ProviderModelSelection {
-            provider_kind: SupportedProviderKind::OpenAi,
-            model_name: "gpt-5.4".to_string(),
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "alpha-chat-large".to_string(),
         },
         vision: Some(ProviderModelSelection {
-            provider_kind: SupportedProviderKind::OpenAi,
-            model_name: "gpt-5.4-mini".to_string(),
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "alpha-vision".to_string(),
         }),
     }
 }
@@ -125,13 +128,13 @@ fn sample_runtime_binding() -> ResolvedRuntimeBinding {
         library_id: uuid::Uuid::nil(),
         binding_purpose: AiBindingPurpose::ExtractGraph,
         provider_catalog_id: uuid::Uuid::now_v7(),
-        provider_kind: "openai".to_string(),
+        provider_kind: "provider-alpha".to_string(),
         provider_base_url: None,
-        provider_api_style: "openai".to_string(),
+        provider_api_style: "provider-alpha-compatible".to_string(),
         credential_id: uuid::Uuid::now_v7(),
         api_key: Some("test-api-key".to_string()),
         model_catalog_id: uuid::Uuid::now_v7(),
-        model_name: "gpt-5.4-mini".to_string(),
+        model_name: "alpha-chat-mini".to_string(),
         system_prompt: None,
         temperature: None,
         top_p: None,
@@ -217,7 +220,7 @@ fn downgraded_prompt_plan_reduces_segment_count_and_marks_shape() {
 
 #[test]
 fn response_format_enum_matches_canonical_relation_catalog() {
-    let response_format = graph_extraction_response_format("openai");
+    let response_format = graph_extraction_response_format();
     let enum_values = response_format
         .get("json_schema")
         .and_then(|value| value.get("schema"))
@@ -306,31 +309,20 @@ fn graph_cache_hash_tracks_provider_contract_without_revision_noise() {
     assert_ne!(base_hash, graph_extraction_cache_hash(&different_hints_prompt, &binding));
 
     let mut different_model = binding.clone();
-    different_model.model_name = "gpt-5.4".to_string();
+    different_model.model_name = "alpha-chat-large".to_string();
     assert_ne!(base_hash, graph_extraction_cache_hash(&base_prompt, &different_model));
 }
 
 #[test]
-fn deepseek_uses_json_object_response_format() {
-    let response_format = graph_extraction_response_format("deepseek");
-
-    assert_eq!(
-        response_format.get("type").and_then(serde_json::Value::as_str),
-        Some("json_object")
-    );
-    assert!(response_format.get("json_schema").is_none());
-}
-
-#[test]
-fn normalizes_json_and_string_candidates() {
+fn parses_canonical_json_candidates_only() {
     let normalized = parse_graph_extraction_output(
         r#"{
           "entities": [
-            "Annual report",
-            { "label": "OpenAI", "node_type": "concept", "aliases": ["Open AI"], "summary": "provider" }
+            { "label": "Annual report", "node_type": "artifact", "aliases": [], "sub_type": null, "summary": "report" },
+            { "label": "Provider Alpha", "node_type": "concept", "aliases": ["Alpha Provider"], "sub_type": null, "summary": "provider" }
           ],
           "relations": [
-            { "source": "Annual report", "target": "OpenAI", "type": "mentions" }
+            { "source_label": "Annual report", "target_label": "Provider Alpha", "relation_type": "mentions", "summary": "report mentions provider" }
           ]
         }"#,
     )
@@ -343,20 +335,18 @@ fn normalizes_json_and_string_candidates() {
 }
 
 #[test]
-fn falls_back_unknown_node_type_to_entity() {
+fn drops_unknown_node_type() {
     let normalized = parse_graph_extraction_output(
         r#"{
           "entities": [
-            { "label": "Something", "node_type": "invented_type", "aliases": [], "summary": "" }
+            { "label": "Something", "node_type": "invented_type", "aliases": [], "sub_type": null, "summary": "" }
           ],
           "relations": []
         }"#,
     )
     .expect("parse graph extraction");
 
-    assert_eq!(normalized.entities.len(), 1);
-    assert_eq!(normalized.entities[0].label, "Something");
-    assert_eq!(normalized.entities[0].node_type, RuntimeNodeType::Entity);
+    assert!(normalized.entities.is_empty());
 }
 
 #[test]
@@ -368,24 +358,25 @@ fn rejects_json_inside_markdown_fence() {
 }
 
 #[test]
-fn drops_empty_candidates_and_normalizes_relation_labels() {
+fn drops_empty_candidates_and_rejects_noncanonical_relation_labels() {
     let normalized = parse_graph_extraction_output(
         r#"{
           "entities": [
-            { "label": "  ", "node_type": "entity" },
-            { "label": "DeepSeek", "aliases": ["", " Deep Seek "] }
+            { "label": "  ", "node_type": "entity", "aliases": [], "sub_type": null, "summary": "" },
+            { "label": "Provider Delta", "node_type": "entity", "aliases": ["", " Delta Provider "], "sub_type": null, "summary": "provider" }
           ],
           "relations": [
-            { "source_label": "DeepSeek", "target_label": "Knowledge Graph", "relation_type": "Builds On" },
-            { "source_label": " ", "target_label": "Ignored", "relation_type": "mentions" }
+            { "source_label": "Provider Delta", "target_label": "Knowledge Graph", "relation_type": "Builds On" },
+            { "source_label": " ", "target_label": "Ignored", "relation_type": "mentions", "summary": "ignored" },
+            { "source_label": "Provider Delta", "target_label": "Knowledge Graph", "relation_type": "builds_on", "summary": "provider builds on graph" }
           ]
         }"#,
     )
     .expect("normalize graph extraction");
 
     assert_eq!(normalized.entities.len(), 1);
-    assert_eq!(normalized.entities[0].label, "DeepSeek");
-    assert_eq!(normalized.entities[0].aliases, vec!["Deep Seek".to_string()]);
+    assert_eq!(normalized.entities[0].label, "Provider Delta");
+    assert_eq!(normalized.entities[0].aliases, vec!["Delta Provider".to_string()]);
     assert_eq!(normalized.relations.len(), 1);
     assert_eq!(normalized.relations[0].relation_type, "builds_on");
 }
@@ -434,7 +425,7 @@ fn rejects_non_json_payloads() {
 #[test]
 fn rejects_json_object_surrounded_by_prose() {
     let error = parse_graph_extraction_output(
-        "Here is the result:\n{\"entities\":[\"OpenAI\"],\"relations\":[]}\nThanks.",
+        "Here is the result:\n{\"entities\":[\"Provider Alpha\"],\"relations\":[]}\nThanks.",
     )
     .expect_err("prose wrapper must fail");
 
@@ -444,7 +435,7 @@ fn rejects_json_object_surrounded_by_prose() {
 #[test]
 fn rejects_json5_style_payloads() {
     let error = parse_graph_extraction_output(
-        "{entities:[{label:'OpenAI', node_type:'entity', aliases:['Open AI'], summary:'provider',},], relations:[]}",
+        "{entities:[{label:'Provider Alpha', node_type:'entity', aliases:['Alpha Provider'], summary:'provider',},], relations:[]}",
     )
     .expect_err("json5 payload must fail");
 
@@ -454,7 +445,7 @@ fn rejects_json5_style_payloads() {
 #[test]
 fn rejects_truncated_json_payloads() {
     let error = parse_graph_extraction_output(
-        r#"{"entities":[{"label":"OpenAI","node_type":"entity","aliases":[],"summary":"provider"}],"relations":[{"source_label":"OpenAI","target_label":"Graph","relation_type":"mentions","summary":"link"}"#,
+        r#"{"entities":[{"label":"Provider Alpha","node_type":"entity","aliases":[],"summary":"provider"}],"relations":[{"source_label":"Provider Alpha","target_label":"Graph","relation_type":"mentions","summary":"link"}"#,
     )
     .expect_err("truncated payload must fail");
 
@@ -466,9 +457,9 @@ fn rejects_named_sections_without_outer_object() {
     let error = normalize_graph_extraction_output(
         r#"
         entities:
-        [{"label":"OpenAI","node_type":"entity","aliases":[],"summary":"provider"}]
+        [{"label":"Provider Alpha","node_type":"entity","aliases":[],"summary":"provider"}]
         relations:
-        [{"source_label":"OpenAI","target_label":"Annual report","relation_type":"mentions","summary":"citation"}]
+        [{"source_label":"Provider Alpha","target_label":"Annual report","relation_type":"mentions","summary":"citation"}]
         "#,
     )
     .expect_err("named sections must fail");
@@ -556,8 +547,8 @@ async fn retries_after_terminal_parse_failure_and_aggregates_usage() {
     let gateway = FakeGateway {
         responses: Mutex::new(vec![
             Ok(ChatResponse {
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
+                provider_kind: "provider-alpha".to_string(),
+                model_name: "alpha-chat-mini".to_string(),
                 output_text: "this is not json".to_string(),
                 usage_json: serde_json::json!({
                     "prompt_tokens": 11,
@@ -566,9 +557,9 @@ async fn retries_after_terminal_parse_failure_and_aggregates_usage() {
                 }),
             }),
             Ok(ChatResponse {
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
-                output_text: r#"{"entities":["OpenAI"],"relations":[]}"#.to_string(),
+                provider_kind: "provider-alpha".to_string(),
+                model_name: "alpha-chat-mini".to_string(),
+                output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
                 usage_json: serde_json::json!({
                     "prompt_tokens": 7,
                     "completion_tokens": 3,
@@ -585,6 +576,7 @@ async fn retries_after_terminal_parse_failure_and_aggregates_usage() {
         &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
+        &CancellationToken::new(),
         true,
         2,
         1,
@@ -627,12 +619,12 @@ async fn retries_upstream_protocol_failures_as_transient_provider_errors() {
         responses: Mutex::new(vec![
             Err(anyhow::anyhow!(
                 "{}",
-                "provider request failed: provider=openai status=400 body={\"error\":{\"message\":\"We could not parse the JSON body of your request. The OpenAI API expects a JSON payload.\",\"type\":\"invalid_request_error\"}}"
+                "provider request failed: provider=provider-alpha status=400 body={\"error\":{\"message\":\"We could not parse the JSON body of your request. The provider API expects a JSON payload.\",\"type\":\"invalid_request_error\"}}"
             )),
             Ok(ChatResponse {
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
-                output_text: r#"{"entities":["OpenAI"],"relations":[]}"#.to_string(),
+                provider_kind: "provider-alpha".to_string(),
+                model_name: "alpha-chat-mini".to_string(),
+                output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
                 usage_json: serde_json::json!({
                     "prompt_tokens": 9,
                     "completion_tokens": 3,
@@ -649,6 +641,7 @@ async fn retries_upstream_protocol_failures_as_transient_provider_errors() {
         &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
+        &CancellationToken::new(),
         true,
         2,
         1,
@@ -673,12 +666,12 @@ async fn retries_transient_upstream_rejections_as_provider_errors() {
         responses: Mutex::new(vec![
             Err(anyhow::anyhow!(
                 "{}",
-                "provider request failed: provider=openai status=520 body={\"raw_body\":\"error code: 520\"}"
+                "provider request failed: provider=provider-alpha status=520 body={\"raw_body\":\"error code: 520\"}"
             )),
             Ok(ChatResponse {
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
-                output_text: r#"{"entities":["OpenAI"],"relations":[]}"#.to_string(),
+                provider_kind: "provider-alpha".to_string(),
+                model_name: "alpha-chat-mini".to_string(),
+                output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
                 usage_json: serde_json::json!({
                     "prompt_tokens": 11,
                     "completion_tokens": 4,
@@ -695,6 +688,7 @@ async fn retries_transient_upstream_rejections_as_provider_errors() {
         &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
+        &CancellationToken::new(),
         true,
         2,
         1,
@@ -734,14 +728,14 @@ async fn fails_after_retry_exhaustion_with_recovery_trace() {
     let gateway = FakeGateway {
         responses: Mutex::new(vec![
             Ok(ChatResponse {
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
+                provider_kind: "provider-alpha".to_string(),
+                model_name: "alpha-chat-mini".to_string(),
                 output_text: "broken payload".to_string(),
                 usage_json: serde_json::json!({ "prompt_tokens": 5 }),
             }),
             Ok(ChatResponse {
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
+                provider_kind: "provider-alpha".to_string(),
+                model_name: "alpha-chat-mini".to_string(),
                 output_text: "still broken".to_string(),
                 usage_json: serde_json::json!({ "prompt_tokens": 6 }),
             }),
@@ -755,6 +749,7 @@ async fn fails_after_retry_exhaustion_with_recovery_trace() {
         &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
+        &CancellationToken::new(),
         true,
         2,
         1,
@@ -772,15 +767,21 @@ async fn fails_after_retry_exhaustion_with_recovery_trace() {
 #[test]
 fn provider_usage_payload_keeps_provider_metadata() {
     let usage = build_provider_usage_json(
-        "openai",
-        "gpt-5.4-mini",
+        "provider-alpha",
+        "alpha-chat-mini",
         serde_json::json!({
             "prompt_tokens": 21,
             "completion_tokens": 9,
         }),
     );
 
-    assert_eq!(usage.get("provider_kind").and_then(serde_json::Value::as_str), Some("openai"));
-    assert_eq!(usage.get("model_name").and_then(serde_json::Value::as_str), Some("gpt-5.4-mini"));
+    assert_eq!(
+        usage.get("provider_kind").and_then(serde_json::Value::as_str),
+        Some("provider-alpha")
+    );
+    assert_eq!(
+        usage.get("model_name").and_then(serde_json::Value::as_str),
+        Some("alpha-chat-mini")
+    );
     assert_eq!(usage.get("prompt_tokens").and_then(serde_json::Value::as_i64), Some(21));
 }

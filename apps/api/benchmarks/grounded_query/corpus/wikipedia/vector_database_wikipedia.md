@@ -232,4 +232,3 @@ E
 
 
 {\displaystyle G(V,E)}
-

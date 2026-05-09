@@ -3,9 +3,15 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domains::agent_runtime::RuntimeTaskKind;
+use crate::domains::{
+    agent_runtime::RuntimeTaskKind,
+    provider_profiles::{
+        ProviderBaseUrlPolicy, ProviderCapabilities, ProviderCredentialPolicy,
+        ProviderModelDiscovery, ProviderProfile, ProviderRuntimeProfile,
+    },
+};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AiBindingPurpose {
     ExtractText,
@@ -38,9 +44,10 @@ impl AiBindingPurpose {
             RuntimeTaskKind::QueryPlan
             | RuntimeTaskKind::QueryAnswer
             | RuntimeTaskKind::QueryVerify => Some(Self::QueryAnswer),
-            RuntimeTaskKind::QueryRerank => Some(Self::QueryRetrieve),
             RuntimeTaskKind::GraphExtract => Some(Self::ExtractGraph),
-            RuntimeTaskKind::StructuredPrepare | RuntimeTaskKind::TechnicalFactExtract => None,
+            RuntimeTaskKind::QueryRerank
+            | RuntimeTaskKind::StructuredPrepare
+            | RuntimeTaskKind::TechnicalFactExtract => None,
         }
     }
 }
@@ -62,7 +69,7 @@ impl std::str::FromStr for AiBindingPurpose {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AiScopeKind {
     Instance,
@@ -81,7 +88,7 @@ impl AiScopeKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProviderCatalogEntry {
     pub id: Uuid,
     pub provider_kind: String,
@@ -89,11 +96,19 @@ pub struct ProviderCatalogEntry {
     pub api_style: String,
     pub lifecycle_state: String,
     pub default_base_url: Option<String>,
+    pub capability_flags_json: serde_json::Value,
     pub api_key_required: bool,
     pub base_url_required: bool,
+    pub credential_policy: ProviderCredentialPolicy,
+    pub base_url_policy: ProviderBaseUrlPolicy,
+    pub model_discovery: ProviderModelDiscovery,
+    pub capabilities: ProviderCapabilities,
+    pub runtime: ProviderRuntimeProfile,
+    pub ui_hints: serde_json::Value,
+    pub profile: ProviderProfile,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelCatalogEntry {
     pub id: Uuid,
     pub provider_catalog_id: Uuid,
@@ -105,7 +120,7 @@ pub struct ModelCatalogEntry {
     pub max_output_tokens: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelAvailabilityState {
     Available,
@@ -113,14 +128,14 @@ pub enum ModelAvailabilityState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ResolvedModelCatalogEntry {
     pub model: ModelCatalogEntry,
     pub availability_state: ModelAvailabilityState,
     pub available_credential_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PriceCatalogEntry {
     pub id: Uuid,
     pub model_catalog_id: Uuid,
@@ -136,7 +151,7 @@ pub struct PriceCatalogEntry {
     pub workspace_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AiBindingAssignment {
     pub id: Uuid,
     pub scope_kind: AiScopeKind,
@@ -148,7 +163,7 @@ pub struct AiBindingAssignment {
     pub binding_state: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProviderCredential {
     pub id: Uuid,
     pub scope_kind: AiScopeKind,
@@ -163,7 +178,7 @@ pub struct ProviderCredential {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelPreset {
     pub id: Uuid,
     pub scope_kind: AiScopeKind,
@@ -180,7 +195,7 @@ pub struct ModelPreset {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BindingValidation {
     pub id: Uuid,
     pub binding_id: Uuid,
@@ -188,4 +203,16 @@ pub struct BindingValidation {
     pub checked_at: DateTime<Utc>,
     pub failure_code: Option<String>,
     pub message: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::domains::agent_runtime::RuntimeTaskKind;
+
+    use super::AiBindingPurpose;
+
+    #[test]
+    fn deterministic_query_rerank_has_no_provider_binding_purpose() {
+        assert_eq!(AiBindingPurpose::for_runtime_task_kind(RuntimeTaskKind::QueryRerank), None);
+    }
 }

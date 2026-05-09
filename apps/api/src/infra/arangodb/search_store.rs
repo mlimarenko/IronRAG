@@ -38,7 +38,7 @@ const VECTOR_OVER_FETCH_DEFAULT_FLOOR: usize = 64;
 /// keeps a 256 GB Arango heap-budget headroom even on the temporal lane.
 const VECTOR_OVER_FETCH_MAX: usize = 8_192;
 
-// TODO[T1.x-followup]: extract the duplicated `FILTER (@temporal_start_iso ==
+// TODO(IRONRAG-001): extract the duplicated `FILTER (@temporal_start_iso ==
 // null AND @temporal_end_iso == null) OR (X.occurred_at != null AND ...)`
 // snippet from the four lexical lanes of `search_chunks` (text view,
 // title-identity, title-soft, backstop fallback) and the vector ANN sieve
@@ -51,7 +51,7 @@ const VECTOR_OVER_FETCH_MAX: usize = 8_192;
 // would force a `format!`-based AQL build that this diff is not large
 // enough to also include safely.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeChunkVectorRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -81,7 +81,7 @@ pub struct KnowledgeChunkVectorRow {
     pub occurred_until: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEntityVectorRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -101,7 +101,7 @@ pub struct KnowledgeEntityVectorRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeChunkSearchRow {
     pub chunk_id: Uuid,
     pub workspace_id: Uuid,
@@ -116,7 +116,7 @@ pub struct KnowledgeChunkSearchRow {
     pub quality_score: Option<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeStructuredBlockSearchRow {
     pub block_id: Uuid,
     pub document_id: Uuid,
@@ -132,7 +132,7 @@ pub struct KnowledgeStructuredBlockSearchRow {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeTechnicalFactSearchRow {
     pub fact_id: Uuid,
     pub document_id: Uuid,
@@ -146,7 +146,7 @@ pub struct KnowledgeTechnicalFactSearchRow {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEntitySearchRow {
     pub entity_id: Uuid,
     pub workspace_id: Uuid,
@@ -157,7 +157,7 @@ pub struct KnowledgeEntitySearchRow {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRelationSearchRow {
     pub relation_id: Uuid,
     pub workspace_id: Uuid,
@@ -168,7 +168,7 @@ pub struct KnowledgeRelationSearchRow {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeChunkVectorSearchRow {
     pub vector_id: Uuid,
     pub workspace_id: Uuid,
@@ -181,7 +181,7 @@ pub struct KnowledgeChunkVectorSearchRow {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeEntityVectorSearchRow {
     pub vector_id: Uuid,
     pub workspace_id: Uuid,
@@ -365,6 +365,25 @@ impl ArangoSearchStore {
             .await
             .context("failed to delete knowledge chunk vector")?;
         decode_optional_single_result(cursor)
+    }
+
+    pub async fn delete_chunk_vectors_by_revision(&self, revision_id: Uuid) -> anyhow::Result<u64> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 FILTER vector.revision_id == @revision_id
+                 REMOVE vector IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "revision_id": revision_id,
+                }),
+            )
+            .await
+            .context("failed to delete knowledge chunk vectors by revision")?;
+        let deleted: Vec<String> = decode_many_results(cursor)?;
+        u64::try_from(deleted.len()).context("deleted chunk vector count overflowed u64")
     }
 
     pub async fn list_chunk_vectors_by_chunk(
@@ -1283,8 +1302,7 @@ impl ArangoSearchStore {
         // per-query budget on a 5+ concurrency floor.
         let over_fetch = limit
             .saturating_mul(VECTOR_OVER_FETCH_DEFAULT_FACTOR)
-            .max(VECTOR_OVER_FETCH_DEFAULT_FLOOR)
-            .min(VECTOR_OVER_FETCH_MAX);
+            .clamp(VECTOR_OVER_FETCH_DEFAULT_FLOOR, VECTOR_OVER_FETCH_MAX);
         let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
         let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
         let cursor = self

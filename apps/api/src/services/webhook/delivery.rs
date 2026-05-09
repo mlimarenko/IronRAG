@@ -19,7 +19,7 @@ use crate::{
         ingest_repository::IngestJobRow,
         webhook_repository::{self, WebhookDeliveryAttemptRow, WebhookSubscriptionRow},
     },
-    services::webhook::signature,
+    services::webhook::{error::WebhookServiceError, signature},
 };
 
 const MAX_ATTEMPTS: i32 = 8;
@@ -28,7 +28,7 @@ const MAX_DELAY_MINUTES: i64 = 360; // 6 h
 pub async fn run_webhook_delivery_job(
     state: &Arc<AppState>,
     job: &IngestJobRow,
-) -> anyhow::Result<()> {
+) -> Result<(), WebhookServiceError> {
     // The dedupe_key encodes the attempt_id: "wh-delivery-{sub_id}-{event_id}".
     // We recover the attempt by looking up via job_id.
     let attempt = find_attempt_for_job(state, job.id).await?;
@@ -68,6 +68,7 @@ pub async fn run_webhook_delivery_job(
         }
     }
 
+    let req = crate::observability::inject_trace_context(req);
     let response = req.send().await;
 
     match response {
@@ -166,7 +167,7 @@ pub async fn run_webhook_delivery_job(
 async fn find_attempt_for_job(
     state: &Arc<AppState>,
     job_id: uuid::Uuid,
-) -> anyhow::Result<WebhookDeliveryAttemptRow> {
+) -> Result<WebhookDeliveryAttemptRow, WebhookServiceError> {
     // Find the delivery attempt linked to this job_id.
     // We query directly since there is a 1:1 relationship per enqueue.
     sqlx::query_as::<_, WebhookDeliveryAttemptRow>(
@@ -182,18 +183,18 @@ async fn find_attempt_for_job(
     .bind(job_id)
     .fetch_optional(&state.persistence.postgres)
     .await
-    .context("failed to query delivery attempt by job_id")?
-    .with_context(|| format!("no delivery attempt found for job_id={job_id}"))
+    .map_err(WebhookServiceError::Repository)?
+    .ok_or(WebhookServiceError::DeliveryAttemptNotFound { job_id })
 }
 
 async fn load_subscription(
     state: &Arc<AppState>,
     subscription_id: uuid::Uuid,
-) -> anyhow::Result<WebhookSubscriptionRow> {
+) -> Result<WebhookSubscriptionRow, WebhookServiceError> {
     webhook_repository::get_webhook_subscription_by_id(&state.persistence.postgres, subscription_id)
         .await
-        .context("failed to load webhook subscription")?
-        .with_context(|| format!("webhook subscription {subscription_id} not found"))
+        .map_err(WebhookServiceError::Repository)?
+        .ok_or(WebhookServiceError::SubscriptionNotFound { subscription_id })
 }
 
 fn next_attempt_at(attempt_number: i32) -> chrono::DateTime<Utc> {
@@ -213,7 +214,7 @@ async fn schedule_retry(
     state: &Arc<AppState>,
     attempt: &WebhookDeliveryAttemptRow,
     available_at: Option<chrono::DateTime<Utc>>,
-) -> anyhow::Result<()> {
+) -> Result<(), WebhookServiceError> {
     use crate::infra::repositories::ingest_repository::NewIngestJob;
 
     let new_job = crate::infra::repositories::ingest_repository::create_ingest_job(

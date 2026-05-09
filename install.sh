@@ -137,6 +137,35 @@ download "${RAW_BASE_URL}/.env.example" "${INSTALL_DIR}/.env.example"
 
 IRONRAG_NEW_ENV_SECRETS=0
 if [ ! -f "${INSTALL_DIR}/.env" ]; then
+  # Refuse to mint fresh random Postgres / ArangoDB passwords when stale
+  # data volumes from a previous install survive: Postgres bakes the
+  # initial password into PGDATA, ArangoDB never resets the root password
+  # after first init, so a fresh `.env` would auth-loop forever otherwise.
+  # The operator must explicitly opt into wiping the data with
+  # IRONRAG_RESET_VOLUMES=1, or restore the prior `.env` first.
+  stale_volumes=""
+  if command -v docker >/dev/null 2>&1; then
+    for vol in ironrag_postgres_data ironrag_arangodb_data ironrag_content_storage_data; do
+      if docker volume inspect "$vol" >/dev/null 2>&1; then
+        stale_volumes="${stale_volumes}${stale_volumes:+ }${vol}"
+      fi
+    done
+  fi
+  if [ -n "$stale_volumes" ]; then
+    if [ "${IRONRAG_RESET_VOLUMES:-0}" = "1" ]; then
+      echo "Wiping stale Docker volumes (IRONRAG_RESET_VOLUMES=1): $stale_volumes"
+      docker volume rm $stale_volumes >/dev/null
+    else
+      echo "error: .env is missing but stale Docker volumes survive from a previous install:" >&2
+      echo "  $stale_volumes" >&2
+      echo "Minting fresh secrets would not match the passwords baked into those" >&2
+      echo "volumes (Postgres PGDATA, ArangoDB root). Pick one:" >&2
+      echo "  1. Restore the previous .env if you still have it." >&2
+      echo "  2. Re-run with IRONRAG_RESET_VOLUMES=1 to wipe the data and start fresh." >&2
+      exit 1
+    fi
+  fi
+
   cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
   IRONRAG_NEW_ENV_SECRETS=1
   pg_pass="$(rand_hex_bytes 24)"

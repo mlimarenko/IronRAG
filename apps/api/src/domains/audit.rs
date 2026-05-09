@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AuditEvent {
     pub id: Uuid,
     pub actor_principal_id: Option<Uuid>,
@@ -16,7 +16,7 @@ pub struct AuditEvent {
     pub redacted_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AuditEventInternalView {
     pub id: Uuid,
     pub actor_principal_id: Option<Uuid>,
@@ -30,7 +30,7 @@ pub struct AuditEventInternalView {
     pub internal_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AuditEventRedactedView {
     pub id: Uuid,
     pub actor_principal_id: Option<Uuid>,
@@ -43,7 +43,7 @@ pub struct AuditEventRedactedView {
     pub redacted_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AuditEventSubject {
     pub audit_event_id: Uuid,
     pub subject_kind: String,
@@ -58,13 +58,13 @@ pub struct AuditEventSubject {
     pub async_operation_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AuditAssistantModel {
     pub provider_kind: String,
     pub model_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AuditAssistantCallSummary {
     pub query_execution_id: Uuid,
     pub conversation_id: Option<Uuid>,

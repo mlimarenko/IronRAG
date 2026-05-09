@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use crate::domains::query_ir::QueryIR;
 
 use super::question_intent::{QuestionIntent, classify_query_ir_intents};
-use super::{focused_answer_document_id, types::RuntimeMatchedChunk};
+use super::{
+    concise_document_subject_label, focused_answer_document_id, types::RuntimeMatchedChunk,
+};
 
 pub(crate) fn build_focused_document_answer(
     question: &str,
@@ -80,7 +82,60 @@ fn extract_primary_document_heading(document_chunks: &[&RuntimeMatchedChunk]) ->
 
 fn extract_secondary_document_heading(document_chunks: &[&RuntimeMatchedChunk]) -> Option<String> {
     let headings = document_heading_lines(document_chunks);
-    headings.get(1).cloned().or_else(|| headings.first().cloned())
+    headings
+        .get(1)
+        .cloned()
+        .or_else(|| extract_inline_secondary_heading(document_chunks))
+        .or_else(|| headings.first().cloned())
+}
+
+fn extract_inline_secondary_heading(document_chunks: &[&RuntimeMatchedChunk]) -> Option<String> {
+    for chunk in document_chunks {
+        let subjects = inline_secondary_heading_subjects(&chunk.excerpt, &chunk.document_label);
+        for line in chunk.source_text.lines().map(str::trim) {
+            for subject in &subjects {
+                let Some(prefix_len) = ascii_case_insensitive_prefix_len(line, subject) else {
+                    continue;
+                };
+                let remainder = line[prefix_len..]
+                    .trim_start_matches(|character: char| {
+                        character.is_whitespace() || matches!(character, ':' | '-' | '|')
+                    })
+                    .trim();
+                if normalize_heading_line(remainder).is_some() {
+                    return Some(remainder.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn inline_secondary_heading_subjects(excerpt: &str, document_label: &str) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut subjects = Vec::new();
+    let candidates =
+        vec![excerpt.trim().to_string(), concise_document_subject_label(document_label)];
+    for candidate in candidates {
+        let candidate = candidate.trim();
+        if candidate.is_empty() || !seen.insert(candidate.to_lowercase()) {
+            continue;
+        }
+        subjects.push(candidate.to_string());
+    }
+    subjects
+}
+
+fn ascii_case_insensitive_prefix_len(line: &str, prefix: &str) -> Option<usize> {
+    let mut cursor = 0;
+    for prefix_character in prefix.chars() {
+        let line_character = line[cursor..].chars().next()?;
+        if !line_character.eq_ignore_ascii_case(&prefix_character) {
+            return None;
+        }
+        cursor += line_character.len_utf8();
+    }
+    Some(cursor)
 }
 
 fn document_heading_lines(document_chunks: &[&RuntimeMatchedChunk]) -> Vec<String> {

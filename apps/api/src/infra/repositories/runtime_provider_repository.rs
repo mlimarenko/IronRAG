@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeProviderFailureSnapshotRow {
     pub ingestion_run_id: Uuid,
     pub attempt_no: i32,
@@ -16,7 +16,7 @@ pub struct RuntimeProviderFailureSnapshotRow {
     pub computed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeProviderProfileRow {
     pub library_id: Uuid,
     pub indexing_provider_kind: String,
@@ -34,7 +34,7 @@ pub struct RuntimeProviderProfileRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeProviderValidationLogRow {
     pub id: Uuid,
     pub library_id: Option<Uuid>,
@@ -46,7 +46,7 @@ pub struct RuntimeProviderValidationLogRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct ModelPricingCatalogEntryRow {
     pub id: Uuid,
     pub workspace_id: Option<Uuid>,
@@ -66,7 +66,7 @@ pub struct ModelPricingCatalogEntryRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct ModelPricingResolutionRow {
     pub pricing_catalog_entry_id: Uuid,
     pub workspace_id: Option<Uuid>,

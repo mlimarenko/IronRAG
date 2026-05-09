@@ -30,10 +30,68 @@ pub(crate) struct QueryResultCacheKeyInput<'a> {
     pub(crate) prompt_history_text: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 struct CachedQueryResult {
     source_execution_id: Uuid,
 }
+
+const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
+    ("assistant_prompt.rs", include_str!("assistant_prompt.rs")),
+    ("compiler.rs", include_str!("compiler.rs")),
+    ("latest_versions.rs", include_str!("latest_versions.rs")),
+    ("execution/answer.rs", include_str!("execution/answer.rs")),
+    ("execution/answer_pipeline.rs", include_str!("execution/answer_pipeline.rs")),
+    (
+        "execution/canonical_answer_context.rs",
+        include_str!("execution/canonical_answer_context.rs"),
+    ),
+    ("execution/consolidation.rs", include_str!("execution/consolidation.rs")),
+    ("execution/context.rs", include_str!("execution/context.rs")),
+    ("execution/document_target.rs", include_str!("execution/document_target.rs")),
+    ("execution/embed.rs", include_str!("execution/embed.rs")),
+    ("execution/endpoint_answer.rs", include_str!("execution/endpoint_answer.rs")),
+    ("execution/endpoint_chunk_answer.rs", include_str!("execution/endpoint_chunk_answer.rs")),
+    ("execution/fact_lookup.rs", include_str!("execution/fact_lookup.rs")),
+    ("execution/focused_document_answer.rs", include_str!("execution/focused_document_answer.rs")),
+    ("execution/graph_retrieval.rs", include_str!("execution/graph_retrieval.rs")),
+    ("execution/hyde_crag.rs", include_str!("execution/hyde_crag.rs")),
+    ("execution/port_answer.rs", include_str!("execution/port_answer.rs")),
+    ("execution/preflight.rs", include_str!("execution/preflight.rs")),
+    ("execution/question_intent.rs", include_str!("execution/question_intent.rs")),
+    ("execution/rerank.rs", include_str!("execution/rerank.rs")),
+    ("execution/retrieve.rs", include_str!("execution/retrieve.rs")),
+    ("execution/source_context.rs", include_str!("execution/source_context.rs")),
+    ("execution/source_profile.rs", include_str!("execution/source_profile.rs")),
+    (
+        "execution/structured_query_pipeline.rs",
+        include_str!("execution/structured_query_pipeline.rs"),
+    ),
+    ("execution/table_retrieval.rs", include_str!("execution/table_retrieval.rs")),
+    ("execution/table_row_answer.rs", include_str!("execution/table_row_answer.rs")),
+    ("execution/table_summary_answer.rs", include_str!("execution/table_summary_answer.rs")),
+    ("execution/technical_answer.rs", include_str!("execution/technical_answer.rs")),
+    (
+        "execution/technical_literal_context.rs",
+        include_str!("execution/technical_literal_context.rs"),
+    ),
+    (
+        "execution/technical_literal_extractors.rs",
+        include_str!("execution/technical_literal_extractors.rs"),
+    ),
+    ("execution/technical_literal_focus.rs", include_str!("execution/technical_literal_focus.rs")),
+    ("execution/technical_literals.rs", include_str!("execution/technical_literals.rs")),
+    (
+        "execution/technical_parameter_answer.rs",
+        include_str!("execution/technical_parameter_answer.rs"),
+    ),
+    ("execution/technical_url_answer.rs", include_str!("execution/technical_url_answer.rs")),
+    ("execution/transport_answer.rs", include_str!("execution/transport_answer.rs")),
+    ("execution/tuning.rs", include_str!("execution/tuning.rs")),
+    ("execution/types.rs", include_str!("execution/types.rs")),
+    ("execution/verification.rs", include_str!("execution/verification.rs")),
+    ("text_match.rs", include_str!("text_match.rs")),
+    ("result_cache.rs", include_str!("result_cache.rs")),
+];
 
 #[must_use]
 pub(crate) fn cache_key(input: &QueryResultCacheKeyInput<'_>) -> String {
@@ -63,22 +121,8 @@ pub(crate) fn cache_key(input: &QueryResultCacheKeyInput<'_>) -> String {
 pub(crate) fn answer_runtime_fingerprint() -> &'static str {
     static FINGERPRINT: LazyLock<String> = LazyLock::new(|| {
         let mut hasher = Sha256::new();
-        for source in [
-            include_str!("assistant_prompt.rs"),
-            include_str!("compiler.rs"),
-            include_str!("execution/answer_pipeline.rs"),
-            include_str!("execution/canonical_answer_context.rs"),
-            include_str!("execution/consolidation.rs"),
-            include_str!("execution/context.rs"),
-            include_str!("execution/document_target.rs"),
-            include_str!("execution/graph_retrieval.rs"),
-            include_str!("execution/preflight.rs"),
-            include_str!("execution/rerank.rs"),
-            include_str!("execution/retrieve.rs"),
-            include_str!("execution/types.rs"),
-            include_str!("text_match.rs"),
-            include_str!("result_cache.rs"),
-        ] {
+        for (path, source) in ANSWER_RUNTIME_FINGERPRINT_SOURCES {
+            update_str(&mut hasher, path);
             update_str(&mut hasher, source);
         }
         hex_digest(hasher.finalize())
@@ -323,6 +367,8 @@ fn hex_digest(digest: sha2::digest::Output<Sha256>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn base_input(top_k: usize) -> QueryResultCacheKeyInput<'static> {
@@ -387,5 +433,29 @@ mod tests {
         let mut changed = base_input(8);
         changed.answer_runtime_fingerprint = "answer-runtime:changed";
         assert_ne!(cache_key(&base_input(8)), cache_key(&changed));
+    }
+
+    #[test]
+    fn answer_runtime_fingerprint_covers_deterministic_answer_builders() {
+        let paths =
+            ANSWER_RUNTIME_FINGERPRINT_SOURCES.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+        let unique_paths = paths.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(paths.len(), unique_paths.len());
+        for required in [
+            "execution/answer.rs",
+            "execution/endpoint_answer.rs",
+            "execution/endpoint_chunk_answer.rs",
+            "execution/focused_document_answer.rs",
+            "execution/question_intent.rs",
+            "execution/technical_answer.rs",
+            "execution/technical_literal_focus.rs",
+            "execution/technical_url_answer.rs",
+            "execution/verification.rs",
+        ] {
+            assert!(
+                unique_paths.contains(required),
+                "answer result cache fingerprint must include {required}"
+            );
+        }
     }
 }

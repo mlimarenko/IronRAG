@@ -540,6 +540,11 @@ impl KnowledgeService {
             .delete_revision_chunk_edges(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let _ = state
+            .arango_search_store
+            .delete_chunk_vectors_by_revision(revision_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let rows = state
             .arango_document_store
             .delete_chunks_by_revision(revision_id)

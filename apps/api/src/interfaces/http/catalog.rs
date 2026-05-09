@@ -33,7 +33,7 @@ use crate::{
     shared::web::ingest::WebIngestPolicy,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogWorkspaceResponse {
     pub id: Uuid,
@@ -42,14 +42,14 @@ pub struct CatalogWorkspaceResponse {
     pub lifecycle_state: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogLibraryIngestionReadinessResponse {
     pub ready: bool,
     pub missing_binding_purposes: Vec<AiBindingPurpose>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogLibraryResponse {
     pub id: Uuid,
@@ -64,14 +64,14 @@ pub struct CatalogLibraryResponse {
     pub ingestion_readiness: CatalogLibraryIngestionReadinessResponse,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCatalogWorkspaceRequest {
     pub slug: Option<String>,
     pub display_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCatalogLibraryRequest {
     pub slug: Option<String>,
@@ -79,7 +79,7 @@ pub struct CreateCatalogLibraryRequest {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCatalogLibraryRequest {
     pub slug: Option<String>,
@@ -89,13 +89,13 @@ pub struct UpdateCatalogLibraryRequest {
     pub lifecycle_state: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateLibraryWebIngestPolicyRequest {
     pub url_filter: crate::shared::web::ingest::WebIngestUrlFilter,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct UpdateLibraryRecognitionPolicyRequest {
@@ -123,7 +123,17 @@ pub fn router() -> Router<AppState> {
 }
 
 #[tracing::instrument(level = "info", name = "http.list_workspaces", skip_all, fields(item_count))]
-async fn list_workspaces(
+#[utoipa::path(
+    get,
+    path = "/v1/catalog/workspaces",
+    tag = "catalog",
+    operation_id = "listCatalogWorkspaces",
+    responses(
+        (status = 200, description = "Workspaces visible to the caller", body = [CatalogWorkspaceResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
+pub async fn list_workspaces(
     auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CatalogWorkspaceResponse>>, ApiError> {
@@ -145,7 +155,20 @@ async fn list_workspaces(
     skip_all,
     fields(workspace_id = %workspace_id)
 )]
-async fn get_workspace(
+#[utoipa::path(
+    get,
+    path = "/v1/catalog/workspaces/{workspaceId}",
+    tag = "catalog",
+    operation_id = "getCatalogWorkspace",
+    params(("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier")),
+    responses(
+        (status = 200, description = "Workspace detail", body = CatalogWorkspaceResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the workspace"),
+        (status = 404, description = "Workspace not found"),
+    ),
+)]
+pub async fn get_workspace(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
@@ -155,8 +178,19 @@ async fn get_workspace(
     Ok(Json(map_workspace(workspace)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/catalog/workspaces",
+    tag = "catalog",
+    operation_id = "createCatalogWorkspace",
+    request_body = CreateCatalogWorkspaceRequest,
+    responses(
+        (status = 200, description = "Newly created workspace", body = CatalogWorkspaceResponse),
+        (status = 401, description = "Caller is not a system administrator"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.create_workspace", skip_all)]
-async fn create_workspace(
+pub async fn create_workspace(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -211,13 +245,25 @@ async fn create_workspace(
     Ok(Json(map_workspace(workspace)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/catalog/workspaces/{workspaceId}",
+    tag = "catalog",
+    operation_id = "deleteCatalogWorkspace",
+    params(("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier")),
+    responses(
+        (status = 204, description = "Workspace deleted"),
+        (status = 401, description = "Caller is not a system administrator"),
+        (status = 404, description = "Workspace not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.delete_workspace",
     skip_all,
     fields(workspace_id = %workspace_id)
 )]
-async fn delete_workspace(
+pub async fn delete_workspace(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -261,13 +307,25 @@ async fn delete_workspace(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/catalog/workspaces/{workspaceId}/libraries",
+    tag = "catalog",
+    operation_id = "listCatalogLibraries",
+    params(("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier")),
+    responses(
+        (status = 200, description = "Libraries visible to the caller in this workspace", body = [CatalogLibraryResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the workspace"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.list_libraries",
     skip_all,
     fields(workspace_id = %workspace_id, item_count)
 )]
-async fn list_libraries(
+pub async fn list_libraries(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
@@ -286,13 +344,26 @@ async fn list_libraries(
     Ok(Json(items))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/catalog/workspaces/{workspaceId}/libraries",
+    tag = "catalog",
+    operation_id = "createCatalogLibrary",
+    params(("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier")),
+    request_body = CreateCatalogLibraryRequest,
+    responses(
+        (status = 200, description = "Newly created library", body = CatalogLibraryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace admin"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.create_library",
     skip_all,
     fields(workspace_id = %workspace_id)
 )]
-async fn create_library(
+pub async fn create_library(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -340,13 +411,29 @@ async fn create_library(
     Ok(Json(map_library(library)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/catalog/workspaces/{workspaceId}/libraries/{libraryId}",
+    tag = "catalog",
+    operation_id = "deleteCatalogLibrary",
+    params(
+        ("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier"),
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+    ),
+    responses(
+        (status = 204, description = "Library deleted"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace admin"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.delete_library",
     skip_all,
     fields(workspace_id = %workspace_id, library_id = %library_id)
 )]
-async fn delete_library(
+pub async fn delete_library(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -385,13 +472,26 @@ async fn delete_library(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/catalog/libraries/{libraryId}",
+    tag = "catalog",
+    operation_id = "getCatalogLibrary",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Library detail", body = CatalogLibraryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot discover the library"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_library",
     skip_all,
     fields(library_id = %library_id)
 )]
-async fn get_library(
+pub async fn get_library(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
@@ -401,13 +501,28 @@ async fn get_library(
     Ok(Json(map_library(library)))
 }
 
+#[utoipa::path(
+    put,
+    path = "/v1/catalog/libraries/{libraryId}",
+    tag = "catalog",
+    operation_id = "updateCatalogLibrary",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    request_body = UpdateCatalogLibraryRequest,
+    responses(
+        (status = 200, description = "Library after applying the update", body = CatalogLibraryResponse),
+        (status = 400, description = "Invalid lifecycle state"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a workspace admin"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.update_library",
     skip_all,
     fields(library_id = %library_id)
 )]
-async fn update_library(
+pub async fn update_library(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -462,13 +577,27 @@ async fn update_library(
     Ok(Json(map_library(library)))
 }
 
+#[utoipa::path(
+    put,
+    path = "/v1/catalog/libraries/{libraryId}/web-ingest-policy",
+    tag = "catalog",
+    operation_id = "updateCatalogLibraryWebIngestPolicy",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    request_body = UpdateLibraryWebIngestPolicyRequest,
+    responses(
+        (status = 200, description = "Library after applying the new web ingest policy", body = CatalogLibraryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller does not have library write permission"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.update_library_web_ingest_policy",
     skip_all,
     fields(library_id = %library_id)
 )]
-async fn update_library_web_ingest_policy(
+pub async fn update_library_web_ingest_policy(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
@@ -514,13 +643,27 @@ async fn update_library_web_ingest_policy(
     Ok(Json(map_library(library)))
 }
 
+#[utoipa::path(
+    put,
+    path = "/v1/catalog/libraries/{libraryId}/recognition-policy",
+    tag = "catalog",
+    operation_id = "updateCatalogLibraryRecognitionPolicy",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    request_body = UpdateLibraryRecognitionPolicyRequest,
+    responses(
+        (status = 200, description = "Library after applying the new recognition policy", body = CatalogLibraryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller does not have library write permission"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.update_library_recognition_policy",
     skip_all,
     fields(library_id = %library_id)
 )]
-async fn update_library_recognition_policy(
+pub async fn update_library_recognition_policy(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,

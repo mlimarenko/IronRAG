@@ -22,7 +22,7 @@ use crate::infra::arangodb::{
     },
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeContextBundleRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -50,7 +50,7 @@ pub struct KnowledgeContextBundleRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeRetrievalTraceRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -73,7 +73,7 @@ pub struct KnowledgeRetrievalTraceRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleChunkEdgeRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -93,7 +93,7 @@ pub struct KnowledgeBundleChunkEdgeRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleEntityEdgeRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -113,7 +113,7 @@ pub struct KnowledgeBundleEntityEdgeRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleRelationEdgeRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -133,7 +133,7 @@ pub struct KnowledgeBundleRelationEdgeRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleEvidenceEdgeRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -153,7 +153,7 @@ pub struct KnowledgeBundleEvidenceEdgeRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleChunkReferenceRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -165,7 +165,7 @@ pub struct KnowledgeBundleChunkReferenceRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleEntityReferenceRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -177,7 +177,7 @@ pub struct KnowledgeBundleEntityReferenceRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleRelationReferenceRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -189,7 +189,7 @@ pub struct KnowledgeBundleRelationReferenceRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeBundleEvidenceReferenceRow {
     #[serde(rename = "_key")]
     pub key: String,
@@ -201,7 +201,7 @@ pub struct KnowledgeBundleEvidenceReferenceRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeContextBundleReferenceSetRow {
     pub bundle: KnowledgeContextBundleRow,
     pub chunk_references: Vec<KnowledgeBundleChunkReferenceRow>,

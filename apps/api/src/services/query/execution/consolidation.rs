@@ -37,7 +37,7 @@ use super::{
 /// winner). Carried in the answer-pipeline diagnostics so
 /// `prod` logs can tell apart "IR explicitly forced this" vs. "soft
 /// evidence-dominance signal" vs. "nothing to do".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FocusReason {
     /// No consolidation applied — either the IR did not pin a single
@@ -76,7 +76,7 @@ impl FocusReason {
 
 /// Structured summary of the consolidation decision, suitable for
 /// logging into `stage = "answer.consolidation"` records.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct ConsolidationDiagnostics {
     pub(crate) focused_document_id: Option<Uuid>,
     pub(crate) focus_reason: FocusReason,
@@ -95,7 +95,7 @@ impl ConsolidationDiagnostics {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct TopicalPruneDiagnostics {
     pub(crate) removed_chunk_count: usize,
     pub(crate) kept_chunk_count: usize,

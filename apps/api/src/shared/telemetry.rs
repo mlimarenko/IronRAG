@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use tracing::{info, warn};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::domains::ingest::WebRunCounts;
@@ -31,11 +31,6 @@ const NOISY_CRATE_CEILINGS: &[&str] = &[
     "tungstenite=warn",
     "tokio_tungstenite=warn",
 ];
-
-pub fn init(filter: &str) {
-    let composed = compose_env_filter(filter);
-    let _ = fmt().with_env_filter(composed).with_target(false).try_init();
-}
 
 /// Reads `/proc/self/status` and returns the current process resident set
 /// size (VmRSS) in bytes. Returns None on non-Linux or parse error.
@@ -138,7 +133,7 @@ pub fn log_worker_rss(tag: &'static str, context: impl std::fmt::Display) {
     }
 }
 
-fn compose_env_filter(filter: &str) -> EnvFilter {
+pub(crate) fn compose_env_filter(filter: &str) -> EnvFilter {
     let mut directives = String::from(filter);
     for ceiling in NOISY_CRATE_CEILINGS {
         directives.push(',');

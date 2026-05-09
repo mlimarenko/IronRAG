@@ -185,6 +185,8 @@ impl ExtractGraphFixture {
                 token_count: Some(16),
                 normalized_text: "Readable extracted text for the canonical greenfield test.",
                 text_checksum: "sha256:chunk",
+                occurred_at: None,
+                occurred_until: None,
             },
         )
         .await

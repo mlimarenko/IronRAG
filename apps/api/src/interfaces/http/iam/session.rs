@@ -12,10 +12,11 @@ use crate::{
     interfaces::http::{
         auth::{AuthContext, build_session_cookie_value},
         router_support::{ApiError, RequestId},
-        ui_support::{build_cleared_session_cookie, build_session_cookie},
+        ui_support::{
+            build_cleared_session_cookie, build_session_cookie, session_cookie_secure_for_request,
+        },
     },
     interfaces::shell::{build_shell_bootstrap, parse_ui_locale, to_bootstrap_contract},
-    services::ai_catalog_service::{BootstrapAiCredentialSource, BootstrapAiSetupDescriptor},
     services::iam::{
         audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
         service::{AuthenticateSessionCommand, BootstrapSetupAiCommand, BootstrapSetupCommand},
@@ -24,15 +25,21 @@ use crate::{
 
 use super::{
     load_contract_me,
-    types::{
-        BootstrapAiSetupResponse, BootstrapProviderPresetBundleResponse,
-        BootstrapProviderPresetResponse, BootstrapSetupRequest, BootstrapStatusResponse,
-        LoginSessionRequest, SessionResponse, SessionUserResponse,
-    },
+    types::{BootstrapSetupRequest, LoginSessionRequest, SessionResponse, SessionUserResponse},
 };
 
+#[utoipa::path(
+    get,
+    path = "/v1/iam/session/resolve",
+    tag = "iam",
+    operation_id = "resolveIamSession",
+    security(),
+    responses(
+        (status = 200, description = "Composite session view (mode + session + me + shell bootstrap + bootstrap status). Always 200 — the canonical UI shell calls this on every navigation.", body = ironrag_contracts::auth::SessionResolveResponse),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.resolve_session", skip_all)]
-pub(super) async fn resolve_session(
+pub async fn resolve_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ironrag_contracts::auth::SessionResolveResponse>, ApiError> {
@@ -99,20 +106,40 @@ pub(super) async fn resolve_session(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/iam/bootstrap/status",
+    tag = "iam",
+    operation_id = "getBootstrapStatus",
+    security(),
+    responses(
+        (status = 200, description = "Bootstrap status indicating whether first-run admin setup is required", body = ironrag_contracts::auth::BootstrapStatus),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.get_bootstrap_status", skip_all)]
-pub(super) async fn get_bootstrap_status(
+pub async fn get_bootstrap_status(
     State(state): State<AppState>,
-) -> Result<Json<BootstrapStatusResponse>, ApiError> {
+) -> Result<Json<ironrag_contracts::auth::BootstrapStatus>, ApiError> {
     let outcome = state.canonical_services.iam.get_bootstrap_status(&state).await?;
-    Ok(Json(BootstrapStatusResponse {
-        setup_required: outcome.setup_required,
-        ai_setup: outcome.ai_setup.map(map_bootstrap_ai_setup),
-    }))
+    Ok(Json(to_bootstrap_contract(&outcome)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/iam/bootstrap/setup",
+    tag = "iam",
+    operation_id = "postBootstrapSetup",
+    security(),
+    request_body = BootstrapSetupRequest,
+    responses(
+        (status = 200, description = "Bootstrap admin configured; sets the canonical UI session cookie", body = SessionResponse),
+        (status = 409, description = "Bootstrap already completed"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.setup_bootstrap_admin", skip_all)]
-pub(super) async fn setup_bootstrap_admin(
+pub async fn setup_bootstrap_admin(
     State(state): State<AppState>,
+    request_headers: HeaderMap,
     request_id: Option<axum::Extension<RequestId>>,
     Json(payload): Json<BootstrapSetupRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -137,13 +164,14 @@ pub(super) async fn setup_bootstrap_admin(
         )
         .await?;
 
-    let mut headers = HeaderMap::new();
+    let mut response_headers = HeaderMap::new();
     let cookie = build_session_cookie(
         state.ui_session_cookie.name,
         &build_session_cookie_value(outcome.session_id, &outcome.session_secret),
         state.ui_session_cookie.ttl_hours,
+        session_cookie_secure_for_request(state.ui_session_cookie.secure, &request_headers),
     );
-    headers.insert(
+    response_headers.insert(
         header::SET_COOKIE,
         cookie.parse().map_err(|error| ApiError::internal_with_log(error, "internal"))?,
     );
@@ -189,7 +217,7 @@ pub(super) async fn setup_bootstrap_admin(
     }
 
     Ok((
-        headers,
+        response_headers,
         Json(SessionResponse {
             session_id: outcome.session_id,
             expires_at: outcome.expires_at,
@@ -203,9 +231,22 @@ pub(super) async fn setup_bootstrap_admin(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/iam/session/login",
+    tag = "iam",
+    operation_id = "loginIamSession",
+    security(),
+    request_body = LoginSessionRequest,
+    responses(
+        (status = 200, description = "Login succeeded; sets the canonical UI session cookie", body = SessionResponse),
+        (status = 401, description = "Invalid credentials"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.login_session", skip_all)]
-pub(super) async fn login_session(
+pub async fn login_session(
     State(state): State<AppState>,
+    request_headers: HeaderMap,
     request_id: Option<axum::Extension<RequestId>>,
     Json(payload): Json<LoginSessionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -224,13 +265,14 @@ pub(super) async fn login_session(
         )
         .await?;
 
-    let mut headers = HeaderMap::new();
+    let mut response_headers = HeaderMap::new();
     let cookie = build_session_cookie(
         state.ui_session_cookie.name,
         &build_session_cookie_value(outcome.session_id, &outcome.session_secret),
         ttl_hours,
+        session_cookie_secure_for_request(state.ui_session_cookie.secure, &request_headers),
     );
-    headers.insert(
+    response_headers.insert(
         header::SET_COOKIE,
         cookie.parse().map_err(|error| ApiError::internal_with_log(error, "internal"))?,
     );
@@ -278,7 +320,7 @@ pub(super) async fn login_session(
     });
 
     Ok((
-        headers,
+        response_headers,
         Json(SessionResponse {
             session_id: outcome.session_id,
             expires_at: outcome.expires_at,
@@ -292,8 +334,18 @@ pub(super) async fn login_session(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/iam/session",
+    tag = "iam",
+    operation_id = "getIamSession",
+    responses(
+        (status = 200, description = "Current authenticated session", body = SessionResponse),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.get_session", skip_all)]
-pub(super) async fn get_session(
+pub async fn get_session(
     auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<SessionResponse>, ApiError> {
@@ -301,22 +353,36 @@ pub(super) async fn get_session(
     Ok(Json(map_contract_session_response(session)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/iam/session/logout",
+    tag = "iam",
+    operation_id = "logoutIamSession",
+    responses(
+        (status = 200, description = "Session revoked; clears the session cookie"),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.logout_session", skip_all)]
-pub(super) async fn logout_session(
+pub async fn logout_session(
     auth: AuthContext,
     State(state): State<AppState>,
+    request_headers: HeaderMap,
     request_id: Option<axum::Extension<RequestId>>,
 ) -> Result<impl IntoResponse, ApiError> {
     auth.require_session_token()?;
 
     state.canonical_services.iam.revoke_session(&state, auth.token_id).await?;
 
-    let mut headers = HeaderMap::new();
-    headers.insert(
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
         header::SET_COOKIE,
-        build_cleared_session_cookie(state.ui_session_cookie.name)
-            .parse()
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?,
+        build_cleared_session_cookie(
+            state.ui_session_cookie.name,
+            session_cookie_secure_for_request(state.ui_session_cookie.secure, &request_headers),
+        )
+        .parse()
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?,
     );
 
     if let Err(error) = state
@@ -350,42 +416,7 @@ pub(super) async fn logout_session(
         warn!(stage = "audit", error = %error, "audit append failed");
     }
 
-    Ok((headers, StatusCode::NO_CONTENT))
-}
-
-fn map_bootstrap_ai_setup(descriptor: BootstrapAiSetupDescriptor) -> BootstrapAiSetupResponse {
-    BootstrapAiSetupResponse {
-        preset_bundles: descriptor
-            .preset_bundles
-            .into_iter()
-            .map(|bundle| BootstrapProviderPresetBundleResponse {
-                id: bundle.provider_catalog_id,
-                provider_kind: bundle.provider_kind,
-                display_name: bundle.display_name,
-                credential_source: match bundle.credential_source {
-                    BootstrapAiCredentialSource::Missing => "missing".to_string(),
-                    BootstrapAiCredentialSource::Env => "env".to_string(),
-                },
-                default_base_url: bundle.default_base_url,
-                api_key_required: bundle.api_key_required,
-                base_url_required: bundle.base_url_required,
-                presets: bundle
-                    .presets
-                    .into_iter()
-                    .map(|preset| BootstrapProviderPresetResponse {
-                        binding_purpose: preset.binding_purpose,
-                        model_catalog_id: preset.model_catalog_id,
-                        model_name: preset.model_name,
-                        preset_name: preset.preset_name,
-                        system_prompt: preset.system_prompt,
-                        temperature: preset.temperature,
-                        top_p: preset.top_p,
-                        max_output_tokens_override: preset.max_output_tokens_override,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
+    Ok((response_headers, StatusCode::NO_CONTENT))
 }
 
 fn session_mode_from_bootstrap(

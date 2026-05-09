@@ -680,11 +680,14 @@ async fn fetch_upload_bytes_from_url(
         .map_err(|error| {
             ApiError::BadRequest(format!("failed to build HTTP client for fetchUrl: {error}"))
         })?;
-    let response = client.get(parsed).send().await.map_err(|error| {
-        ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}].fetchUrl request failed: {error}"
-        ))
-    })?;
+    let response = crate::observability::inject_trace_context(client.get(parsed))
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::invalid_mcp_tool_call(format!(
+                "documents[{index}].fetchUrl request failed: {error}"
+            ))
+        })?;
     if !response.status().is_success() {
         return Err(ApiError::invalid_mcp_tool_call(format!(
             "documents[{index}].fetchUrl returned HTTP {}",

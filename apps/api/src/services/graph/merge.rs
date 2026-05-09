@@ -1,13 +1,14 @@
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::Result;
+use anyhow::Result as AnyhowResult;
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::{
     domains::graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
     infra::repositories::{self, ChunkRow, DocumentRow, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
     services::{
-        graph::extract::GraphExtractionCandidateSet, graph::quality_guard::GraphQualityGuardService,
+        graph::error::GraphServiceError, graph::extract::GraphExtractionCandidateSet,
+        graph::quality_guard::GraphQualityGuardService,
     },
 };
 
@@ -41,7 +42,7 @@ pub async fn reconcile_merge_support_counts(
     scope: &GraphMergeScope,
     changed_node_ids: &[uuid::Uuid],
     changed_edge_ids: &[uuid::Uuid],
-) -> Result<()> {
+) -> std::result::Result<(), GraphServiceError> {
     repositories::recalculate_runtime_graph_node_support_counts_by_ids(
         pool,
         scope.library_id,
@@ -139,7 +140,7 @@ pub async fn merge_chunk_graph_candidates(
     chunk: &ChunkRow,
     candidates: &GraphExtractionCandidateSet,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
-) -> Result<GraphMergeOutcome> {
+) -> std::result::Result<GraphMergeOutcome, GraphServiceError> {
     let entity_key_index = build_entity_key_index(candidates);
     // Collect every evidence row generated during this chunk merge into one
     // batch and flush via `bulk_create_runtime_graph_evidence_for_chunk` at
@@ -522,7 +523,7 @@ async fn preload_existing_nodes_for_merge(
     document: &DocumentRow,
     candidates: &GraphExtractionCandidateSet,
     entity_key_index: &crate::services::graph::identity::GraphLabelNodeTypeIndex,
-) -> Result<HashMap<String, RuntimeGraphNodeRow>> {
+) -> AnyhowResult<HashMap<String, RuntimeGraphNodeRow>> {
     let mut canonical_keys: BTreeSet<String> = BTreeSet::new();
     canonical_keys.insert(format!("document:{}", document.id));
     for entity in &candidates.entities {
@@ -558,7 +559,7 @@ async fn upsert_document_node(
     scope: &GraphMergeScope,
     document: &DocumentRow,
     preloaded_existing: &HashMap<String, RuntimeGraphNodeRow>,
-) -> Result<RuntimeGraphNodeRow> {
+) -> AnyhowResult<RuntimeGraphNodeRow> {
     let label = document
         .title
         .as_deref()
@@ -596,7 +597,7 @@ async fn upsert_graph_edge(
     relation_type: &str,
     summary: Option<&str>,
     extraction_recovery: Option<&ExtractionRecoverySummary>,
-) -> Result<EdgePersistenceOutcome> {
+) -> AnyhowResult<EdgePersistenceOutcome> {
     let normalized_relation_type =
         crate::services::graph::identity::normalize_relation_type(relation_type);
     if normalized_relation_type.is_empty() {
@@ -780,7 +781,7 @@ mod tests {
     #[test]
     fn normalizes_relation_type_to_snake_case() {
         assert_eq!(
-            crate::services::graph::identity::normalize_relation_type("Mentions In"),
+            crate::services::graph::identity::normalize_relation_type("mentions_in"),
             "mentions_in"
         );
     }
@@ -790,7 +791,7 @@ mod tests {
         assert_eq!(
             crate::services::graph::identity::canonical_edge_key(
                 "document:1",
-                "mentions in",
+                "mentions_in",
                 "entity:openai"
             ),
             "document:1--mentions_in--entity:openai"

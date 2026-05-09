@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
+use ironrag_contracts::documents::{DocumentReadiness, DocumentStatus};
 use uuid::Uuid;
 
 use crate::{
@@ -186,7 +187,7 @@ impl ContentService {
     ///      and the effective `knowledge_revision` readiness states
     ///      (text_state / graph_state / …) needed to derive the canonical
     ///      readiness bucket.
-    ///   3. Derives the canonical `status` and `readiness` strings
+    ///   3. Derives the canonical `status` and `readiness` enums
     ///      server-side so every client agrees on the same vocabulary.
     ///
     /// Net: two round-trips per page regardless of library size, instead of
@@ -219,6 +220,8 @@ impl ContentService {
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
 
+        let status_filter_values =
+            status_filter.iter().map(|status| status.as_str().to_string()).collect::<Vec<_>>();
         let page = content_repository::list_document_page_rows(
             &state.persistence.postgres,
             library.id,
@@ -228,7 +231,7 @@ impl ContentService {
             search.as_deref(),
             sort,
             sort_desc,
-            &status_filter,
+            &status_filter_values,
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1240,7 +1243,7 @@ impl ContentService {
                 .as_ref()
                 .and_then(|handle| handle.async_operation.as_ref())
                 .filter(|operation| operation.id == operation_id)
-                .map(|operation| operation.status == ASYNC_OP_STATUS_FAILED)
+                .map(|operation| operation.status.as_str() == ASYNC_OP_STATUS_FAILED)
         }) == Some(true);
 
         if !(job_failed || attempt_failed || async_operation_failed) {
@@ -1336,16 +1339,19 @@ impl ContentService {
             .arango_document_store
             .list_revisions_by_document(document_id)
             .await
-            .unwrap_or_default();
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         for revision in &revisions {
-            if let Err(e) =
-                state.arango_document_store.delete_chunks_by_revision(revision.revision_id).await
+            if let Err(e) = state
+                .canonical_services
+                .knowledge
+                .delete_revision_chunks(state, revision.revision_id)
+                .await
             {
                 tracing::warn!(
                     %document_id,
                     revision_id = %revision.revision_id,
                     ?e,
-                    "failed to delete ArangoDB chunks for deleted document"
+                    "failed to delete ArangoDB chunks and vectors for deleted document"
                 );
             }
             if let Err(e) = state
@@ -1550,7 +1556,7 @@ pub struct ListDocumentsPageCommand {
     /// Server-side status filter. Empty = no filter. Values must be one of
     /// `canceled`, `failed`, `processing`, `queued`, `ready` — matching the
     /// canonical `derived_status` column in `list_document_page_rows`.
-    pub status_filter: Vec<String>,
+    pub status_filter: Vec<DocumentStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -1563,8 +1569,8 @@ pub struct ContentDocumentListEntry {
     pub file_size: Option<i64>,
     pub uploaded_at: DateTime<Utc>,
     pub document_state: String,
-    pub status: String,
-    pub readiness: String,
+    pub status: DocumentStatus,
+    pub readiness: DocumentReadiness,
     pub stage: Option<String>,
     pub processing_started_at: Option<DateTime<Utc>>,
     pub processing_finished_at: Option<DateTime<Utc>>,
@@ -1597,7 +1603,7 @@ pub struct ContentDocumentListPageResult {
 /// Derives a `ContentDocumentListEntry` from the joined Postgres row and the
 /// (optional) ArangoDB knowledge-document + effective-revision rows for the
 /// same document. This is the single canonical place where document list
-/// status / readiness strings are computed — both the list handler and the
+/// status / readiness enums are computed — both the list handler and the
 /// library summary aggregator go through it so there is no drift between
 /// surfaces.
 fn build_document_list_entry(
@@ -1648,8 +1654,10 @@ fn build_document_list_entry(
             typed_fact_count: None,
         }))
     };
-    let readiness =
-        classification.as_ref().map(|state| state.readiness_kind.as_str()).unwrap_or("processing");
+    let readiness = classification
+        .as_ref()
+        .map(|state| state.readiness_kind)
+        .unwrap_or(DocumentReadiness::Processing);
 
     // Status derivation MUST mirror `DERIVED_STATUS_CASE_SQL` in
     // content_repository.rs — that CASE drives the status filter on the
@@ -1663,30 +1671,35 @@ fn build_document_list_entry(
     let status_hard_failed =
         mutation_failed || job_failed || (revision_hard_failed && !revision_text_ready);
     let status = if status_hard_failed {
-        "failed"
+        DocumentStatus::Failed
     } else if row.job_queue_state.as_deref() == Some("leased") {
         // list path does not carry activity_status; surface as `processing`
         // and let the inspector refine the blocked/retrying/stalled split.
-        "processing"
-    } else if matches!(readiness, "graph_ready" | "graph_sparse" | "readable") {
-        "ready"
+        DocumentStatus::Processing
+    } else if matches!(
+        readiness,
+        DocumentReadiness::GraphReady
+            | DocumentReadiness::GraphSparse
+            | DocumentReadiness::Readable
+    ) {
+        DocumentStatus::Ready
     } else if row.job_queue_state.as_deref() == Some("canceled")
         || row.mutation_state.as_deref() == Some("canceled")
     {
-        "canceled"
+        DocumentStatus::Canceled
     } else if row.job_queue_state.as_deref() == Some("queued") {
-        "queued"
+        DocumentStatus::Queued
     } else if mutation_inflight || job_inflight {
-        "processing"
+        DocumentStatus::Processing
     } else if row.job_queue_state.as_deref() == Some("completed") {
         // zombie completion — job terminal but readiness never went green
-        "failed"
+        DocumentStatus::Failed
     } else {
-        "queued"
+        DocumentStatus::Queued
     };
 
     // Visible name: folder-backed uploads with a relative `external_key`
-    // intentionally surface that canonical path; legacy uploads and all
+    // intentionally surface that canonical path; older uploads and all
     // non-file sources keep the existing filename/title-derived chain.
     let file_name_from_knowledge =
         knowledge_document.and_then(|doc| doc.file_name.clone()).filter(|name| !name.is_empty());
@@ -1734,7 +1747,7 @@ fn build_document_list_entry(
     // processing_started_at: the first claim (attempt started) is the only
     // truthful anchor — mirrors the frontend "claimedAt" logic.
     let processing_started_at = row.attempt_started_at;
-    let processing_finished_at = if status == "processing" {
+    let processing_finished_at = if status == DocumentStatus::Processing {
         None
     } else {
         row.job_completed_at.or(row.attempt_finished_at)
@@ -1752,8 +1765,8 @@ fn build_document_list_entry(
         file_size,
         uploaded_at: row.created_at,
         document_state: row.document_state.clone(),
-        status: status.to_string(),
-        readiness: readiness.to_string(),
+        status,
+        readiness,
         stage,
         processing_started_at,
         processing_finished_at,
@@ -1785,6 +1798,7 @@ mod tests {
         infra::repositories::content_repository::ContentDocumentListRow,
     };
     use chrono::Utc;
+    use ironrag_contracts::documents::{DocumentReadiness, DocumentStatus};
     use rust_decimal::Decimal;
     use uuid::Uuid;
 
@@ -1871,8 +1885,8 @@ mod tests {
 
         let entry = build_document_list_entry(&row, None, Some(&revision));
 
-        assert_eq!(entry.status, "ready");
-        assert_eq!(entry.readiness, "readable");
+        assert_eq!(entry.status, DocumentStatus::Ready);
+        assert_eq!(entry.readiness, DocumentReadiness::Readable);
     }
 
     #[test]
@@ -1882,8 +1896,8 @@ mod tests {
 
         let entry = build_document_list_entry(&row, None, Some(&revision));
 
-        assert_eq!(entry.status, "ready");
-        assert_eq!(entry.readiness, "readable");
+        assert_eq!(entry.status, DocumentStatus::Ready);
+        assert_eq!(entry.readiness, DocumentReadiness::Readable);
     }
 
     #[test]

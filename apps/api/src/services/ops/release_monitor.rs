@@ -3,27 +3,17 @@ use std::{sync::Arc, time::Duration};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::header::{ACCEPT, USER_AGENT};
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 const RELEASE_CHECK_TIMEOUT_SECONDS: u64 = 5;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ReleaseUpdateStatus {
     UpToDate,
     UpdateAvailable,
     Unknown,
-}
-
-impl ReleaseUpdateStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::UpToDate => "up_to_date",
-            Self::UpdateAvailable => "update_available",
-            Self::Unknown => "unknown",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +33,7 @@ pub struct ReleaseMonitorService {
     cache: Arc<RwLock<Option<ReleaseUpdateSnapshot>>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct GithubTagPayload {
     name: String,
 }
@@ -115,15 +105,17 @@ async fn fetch_release_update(
         .timeout(Duration::from_secs(RELEASE_CHECK_TIMEOUT_SECONDS))
         .build()?;
 
-    let tags = client
-        .get(release_tags_api_url(repository))
-        .header(ACCEPT, "application/vnd.github+json")
-        .header(USER_AGENT, format!("IronRAG/{current_version}"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Vec<GithubTagPayload>>()
-        .await?;
+    let tags = crate::observability::inject_trace_context(
+        client
+            .get(release_tags_api_url(repository))
+            .header(ACCEPT, "application/vnd.github+json")
+            .header(USER_AGENT, format!("IronRAG/{current_version}")),
+    )
+    .send()
+    .await?
+    .error_for_status()?
+    .json::<Vec<GithubTagPayload>>()
+    .await?;
 
     let checked_at = Utc::now();
     let latest = select_latest_release_version(tags.iter().map(|tag| tag.name.as_str()));

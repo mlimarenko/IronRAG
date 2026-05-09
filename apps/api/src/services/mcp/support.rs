@@ -17,7 +17,7 @@ const EXCERPT_CONTEXT_BEFORE: usize = 80;
 const EXCERPT_CONTEXT_AFTER: usize = 200;
 const EXCERPT_BASE_RELEVANCE_SCORE: f64 = 0.7;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpContinuationPayload {
     pub(crate) document_id: Uuid,

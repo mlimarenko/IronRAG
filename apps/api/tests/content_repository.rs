@@ -242,6 +242,8 @@ async fn content_repository_persists_logical_document_revision_head_and_chunks()
                 token_count: Some(3),
                 normalized_text: "hello world.",
                 text_checksum: "sha256:chunk-1",
+                occurred_at: None,
+                occurred_until: None,
             },
         )
         .await
@@ -256,6 +258,8 @@ async fn content_repository_persists_logical_document_revision_head_and_chunks()
                 token_count: Some(4),
                 normalized_text: "second segment.",
                 text_checksum: "sha256:chunk-2",
+                occurred_at: None,
+                occurred_until: None,
             },
         )
         .await

@@ -2,6 +2,7 @@ pub(crate) mod agent_loop;
 pub(crate) mod assistant_grounding;
 pub mod assistant_prompt;
 pub mod compiler;
+pub mod error;
 pub(super) mod execution;
 pub(crate) mod latest_versions;
 pub mod llm_context_debug;

@@ -267,8 +267,8 @@ fn normalize_verification_literal(value: &str) -> String {
         if ch == '\\'
             && let Some(next) = chars.peek().copied()
             && is_markdown_escaped_literal_punctuation(next)
+            && let Some(escaped) = chars.next()
         {
-            let escaped = chars.next().expect("peeked char must exist");
             normalized.extend(escaped.to_lowercase());
             continue;
         }
@@ -282,9 +282,9 @@ where
     I: Iterator<Item = char> + Clone,
 {
     let mut entity = String::new();
-    let mut probe = chars.clone();
+    let probe = chars.clone();
     let mut saw_semicolon = false;
-    while let Some(next) = probe.next() {
+    for next in probe {
         if next == ';' {
             saw_semicolon = true;
             break;

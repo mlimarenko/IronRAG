@@ -949,10 +949,15 @@ impl FromRequestParts<AppState> for AuthContext {
         parts: &mut Parts,
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let request_auth = parts.extensions.get::<super::middleware::auth::RequestAuth>().cloned();
         let headers = parts.headers.clone();
         let state = state.clone();
 
         async move {
+            if let Some(request_auth) = request_auth {
+                return request_auth.required_context();
+            }
+
             resolve_optional_auth_context_from_headers(&state, &headers)
                 .await?
                 .ok_or(ApiError::Unauthorized)

@@ -93,17 +93,8 @@ pub(crate) fn build_graph_extraction_prompt_plan(
         "You are a knowledge graph extraction expert. Your job is to extract structured entities and relationships from a document chunk to build a rich, queryable knowledge graph.\n\n\
 Extract ALL meaningful entities: named things (people, organizations, artifacts, natural phenomena), typed concepts (algorithms, patterns, paradigms), processes (methods, workflows), and measurable attributes (metrics, parameters, configuration values) that appear in the text.\n\n\
 For each entity, determine the single best type from the entity type reference below.\n\n\
-Extract ALL relationships between entities. Use the most specific relation type from the catalog. NEVER use \"mentions\" when a more specific type exists. For example:\n\
-- \"X uses Y\" → uses (not mentions)\n\
-- \"X depends on Y\" → depends_on (not mentions)\n\
-- \"X is built with Y\" → uses or builds_on (not mentions)\n\
-- \"X authenticates via Y\" → authenticates (not mentions)\n\
-- \"X returns Y\" → returns (not mentions)\n\
-- \"X implements Y\" → implements (not mentions)\n\
-- \"X contains Y\" → contains (not mentions)\n\
-- \"X is a type of Y\" → is_a (not mentions)\n\
-Only use \"mentions\" for truly tangential references where the text names something without describing any functional relationship.\n\n\
-Resolve coreferences: when a pronoun or short anaphoric reference (e.g. an article-prefixed noun like \"the system\", \"the API\", \"the framework\") points back to a previously named entity, resolve it to that entity's full canonical name. Do not extract pronouns, articles, or abbreviations as separate entities.\n\n\
+Extract ALL relationships between entities. Use the most specific relation type from the catalog. Use `mentions` only for tangential references where the source names an entity without stating a functional relationship.\n\n\
+Resolve coreferences only when the referenced entity is unambiguous in the same prepared chunk segment. Do not extract generic references, pronouns, articles, or abbreviations as separate entities.\n\n\
 SOURCE WRITING PRESERVATION (critical):\n\
 - Every `label`, `alias`, `source_label`, `target_label`, and textual `summary` MUST preserve the writing system and language used by the source chunk text.\n\
 - NEVER transliterate, translate, phonetically transcribe, or otherwise convert source text from one writing system to another.\n\
@@ -125,18 +116,15 @@ SOURCE WRITING PRESERVATION (critical):\n\
 - entity: Catch-all for named things that do not fit any other type. Always prefer a more specific type above.".to_string(),
     ));
     sections.push((
-        "examples".to_string(),
-        "Example 1 - API documentation chunk:\n\
-Input: \"FastAPI uses Pydantic for data validation. When you declare a parameter with a type annotation, FastAPI automatically validates the input and returns a 422 status code if validation fails.\"\n\
-Output: {\"entities\":[{\"label\":\"FastAPI\",\"node_type\":\"artifact\",\"sub_type\":\"framework\",\"aliases\":[],\"summary\":\"Python web framework with automatic data validation\"},{\"label\":\"Pydantic\",\"node_type\":\"artifact\",\"sub_type\":\"library\",\"aliases\":[],\"summary\":\"Data validation library used by FastAPI\"},{\"label\":\"422\",\"node_type\":\"attribute\",\"sub_type\":\"http_status_code\",\"aliases\":[\"422 Unprocessable Entity\"],\"summary\":\"HTTP status code returned when validation fails\"}],\"relations\":[{\"source_label\":\"FastAPI\",\"target_label\":\"Pydantic\",\"relation_type\":\"uses\",\"summary\":\"FastAPI uses Pydantic for data validation\"},{\"source_label\":\"FastAPI\",\"target_label\":\"422\",\"relation_type\":\"returns\",\"summary\":\"Returns 422 when input validation fails\"}]}\n\n\
-Example 2 - Infrastructure chunk:\n\
-Input: \"The auth-service runs on port 8001 and depends on PostgreSQL for session storage. It authenticates users via JWT tokens signed with RS256.\"\n\
-Output: {\"entities\":[{\"label\":\"auth-service\",\"node_type\":\"artifact\",\"sub_type\":\"microservice\",\"aliases\":[],\"summary\":\"Authentication service on port 8001\"},{\"label\":\"PostgreSQL\",\"node_type\":\"artifact\",\"sub_type\":\"database\",\"aliases\":[\"Postgres\"],\"summary\":\"Database used for session storage\"},{\"label\":\"JWT\",\"node_type\":\"artifact\",\"sub_type\":\"token_format\",\"aliases\":[\"JSON Web Token\"],\"summary\":\"Token format for authentication\"},{\"label\":\"RS256\",\"node_type\":\"artifact\",\"sub_type\":\"signing_algorithm\",\"aliases\":[],\"summary\":\"RSA-SHA256 signing algorithm\"}],\"relations\":[{\"source_label\":\"auth-service\",\"target_label\":\"PostgreSQL\",\"relation_type\":\"depends_on\",\"summary\":\"Uses PostgreSQL for session storage\"},{\"source_label\":\"auth-service\",\"target_label\":\"JWT\",\"relation_type\":\"authenticates\",\"summary\":\"Authenticates users via JWT tokens\"},{\"source_label\":\"JWT\",\"target_label\":\"RS256\",\"relation_type\":\"uses\",\"summary\":\"Tokens signed with RS256 algorithm\"}]}".to_string(),
+        "example".to_string(),
+        "Example - symbolic chunk:\n\
+Input: \"component_alpha relation=uses target=library_beta; component_alpha relation=returns target=status_422; component_alpha relation=records target=audit_event_7.\"\n\
+Output: {\"entities\":[{\"label\":\"component_alpha\",\"node_type\":\"artifact\",\"sub_type\":\"component\",\"aliases\":[],\"summary\":\"component_alpha\"},{\"label\":\"library_beta\",\"node_type\":\"artifact\",\"sub_type\":\"library\",\"aliases\":[],\"summary\":\"library_beta\"},{\"label\":\"status_422\",\"node_type\":\"attribute\",\"sub_type\":\"status_code\",\"aliases\":[],\"summary\":\"status_422\"},{\"label\":\"audit_event_7\",\"node_type\":\"event\",\"sub_type\":null,\"aliases\":[],\"summary\":\"audit_event_7\"}],\"relations\":[{\"source_label\":\"component_alpha\",\"target_label\":\"library_beta\",\"relation_type\":\"uses\",\"summary\":\"relation=uses target=library_beta\"},{\"source_label\":\"component_alpha\",\"target_label\":\"status_422\",\"relation_type\":\"returns\",\"summary\":\"relation=returns target=status_422\"},{\"source_label\":\"component_alpha\",\"target_label\":\"audit_event_7\",\"relation_type\":\"records\",\"summary\":\"relation=records target=audit_event_7\"}]}".to_string(),
     ));
     sections.push((
         "schema".to_string(),
         format!(
-            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, `summary`, and optionally `sub_type` (a freeform specialization within the type, e.g. framework, database, algorithm, enzyme, microservice, protocol). Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
+            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, `sub_type`, and `summary`. `sub_type` is a freeform specialization within the type (for example framework, database, algorithm, enzyme, microservice, protocol); use null when no concise specialization is available. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
             crate::services::graph::identity::canonical_relation_type_catalog().join(", ")
         ),
     ));
@@ -145,9 +133,10 @@ Output: {\"entities\":[{\"label\":\"auth-service\",\"node_type\":\"artifact\",\"
         "Do not include markdown fences or prose. If no grounded graph evidence exists, return {\"entities\":[],\"relations\":[]}.\n\
 Critical rules:\n\
 1. ALWAYS provide a non-empty summary for every entity and relation.\n\
-2. NEVER use 'mentions' when any specific relation type fits. Audit each relation: could it be uses, depends_on, contains, implements, returns, configures, extends, calls, or another specific type?\n\
-3. Extract the entity's PRIMARY role or purpose in the summary, not just its name.\n\
-4. When the text describes a capability, feature, or behavior, model it as a relation (enables, provides, supports) not just a mention.".to_string(),
+2. NEVER use `mentions` when any specific catalog relation type fits the source evidence.\n\
+3. When the source sentence carries a concrete action whose normalized snake_case predicate exists in the relation catalog, use that catalog predicate and keep the sentence's relation-specific qualifiers in the summary.\n\
+4. Extract the entity's PRIMARY role or purpose in the summary, not just its name.\n\
+5. When the text describes a capability, feature, or behavior, model it as a relation (enables, provides, supports) not just a mention.".to_string(),
     ));
     sections.push((
         "document".to_string(),
@@ -380,14 +369,7 @@ fn render_graph_extraction_technical_facts(
     (!rendered.is_empty()).then_some(rendered)
 }
 
-#[cfg(test)]
-pub(crate) fn graph_extraction_response_format(provider_kind: &str) -> serde_json::Value {
-    if provider_kind == "deepseek" {
-        return serde_json::json!({
-            "type": "json_object"
-        });
-    }
-
+pub(crate) fn graph_extraction_response_format() -> serde_json::Value {
     serde_json::json!({
         "type": "json_schema",
         "json_schema": {
@@ -412,9 +394,10 @@ pub(crate) fn graph_extraction_response_format(provider_kind: &str) -> serde_jso
                                     "type": "array",
                                     "items": { "type": "string" }
                                 },
+                                "sub_type": { "type": ["string", "null"] },
                                 "summary": { "type": "string" }
                             },
-                            "required": ["label", "node_type", "aliases", "summary"]
+                            "required": ["label", "node_type", "aliases", "sub_type", "summary"]
                         }
                     },
                     "relations": {

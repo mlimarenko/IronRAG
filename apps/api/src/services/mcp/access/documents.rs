@@ -1,3 +1,4 @@
+use ironrag_contracts::documents::DocumentReadiness;
 use serde_json::json;
 use tracing::warn;
 use uuid::Uuid;
@@ -222,7 +223,7 @@ pub async fn search_documents(
                 .get_document(state, accumulator.document_id)
                 .await?;
             let readiness_summary = content_summary.readiness_summary.ok_or(ApiError::Internal)?;
-            let readability_state = readability_state_from_kind(&readiness_summary.readiness_kind);
+            let readability_state = readability_state_from_kind(readiness_summary.readiness_kind);
             if !include_unreadable && readability_state != McpReadabilityState::Readable {
                 continue;
             }
@@ -246,7 +247,7 @@ pub async fn search_documents(
                 excerpt_end_offset: accumulator.excerpt_end_offset,
                 suggested_start_offset: accumulator.suggested_start_offset,
                 readability_state,
-                readiness_kind: readiness_summary.readiness_kind.clone(),
+                readiness_kind: readiness_summary.readiness_kind.as_str().to_string(),
                 graph_coverage_kind: readiness_summary.graph_coverage_kind.clone(),
                 status_reason,
                 chunk_references,
@@ -618,15 +619,15 @@ fn list_documents_matches_status_filter(
 
     match filter {
         "readable" => {
-            readability_state_from_kind(&readiness_summary.readiness_kind)
+            readability_state_from_kind(readiness_summary.readiness_kind)
                 == McpReadabilityState::Readable
         }
         "processing" => {
-            readability_state_from_kind(&readiness_summary.readiness_kind)
+            readability_state_from_kind(readiness_summary.readiness_kind)
                 == McpReadabilityState::Processing
         }
         "failed" => {
-            readability_state_from_kind(&readiness_summary.readiness_kind)
+            readability_state_from_kind(readiness_summary.readiness_kind)
                 == McpReadabilityState::Failed
         }
         _ => false,
@@ -768,7 +769,7 @@ pub(crate) async fn resolve_document_state(
             .await?;
             let status_reason = readable_status_reason(&readiness_summary, &grounding);
             (
-                readability_state_from_kind(&readiness_summary.readiness_kind),
+                readability_state_from_kind(readiness_summary.readiness_kind),
                 status_reason,
                 revision.normalized_text.clone(),
                 chunk_references,
@@ -779,7 +780,7 @@ pub(crate) async fn resolve_document_state(
             )
         }
         Some(revision) if revision.text_state == "failed" => (
-            readability_state_from_kind(&readiness_summary.readiness_kind),
+            readability_state_from_kind(readiness_summary.readiness_kind),
             Some("latest readable revision extraction failed".to_string()),
             None,
             Vec::new(),
@@ -789,7 +790,7 @@ pub(crate) async fn resolve_document_state(
             Vec::new(),
         ),
         _ if knowledge_document.active_revision_id.is_some() => (
-            readability_state_from_kind(&readiness_summary.readiness_kind),
+            readability_state_from_kind(readiness_summary.readiness_kind),
             Some("latest revision is still being extracted".to_string()),
             None,
             Vec::new(),
@@ -799,7 +800,7 @@ pub(crate) async fn resolve_document_state(
             Vec::new(),
         ),
         _ => (
-            readability_state_from_kind(&readiness_summary.readiness_kind),
+            readability_state_from_kind(readiness_summary.readiness_kind),
             Some("document has no readable revision yet".to_string()),
             None,
             Vec::new(),
@@ -815,7 +816,7 @@ pub(crate) async fn resolve_document_state(
         library,
         latest_revision_id,
         readability_state,
-        readiness_kind: readiness_summary.readiness_kind,
+        readiness_kind: readiness_summary.readiness_kind.as_str().to_string(),
         graph_coverage_kind: readiness_summary.graph_coverage_kind,
         status_reason,
         mime_type: readable_revision_mime_type,
@@ -911,6 +912,7 @@ async fn load_source_visual_description(
         &binding.model_name,
         binding.api_key.as_deref().unwrap_or_default(),
         binding.provider_base_url.as_deref(),
+        &binding.extra_parameters_json,
         mime_type,
         &file_bytes,
     )
@@ -1223,7 +1225,7 @@ pub(crate) fn readable_status_reason(
     readiness_summary: &crate::domains::content::DocumentReadinessSummary,
     grounding: &McpRevisionGroundingReferences,
 ) -> Option<String> {
-    if readiness_summary.readiness_kind == "readable" {
+    if readiness_summary.readiness_kind == DocumentReadiness::Readable {
         return Some(
             "document text is readable, but canonical preparation and graph extraction are still processing"
                 .to_string(),
@@ -1250,12 +1252,15 @@ pub(crate) fn readable_status_reason(
         )
 }
 
-pub(crate) fn readability_state_from_kind(readiness_kind: &str) -> McpReadabilityState {
+pub(crate) fn readability_state_from_kind(
+    readiness_kind: DocumentReadiness,
+) -> McpReadabilityState {
     match readiness_kind {
-        "failed" => McpReadabilityState::Failed,
-        "processing" => McpReadabilityState::Processing,
-        "readable" | "graph_sparse" | "graph_ready" => McpReadabilityState::Readable,
-        _ => McpReadabilityState::Unavailable,
+        DocumentReadiness::Failed => McpReadabilityState::Failed,
+        DocumentReadiness::Processing => McpReadabilityState::Processing,
+        DocumentReadiness::Readable
+        | DocumentReadiness::GraphSparse
+        | DocumentReadiness::GraphReady => McpReadabilityState::Readable,
     }
 }
 
@@ -1288,6 +1293,7 @@ mod tests {
         shared::versioning::dotted_version_key,
     };
     use chrono::Utc;
+    use ironrag_contracts::documents::DocumentReadiness;
     use uuid::Uuid;
 
     #[test]
@@ -1317,9 +1323,18 @@ mod tests {
 
     #[test]
     fn readability_state_treats_graph_ready_as_readable() {
-        assert_eq!(readability_state_from_kind("graph_ready"), McpReadabilityState::Readable);
-        assert_eq!(readability_state_from_kind("graph_sparse"), McpReadabilityState::Readable);
-        assert_eq!(readability_state_from_kind("readable"), McpReadabilityState::Readable);
+        assert_eq!(
+            readability_state_from_kind(DocumentReadiness::GraphReady),
+            McpReadabilityState::Readable
+        );
+        assert_eq!(
+            readability_state_from_kind(DocumentReadiness::GraphSparse),
+            McpReadabilityState::Readable
+        );
+        assert_eq!(
+            readability_state_from_kind(DocumentReadiness::Readable),
+            McpReadabilityState::Readable
+        );
     }
 
     #[test]
@@ -1327,7 +1342,7 @@ mod tests {
         let graph_ready = DocumentReadinessSummary {
             document_id: Uuid::nil(),
             active_revision_id: None,
-            readiness_kind: "graph_ready".to_string(),
+            readiness_kind: DocumentReadiness::GraphReady,
             activity_status: RuntimeDocumentActivityStatus::Ready,
             stalled_reason: None,
             preparation_state: "ready".to_string(),
@@ -1340,7 +1355,7 @@ mod tests {
         let graph_sparse = DocumentReadinessSummary {
             document_id: Uuid::nil(),
             active_revision_id: None,
-            readiness_kind: "graph_sparse".to_string(),
+            readiness_kind: DocumentReadiness::GraphSparse,
             activity_status: RuntimeDocumentActivityStatus::Ready,
             stalled_reason: None,
             preparation_state: "ready".to_string(),
@@ -1353,7 +1368,7 @@ mod tests {
         let readable = DocumentReadinessSummary {
             document_id: Uuid::nil(),
             active_revision_id: None,
-            readiness_kind: "readable".to_string(),
+            readiness_kind: DocumentReadiness::Readable,
             activity_status: RuntimeDocumentActivityStatus::Ready,
             stalled_reason: None,
             preparation_state: "ready".to_string(),

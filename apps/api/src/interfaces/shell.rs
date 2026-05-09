@@ -1,6 +1,15 @@
 use crate::{
     app::state::AppState,
-    domains::{ai::AiBindingPurpose, catalog::CatalogLifecycleState},
+    domains::{
+        ai::AiBindingPurpose,
+        catalog::CatalogLifecycleState,
+        provider_profiles::{
+            ProviderAuthScheme, ProviderBaseUrlMode, ProviderBaseUrlPolicy, ProviderCapabilities,
+            ProviderCapabilityState, ProviderCredentialPolicy, ProviderCredentialValidationMode,
+            ProviderModelDiscovery, ProviderModelDiscoveryMode, ProviderRuntimeProfile,
+            ProviderStructuredOutputMode, ProviderTokenLimitParameter,
+        },
+    },
     infra::repositories::iam_repository,
     interfaces::http::{
         auth::AuthContext,
@@ -13,6 +22,21 @@ use ironrag_contracts::{
     auth::{
         BootstrapAiSetup, BootstrapBindingPurpose, BootstrapCredentialSource,
         BootstrapProviderPreset, BootstrapProviderPresetBundle, BootstrapStatus, UiLocale,
+    },
+    provider::{
+        ProviderAuthScheme as ContractProviderAuthScheme,
+        ProviderBaseUrlMode as ContractProviderBaseUrlMode,
+        ProviderBaseUrlPolicy as ContractProviderBaseUrlPolicy,
+        ProviderCapabilities as ContractProviderCapabilities,
+        ProviderCapabilityState as ContractProviderCapabilityState,
+        ProviderCredentialPolicy as ContractProviderCredentialPolicy,
+        ProviderCredentialValidationMode as ContractProviderCredentialValidationMode,
+        ProviderModelDiscovery as ContractProviderModelDiscovery,
+        ProviderModelDiscoveryMode as ContractProviderModelDiscoveryMode,
+        ProviderModelDiscoveryPath as ContractProviderModelDiscoveryPath,
+        ProviderRuntimeProfile as ContractProviderRuntimeProfile,
+        ProviderStructuredOutputMode as ContractProviderStructuredOutputMode,
+        ProviderTokenLimitParameter as ContractProviderTokenLimitParameter,
     },
     shell::{LibrarySummary, ShellBootstrap, ShellViewer, WorkspaceSummary},
 };
@@ -88,21 +112,27 @@ pub(crate) async fn build_shell_bootstrap(
         active_workspace_id,
         libraries: libraries
             .into_iter()
-            .map(|library| LibrarySummary {
-                id: library.id,
-                workspace_id: library.workspace_id,
-                slug: library.slug,
-                name: library.display_name,
-                description: library.description,
-                lifecycle_state: catalog_lifecycle_label(&library.lifecycle_state).to_string(),
-                ingestion_ready: library.ingestion_readiness.ready,
-                missing_binding_purposes: library
-                    .ingestion_readiness
+            .map(|library| {
+                let ingestion_ready = library.ingestion_readiness.ready;
+                let query_ready =
+                    shell_library_query_ready(&library.runtime_readiness.missing_binding_purposes);
+                let missing_binding_purposes = library
+                    .runtime_readiness
                     .missing_binding_purposes
                     .into_iter()
-                    .filter_map(map_bootstrap_binding_purpose)
-                    .collect(),
-                query_ready: None,
+                    .map(map_bootstrap_binding_purpose)
+                    .collect();
+                LibrarySummary {
+                    id: library.id,
+                    workspace_id: library.workspace_id,
+                    slug: library.slug,
+                    name: library.display_name,
+                    description: library.description,
+                    lifecycle_state: catalog_lifecycle_label(&library.lifecycle_state).to_string(),
+                    ingestion_ready,
+                    missing_binding_purposes,
+                    query_ready: Some(query_ready),
+                }
             })
             .collect(),
         active_library_id,
@@ -117,6 +147,149 @@ pub(crate) fn parse_ui_locale(locale: &str) -> UiLocale {
     match locale.trim().to_ascii_lowercase().as_str() {
         "ru" => UiLocale::Ru,
         _ => UiLocale::En,
+    }
+}
+
+fn map_contract_provider_auth_scheme(value: ProviderAuthScheme) -> ContractProviderAuthScheme {
+    match value {
+        ProviderAuthScheme::Bearer => ContractProviderAuthScheme::Bearer,
+        ProviderAuthScheme::RawAuthorization => ContractProviderAuthScheme::RawAuthorization,
+    }
+}
+
+fn map_contract_provider_token_limit_parameter(
+    value: ProviderTokenLimitParameter,
+) -> ContractProviderTokenLimitParameter {
+    match value {
+        ProviderTokenLimitParameter::MaxCompletionTokens => {
+            ContractProviderTokenLimitParameter::MaxCompletionTokens
+        }
+        ProviderTokenLimitParameter::MaxTokens => ContractProviderTokenLimitParameter::MaxTokens,
+    }
+}
+
+fn map_contract_provider_structured_output_mode(
+    value: ProviderStructuredOutputMode,
+) -> ContractProviderStructuredOutputMode {
+    match value {
+        ProviderStructuredOutputMode::JsonSchema => {
+            ContractProviderStructuredOutputMode::JsonSchema
+        }
+        ProviderStructuredOutputMode::JsonObject => {
+            ContractProviderStructuredOutputMode::JsonObject
+        }
+        ProviderStructuredOutputMode::Unsupported => {
+            ContractProviderStructuredOutputMode::Unsupported
+        }
+    }
+}
+
+fn map_contract_provider_runtime_profile(
+    value: &ProviderRuntimeProfile,
+) -> ContractProviderRuntimeProfile {
+    ContractProviderRuntimeProfile {
+        kind: value.kind.clone(),
+        auth_scheme: map_contract_provider_auth_scheme(value.auth_scheme),
+        token_limit_parameter: map_contract_provider_token_limit_parameter(
+            value.token_limit_parameter,
+        ),
+        structured_output: map_contract_provider_structured_output_mode(value.structured_output),
+        chat_path: value.chat_path.clone(),
+        embeddings_path: value.embeddings_path.clone(),
+        models_path: value.models_path.clone(),
+    }
+}
+
+fn map_contract_provider_base_url_mode(value: ProviderBaseUrlMode) -> ContractProviderBaseUrlMode {
+    match value {
+        ProviderBaseUrlMode::Fixed => ContractProviderBaseUrlMode::Fixed,
+        ProviderBaseUrlMode::Required => ContractProviderBaseUrlMode::Required,
+        ProviderBaseUrlMode::Optional => ContractProviderBaseUrlMode::Optional,
+    }
+}
+
+fn map_contract_provider_credential_validation_mode(
+    value: ProviderCredentialValidationMode,
+) -> ContractProviderCredentialValidationMode {
+    match value {
+        ProviderCredentialValidationMode::ChatRoundTrip => {
+            ContractProviderCredentialValidationMode::ChatRoundTrip
+        }
+        ProviderCredentialValidationMode::ModelList => {
+            ContractProviderCredentialValidationMode::ModelList
+        }
+        ProviderCredentialValidationMode::None => ContractProviderCredentialValidationMode::None,
+    }
+}
+
+fn map_contract_provider_credential_policy(
+    value: &ProviderCredentialPolicy,
+) -> ContractProviderCredentialPolicy {
+    ContractProviderCredentialPolicy {
+        api_key_required: value.api_key_required,
+        base_url_required: value.base_url_required,
+        base_url_mode: map_contract_provider_base_url_mode(value.base_url_mode),
+        validation_mode: map_contract_provider_credential_validation_mode(value.validation_mode),
+    }
+}
+
+fn map_contract_provider_base_url_policy(
+    value: &ProviderBaseUrlPolicy,
+) -> ContractProviderBaseUrlPolicy {
+    ContractProviderBaseUrlPolicy {
+        allow_override: value.allow_override,
+        require_https: value.require_https,
+        allow_private_network: value.allow_private_network,
+        trim_suffixes: value.trim_suffixes.clone(),
+    }
+}
+
+fn map_contract_provider_model_discovery_mode(
+    value: ProviderModelDiscoveryMode,
+) -> ContractProviderModelDiscoveryMode {
+    match value {
+        ProviderModelDiscoveryMode::Shared => ContractProviderModelDiscoveryMode::Shared,
+        ProviderModelDiscoveryMode::Credential => ContractProviderModelDiscoveryMode::Credential,
+        ProviderModelDiscoveryMode::Unsupported => ContractProviderModelDiscoveryMode::Unsupported,
+    }
+}
+
+fn map_contract_provider_model_discovery(
+    value: &ProviderModelDiscovery,
+) -> ContractProviderModelDiscovery {
+    ContractProviderModelDiscovery {
+        mode: map_contract_provider_model_discovery_mode(value.mode),
+        paths: value
+            .paths
+            .iter()
+            .map(|path| ContractProviderModelDiscoveryPath {
+                capability_kind: path.capability_kind.clone(),
+                path: path.path.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn map_contract_provider_capability_state(
+    value: ProviderCapabilityState,
+) -> ContractProviderCapabilityState {
+    match value {
+        ProviderCapabilityState::Supported => ContractProviderCapabilityState::Supported,
+        ProviderCapabilityState::Unsupported => ContractProviderCapabilityState::Unsupported,
+        ProviderCapabilityState::Unknown => ContractProviderCapabilityState::Unknown,
+    }
+}
+
+fn map_contract_provider_capabilities(
+    value: &ProviderCapabilities,
+) -> ContractProviderCapabilities {
+    ContractProviderCapabilities {
+        chat: map_contract_provider_capability_state(value.chat),
+        embeddings: map_contract_provider_capability_state(value.embeddings),
+        vision: map_contract_provider_capability_state(value.vision),
+        streaming: map_contract_provider_capability_state(value.streaming),
+        tools: map_contract_provider_capability_state(value.tools),
+        model_discovery: map_contract_provider_capability_state(value.model_discovery),
     }
 }
 
@@ -140,22 +313,26 @@ pub(crate) fn to_bootstrap_contract(value: &BootstrapStatusOutcome) -> Bootstrap
                 default_base_url: bundle.default_base_url.clone(),
                 api_key_required: bundle.api_key_required,
                 base_url_required: bundle.base_url_required,
+                credential_policy: map_contract_provider_credential_policy(
+                    &bundle.credential_policy,
+                ),
+                base_url_policy: map_contract_provider_base_url_policy(&bundle.base_url_policy),
+                model_discovery: map_contract_provider_model_discovery(&bundle.model_discovery),
+                capabilities: map_contract_provider_capabilities(&bundle.capabilities),
+                runtime: map_contract_provider_runtime_profile(&bundle.runtime),
+                ui_hints: bundle.ui_hints.clone(),
                 presets: bundle
                     .presets
                     .iter()
-                    .filter_map(|preset| {
-                        map_bootstrap_binding_purpose(preset.binding_purpose).map(
-                            |binding_purpose| BootstrapProviderPreset {
-                                binding_purpose,
-                                model_catalog_id: preset.model_catalog_id,
-                                model_name: preset.model_name.clone(),
-                                preset_name: preset.preset_name.clone(),
-                                system_prompt: preset.system_prompt.clone(),
-                                temperature: preset.temperature,
-                                top_p: preset.top_p,
-                                max_output_tokens_override: preset.max_output_tokens_override,
-                            },
-                        )
+                    .map(|preset| BootstrapProviderPreset {
+                        binding_purpose: map_bootstrap_binding_purpose(preset.binding_purpose),
+                        model_catalog_id: preset.model_catalog_id,
+                        model_name: preset.model_name.clone(),
+                        preset_name: preset.preset_name.clone(),
+                        system_prompt: preset.system_prompt.clone(),
+                        temperature: preset.temperature,
+                        top_p: preset.top_p,
+                        max_output_tokens_override: preset.max_output_tokens_override,
                     })
                     .collect(),
             })
@@ -172,15 +349,55 @@ const fn catalog_lifecycle_label(value: &CatalogLifecycleState) -> &'static str 
     }
 }
 
-const fn map_bootstrap_binding_purpose(value: AiBindingPurpose) -> Option<BootstrapBindingPurpose> {
+fn shell_library_query_ready(missing: &[AiBindingPurpose]) -> bool {
+    !missing.iter().any(|purpose| {
+        matches!(
+            purpose,
+            AiBindingPurpose::QueryRetrieve
+                | AiBindingPurpose::QueryCompile
+                | AiBindingPurpose::QueryAnswer
+        )
+    })
+}
+
+const fn map_bootstrap_binding_purpose(value: AiBindingPurpose) -> BootstrapBindingPurpose {
     match value {
-        AiBindingPurpose::ExtractGraph => Some(BootstrapBindingPurpose::ExtractGraph),
-        AiBindingPurpose::EmbedChunk => Some(BootstrapBindingPurpose::EmbedChunk),
-        AiBindingPurpose::QueryCompile => Some(BootstrapBindingPurpose::QueryCompile),
-        AiBindingPurpose::QueryAnswer | AiBindingPurpose::QueryRetrieve => {
-            Some(BootstrapBindingPurpose::QueryAnswer)
-        }
-        AiBindingPurpose::Vision => Some(BootstrapBindingPurpose::Vision),
-        AiBindingPurpose::ExtractText => None,
+        AiBindingPurpose::ExtractText => BootstrapBindingPurpose::ExtractText,
+        AiBindingPurpose::ExtractGraph => BootstrapBindingPurpose::ExtractGraph,
+        AiBindingPurpose::EmbedChunk => BootstrapBindingPurpose::EmbedChunk,
+        AiBindingPurpose::QueryCompile => BootstrapBindingPurpose::QueryCompile,
+        AiBindingPurpose::QueryRetrieve => BootstrapBindingPurpose::QueryRetrieve,
+        AiBindingPurpose::QueryAnswer => BootstrapBindingPurpose::QueryAnswer,
+        AiBindingPurpose::Vision => BootstrapBindingPurpose::Vision,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_binding_purpose_mapping_preserves_provider_router_vocabulary() {
+        assert_eq!(
+            map_bootstrap_binding_purpose(AiBindingPurpose::ExtractText),
+            BootstrapBindingPurpose::ExtractText,
+        );
+        assert_eq!(
+            map_bootstrap_binding_purpose(AiBindingPurpose::QueryRetrieve),
+            BootstrapBindingPurpose::QueryRetrieve,
+        );
+        assert_eq!(
+            map_bootstrap_binding_purpose(AiBindingPurpose::QueryAnswer),
+            BootstrapBindingPurpose::QueryAnswer,
+        );
+    }
+
+    #[test]
+    fn shell_query_readiness_only_blocks_on_query_purposes() {
+        assert!(shell_library_query_ready(&[AiBindingPurpose::ExtractText]));
+        assert!(!shell_library_query_ready(&[AiBindingPurpose::QueryCompile]));
+        assert!(!shell_library_query_ready(&[AiBindingPurpose::QueryAnswer]));
+        assert!(!shell_library_query_ready(&[AiBindingPurpose::QueryRetrieve]));
+        assert!(shell_library_query_ready(&[]));
     }
 }

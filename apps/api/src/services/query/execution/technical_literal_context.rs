@@ -9,8 +9,7 @@ use super::technical_literals::{
     TechnicalLiteralIntent, detect_technical_literal_intent_from_query_ir,
     extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
     extract_prefix_literals, extract_url_literals, push_unique_limited,
-    question_mentions_pagination, select_document_balanced_chunks,
-    technical_literal_focus_keywords,
+    select_document_balanced_chunks, technical_literal_focus_keywords,
 };
 use super::types::RuntimeMatchedChunk;
 
@@ -52,13 +51,13 @@ pub(super) fn collect_technical_literal_groups(
 ) -> Vec<TechnicalLiteralDocumentGroup> {
     let intent: TechnicalLiteralIntent =
         detect_technical_literal_intent_from_query_ir(question, query_ir);
-    if !intent.any() {
+    if !intent.any() && !query_ir.is_exact_literal_technical() {
         return Vec::new();
     }
 
     let mut groups: Vec<TechnicalLiteralDocumentGroup> = Vec::new();
     let literal_focus_keywords = technical_literal_focus_keywords(question, Some(query_ir));
-    let pagination_requested = question_mentions_pagination(question);
+    let pagination_requested = false;
 
     for chunk in select_document_balanced_chunks(
         question,

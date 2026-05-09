@@ -6,7 +6,7 @@ pub(crate) const LATEST_VERSION_CHUNKS_PER_DOCUMENT: usize = 4;
 
 pub(crate) fn query_requests_latest_versions(ir: &QueryIR) -> bool {
     matches!(ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
-        && ir_target_types_include(ir, &["release", "version", "changelog", "change_log"])
+        && ir_target_types_include(ir, &["version"])
 }
 
 pub(crate) fn requested_latest_version_count(ir: &QueryIR) -> usize {
@@ -115,7 +115,7 @@ fn lexical_tokens(query: &str) -> Vec<String> {
 
 fn ir_target_types_include(ir: &QueryIR, tags: &[&str]) -> bool {
     ir.target_types.iter().any(|target_type| {
-        let normalized = target_type.trim().to_ascii_lowercase().replace('-', "_");
+        let normalized = target_type.trim().to_ascii_lowercase();
         tags.iter().any(|tag| normalized == *tag)
     })
 }

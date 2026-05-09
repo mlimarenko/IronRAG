@@ -914,6 +914,28 @@ pub async fn list_grants_by_principal(
     .await
 }
 
+pub async fn get_grant_by_id(
+    postgres: &PgPool,
+    grant_id: Uuid,
+) -> Result<Option<IamGrantRow>, sqlx::Error> {
+    sqlx::query_as::<_, IamGrantRow>(
+        "select
+            id,
+            principal_id,
+            resource_kind::text as resource_kind,
+            resource_id,
+            permission_kind::text as permission_kind,
+            granted_at,
+            granted_by_principal_id,
+            expires_at
+         from iam_grant
+         where id = $1",
+    )
+    .bind(grant_id)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn list_resolved_grants_by_principal(
     postgres: &PgPool,
     principal_id: Uuid,

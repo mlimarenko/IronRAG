@@ -7,12 +7,17 @@ use ironrag_backend::{
     services::ingest::structured_preparation::StructuredPreparationService,
     shared::extraction::structured_document::StructuredBlockKind,
 };
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn structured_preparation_preserves_semantic_blocks_and_chunk_ancestry() {
     let service = StructuredPreparationService::new();
+    let cancellation_token = CancellationToken::new();
     let prepared = service
-        .prepare_revision(structured_document_fixtures::canonical_prepare_command())
+        .prepare_revision(
+            structured_document_fixtures::canonical_prepare_command(),
+            &cancellation_token,
+        )
         .expect("fixture should prepare successfully");
 
     assert!(

@@ -250,7 +250,7 @@ pub async fn update_provider_credential(
         "update ai_provider_credential
          set label = $2,
              api_key = coalesce($3, api_key),
-             base_url = coalesce($4, base_url),
+             base_url = $4,
              credential_state = $5::ai_credential_state,
              updated_at = now()
          where id = $1

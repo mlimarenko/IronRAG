@@ -1,16 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeIngestionStatus {
     Queued,
     Processing,
     Ready,
-    ReadyNoGraph,
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeDocumentActivityStatus {
     Queued,
@@ -22,7 +21,7 @@ pub enum RuntimeDocumentActivityStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProviderFailureClass {
     InternalRequestInvalid,
@@ -33,7 +32,7 @@ pub enum RuntimeProviderFailureClass {
     RecoveredAfterRetry,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RuntimeProviderFailureDetail {
     pub failure_class: RuntimeProviderFailureClass,
     pub provider_kind: Option<String>,

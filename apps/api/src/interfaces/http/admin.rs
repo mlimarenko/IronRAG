@@ -25,8 +25,18 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/admin/surface", get(get_admin_surface))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/admin/surface",
+    tag = "admin",
+    operation_id = "getAdminSurface",
+    responses(
+        (status = 200, description = "Admin surface for the authenticated principal", body = AdminSurface),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
 #[tracing::instrument(level = "info", name = "http.get_admin_surface", skip_all)]
-async fn get_admin_surface(
+pub async fn get_admin_surface(
     auth: AuthContext,
     State(state): State<AppState>,
 ) -> Result<Json<AdminSurface>, ApiError> {

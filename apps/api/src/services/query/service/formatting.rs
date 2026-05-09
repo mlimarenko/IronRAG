@@ -442,10 +442,49 @@ pub(crate) fn map_entity_references(
         .collect()
 }
 
-/// Searches PostgreSQL `runtime_graph_node` by keyword overlap with the query
-/// text and returns ranked `QueryGraphNodeReference` entries.  This provides
-/// entity references when the ArangoDB `knowledge_entity` collection is empty.
-pub(crate) async fn search_pg_entity_references(
+pub(crate) async fn hydrate_entity_references(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    mut references: Vec<QueryGraphNodeReference>,
+) -> Vec<QueryGraphNodeReference> {
+    let node_ids = references.iter().map(|reference| reference.node_id).collect::<Vec<_>>();
+    if node_ids.is_empty() || projection_version <= 0 {
+        return references;
+    }
+
+    match graph_repo::list_admitted_runtime_graph_nodes_by_ids(
+        pool,
+        library_id,
+        projection_version,
+        &node_ids,
+    )
+    .await
+    {
+        Ok(rows) => {
+            let nodes_by_id = rows.into_iter().map(|row| (row.id, row)).collect::<HashMap<_, _>>();
+            for reference in &mut references {
+                if let Some(row) = nodes_by_id.get(&reference.node_id) {
+                    reference.label = row.label.clone();
+                    reference.entity_type = Some(row.node_type.clone());
+                    reference.summary = row.summary.clone();
+                }
+            }
+            references
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                library_id = %library_id,
+                projection_version,
+                "failed to hydrate graph entity references"
+            );
+            references
+        }
+    }
+}
+
+pub(crate) async fn search_runtime_graph_entity_references(
     pool: &sqlx::PgPool,
     library_id: Uuid,
     execution_id: Uuid,
@@ -478,7 +517,7 @@ pub(crate) async fn search_pg_entity_references(
                 error = %error,
                 library_id = %library_id,
                 execution_id = %execution_id,
-                "PostgreSQL entity reference fallback search failed"
+                "runtime graph entity reference search failed"
             );
             Vec::new()
         }
@@ -497,8 +536,51 @@ pub(crate) fn map_relation_references(
             edge_id: reference.relation_id,
             rank: reference.rank,
             score: reference.score,
+            relation_type: String::new(),
+            summary: None,
         })
         .collect()
+}
+
+pub(crate) async fn hydrate_relation_references(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    mut references: Vec<QueryGraphEdgeReference>,
+) -> Vec<QueryGraphEdgeReference> {
+    let edge_ids = references.iter().map(|reference| reference.edge_id).collect::<Vec<_>>();
+    if edge_ids.is_empty() || projection_version <= 0 {
+        return references;
+    }
+
+    match graph_repo::list_admitted_runtime_graph_edges_by_ids(
+        pool,
+        library_id,
+        projection_version,
+        &edge_ids,
+    )
+    .await
+    {
+        Ok(rows) => {
+            let edges_by_id = rows.into_iter().map(|row| (row.id, row)).collect::<HashMap<_, _>>();
+            for reference in &mut references {
+                if let Some(row) = edges_by_id.get(&reference.edge_id) {
+                    reference.relation_type = row.relation_type.clone();
+                    reference.summary = row.summary.clone();
+                }
+            }
+            references
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                library_id = %library_id,
+                projection_version,
+                "failed to hydrate graph relation references"
+            );
+            references
+        }
+    }
 }
 
 pub(crate) fn map_execution_runtime_summary(

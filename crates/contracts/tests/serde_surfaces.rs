@@ -1,4 +1,9 @@
+#![allow(missing_docs)]
+
 use chrono::{TimeZone, Utc};
+use rust_decimal as _;
+use serde as _;
+use utoipa as _;
 use uuid::Uuid;
 
 type JsonResult = serde_json::Result<()>;
@@ -14,8 +19,8 @@ use ironrag_contracts::{
         AssistantSessionListItem, AssistantStageItem, AssistantWorkspaceSurface,
     },
     auth::{
-        AuthenticatedSession, BootstrapStatus, LoginResponse, SessionMode, SessionResolveResponse,
-        SessionUser, UiLocale,
+        AuthenticatedSession, BootstrapBindingPurpose, BootstrapStatus, LoginResponse, SessionMode,
+        SessionResolveResponse, SessionUser, UiLocale,
     },
     diagnostics::{
         DegradedState, DiagnosticCounter, MessageLevel, OperatorWarning, SurfaceDiagnostics,
@@ -30,6 +35,7 @@ use ironrag_contracts::{
         GraphConvergenceStatus, GraphFilterState, GraphNode, GraphNodeType, GraphStatus,
         GraphSurface, GraphWorkbenchSurface,
     },
+    provider::ProviderRuntimeProfile,
     shell::{
         LibrarySummary, ShellBootstrap, ShellCapability, ShellRole, ShellViewer, WorkspaceSummary,
     },
@@ -69,6 +75,22 @@ fn session_resolve_response_uses_canonical_casing() -> JsonResult {
 }
 
 #[test]
+fn provider_runtime_profile_requires_structured_output() {
+    let result = serde_json::from_value::<ProviderRuntimeProfile>(serde_json::json!({
+        "kind": "openai_compatible",
+        "authScheme": "bearer",
+        "tokenLimitParameter": "max_tokens",
+        "chatPath": "/chat/completions",
+        "embeddingsPath": "/embeddings",
+        "modelsPath": "/models"
+    }));
+
+    assert!(result.is_err(), "provider runtime profile must fail loud without structuredOutput");
+    let error_message = result.err().map(|error| error.to_string()).unwrap_or_default();
+    assert!(error_message.contains("structuredOutput"));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
     let workspace_id = Uuid::from_u128(10);
@@ -100,7 +122,11 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
             description: None,
             lifecycle_state: "ready".to_string(),
             ingestion_ready: true,
-            missing_binding_purposes: Vec::new(),
+            missing_binding_purposes: vec![
+                BootstrapBindingPurpose::QueryRetrieve,
+                BootstrapBindingPurpose::QueryAnswer,
+                BootstrapBindingPurpose::ExtractText,
+            ],
             query_ready: Some(true),
         }],
         active_library_id: Some(library_id),
@@ -117,6 +143,10 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
     let shell_value = serde_json::to_value(&shell)?;
     assert!(shell_value.get("workspaceMemberships").is_some());
     assert!(shell_value.get("effectiveGrants").is_some());
+    assert_eq!(
+        shell_value["libraries"][0]["missingBindingPurposes"],
+        serde_json::json!(["query_retrieve", "query_answer", "extract_text"]),
+    );
 
     let graph = GraphSurface {
         library_id,

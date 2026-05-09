@@ -16,6 +16,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{sync::broadcast, task::JoinHandle, time};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -23,7 +24,12 @@ use crate::{
     app::state::AppState,
     infra::repositories::{content_repository, ingest_repository},
     services::{
-        content::service::{MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand},
+        content::service::{
+            MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand,
+            fail_revision_vector_graph_readiness, graph_extract_success_message,
+            graph_state_after_successful_extract,
+        },
+        ingest::cancellation::anyhow_is_cancelled,
         ingest::service::{
             FinalizeAttemptCommand, INGEST_STAGE_CHUNK_CONTENT, INGEST_STAGE_EMBED_CHUNK,
             INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH,
@@ -92,45 +98,51 @@ struct DeletedDocumentJobSkipped {
 
 /// Raised from inside the pipeline when the heartbeat observer notices that
 /// the job has been transitioned to `queue_state='canceled'` by the cancel
-/// endpoint (`cancel_jobs_for_document`). The outer execute handler converts
-/// this into a `canceled` attempt finalization and does **not** mark the job
-/// as `failed` — `queue_state` is already `canceled` and must be preserved.
+/// endpoint (`cancel_jobs_for_document`). The cancel path has already marked
+/// the job and leased attempt as canceled, so the worker only stops cleanly
+/// and must not rewrite the terminal cancellation state.
 #[derive(Debug, Error)]
 #[error("canonical ingest job {job_id} was canceled by user request")]
 struct JobCanceledByRequest {
     job_id: Uuid,
 }
 
-/// Shared abort flag observed by the pipeline. The heartbeat observer sets it
-/// to `true` the moment it reads `queue_state='canceled'` from the database;
-/// the pipeline calls `check_cancel` between stages to react.
-#[derive(Debug, Clone, Default)]
-pub(super) struct JobCancellationToken {
-    canceled: Arc<AtomicBool>,
+#[derive(Debug, Error)]
+#[error("canonical ingest job {job_id} stopped because worker shutdown was requested")]
+struct JobCanceledByShutdown {
+    job_id: Uuid,
 }
 
-impl JobCancellationToken {
-    fn new() -> Self {
-        Self { canceled: Arc::new(AtomicBool::new(false)) }
+fn job_cancellation_error(job_id: Uuid, user_cancel_requested: &AtomicBool) -> anyhow::Error {
+    if user_cancel_requested.load(Ordering::Relaxed) {
+        anyhow::Error::new(JobCanceledByRequest { job_id })
+    } else {
+        anyhow::Error::new(JobCanceledByShutdown { job_id })
     }
+}
 
-    pub(super) fn is_canceled(&self) -> bool {
-        self.canceled.load(Ordering::Relaxed)
+fn check_job_cancellation(
+    cancellation_token: &CancellationToken,
+    user_cancel_requested: &AtomicBool,
+    job_id: Uuid,
+) -> anyhow::Result<()> {
+    if cancellation_token.is_cancelled() {
+        Err(job_cancellation_error(job_id, user_cancel_requested))
+    } else {
+        Ok(())
     }
+}
 
-    fn mark_canceled(&self) {
-        self.canceled.store(true, Ordering::Relaxed);
-    }
-
-    /// Returns `Err(JobCanceledByRequest)` if the token has been tripped. Call
-    /// this between pipeline stages so the worker stops as soon as possible
-    /// after the cancel request arrives.
-    pub(super) fn check(&self, job_id: Uuid) -> anyhow::Result<()> {
-        if self.is_canceled() {
-            Err(anyhow::Error::new(JobCanceledByRequest { job_id }))
-        } else {
-            Ok(())
-        }
+fn map_stage_error(
+    error: anyhow::Error,
+    user_cancel_requested: &AtomicBool,
+    job_id: Uuid,
+    context: &'static str,
+) -> anyhow::Error {
+    if anyhow_is_cancelled(&error) {
+        job_cancellation_error(job_id, user_cancel_requested)
+    } else {
+        error.context(context)
     }
 }
 
@@ -191,6 +203,7 @@ async fn execute_canonical_ingest_job(
     state: Arc<AppState>,
     worker_id: &str,
     job: ingest_repository::IngestJobRow,
+    cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let job_id = job.id;
     let initial_stage = match job.job_kind.as_str() {
@@ -221,7 +234,7 @@ async fn execute_canonical_ingest_job(
 
     let heartbeat_running = Arc::new(AtomicBool::new(true));
     let heartbeat_guard = AttemptHeartbeatGuard::new(Arc::clone(&heartbeat_running));
-    let cancellation = JobCancellationToken::new();
+    let user_cancel_requested = Arc::new(AtomicBool::new(false));
 
     // The heartbeat loop does double duty: it refreshes `heartbeat_at` so the
     // stale-lease reaper leaves this attempt alone, AND it polls the job's
@@ -234,7 +247,8 @@ async fn execute_canonical_ingest_job(
     // for connections, so `touch_attempt_heartbeat` always succeeds even
     // while ingest stages hold every slot in `persistence.postgres`.
     let heartbeat_pg = state.persistence.heartbeat_postgres.clone();
-    let heartbeat_cancellation = cancellation.clone();
+    let heartbeat_cancellation = cancellation_token.clone();
+    let heartbeat_user_cancel_requested = Arc::clone(&user_cancel_requested);
     let heartbeat_job_id = job.id;
     let heartbeat_interval =
         Duration::from_secs(state.settings.ingestion_worker_heartbeat_interval_seconds.max(1));
@@ -269,7 +283,8 @@ async fn execute_canonical_ingest_job(
                         %attempt_id,
                         "cancellation observed on heartbeat tick, signalling pipeline abort"
                     );
-                    heartbeat_cancellation.mark_canceled();
+                    heartbeat_user_cancel_requested.store(true, Ordering::Relaxed);
+                    heartbeat_cancellation.cancel();
                     observed_cancel = true;
                 }
                 Ok(_) => {}
@@ -292,11 +307,12 @@ async fn execute_canonical_ingest_job(
         .await
         .context("failed to reload ingest job for cancellation check")?;
     if current_job.as_ref().is_some_and(|j| j.queue_state == "canceled") {
-        cancellation.mark_canceled();
+        user_cancel_requested.store(true, Ordering::Relaxed);
+        cancellation_token.cancel();
     }
 
-    let result = if cancellation.is_canceled() {
-        Err(anyhow::Error::new(JobCanceledByRequest { job_id: job.id }))
+    let result = if cancellation_token.is_cancelled() {
+        Err(job_cancellation_error(job.id, &user_cancel_requested))
     } else {
         match job.job_kind.as_str() {
             "content_mutation" => {
@@ -338,7 +354,8 @@ async fn execute_canonical_ingest_job(
                     attempt_id,
                     document_id,
                     revision_id,
-                    &cancellation,
+                    &cancellation_token,
+                    &user_cancel_requested,
                 )
                 .await
             }
@@ -347,7 +364,9 @@ async fn execute_canonical_ingest_job(
                 run_canonical_web_materialize_page_job(&state, &job, attempt_id).await
             }
             "webhook_delivery" => {
-                crate::services::webhook::delivery::run_webhook_delivery_job(&state, &job).await
+                crate::services::webhook::delivery::run_webhook_delivery_job(&state, &job)
+                    .await
+                    .map_err(Into::into)
             }
             other => Err(anyhow::anyhow!("unsupported canonical ingest job kind {other}")),
         }
@@ -390,6 +409,36 @@ async fn execute_canonical_ingest_job(
         }
         Err(error) => {
             if error.downcast_ref::<JobCanceledByRequest>().is_some() {
+                info!(
+                    %worker_id,
+                    %job_id,
+                    %attempt_id,
+                    "canonical ingest job observed user cancel request and stopped cooperatively",
+                );
+                return Ok(());
+            }
+            if error.downcast_ref::<JobCanceledByShutdown>().is_some() {
+                match ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
+                    .await
+                {
+                    Ok(Some(row)) if row.queue_state == "canceled" => {
+                        info!(
+                            %worker_id,
+                            %job_id,
+                            %attempt_id,
+                            "canonical ingest job stopped during shutdown after user cancel won the race",
+                        );
+                        return Ok(());
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            %attempt_id,
+                            ?e,
+                            "failed to reload ingest job while finalizing shutdown cancellation"
+                        );
+                    }
+                }
                 if let Err(e) = state
                     .canonical_services
                     .ingest
@@ -398,22 +447,22 @@ async fn execute_canonical_ingest_job(
                         FinalizeAttemptCommand {
                             attempt_id,
                             knowledge_generation_id: None,
-                            attempt_state: "canceled".to_string(),
+                            attempt_state: "failed".to_string(),
                             current_stage: Some(initial_stage.clone()),
-                            failure_class: Some("content_mutation".to_string()),
-                            failure_code: Some("canceled_by_request".to_string()),
-                            retryable: false,
+                            failure_class: Some("worker_shutdown".to_string()),
+                            failure_code: Some("shutdown_cancelled".to_string()),
+                            retryable: true,
                         },
                     )
                     .await
                 {
-                    tracing::warn!(%attempt_id, ?e, "failed to finalize user-canceled attempt as canceled");
+                    tracing::warn!(%attempt_id, ?e, "failed to requeue shutdown-canceled attempt");
                 }
                 info!(
                     %worker_id,
                     %job_id,
                     %attempt_id,
-                    "canonical ingest job aborted by user cancel request",
+                    "canonical ingest job stopped cooperatively for worker shutdown",
                 );
                 return Ok(());
             }
@@ -491,10 +540,11 @@ async fn run_canonical_ingest_pipeline(
     attempt_id: Uuid,
     document_id: Uuid,
     revision_id: Uuid,
-    cancellation: &JobCancellationToken,
+    cancellation_token: &CancellationToken,
+    user_cancel_requested: &AtomicBool,
 ) -> anyhow::Result<()> {
     // --- Stage: extract_content -----------------------------------------------
-    cancellation.check(job.id)?;
+    check_job_cancellation(cancellation_token, user_cancel_requested, job.id)?;
     state
         .canonical_services
         .ingest
@@ -672,7 +722,7 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record extract_content stage event")?;
 
     // --- Stage: prepare_structure / chunk_content / extract_technical_facts ---
-    cancellation.check(job.id)?;
+    check_job_cancellation(cancellation_token, user_cancel_requested, job.id)?;
     state
         .canonical_services
         .ingest
@@ -708,9 +758,17 @@ async fn run_canonical_ingest_pipeline(
             state,
             revision_id,
             &extracted_content.extraction_plan,
+            cancellation_token,
         )
         .await
-        .context("failed to prepare and persist structured revision")?;
+        .map_err(|error| {
+            map_stage_error(
+                error.into(),
+                user_cancel_requested,
+                job.id,
+                "failed to prepare and persist structured revision",
+            )
+        })?;
 
     let prepare_structure_elapsed_ms = Some(preparation.prepare_structure_elapsed_ms);
     let chunk_content_elapsed_ms = Some(preparation.chunk_content_elapsed_ms);
@@ -848,15 +906,10 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record extract_technical_facts stage event")?;
 
     // --- Stage: embed_chunk ---------------------------------------------------
-    // Inline chunk embedding. The previous "deferred non-blocking" no-op
-    // left `knowledge_chunk_vector` empty, so every vector-lane retrieval
-    // returned zero hits and queries fell back to lexical-only results.
-    // Canonical fix: embed all chunks for the just-readable revision
-    // synchronously using the library's EmbedChunk binding. Failure here
-    // leaves `vector_state` unpromoted — the revision is still text-
-    // readable, but graph extraction still runs so the rest of the
-    // pipeline doesn't stall on embedding provider hiccups.
-    cancellation.check(job.id)?;
+    // Chunk embedding is required for a readable revision. Failure marks
+    // vector/graph readiness failed and aborts this attempt; the worker does
+    // not continue into graph extraction with a partial vector inventory.
+    check_job_cancellation(cancellation_token, user_cancel_requested, job.id)?;
     state
         .canonical_services
         .ingest
@@ -888,9 +941,10 @@ async fn run_canonical_ingest_pipeline(
     let embed_chunk_outcome = state
         .canonical_services
         .search
-        .embed_chunks_for_revision(state, revision.library_id, revision_id)
+        .embed_chunks_for_revision(state, revision.library_id, revision_id, cancellation_token)
         .await;
     let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
+    let mut embed_chunk_failure: Option<String> = None;
     let embed_chunk_success = match &embed_chunk_outcome {
         Ok(outcome) => {
             if let (Some(provider), Some(model), Some(usage_json)) = (
@@ -951,6 +1005,10 @@ async fn run_canonical_ingest_pipeline(
             true
         }
         Err(error) => {
+            if matches!(error, crate::services::query::error::QueryServiceError::Cancelled) {
+                return Err(job_cancellation_error(job.id, user_cancel_requested));
+            }
+            embed_chunk_failure = Some(format!("chunk embedding failed: {error:#}"));
             warn!(
                 %worker_id,
                 job_id = %job.id,
@@ -988,9 +1046,13 @@ async fn run_canonical_ingest_pipeline(
         }
     };
     drop(embed_chunk_outcome);
+    if let Some(reason) = embed_chunk_failure {
+        fail_revision_vector_graph_readiness(state, revision_id, &reason).await?;
+        return Err(anyhow::anyhow!(reason));
+    }
 
     // --- Stage: extract_graph -------------------------------------------------
-    cancellation.check(job.id)?;
+    check_job_cancellation(cancellation_token, user_cancel_requested, job.id)?;
     state
         .canonical_services
         .ingest
@@ -1022,9 +1084,8 @@ async fn run_canonical_ingest_pipeline(
     let extract_graph_start = Instant::now();
     // Canonical wall-clock cap on the entire extract_graph stage. Guards
     // against stages that silently monopolize the tokio runtime and
-    // starve heartbeat/cancel polling. On timeout we fall through to the
-    // same "degraded to readable" path the downstream match uses for
-    // other graph extraction failures, so the attempt still finalizes
+    // starve heartbeat/cancel polling. Timeout is handled by the same
+    // fail-loud path as graph extraction errors, so the attempt finalizes
     // instead of leaking a `leased` row until the reaper catches it.
     let stage_timeout =
         Duration::from_secs(state.settings.runtime_graph_extract_stage_timeout_seconds.max(1));
@@ -1039,17 +1100,25 @@ async fn run_canonical_ingest_pipeline(
                 revision_id,
                 attempt_id: Some(attempt_id),
             },
+            cancellation_token,
         ),
     )
     .await
     {
-        Ok(result) => result,
-        Err(_) => Err(crate::interfaces::http::router_support::ApiError::Conflict(format!(
-            "stage_timeout: extract_graph stage exceeded canonical timeout of {}s during graph candidate materialization",
-            stage_timeout.as_secs()
-        ))),
+        Ok(Ok(materialization)) => Ok(materialization),
+        Ok(Err(crate::services::content::error::ContentServiceError::Cancelled)) => {
+            return Err(job_cancellation_error(job.id, user_cancel_requested));
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(crate::services::content::error::ContentServiceError::StateConflict {
+            message: format!(
+                "stage_timeout: extract_graph stage exceeded canonical timeout of {}s during graph candidate materialization",
+                stage_timeout.as_secs()
+            ),
+        }),
     };
     let mut graph_ready = false;
+    let mut graph_failure: Option<String> = None;
 
     match graph_materialization {
         Ok(graph_materialization) => {
@@ -1061,15 +1130,22 @@ async fn run_canonical_ingest_pipeline(
                     document_id,
                     revision_id,
                     Some(attempt_id),
+                    cancellation_token,
                 ),
             )
             .await
             {
-                Ok(result) => result,
-                Err(_) => Err(anyhow::anyhow!(
-                    "extract_graph stage exceeded canonical timeout of {}s during revision graph reconcile",
-                    stage_timeout.as_secs()
-                )),
+                Ok(Ok(outcome)) => Ok(outcome),
+                Ok(Err(crate::services::graph::error::GraphServiceError::Cancelled)) => {
+                    return Err(job_cancellation_error(job.id, user_cancel_requested));
+                }
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(crate::services::graph::error::GraphServiceError::StateConflict {
+                    message: format!(
+                        "extract_graph stage exceeded canonical timeout of {}s during revision graph reconcile",
+                        stage_timeout.as_secs()
+                    ),
+                }),
             };
             graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
 
@@ -1086,7 +1162,7 @@ async fn run_canonical_ingest_pipeline(
                                 attempt_id,
                                 stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                                 stage_state: "completed".to_string(),
-                                message: Some("graph candidates extracted and reconciled".to_string()),
+                                message: Some(graph_extract_success_message(graph_ready).to_string()),
                                 details_json: serde_json::json!({
                                     "chunksProcessed": graph_materialization.chunk_count,
                                     "graphChunksSelected": graph_materialization.selected_graph_chunks,
@@ -1152,12 +1228,13 @@ async fn run_canonical_ingest_pipeline(
                     }
                 }
                 Err(graph_error) => {
+                    graph_failure = Some(format!("graph reconcile failed: {graph_error:#}"));
                     warn!(
                         %worker_id,
                         job_id = %job.id,
                         revision_id = %revision_id,
                         ?graph_error,
-                        "canonical graph rebuild failed; preserving readable revision",
+                        "canonical graph rebuild failed",
                     );
                     let extract_graph_elapsed_ms =
                         Some(extract_graph_start.elapsed().as_millis() as i64);
@@ -1171,7 +1248,7 @@ async fn run_canonical_ingest_pipeline(
                                 stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                                 stage_state: "failed".to_string(),
                                 message: Some(
-                                    "graph rebuild failed; readable revision preserved".to_string(),
+                                    "graph rebuild failed".to_string(),
                                 ),
                                 details_json: serde_json::json!({
                                     "chunksProcessed": graph_materialization.chunk_count,
@@ -1180,7 +1257,6 @@ async fn run_canonical_ingest_pipeline(
                                     "extractedEntityCandidates": graph_materialization.extracted_entities,
                                     "extractedRelationCandidates": graph_materialization.extracted_relations,
                                     "graphReady": false,
-                                    "degradedToReadable": true,
                                     "error": format!("{graph_error:#}"),
                                     "providerKind": graph_materialization.provider_kind,
                                     "modelName": graph_materialization.model_name,
@@ -1202,12 +1278,13 @@ async fn run_canonical_ingest_pipeline(
             }
         }
         Err(error) => {
+            graph_failure = Some(format!("graph candidate extraction failed: {error:#}"));
             warn!(
                 %worker_id,
                 job_id = %job.id,
                 revision_id = %revision_id,
                 ?error,
-                "graph candidate extraction failed; preserving readable revision",
+                "graph candidate extraction failed",
             );
             let extract_graph_elapsed_ms = Some(extract_graph_start.elapsed().as_millis() as i64);
             state
@@ -1219,13 +1296,9 @@ async fn run_canonical_ingest_pipeline(
                         attempt_id,
                         stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                         stage_state: "failed".to_string(),
-                        message: Some(
-                            "graph candidate extraction failed; readable revision preserved"
-                                .to_string(),
-                        ),
+                        message: Some("graph candidate extraction failed".to_string()),
                         details_json: serde_json::json!({
                             "graphReady": false,
-                            "degradedToReadable": true,
                             "error": error.to_string(),
                         }),
                         provider_kind: None,
@@ -1242,6 +1315,11 @@ async fn run_canonical_ingest_pipeline(
                 .await
                 .context("failed to record extract_graph extraction failure stage event")?;
         }
+    }
+
+    if let Some(reason) = graph_failure {
+        fail_revision_vector_graph_readiness(state, revision_id, &reason).await?;
+        return Err(anyhow::anyhow!(reason));
     }
 
     // --- Graph maintenance (entity resolution + community detection) ---
@@ -1301,21 +1379,15 @@ async fn run_canonical_ingest_pipeline(
         );
     }
 
-    // --- Graph backfill (self-healing pass for failed extract_graph stages) ---
+    // --- Graph backfill ----------------------------------------------------------
     //
-    // When `extract_graph` fails at the stage level (canonical 600s timeout,
-    // projection write failure, cancellation) but individual chunk
-    // extractions already persisted `ready` rows in `runtime_graph_extraction`,
-    // this job's `reconcile_revision_graph` never runs — the document's
-    // entities sit ready in Postgres but never become graph nodes. The
-    // dashboard then shows the doc as "readable" while the graph viewer
-    // never learns it exists.
-    //
-    // Run regardless of the current job's `graph_ready` flag — the backfill
-    // target is the set of ALL library documents that got stuck, not
-    // whatever the current job produced. A dedicated 60s slot stops a
-    // queue burst from replaying the same pass in a tight loop.
-    if crate::services::graph::backfill::try_acquire_graph_backfill_slot(job.library_id) {
+    // Successful jobs may observe older stuck graph rows from previous
+    // versions. Keep the bounded library-wide repair pass here, after the
+    // current revision has proven graph-ready, so failed current attempts do
+    // not hide behind background repair.
+    if graph_ready
+        && crate::services::graph::backfill::try_acquire_graph_backfill_slot(job.library_id)
+    {
         if let Err(error) =
             crate::services::graph::backfill::run_library_graph_backfill(state, job.library_id)
                 .await
@@ -1348,7 +1420,7 @@ async fn run_canonical_ingest_pipeline(
     }
 
     // --- Stage: finalize readiness --------------------------------------------
-    cancellation.check(job.id)?;
+    check_job_cancellation(cancellation_token, user_cancel_requested, job.id)?;
     state
         .canonical_services
         .ingest
@@ -1385,7 +1457,7 @@ async fn run_canonical_ingest_pipeline(
             revision_id,
             "ready",
             vector_state_label,
-            if graph_ready { "ready" } else { "processing" },
+            graph_state_after_successful_extract(graph_ready),
             Some(now),
             vector_ready_at,
             graph_ready.then_some(now),

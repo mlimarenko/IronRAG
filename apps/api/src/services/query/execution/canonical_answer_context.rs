@@ -25,7 +25,7 @@ use super::{
 const MAX_DIRECT_TABLE_ANALYTICS_ROWS: usize = 2_000;
 const MAX_CANONICAL_ANSWER_TECHNICAL_FACTS: usize = 24;
 const SOURCE_COVERAGE_DOCUMENT_LIMIT: usize = 3;
-const SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT: usize = 8;
+const SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT: usize = 12;
 const SOURCE_PROFILE_SCORE: f32 = 1.25;
 const SOURCE_COVERAGE_SCORE_BASE: f32 = 0.95;
 const SOURCE_COVERAGE_SCORE_STEP: f32 = 0.001;
@@ -36,7 +36,7 @@ pub(crate) async fn load_direct_targeted_table_answer(
     ir: Option<&crate::domains::query_ir::QueryIR>,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) -> anyhow::Result<Option<String>> {
-    let row_count = requested_initial_table_row_count(question);
+    let row_count = requested_initial_table_row_count(ir);
     let inventory_requested = question_asks_table_value_inventory(question, ir);
     if row_count.is_none() && !inventory_requested {
         return Ok(None);
@@ -165,7 +165,7 @@ pub(crate) async fn load_canonical_answer_chunks(
         Vec::new()
     };
     let explicit_initial_table_rows = if let Some(row_count) =
-        requested_initial_table_row_count(question)
+        requested_initial_table_row_count(Some(query_ir))
         && let Some(document_id) = focused_document_id
     {
         let plan_keywords = crate::services::query::planner::extract_keywords(question);
@@ -279,7 +279,7 @@ pub(crate) async fn load_canonical_answer_chunks(
         )
         .await;
     }
-    if let Some(row_count) = requested_initial_table_row_count(question)
+    if let Some(row_count) = requested_initial_table_row_count(Some(query_ir))
         && let Some(document_id) = focused_document_id
     {
         let targeted_document_ids = BTreeSet::from([document_id]);
@@ -359,7 +359,7 @@ async fn augment_with_source_coverage_chunks(
     plan_keywords: &[String],
     mut chunks: Vec<RuntimeMatchedChunk>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
-    if !query_ir.requests_source_coverage_context() {
+    if !should_request_source_coverage_chunks(query_ir) {
         return Ok(chunks);
     }
     let mut document_ids = Vec::<Uuid>::new();
@@ -419,6 +419,10 @@ async fn augment_with_source_coverage_chunks(
     Ok(chunks)
 }
 
+fn should_request_source_coverage_chunks(query_ir: &QueryIR) -> bool {
+    query_ir.requests_source_coverage_context() || query_ir.is_exact_literal_technical()
+}
+
 fn select_source_coverage_chunk_rows(
     mut rows: Vec<KnowledgeChunkRow>,
     limit: usize,
@@ -463,72 +467,6 @@ fn select_source_coverage_chunk_rows(
 
 fn is_source_profile_chunk(row: &KnowledgeChunkRow) -> bool {
     super::source_profile::is_source_profile_chunk_row(row)
-}
-
-#[cfg(test)]
-mod source_coverage_tests {
-    use super::*;
-
-    fn chunk_row(chunk_index: i32, text: &str) -> KnowledgeChunkRow {
-        let chunk_id = Uuid::now_v7();
-        KnowledgeChunkRow {
-            key: chunk_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
-            chunk_id,
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index,
-            chunk_kind: if text.contains("[source_profile ") {
-                Some("source_profile".to_string())
-            } else {
-                Some("paragraph".to_string())
-            },
-            content_text: text.to_string(),
-            normalized_text: text.to_string(),
-            span_start: None,
-            span_end: None,
-            token_count: None,
-            support_block_ids: Vec::new(),
-            section_path: Vec::new(),
-            heading_trail: Vec::new(),
-            literal_digest: None,
-            chunk_state: "ready".to_string(),
-            text_generation: Some(1),
-            vector_generation: Some(1),
-            quality_score: Some(1.0),
-            window_text: None,
-            raptor_level: None,
-            occurred_at: None,
-            occurred_until: None,
-        }
-    }
-
-    #[test]
-    fn source_coverage_selection_keeps_profile_edges_and_middle() {
-        let rows = (0..10)
-            .map(|index| {
-                if index == 5 {
-                    chunk_row(index, "[source_profile source_format=record_jsonl unit_count=42]")
-                } else {
-                    chunk_row(index, &format!("chunk {index}"))
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let selected = select_source_coverage_chunk_rows(rows, 8);
-        let selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
-
-        assert!(selected_indexes.contains(&0));
-        assert!(selected_indexes.contains(&1));
-        assert!(selected_indexes.contains(&4));
-        assert!(selected_indexes.contains(&5));
-        assert!(selected_indexes.contains(&8));
-        assert!(selected_indexes.contains(&9));
-        assert!(selected.iter().any(is_source_profile_chunk));
-    }
 }
 
 pub(crate) async fn load_canonical_answer_evidence(
@@ -806,4 +744,114 @@ fn explicit_canonical_context_document_id(
         chunks.iter().map(|chunk| (chunk.document_id, chunk.document_label.as_str())),
     );
     (document_ids.len() == 1).then(|| document_ids.iter().next().copied()).flatten()
+}
+
+#[cfg(test)]
+mod source_coverage_tests {
+    use super::*;
+    use crate::domains::query_ir::{
+        LiteralKind, LiteralSpan, QueryAct, QueryIR, QueryLanguage, QueryScope,
+    };
+
+    fn chunk_row(chunk_index: i32, text: &str) -> KnowledgeChunkRow {
+        let chunk_id = Uuid::now_v7();
+        KnowledgeChunkRow {
+            key: chunk_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            chunk_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index,
+            chunk_kind: if text.contains("[source_profile ") {
+                Some("source_profile".to_string())
+            } else {
+                Some("paragraph".to_string())
+            },
+            content_text: text.to_string(),
+            normalized_text: text.to_string(),
+            span_start: None,
+            span_end: None,
+            token_count: None,
+            support_block_ids: Vec::new(),
+            section_path: Vec::new(),
+            heading_trail: Vec::new(),
+            literal_digest: None,
+            chunk_state: "ready".to_string(),
+            text_generation: Some(1),
+            vector_generation: Some(1),
+            quality_score: Some(1.0),
+            window_text: None,
+            raptor_level: None,
+            occurred_at: None,
+            occurred_until: None,
+        }
+    }
+
+    fn exact_literal_query_ir() -> QueryIR {
+        QueryIR {
+            act: QueryAct::RetrieveValue,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec!["config_key".to_string()],
+            target_entities: Vec::new(),
+            literal_constraints: vec![LiteralSpan {
+                text: "route_map".to_string(),
+                kind: LiteralKind::Identifier,
+            }],
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn source_coverage_is_enabled_for_exact_literal_queries() {
+        assert!(should_request_source_coverage_chunks(&exact_literal_query_ir()));
+        assert!(!should_request_source_coverage_chunks(&QueryIR {
+            act: QueryAct::Compare,
+            scope: QueryScope::MultiDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            confidence: 1.0,
+        }));
+    }
+
+    #[test]
+    fn source_coverage_selection_keeps_profile_edges_and_middle() {
+        let rows = (0..10)
+            .map(|index| {
+                if index == 5 {
+                    chunk_row(index, "[source_profile source_format=record_jsonl unit_count=42]")
+                } else {
+                    chunk_row(index, &format!("chunk {index}"))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let selected = select_source_coverage_chunk_rows(rows, 8);
+        let selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
+
+        assert!(selected_indexes.contains(&0));
+        assert!(selected_indexes.contains(&1));
+        assert!(selected_indexes.contains(&4));
+        assert!(selected_indexes.contains(&5));
+        assert!(selected_indexes.contains(&8));
+        assert!(selected_indexes.contains(&9));
+        assert!(selected.iter().any(is_source_profile_chunk));
+    }
 }

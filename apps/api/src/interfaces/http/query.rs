@@ -19,7 +19,7 @@ use crate::{
         PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryConversationDetail,
         QueryExecution, QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference,
         QueryRuntimeStageSummary, QueryTurn, QueryVerificationState, QueryVerificationWarning,
-        TechnicalFactReference,
+        TechnicalFactReference, resolve_top_k,
     },
     infra::repositories::catalog_repository,
     interfaces::http::{
@@ -37,24 +37,25 @@ use crate::{
     },
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
-struct ListSessionsQuery {
-    library_id: Option<Uuid>,
+#[into_params(parameter_in = Query)]
+pub struct ListSessionsQuery {
+    pub library_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct CreateSessionRequest {
+pub struct CreateSessionRequest {
     /// When omitted, inferred from the library's parent workspace.
     workspace_id: Option<Uuid>,
     library_id: Uuid,
     title: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct CreateSessionTurnRequest {
+pub struct CreateSessionTurnRequest {
     content_text: String,
     top_k: Option<usize>,
     include_debug: Option<bool>,
@@ -70,15 +71,16 @@ pub fn router() -> Router<AppState> {
         .route("/query/assistant/system-prompt", get(get_assistant_system_prompt))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
-struct AssistantSystemPromptQuery {
-    library_id: Option<Uuid>,
+#[into_params(parameter_in = Query)]
+pub struct AssistantSystemPromptQuery {
+    pub library_id: Option<Uuid>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct AssistantSystemPromptResponse {
+pub struct AssistantSystemPromptResponse {
     /// Raw template with the `{LIBRARY_REF}` placeholder. This is what
     /// external MCP clients (Claude Desktop, Codex, Cursor, Continue.dev,
     /// …) should paste into their own system prompt when attaching
@@ -108,7 +110,19 @@ struct AssistantSystemPromptResponse {
     skip_all,
     fields(library_id = ?query.library_id)
 )]
-async fn get_assistant_system_prompt(
+#[utoipa::path(
+    get,
+    path = "/v1/query/assistant/system-prompt",
+    tag = "query",
+    operation_id = "getAssistantSystemPrompt",
+    params(AssistantSystemPromptQuery),
+    responses(
+        (status = 200, description = "Canonical assistant system prompt template plus the version rendered for the active library", body = AssistantSystemPromptResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the requested library"),
+    ),
+)]
+pub async fn get_assistant_system_prompt(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AssistantSystemPromptQuery>,
@@ -142,7 +156,20 @@ async fn get_assistant_system_prompt(
     skip_all,
     fields(library_id = ?query.library_id, item_count)
 )]
-async fn list_sessions(
+#[utoipa::path(
+    get,
+    path = "/v1/query/sessions",
+    tag = "query",
+    operation_id = "listQuerySessions",
+    params(ListSessionsQuery),
+    responses(
+        (status = 200, description = "Query sessions visible to the caller", body = [ironrag_contracts::assistant::AssistantSessionListItem]),
+        (status = 400, description = "libraryId is required"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn list_sessions(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
@@ -160,13 +187,26 @@ async fn list_sessions(
     Ok(Json(items))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/query/sessions",
+    tag = "query",
+    operation_id = "createQuerySession",
+    request_body = CreateSessionRequest,
+    responses(
+        (status = 200, description = "Newly created query conversation", body = QueryConversation),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.query.create_session",
     skip_all,
     fields(library_id = %payload.library_id)
 )]
-async fn create_session(
+pub async fn create_session(
     auth: AuthContext,
     State(state): State<AppState>,
     Json(payload): Json<CreateSessionRequest>,
@@ -225,13 +265,26 @@ async fn create_session(
     Ok(Json(conversation))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/query/sessions/{sessionId}",
+    tag = "query",
+    operation_id = "getQuerySession",
+    params(("sessionId" = uuid::Uuid, Path, description = "Query session identifier")),
+    responses(
+        (status = 200, description = "Hydrated assistant conversation with turns", body = ironrag_contracts::assistant::AssistantHydratedConversation),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the session"),
+        (status = 404, description = "Session not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.query.get_session",
     skip_all,
     fields(session_id = %session_id)
 )]
-async fn get_session(
+pub async fn get_session(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
@@ -241,13 +294,27 @@ async fn get_session(
     Ok(Json(map_session_detail(detail)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/query/sessions/{sessionId}/turns",
+    tag = "query",
+    operation_id = "createQuerySessionTurn",
+    params(("sessionId" = uuid::Uuid, Path, description = "Query session identifier")),
+    request_body = CreateSessionTurnRequest,
+    responses(
+        (status = 200, description = "Turn execution result with grounded answer + evidence references", body = ironrag_contracts::assistant::AssistantExecutionDetail),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the session"),
+        (status = 404, description = "Session not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.create_session_turn",
     skip_all,
     fields(session_id = %session_id, elapsed_ms)
 )]
-async fn create_session_turn(
+pub async fn create_session_turn(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
@@ -267,7 +334,7 @@ async fn create_session_turn(
                 surface_kind: RuntimeSurfaceKind::Ui,
                 content_text: payload.content_text,
                 external_prior_turns: Vec::new(),
-                top_k: payload.top_k.unwrap_or(8),
+                top_k: resolve_query_turn_top_k(payload.top_k),
                 include_debug: payload.include_debug.unwrap_or(false),
             },
         )
@@ -277,13 +344,30 @@ async fn create_session_turn(
     Ok(Json(map_turn_execution_response(outcome)).into_response())
 }
 
+pub(crate) fn resolve_query_turn_top_k(requested_top_k: Option<usize>) -> usize {
+    resolve_top_k(requested_top_k)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/query/executions/{executionId}",
+    tag = "query",
+    operation_id = "getQueryExecution",
+    params(("executionId" = uuid::Uuid, Path, description = "Query execution identifier")),
+    responses(
+        (status = 200, description = "Assistant execution detail with retrieval/answer/verification stages", body = ironrag_contracts::assistant::AssistantExecutionDetail),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the execution"),
+        (status = 404, description = "Execution not found"),
+    ),
+)]
 #[tracing::instrument(
     level = "info",
     name = "http.get_execution",
     skip_all,
     fields(execution_id = %execution_id)
 )]
-async fn get_execution(
+pub async fn get_execution(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(execution_id): Path<Uuid>,
@@ -305,7 +389,20 @@ async fn get_execution(
     skip_all,
     fields(execution_id = %execution_id)
 )]
-async fn get_execution_llm_context(
+#[utoipa::path(
+    get,
+    path = "/v1/query/executions/{executionId}/llm-context",
+    tag = "query",
+    operation_id = "getQueryExecutionLlmContext",
+    params(("executionId" = uuid::Uuid, Path, description = "Query execution identifier")),
+    responses(
+        (status = 200, description = "Volatile in-memory LLM request/response capture for the execution", body = crate::services::query::llm_context_debug::LlmContextSnapshot),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the execution"),
+        (status = 404, description = "Execution not found or no longer in the debug cache"),
+    ),
+)]
+pub async fn get_execution_llm_context(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(execution_id): Path<Uuid>,
@@ -394,7 +491,7 @@ fn map_execution_detail(
     }
 }
 
-fn map_turn_execution_response(
+pub(crate) fn map_turn_execution_response(
     outcome: crate::services::query::service::QueryTurnExecutionResult,
 ) -> ironrag_contracts::assistant::AssistantExecutionDetail {
     ironrag_contracts::assistant::AssistantExecutionDetail {
@@ -667,7 +764,7 @@ fn map_graph_node_reference(
     }
 }
 
-const fn map_graph_edge_reference(
+fn map_graph_edge_reference(
     reference: QueryGraphEdgeReference,
 ) -> ironrag_contracts::assistant::AssistantRelationReference {
     ironrag_contracts::assistant::AssistantRelationReference {
@@ -675,8 +772,8 @@ const fn map_graph_edge_reference(
         edge_id: reference.edge_id,
         rank: reference.rank,
         score: reference.score,
-        predicate: String::new(),
-        normalized_assertion: None,
+        predicate: reference.relation_type,
+        normalized_assertion: reference.summary,
     }
 }
 

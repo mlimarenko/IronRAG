@@ -74,6 +74,8 @@ const CANONICAL_RELATION_TYPES: &[&str] = &[
     "produces",
     "provides",
     "proxies",
+    "receives",
+    "records",
     "replaces",
     "requires",
     "returns",
@@ -82,6 +84,7 @@ const CANONICAL_RELATION_TYPES: &[&str] = &[
     "scales_to",
     "serializes",
     "services",
+    "selects",
     "stores",
     "supports",
     "tested_by",
@@ -177,8 +180,14 @@ pub fn canonical_edge_key(from_node_key: &str, relation_type: &str, to_node_key:
 
 #[must_use]
 pub fn normalize_relation_type(relation_type: &str) -> String {
-    let normalized = normalize_graph_identity_component(relation_type);
-    is_canonical_relation_type(&normalized).then_some(normalized).unwrap_or_default()
+    let candidate = relation_type.trim();
+    if candidate.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+        && is_canonical_relation_type(candidate)
+    {
+        candidate.to_string()
+    } else {
+        String::new()
+    }
 }
 
 #[must_use]
@@ -393,9 +402,9 @@ mod tests {
 
     #[test]
     fn normalize_relation_type_accepts_only_canonical_catalog_members_after_text_normalization() {
-        assert_eq!(normalize_relation_type("Mentions In"), "mentions_in");
-        assert_eq!(normalize_relation_type("used by"), "used_by");
-        assert_eq!(normalize_relation_type("is a"), "is_a");
+        assert!(normalize_relation_type("Mentions In").is_empty());
+        assert!(normalize_relation_type("used by").is_empty());
+        assert!(normalize_relation_type("is a").is_empty());
         assert_eq!(normalize_relation_type("part_of"), "part_of");
     }
 
@@ -418,6 +427,9 @@ mod tests {
     fn canonical_relation_type_catalog_is_controlled_and_ascii_only() {
         assert!(canonical_relation_type_catalog().contains(&"integrates_with"));
         assert!(canonical_relation_type_catalog().contains(&"described_in"));
+        assert!(canonical_relation_type_catalog().contains(&"receives"));
+        assert!(canonical_relation_type_catalog().contains(&"records"));
+        assert!(canonical_relation_type_catalog().contains(&"selects"));
         assert!(canonical_relation_type_catalog().iter().all(|predicate| {
             predicate.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
         }));

@@ -9,6 +9,7 @@ use crate::{
     app::state::AppState,
     domains::{ai::AiBindingPurpose, provider_profiles::EffectiveProviderProfile},
     integrations::llm::EmbeddingRequest,
+    services::ai_catalog_service::ResolvedRuntimeBinding,
 };
 
 const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
@@ -16,10 +17,16 @@ const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
 static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, Vec<f32>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(super) fn embedding_cache_key(question: &str, model: &str) -> u64 {
+pub(super) fn embedding_cache_key(question: &str, binding: &ResolvedRuntimeBinding) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     question.hash(&mut hasher);
-    model.hash(&mut hasher);
+    binding.provider_catalog_id.hash(&mut hasher);
+    binding.provider_kind.hash(&mut hasher);
+    binding.provider_base_url.hash(&mut hasher);
+    binding.credential_id.hash(&mut hasher);
+    binding.model_catalog_id.hash(&mut hasher);
+    binding.model_name.hash(&mut hasher);
+    binding.extra_parameters_json.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -41,14 +48,14 @@ pub(super) async fn embed_question(
     let embedding_binding = state
         .canonical_services
         .ai_catalog
-        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryRetrieve)
         .await?
         .ok_or_else(|| {
-            anyhow::anyhow!("active embedding binding is not configured for this library")
+            anyhow::anyhow!("active query retrieval binding is not configured for this library")
         })?;
 
     let trimmed_input = question.trim().to_string();
-    let cache_key = embedding_cache_key(&trimmed_input, &embedding_binding.model_name);
+    let cache_key = embedding_cache_key(&trimmed_input, &embedding_binding);
 
     if let Ok(cache) = EMBEDDING_CACHE.lock() {
         if let Some(cached_embedding) = cache.get(&cache_key) {
@@ -90,4 +97,59 @@ pub(super) async fn embed_question(
         model_name: response.model_name,
         usage_json: response.usage_json,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn binding() -> ResolvedRuntimeBinding {
+        ResolvedRuntimeBinding {
+            binding_id: Uuid::from_u128(1),
+            workspace_id: Uuid::from_u128(2),
+            library_id: Uuid::from_u128(3),
+            binding_purpose: AiBindingPurpose::EmbedChunk,
+            provider_catalog_id: Uuid::from_u128(4),
+            provider_kind: "provider-alpha".to_string(),
+            provider_base_url: Some("https://alpha.example/v1".to_string()),
+            provider_api_style: "openai_compatible".to_string(),
+            credential_id: Uuid::from_u128(5),
+            api_key: Some("test-key".to_string()),
+            model_catalog_id: Uuid::from_u128(6),
+            model_name: "embed-small".to_string(),
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: json!({"dimensions": 256}),
+        }
+    }
+
+    #[test]
+    fn query_embedding_cache_key_tracks_vector_source_identity() {
+        let base = binding();
+        let base_key = embedding_cache_key("query text", &base);
+
+        let mut changed_provider = base.clone();
+        changed_provider.provider_catalog_id = Uuid::from_u128(7);
+        assert_ne!(base_key, embedding_cache_key("query text", &changed_provider));
+
+        let mut changed_credential = base.clone();
+        changed_credential.credential_id = Uuid::from_u128(8);
+        assert_ne!(base_key, embedding_cache_key("query text", &changed_credential));
+
+        let mut changed_model = base.clone();
+        changed_model.model_catalog_id = Uuid::from_u128(9);
+        assert_ne!(base_key, embedding_cache_key("query text", &changed_model));
+
+        let mut changed_base_url = base.clone();
+        changed_base_url.provider_base_url = Some("https://beta.example/v1".to_string());
+        assert_ne!(base_key, embedding_cache_key("query text", &changed_base_url));
+
+        let mut changed_parameters = base;
+        changed_parameters.extra_parameters_json = json!({"dimensions": 512});
+        assert_ne!(base_key, embedding_cache_key("query text", &changed_parameters));
+    }
 }

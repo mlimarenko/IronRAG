@@ -46,7 +46,7 @@ pub(crate) fn source_anchor_window(anchor: i32, backward: i32, forward: i32) -> 
     (anchor.saturating_sub(backward.max(0)), anchor.saturating_add(forward.max(0)))
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct StructuredSourceContextDiagnostics {
     pub(crate) eligible_document_count: usize,
     pub(crate) source_profile_count: usize,
@@ -290,7 +290,8 @@ async fn apply_ordered_source_slice_context(
     temporal_end: Option<chrono::DateTime<chrono::Utc>>,
 ) -> anyhow::Result<Option<StructuredSourceContextDiagnostics>> {
     let Some((candidate, profile_row)) =
-        first_record_stream_candidate_profile(state, candidates, library_id, document_index).await?
+        first_record_stream_candidate_profile(state, candidates, library_id, document_index)
+            .await?
     else {
         return Ok(None);
     };
@@ -391,10 +392,8 @@ async fn first_record_stream_candidate_profile(
     // Without this step, an ordered-source slice request would never reach
     // `apply_ordered_source_slice_context` for the canonical record-stream
     // document when BM25/vector lose to denser non-stream text.
-    let canonical_revision_ids = canonical_source_profile_revision_ids(
-        document_index,
-        SOURCE_CONTEXT_DOCUMENT_LIMIT * 4,
-    );
+    let canonical_revision_ids =
+        canonical_source_profile_revision_ids(document_index, SOURCE_CONTEXT_DOCUMENT_LIMIT * 4);
     if canonical_revision_ids.is_empty() {
         return Ok(None);
     }

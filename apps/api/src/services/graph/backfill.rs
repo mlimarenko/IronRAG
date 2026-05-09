@@ -43,6 +43,7 @@ use crate::{
         self,
         ingest_repository::{self, NewIngestJob},
     },
+    services::graph::error::GraphServiceError,
 };
 
 /// Minimum wall-clock gap between two backfill passes on the same library.
@@ -214,7 +215,7 @@ pub struct GraphBackfillOutcome {
 pub async fn run_library_graph_backfill(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<GraphBackfillOutcome> {
+) -> Result<GraphBackfillOutcome, GraphServiceError> {
     let raw_candidates = repositories::list_library_documents_missing_graph_node(
         &state.persistence.postgres,
         library_id,
@@ -268,8 +269,16 @@ pub async fn run_library_graph_backfill(
         stream::iter(candidates.into_iter().map(|(document_id, revision_id)| {
             let graph_service = state.canonical_services.graph.clone();
             async move {
+                let cancellation_token = tokio_util::sync::CancellationToken::new();
                 let outcome = graph_service
-                    .reconcile_revision_graph(state, library_id, document_id, revision_id, None)
+                    .reconcile_revision_graph(
+                        state,
+                        library_id,
+                        document_id,
+                        revision_id,
+                        None,
+                        &cancellation_token,
+                    )
                     .await
                     .with_context(|| {
                         format!(
@@ -387,7 +396,7 @@ pub struct GraphReextractOutcome {
 pub async fn run_library_graph_reextract(
     state: &AppState,
     library_id: Uuid,
-) -> anyhow::Result<GraphReextractOutcome> {
+) -> Result<GraphReextractOutcome, GraphServiceError> {
     let candidates = repositories::list_library_documents_needing_graph_reextract(
         &state.persistence.postgres,
         library_id,

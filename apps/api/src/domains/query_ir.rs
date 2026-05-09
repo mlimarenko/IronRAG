@@ -44,7 +44,7 @@ use serde_json::{Value, json};
 /// Matches the seven acts that the golden set's labelling guide enumerates.
 /// The verification guard strictness, the answer builder choice, and the
 /// source-link rendering all key off this.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryAct {
     /// Literal value expected in the answer ("what is the URL", "what port does X listen on").
@@ -80,7 +80,7 @@ impl QueryAct {
 }
 
 /// Which slice of the knowledge base the answer spans.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryScope {
     /// Answer is expected to come from one document (default).
@@ -108,7 +108,7 @@ impl QueryScope {
 }
 
 /// Primary language the user wrote the question in.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryLanguage {
     En,
@@ -130,7 +130,7 @@ impl QueryLanguage {
 }
 
 /// Role a named entity plays in the question.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityRole {
     /// Primary thing the question is about ("payment module" in "how to configure payment module").
@@ -145,12 +145,12 @@ pub enum EntityRole {
 ///
 /// Kept deliberately coarse — exact regex validation is the verifier's job;
 /// the compiler just labels the surface shape it observed.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LiteralKind {
     /// Looks like http(s)://..., including API-style paths after a method.
     Url,
-    /// Filesystem or URL path (`/etc/app/config.ini`, `/api/v2/orders`).
+    /// Filesystem or URL path (`/etc/app/config.ini`, `/api/v1/orders`).
     Path,
     /// Identifier in camelCase / snake_case / SCREAMING_CASE
     /// (`fetchUserDetails`, `DATABASE_URL`, `with_cards`).
@@ -165,7 +165,7 @@ pub enum LiteralKind {
 }
 
 /// Kind of conversational reference the compiler could not resolve.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRefKind {
     /// Generic pronoun referring to prior turn ("it", "this").
@@ -179,7 +179,7 @@ pub enum ConversationRefKind {
 }
 
 /// Direction of an ordered slice requested from a sequential source.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceSliceDirection {
     /// Earliest units in the source order.
@@ -191,7 +191,7 @@ pub enum SourceSliceDirection {
 }
 
 /// Why the compiler is unsure and would prefer clarification from the user.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ClarificationReason {
     /// Question is too short / ambiguous to pin an act.
@@ -210,7 +210,7 @@ pub enum ClarificationReason {
 // =============================================================================
 
 /// Named thing the user talks about, with role in the question.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EntityMention {
     /// Surface label as written by the user, after light normalisation
@@ -226,7 +226,7 @@ pub struct EntityMention {
 /// auto-classified by [`LiteralKind::infer`]. Both the golden set
 /// (hand-labelled strings) and future LLM outputs (strict schema objects)
 /// round-trip through the same type.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, utoipa::ToSchema)]
 pub struct LiteralSpan {
     /// Exact substring from the question.
     pub text: String,
@@ -288,21 +288,21 @@ impl LiteralKind {
 /// naming both sides explicitly ("compare both services", "compare these two").
 /// The resolver picks the implicit sides from session state or document
 /// focus when possible.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComparisonSpec {
     #[serde(default)]
     pub a: Option<String>,
     #[serde(default)]
     pub b: Option<String>,
-    /// Free-form ontology tag ("transport_protocol", "performance",
+    /// Free-form ontology tag ("protocol", "performance",
     /// "feature_coverage"). Not enforced by the type system — grown via
     /// ontology entries.
     pub dimension: String,
 }
 
 /// Hint that pins the question to a specific document.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentHint {
     /// Surface string the user used to identify the document
@@ -311,7 +311,7 @@ pub struct DocumentHint {
 }
 
 /// Unresolved reference the session resolver will fill from prior turns.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnresolvedRef {
     /// The exact surface form used ("here", "this", "the same", "that one").
@@ -322,7 +322,7 @@ pub struct UnresolvedRef {
 /// Ordered slice request over a sequential source. The compiler sets this
 /// only when the user explicitly asks for a positional range of records/items
 /// in an ordered source. Ordinary summaries and needle lookups leave it null.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSliceSpec {
     pub direction: SourceSliceDirection,
@@ -331,7 +331,7 @@ pub struct SourceSliceSpec {
 }
 
 /// Date/time or date-range constraint normalized by the query compiler.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TemporalConstraint {
     /// Exact surface span from the user-visible question or history.
@@ -348,7 +348,7 @@ pub struct TemporalConstraint {
 /// (`{"reason":"...", "suggestion":"..."}`) or a bare reason string
 /// (`"anaphora_unresolved"`). Golden-set labellers use the bare form for
 /// brevity; the LLM path will emit the full form through strict schema.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, utoipa::ToSchema)]
 pub struct ClarificationSpec {
     pub reason: ClarificationReason,
     /// Short prompt the UI could show the user, in their language.
@@ -393,7 +393,7 @@ impl<'de> Deserialize<'de> for ClarificationSpec {
 ///   `target_entities` accordingly.
 /// - `confidence` ∈ [0.0, 1.0]; values below ~0.6 should cause the pipeline
 ///   to prefer `needs_clarification` over a confident reply.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryIR {
     pub act: QueryAct,
@@ -402,8 +402,9 @@ pub struct QueryIR {
 
     /// Open-ended ontology tags (e.g. `"endpoint"`, `"port"`, `"config_key"`,
     /// `"procedure"`, `"protocol"`, `"error_code"`, `"env_var"`, `"metric"`,
-    /// `"table_row"`, `"document"`, `"concept"`). New tags are added as
-    /// ontology rows in Arango, never as Rust enum variants.
+    /// `"table_row"`, `"document"`, `"concept"`). Built-in tags are canonical
+    /// singular snake_case strings; new tags are added as ontology rows in
+    /// Arango, never as Rust enum variants.
     #[serde(default)]
     pub target_types: Vec<String>,
 
@@ -487,9 +488,12 @@ impl QueryIR {
     /// downstream keyword lists.
     #[must_use]
     pub fn requests_source_coverage_context(&self) -> bool {
-        matches!(self.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
-            && self.literal_constraints.is_empty()
+        matches!(
+            self.act,
+            QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta | QueryAct::RetrieveValue
+        ) && self.literal_constraints.is_empty()
             && self.comparison.is_none()
+            && self.source_slice.is_none()
             && !self.is_follow_up()
     }
 
@@ -504,9 +508,8 @@ impl QueryIR {
     /// constraint resolves to a parseable bound — downstream retrieval
     /// then skips the temporal hard-filter and falls back to the
     /// keyword-boost path. Compiler is the canonical NL date parser; this
-    /// helper does only structural RFC3339 parsing per CLAUDE.md
-    /// "запрещено держать захардкоженные словари... под конкретный
-    /// естественный язык".
+    /// helper does only structural RFC3339 parsing — no hardcoded
+    /// natural-language dictionaries are allowed at this layer.
     #[must_use]
     pub fn resolved_temporal_bounds(
         &self,
@@ -556,7 +559,7 @@ impl QueryIR {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationLevel {
     /// Drop the answer to a safe stub if any literal is unsupported.
@@ -1178,7 +1181,7 @@ mod tests {
 /// Canonical QueryIR cache discriminator. When compiler semantics change,
 /// obsolete cache rows are discarded instead of read through compatibility
 /// aliases or parallel cache generations.
-pub const QUERY_IR_SCHEMA_VERSION: u16 = 6;
+pub const QUERY_IR_SCHEMA_VERSION: u16 = 8;
 
 /// Maximum age of a Postgres-tier `query_ir_cache` row before it is
 /// treated as a miss. Redis already holds its own 24h hot tier; the

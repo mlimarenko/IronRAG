@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum PrincipalKind {
     User,
     ApiToken,
@@ -10,7 +10,7 @@ pub enum PrincipalKind {
     Bootstrap,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum GrantResourceKind {
     System,
     Workspace,
@@ -23,7 +23,7 @@ pub enum GrantResourceKind {
     LibraryBinding,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct WorkspaceMembership {
     pub workspace_id: Uuid,
     pub principal_id: Uuid,
@@ -32,7 +32,7 @@ pub struct WorkspaceMembership {
     pub ended_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Principal {
     pub id: Uuid,
     pub principal_kind: PrincipalKind,
@@ -41,7 +41,7 @@ pub struct Principal {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiToken {
     pub principal_id: Uuid,
     pub workspace_id: Option<Uuid>,
@@ -51,7 +51,7 @@ pub struct ApiToken {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Grant {
     pub id: Uuid,
     pub principal_id: Uuid,

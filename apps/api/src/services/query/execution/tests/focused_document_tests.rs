@@ -83,7 +83,7 @@ fn build_focused_document_answer_extracts_report_name_from_focused_document() {
     let document_id = Uuid::now_v7();
     let answer = build_focused_document_answer(
         "What report name appears in the runtime PDF upload check?",
-        &query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["report_name"]),
+        &query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["secondary_heading"]),
         &[RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
             revision_id: Uuid::now_v7(),
@@ -97,6 +97,95 @@ fn build_focused_document_answer_extracts_report_name_from_focused_document() {
             source_text: "Runtime PDF upload check\n\nQuarterly graph report".to_string(),
         }],
     );
+    assert_eq!(answer.as_deref(), Some("Quarterly graph report"));
+}
+
+#[test]
+fn build_focused_document_answer_prefers_pdf_for_format_marker_when_stem_is_ambiguous() {
+    let pdf_id = Uuid::now_v7();
+    let docx_id = Uuid::now_v7();
+    let pptx_id = Uuid::now_v7();
+    let answer = build_focused_document_answer(
+        "What report name appears in the runtime PDF upload check?",
+        &query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["secondary_heading"]),
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: pdf_id,
+                document_label: "runtime_upload_check.pdf".to_string(),
+                excerpt: "Runtime PDF upload check".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.7),
+                source_text: "Runtime PDF upload check\n\nQuarterly graph report".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: docx_id,
+                document_label: "runtime_upload_check.docx".to_string(),
+                excerpt: "Runtime PDF upload check".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.9),
+                source_text: "Runtime PDF upload check\n\nLegacy upload report".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: pptx_id,
+                document_label: "runtime_upload_check.pptx".to_string(),
+                excerpt: "Runtime PDF upload check".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.8),
+                source_text: "Runtime PDF upload check\n\nOperations deck".to_string(),
+            },
+        ],
+    );
+    assert_eq!(answer.as_deref(), Some("Quarterly graph report"));
+}
+
+#[test]
+fn build_focused_document_answer_extracts_report_name_from_pdf_single_line_text() {
+    let pdf_id = Uuid::now_v7();
+    let docx_id = Uuid::now_v7();
+    let answer = build_focused_document_answer(
+        "What report name appears in the runtime PDF upload check?",
+        &query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["secondary_heading"]),
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: pdf_id,
+                document_label: "runtime_upload_check.pdf".to_string(),
+                excerpt: "Runtime PDF upload check".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.7),
+                source_text: "Runtime PDF upload check Quarterly graph report".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: docx_id,
+                document_label: "runtime_upload_check.docx".to_string(),
+                excerpt: "Runtime DOCX upload check".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(1_000_000.0),
+                source_text: "## Runtime DOCX upload check\n\nCanonical pipeline validation"
+                    .to_string(),
+            },
+        ],
+    );
+
     assert_eq!(answer.as_deref(), Some("Quarterly graph report"));
 }
 
@@ -127,7 +216,7 @@ fn build_focused_document_answer_does_not_answer_semantic_vectorized_modalities_
     let document_id = Uuid::now_v7();
     let answer = build_focused_document_answer(
             "According to the vector database article, what kinds of data can all be vectorized?",
-            &fallback_query_ir(),
+            &generic_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 revision_id: Uuid::now_v7(),
@@ -157,7 +246,7 @@ fn build_canonical_answer_context_does_not_filter_on_weak_document_focus() {
 
     let context = build_canonical_answer_context(
         "Which search engines and assistants or services are named as examples in the knowledge graph article?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         None,
         &CanonicalAnswerEvidence {
             bundle: None,
@@ -258,7 +347,7 @@ fn build_canonical_answer_context_filters_only_explicit_document_reference() {
     let other_document_id = Uuid::now_v7();
     let context = build_canonical_answer_context(
         "Summarize knowledge_graph_wikipedia.md",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         None,
         &CanonicalAnswerEvidence {
             bundle: None,
@@ -305,7 +394,7 @@ fn build_canonical_answer_context_keeps_typed_runtime_graph_evidence() {
     let document_id = Uuid::now_v7();
     let context = build_canonical_answer_context(
         "Which rare graph value belongs to Project Omega?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         None,
         &CanonicalAnswerEvidence {
             bundle: None,
@@ -338,7 +427,7 @@ fn build_canonical_answer_context_keeps_typed_runtime_graph_evidence() {
 fn build_canonical_answer_context_keeps_unhydrated_graph_evidence_lines() {
     let context = build_canonical_answer_context(
         "Which rare graph value belongs to Project Omega?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         None,
         &CanonicalAnswerEvidence {
             bundle: None,
@@ -434,7 +523,7 @@ fn build_canonical_answer_context_promotes_query_matching_prepared_segments_befo
         ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
     });
 
-    let mut query_ir = fallback_query_ir();
+    let mut query_ir = generic_query_ir();
     query_ir.document_focus = Some(DocumentHint {
         hint: "deferred ticket regulated product code verification".to_string(),
     });
@@ -482,7 +571,7 @@ fn render_canonical_chunk_section_keeps_full_graph_evidence_text() {
 
     let section = render_canonical_chunk_section(
         "Which exact low-frequency setting is attached to RareNode?",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &[chunk],
         false,
     );
@@ -497,7 +586,7 @@ fn render_canonical_chunk_section_uses_longer_question_focused_source_excerpt() 
     let document_id = Uuid::now_v7();
     let section = render_canonical_chunk_section(
             "Which search engines and assistants or services are named as examples in the knowledge graph article?",
-            &fallback_query_ir(),
+            &generic_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 revision_id: Uuid::now_v7(),
@@ -541,7 +630,7 @@ fn render_canonical_chunk_section_expands_single_document_coverage_for_broad_ir(
 
     let section = render_canonical_chunk_section(
         "Provide a source overview",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &chunks,
         false,
     );
@@ -588,7 +677,7 @@ fn render_canonical_chunk_section_promotes_source_profile_for_broad_ir() {
 
     let section = render_canonical_chunk_section(
         "Provide a source overview",
-        &fallback_query_ir(),
+        &generic_query_ir(),
         &chunks,
         false,
     );
@@ -637,7 +726,7 @@ fn build_focused_document_answer_does_not_answer_semantic_ocr_sources_question()
     let document_id = Uuid::now_v7();
     let answer = build_focused_document_answer(
             "Which kinds of source material are explicitly listed as OCR inputs in the OCR article?",
-            &fallback_query_ir(),
+            &generic_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 revision_id: Uuid::now_v7(),
@@ -660,7 +749,7 @@ fn build_focused_document_answer_does_not_answer_semantic_ocr_conversion_questio
     let document_id = Uuid::now_v7();
     let answer = build_focused_document_answer(
             "What does OCR convert images of text into, and what kinds of source material are explicitly named?",
-            &fallback_query_ir(),
+            &generic_query_ir(),
             &[RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
                 revision_id: Uuid::now_v7(),
