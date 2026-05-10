@@ -13,7 +13,6 @@ use crate::{
     app::state::AppState,
     domains::agent_runtime::{
         RuntimeExecutionSummary, RuntimePolicyDecisionSummary, RuntimePolicySummary,
-        RuntimeSurfaceKind,
     },
     domains::query::{
         PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryConversationDetail,
@@ -33,7 +32,7 @@ use crate::{
     services::{
         iam::audit::{AppendAuditEventCommand, AppendQueryExecutionAuditCommand},
         mcp::access::library_catalog_ref,
-        query::service::{CreateConversationCommand, ExecuteConversationTurnCommand},
+        query::service::CreateConversationCommand,
     },
 };
 
@@ -57,7 +56,6 @@ pub struct CreateSessionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionTurnRequest {
     content_text: String,
-    top_k: Option<usize>,
     include_debug: Option<bool>,
 }
 
@@ -323,27 +321,23 @@ pub async fn create_session_turn(
     let started_at = std::time::Instant::now();
     let span = tracing::Span::current();
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
-    let outcome = state
-        .canonical_services
-        .query
-        .execute_turn(
-            &state,
-            ExecuteConversationTurnCommand {
-                conversation_id: session_id,
-                author_principal_id: Some(auth.principal_id),
-                surface_kind: RuntimeSurfaceKind::Ui,
-                content_text: payload.content_text,
-                external_prior_turns: Vec::new(),
-                top_k: resolve_query_turn_top_k(payload.top_k),
-                include_debug: payload.include_debug.unwrap_or(false),
-            },
-        )
-        .await?;
+    // TODO(observability): thread request_id from middleware instead of generating here
+    let request_id = Uuid::new_v4().to_string();
+    let outcome = crate::services::query::mcp_agent::turn::run_mcp_agent_turn(
+        &state,
+        &request_id,
+        &auth,
+        session_id,
+        payload.content_text,
+        payload.include_debug.unwrap_or(false),
+    )
+    .await?;
     append_query_execution_audit(state.clone(), auth.principal_id, "ui", &outcome).await;
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
     Ok(Json(map_turn_execution_response(outcome)).into_response())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resolve_query_turn_top_k(requested_top_k: Option<usize>) -> usize {
     resolve_top_k(requested_top_k)
 }

@@ -156,6 +156,7 @@ pub struct NewRuntimeExecution<'a> {
     pub parallel_action_limit: i32,
     pub failure_code: Option<&'a str>,
     pub failure_summary_redacted: Option<&'a str>,
+    pub parent_execution_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -219,11 +220,11 @@ pub async fn create_runtime_execution(
         "insert into runtime_execution (
             id, owner_kind, owner_id, task_kind, surface_kind, contract_name, contract_version,
             lifecycle_state, active_stage, turn_budget, turn_count, parallel_action_limit,
-            failure_code, failure_summary_redacted, accepted_at, completed_at
+            failure_code, failure_summary_redacted, parent_execution_id, accepted_at, completed_at
          ) values (
             $1, $2::runtime_execution_owner_kind, $3, $4::runtime_task_kind,
             $5::surface_kind, $6, $7, $8::runtime_lifecycle_state,
-            $9::runtime_stage_kind, $10, $11, $12, $13, $14, now(), null
+            $9::runtime_stage_kind, $10, $11, $12, $13, $14, $15, now(), null
          )
          returning
             id,
@@ -257,6 +258,7 @@ pub async fn create_runtime_execution(
     .bind(input.parallel_action_limit)
     .bind(input.failure_code)
     .bind(input.failure_summary_redacted)
+    .bind(input.parent_execution_id)
     .fetch_one(postgres)
     .await?;
     map_runtime_execution_row(row)

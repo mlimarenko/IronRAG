@@ -21,6 +21,7 @@ pub enum AiBindingPurpose {
     QueryRetrieve,
     QueryAnswer,
     Vision,
+    Agent,
 }
 
 impl AiBindingPurpose {
@@ -34,6 +35,7 @@ impl AiBindingPurpose {
             Self::QueryRetrieve => "query_retrieve",
             Self::QueryAnswer => "query_answer",
             Self::Vision => "vision",
+            Self::Agent => "agent",
         }
     }
 
@@ -64,6 +66,7 @@ impl std::str::FromStr for AiBindingPurpose {
             "query_retrieve" => Ok(Self::QueryRetrieve),
             "query_answer" => Ok(Self::QueryAnswer),
             "vision" => Ok(Self::Vision),
+            "agent" => Ok(Self::Agent),
             other => Err(format!("unsupported AI binding purpose: {other}")),
         }
     }

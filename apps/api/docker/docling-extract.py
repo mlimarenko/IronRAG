@@ -237,6 +237,57 @@ def _splice_picture_ocr(markdown, snippets):
     return "".join(out_parts)
 
 
+def _collect_picture_bytes(document):
+    """Return a list of `{index, contentBase64, sizePx}` for every
+    PictureItem in `document` so the Rust caller can route each
+    picture through the active vision binding for OCR.
+
+    The index matches the order of `<!-- image -->` placeholders in
+    the markdown (same iterate_items() order as `_ocr_picture_items`).
+    Sizes below ~24x24 px are dropped — they are decorative icons,
+    not screenshots, and routing them through a multimodal LLM only
+    burns budget."""
+    pictures = []
+    try:
+        from docling_core.types.doc.document import PictureItem  # type: ignore
+    except ImportError:
+        return pictures
+
+    import base64
+    import io
+
+    idx = -1
+    for item, _level in document.iterate_items():
+        if not isinstance(item, PictureItem):
+            continue
+        idx += 1
+        try:
+            pil_image = item.get_image(document)
+        except Exception:
+            pil_image = None
+        if pil_image is None:
+            continue
+        width, height = pil_image.size
+        if width < 24 or height < 24:
+            # Decorative icon (info marker, copyright glyph). Skip.
+            continue
+        try:
+            buf = io.BytesIO()
+            pil_image.save(buf, format="PNG")
+            encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception:
+            continue
+        pictures.append(
+            {
+                "index": idx,
+                "mime": "image/png",
+                "contentBase64": encoded,
+                "sizePx": [int(width), int(height)],
+            }
+        )
+    return pictures
+
+
 def main():
     if len(sys.argv) != 2:
         print("usage: ironrag-docling-extract <input-file>", file=sys.stderr)
@@ -268,16 +319,17 @@ def main():
     result = converter.convert(source)
     document = result.document
 
-    # Post-process: run the in-process OCR engine on each embedded
-    # picture's cropped image and inline the extracted text after the
-    # picture placeholder so chunking + graph extraction see it.
-    # Detect the dominant script from the already-extracted text layer
-    # so rapidocr loads the matching Rec model (Cyrillic vs CJK vs Latin)
-    # — the default Chinese-only Rec transliterated Russian into Latin
-    # look-alikes ("ИНВЕНТАРИЗАЦИЯ" -> "MHBeHTapN3aUNA").
+    # Two-track image handling. The local rapidocr / tesseract OCR path
+    # stays as a fallback for deployments without a vision binding (and
+    # for tiny logo-only pictures where a vision LLM would be overkill).
+    # In parallel we expose every embedded picture as a base64-encoded
+    # PNG so the Rust caller can route them through the active `vision`
+    # binding for higher-quality OCR (multimodal LLM beats PP-OCRv3
+    # mobile cyrillic on UI screenshots and mixed-script content).
     text = document.export_to_text()
     script_hint = _detect_dominant_script(text)
     picture_ocr_text = _ocr_picture_items(document, script_hint=script_hint)
+    pictures_payload = _collect_picture_bytes(document)
 
     markdown = document.export_to_markdown(image_placeholder="<!-- image -->")
     if picture_ocr_text:
@@ -293,6 +345,7 @@ def main():
         "inputFormat": _input_format(result),
         "doclingVersion": metadata.version("docling"),
         "warnings": _warnings(result),
+        "pictures": pictures_payload,
         "timings": {
             "totalSeconds": round(time.perf_counter() - started_at, 6),
         },

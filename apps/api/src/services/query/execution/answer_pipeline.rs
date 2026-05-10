@@ -496,6 +496,7 @@ pub(crate) async fn generate_answer_query(
                 query_ir: Some(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
+                agent_loop: None,
             },
         );
         return Ok(RuntimeAnswerQueryResult {
@@ -574,6 +575,7 @@ pub(crate) async fn generate_answer_query(
                                     serde_json::to_value(&prepared.query_ir)
                                         .unwrap_or(serde_json::Value::Null),
                                 ),
+                                agent_loop: None,
                             },
                         );
                         return Ok(RuntimeAnswerQueryResult {
@@ -644,6 +646,7 @@ pub(crate) async fn generate_answer_query(
                             serde_json::to_value(&prepared.query_ir)
                                 .unwrap_or(serde_json::Value::Null),
                         ),
+                        agent_loop: None,
                     },
                 );
                 // Lightweight verify: no canonical evidence is
@@ -773,6 +776,7 @@ pub(crate) async fn generate_answer_query(
                                 serde_json::to_value(&prepared.query_ir)
                                     .unwrap_or(serde_json::Value::Null),
                             ),
+                        agent_loop: None,
                         },
                     );
                     let answer_with_sources = append_source_section(
@@ -844,6 +848,7 @@ pub(crate) async fn generate_answer_query(
                 query_ir: Some(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
+            agent_loop: None,
             },
         );
         let verification_stage = verify_generated_answer(
@@ -879,6 +884,7 @@ pub(crate) async fn generate_answer_query(
                 query_ir: Some(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
+            agent_loop: None,
             },
         );
         let answer_with_sources = append_source_section(
@@ -1042,6 +1048,7 @@ pub(crate) async fn generate_answer_query(
                                 serde_json::to_value(&prepared.query_ir)
                                     .unwrap_or(serde_json::Value::Null),
                             ),
+                        agent_loop: None,
                         },
                     );
                     let answer_with_sources = append_source_section(
@@ -1143,6 +1150,7 @@ pub(crate) async fn generate_answer_query(
         final_answer: Some(candidate.verification_stage.generation.answer.clone()),
         captured_at: chrono::Utc::now(),
         query_ir: Some(serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null)),
+        agent_loop: None,
     });
     let answer_with_sources = append_source_section(
         candidate.verification_stage.generation.answer,

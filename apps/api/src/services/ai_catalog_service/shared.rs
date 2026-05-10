@@ -190,6 +190,7 @@ pub(crate) fn canonical_runtime_preset_name(
         AiBindingPurpose::QueryRetrieve => "Query Retrieve",
         AiBindingPurpose::QueryAnswer => "Query Answer",
         AiBindingPurpose::Vision => "Vision",
+        AiBindingPurpose::Agent => "Agent",
     };
     format!("{provider_display_name} {purpose_label} · {model_name}")
 }

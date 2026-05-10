@@ -103,6 +103,7 @@ pub async fn run_single_shot_turn(
         response_text: (!answer.is_empty()).then(|| answer.clone()),
         response_tool_calls: Vec::new(),
         usage: response.usage_json.clone(),
+        child_runtime_execution_ids: Vec::new(),
     };
 
     Ok(AgentTurnResult {
@@ -182,6 +183,7 @@ pub async fn run_literal_fidelity_revision_turn(
         response_text: (!answer.is_empty()).then(|| answer.clone()),
         response_tool_calls: Vec::new(),
         usage: response.usage_json.clone(),
+        child_runtime_execution_ids: Vec::new(),
     };
 
     Ok(AgentTurnResult {
@@ -263,6 +265,7 @@ pub async fn run_clarify_turn(
         response_text: (!answer.is_empty()).then(|| answer.clone()),
         response_tool_calls: Vec::new(),
         usage: response.usage_json.clone(),
+        child_runtime_execution_ids: Vec::new(),
     };
 
     Ok(AgentTurnResult {

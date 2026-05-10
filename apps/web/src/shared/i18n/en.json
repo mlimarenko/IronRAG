@@ -402,7 +402,8 @@
       "verify_query_answer": "Verifying answer",
       "finalizing": "Finalizing",
       "web_discovery": "Discovering pages",
-      "web_materialize_page": "Materializing web page"
+      "web_materialize_page": "Materializing web page",
+      "webhook_delivery": "Webhook delivery"
     },
     "failureMessages": {
       "generic": "Document processing failed.",
@@ -422,7 +423,19 @@
         "web_snapshot_unavailable": "The web page snapshot is unavailable.",
         "web_capture_materialization_failed": "The captured web page could not be materialized for storage.",
         "recursive_crawl_failed": "The recursive crawl failed before completion.",
-        "knowledge_context_bundle_failed": "The system could not assemble the graph context bundle."
+        "knowledge_context_bundle_failed": "The system could not assemble the graph context bundle.",
+        "missing_stored_source": "The document source file is missing from storage.",
+        "stored_source_unavailable": "The source file could not be read.",
+        "shutdown_cancelled": "Processing was interrupted due to service shutdown.",
+        "document_deleted": "The document was deleted before processing completed.",
+        "inline_pipeline_failed": "The inline processing pipeline failed.",
+        "graph_cleanup_failed": "The graph could not be cleaned of stale document data.",
+        "graph_projection_failed": "The graph projection could not be rebuilt.",
+        "batch_timeout": "The batch operation exceeded the time limit.",
+        "ingest_job_admission_failed": "The processing job could not be queued.",
+        "ingest_stage_cancelled": "The processing stage was cancelled.",
+        "malformed_output": "The model returned malformed output.",
+        "invalid_candidate_set": "The model returned an invalid candidate set."
       },
       "byStage": {
         "extract_content": "Text could not be extracted from the document. Check the file and retry processing.",

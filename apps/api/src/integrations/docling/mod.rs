@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use base64::Engine as _;
 use serde::Deserialize;
 use tempfile::TempDir;
 use thiserror::Error;
@@ -80,6 +81,24 @@ struct DoclingExtractionPayload {
     warnings: Vec<String>,
     #[serde(default)]
     timings: serde_json::Value,
+    /// Embedded picture items extracted from the source. Each entry
+    /// carries the cropped picture bytes (base64-encoded PNG) so the
+    /// caller can route them through the active `vision` binding for
+    /// higher-quality OCR than the local rapidocr/tesseract fallback.
+    /// The `index` matches the placeholder ordinal in `markdown`.
+    #[serde(default)]
+    pictures: Vec<DoclingExtractionPicture>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DoclingExtractionPicture {
+    pub index: usize,
+    #[serde(default)]
+    pub mime: Option<String>,
+    pub content_base64: String,
+    #[serde(default)]
+    pub size_px: Vec<u32>,
 }
 
 /// Extracts document text with the local Docling runtime.
@@ -164,6 +183,25 @@ fn build_output(
     let input_format = payload.input_format.unwrap_or_else(|| source_format.to_string());
     let page_count = payload.page_count;
 
+    let extracted_images = payload
+        .pictures
+        .into_iter()
+        .filter_map(|picture| {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(picture.content_base64.as_bytes())
+                .ok()?;
+            let width = picture.size_px.first().copied().unwrap_or_default();
+            let height = picture.size_px.get(1).copied().unwrap_or_default();
+            Some(crate::shared::extraction::ExtractedImage {
+                page: 0,
+                image_bytes: bytes,
+                mime_type: picture.mime.unwrap_or_else(|| "image/png".to_string()),
+                width,
+                height,
+            })
+        })
+        .collect();
+
     Ok(ExtractionOutput {
         extraction_kind: "docling_markdown".to_string(),
         content_text: layout.content_text,
@@ -188,7 +226,7 @@ fn build_output(
         provider_kind: None,
         model_name: None,
         usage_json: serde_json::json!({}),
-        extracted_images: Vec::new(),
+        extracted_images,
     })
 }
 
@@ -313,6 +351,7 @@ mod tests {
             docling_version: Some("2.91.0".to_string()),
             warnings: Vec::new(),
             timings: serde_json::json!({"total": 1.5}),
+            pictures: Vec::new(),
         };
 
         let output =
@@ -340,6 +379,7 @@ mod tests {
             docling_version: Some("2.91.0".to_string()),
             warnings: Vec::new(),
             timings: serde_json::json!({"total": 1.5}),
+            pictures: Vec::new(),
         };
 
         let output = build_output(payload, Some("formats.pdf"), Some("application/pdf"), "pdf")
@@ -359,6 +399,7 @@ mod tests {
             docling_version: Some("2.91.0".to_string()),
             warnings: Vec::new(),
             timings: serde_json::json!({"total": 1.5}),
+            pictures: Vec::new(),
         };
 
         let error = build_output(payload, Some("empty.pdf"), Some("application/pdf"), "pdf")

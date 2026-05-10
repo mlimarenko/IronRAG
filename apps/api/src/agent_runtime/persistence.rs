@@ -29,6 +29,7 @@ pub async fn create_runtime_execution(
             parallel_action_limit: execution.parallel_action_limit,
             failure_code: execution.failure_code.as_deref(),
             failure_summary_redacted: execution.failure_summary_redacted.as_deref(),
+            parent_execution_id: None,
         },
     )
     .await

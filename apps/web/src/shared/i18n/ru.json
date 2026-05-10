@@ -402,7 +402,8 @@
       "verify_query_answer": "Проверка ответа",
       "finalizing": "Финализация",
       "web_discovery": "Обход веб-источника",
-      "web_materialize_page": "Загрузка веб-страницы"
+      "web_materialize_page": "Загрузка веб-страницы",
+      "webhook_delivery": "Доставка вебхука"
     },
     "failureMessages": {
       "generic": "Обработка документа завершилась ошибкой.",
@@ -422,7 +423,19 @@
         "web_snapshot_unavailable": "Снимок веб-страницы недоступен.",
         "web_capture_materialization_failed": "Не удалось подготовить веб-страницу к сохранению.",
         "recursive_crawl_failed": "Рекурсивный обход сайта завершился ошибкой.",
-        "knowledge_context_bundle_failed": "Не удалось собрать контекстный пакет для графа."
+        "knowledge_context_bundle_failed": "Не удалось собрать контекстный пакет для графа.",
+        "missing_stored_source": "Исходный файл документа отсутствует в хранилище.",
+        "stored_source_unavailable": "Исходный файл недоступен для чтения.",
+        "shutdown_cancelled": "Обработка прервана из-за остановки сервиса.",
+        "document_deleted": "Документ был удалён до завершения обработки.",
+        "inline_pipeline_failed": "Встроенный конвейер обработки завершился ошибкой.",
+        "graph_cleanup_failed": "Не удалось очистить граф от старых данных документа.",
+        "graph_projection_failed": "Не удалось перестроить проекцию графа.",
+        "batch_timeout": "Пакетная операция превысила лимит времени.",
+        "ingest_job_admission_failed": "Не удалось поставить задачу обработки в очередь.",
+        "ingest_stage_cancelled": "Этап обработки был отменён.",
+        "malformed_output": "Модель вернула некорректный вывод.",
+        "invalid_candidate_set": "Модель вернула некорректный набор кандидатов."
       },
       "byStage": {
         "extract_content": "Не удалось извлечь текст из документа. Проверьте файл и повторите обработку.",

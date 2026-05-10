@@ -326,7 +326,8 @@ fn provider_capability_for_binding(
         AiBindingPurpose::ExtractText
         | AiBindingPurpose::ExtractGraph
         | AiBindingPurpose::QueryCompile
-        | AiBindingPurpose::QueryAnswer => provider.capabilities.chat,
+        | AiBindingPurpose::QueryAnswer
+        | AiBindingPurpose::Agent => provider.capabilities.chat,
         AiBindingPurpose::EmbedChunk | AiBindingPurpose::QueryRetrieve => {
             provider.capabilities.embeddings
         }

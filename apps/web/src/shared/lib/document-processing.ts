@@ -5,6 +5,16 @@ function normalizeToken(value: string | null | undefined): string | null {
   return normalized ? normalized : null;
 }
 
+/**
+ * Look up a translation key without a defaultValue fallback.
+ * i18next returns the key itself when no translation exists, so
+ * we treat key-echo as a miss and return undefined.
+ */
+function i18nValue(key: string, t: TFunction): string | undefined {
+  const result = t(key);
+  return result !== key ? result : undefined;
+}
+
 function prettifyToken(value: string): string {
   return value
     .replace(/[_-]+/g, ' ')
@@ -30,10 +40,7 @@ function stageFailureMessage(stage: string | null | undefined, t: TFunction): st
     return undefined;
   }
 
-  return (
-    t(`documents.failureMessages.byStage.${normalizedStage}`, { defaultValue: '' }) ||
-    undefined
-  );
+  return i18nValue(`documents.failureMessages.byStage.${normalizedStage}`, t);
 }
 
 function codeFailureMessage(code: string | null | undefined, t: TFunction): string | undefined {
@@ -42,10 +49,7 @@ function codeFailureMessage(code: string | null | undefined, t: TFunction): stri
     return undefined;
   }
 
-  return (
-    t(`documents.failureMessages.byCode.${normalizedCode}`, { defaultValue: '' }) ||
-    undefined
-  );
+  return i18nValue(`documents.failureMessages.byCode.${normalizedCode}`, t);
 }
 
 export function humanizeDocumentStage(
@@ -58,7 +62,7 @@ export function humanizeDocumentStage(
   }
 
   return (
-    t(`documents.stageLabels.${normalizedStage}`, { defaultValue: '' }) ||
+    i18nValue(`documents.stageLabels.${normalizedStage}`, t) ||
     sentenceCase(prettifyToken(normalizedStage))
   );
 }
@@ -119,5 +123,5 @@ export function humanizeDocumentFailure(
     });
   }
 
-  return t('documents.failureMessages.generic', { defaultValue: '' }) || undefined;
+  return i18nValue('documents.failureMessages.generic', t);
 }

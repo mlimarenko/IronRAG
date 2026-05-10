@@ -452,13 +452,32 @@ pub async fn build_runtime_file_extraction_plan(
             docling_owned_recognition_profile(file_kind, source_format, recognition_policy)?;
         return match recognition_profile.engine {
             RecognitionEngine::Docling => {
-                let output =
+                let mut output =
                     docling::extract_document(file_name, mime_type, source_format, file_bytes)
                         .await
                         .map_err(|error| FileExtractError::ExtractionFailed {
                             file_kind,
                             message: error.to_string(),
                         })?;
+                // Embedded raster images inside PDFs (UI screenshots,
+                // diagrams, screenshotted JSON payloads) ride out of
+                // Docling as `<!-- image -->` placeholders in the
+                // markdown plus per-picture PNG bytes in
+                // `extracted_images`. The local rapidocr/tesseract OCR
+                // already augmented the markdown for offline mode; when
+                // the operator has configured a `vision` binding we
+                // upgrade those snippets through the multimodal LLM —
+                // far better recall on UI fonts and mixed-script
+                // content (Cyrillic + Latin).
+                augment_with_vision_picture_ocr(
+                    &mut output,
+                    gateway,
+                    vision_provider,
+                    vision_api_key,
+                    vision_base_url,
+                    vision_extra_parameters_json,
+                )
+                .await;
                 Ok(build_plan_from_extraction(file_kind, output, recognition_profile))
             }
             RecognitionEngine::Vision => {
@@ -640,6 +659,117 @@ fn build_plan_from_extraction(
         extraction_version: Some("runtime_extraction_v1".to_string()),
         ingest_mode: MULTIPART_UPLOAD_MODE.to_string(),
         image_checksum,
+    }
+}
+
+/// Run the active `vision` binding over every embedded picture
+/// reported by Docling, then append the per-picture OCR text to the
+/// extraction's `content_text` so chunking, embedding, and graph
+/// extraction see it.
+///
+/// Best-effort: when the binding is missing, the picture list is
+/// empty, or any individual picture fails the multimodal call, we
+/// keep the local-OCR augmentation that the Python extractor already
+/// wrote into the markdown.
+async fn augment_with_vision_picture_ocr(
+    output: &mut ExtractionOutput,
+    gateway: &dyn LlmGateway,
+    vision_provider: Option<&ProviderModelSelection>,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+    extra_parameters_json: Option<&serde_json::Value>,
+) {
+    tracing::info!(
+        extracted_images = output.extracted_images.len(),
+        vision_provider = ?vision_provider.map(|vp| (vp.provider_kind.as_str(), vp.model_name.as_str())),
+        "augment_with_vision_picture_ocr entry"
+    );
+    if output.extracted_images.is_empty() {
+        return;
+    }
+    let Some(vision_provider) = vision_provider else {
+        // No active vision binding — leave the local-OCR fallback that
+        // docling-extract.py already wrote into the content_text.
+        output.extracted_images.clear();
+        return;
+    };
+    let empty_extra_parameters = serde_json::json!({});
+    let extra_parameters_json = extra_parameters_json.unwrap_or(&empty_extra_parameters);
+    let mut snippets: Vec<String> = Vec::with_capacity(output.extracted_images.len());
+    for (idx, image) in output.extracted_images.iter().enumerate() {
+        let mime = if image.mime_type.is_empty() {
+            "image/png"
+        } else {
+            image.mime_type.as_str()
+        };
+        match extraction::image::extract_image_with_provider(
+            gateway,
+            vision_provider.provider_kind.as_str(),
+            &vision_provider.model_name,
+            api_key.unwrap_or_default(),
+            base_url,
+            extra_parameters_json,
+            mime,
+            image.image_bytes.as_slice(),
+        )
+        .await
+        {
+            Ok(picture_output) => {
+                let trimmed = picture_output.content_text.trim();
+                tracing::info!(
+                    picture_index = idx,
+                    snippet_len = trimmed.len(),
+                    "augment_with_vision_picture_ocr per-picture result"
+                );
+                if !trimmed.is_empty() {
+                    snippets.push(format!(
+                        "--- Embedded image {} ({}x{}) ---\n{}",
+                        idx + 1,
+                        image.width,
+                        image.height,
+                        trimmed
+                    ));
+                }
+            }
+            Err(error) => {
+                output
+                    .warnings
+                    .push(format!("vision OCR for embedded picture {} failed: {error}", idx + 1));
+            }
+        }
+    }
+    output.extracted_images.clear();
+    tracing::info!(
+        snippet_count = snippets.len(),
+        content_text_len_before = output.content_text.len(),
+        "augment_with_vision_picture_ocr exit summary"
+    );
+    if !snippets.is_empty() {
+        let block = snippets.join("\n\n");
+        if output.content_text.trim().is_empty() {
+            output.content_text = block;
+        } else {
+            output.content_text = format!("{}\n\n{}", output.content_text, block);
+        }
+        tracing::info!(
+            content_text_len_after = output.content_text.len(),
+            "augment_with_vision_picture_ocr appended"
+        );
+        // Rebuild structure_hints from the augmented content_text so the
+        // downstream normalizer / chunker actually sees the appended OCR
+        // lines. structure_hints.lines is built from a snapshot of
+        // content_text; without this rebuild the structured preparation
+        // step drops everything it can't align to a known line and the
+        // vision OCR snippets vanish before chunk_content runs.
+        let layout = crate::shared::extraction::build_text_layout_from_content(
+            output.content_text.trim(),
+        );
+        output.content_text = layout.content_text;
+        output.structure_hints = layout.structure_hints;
+        output.source_metadata.line_count = i32::try_from(
+            output.structure_hints.lines.len(),
+        )
+        .unwrap_or(i32::MAX);
     }
 }
 

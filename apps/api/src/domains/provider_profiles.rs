@@ -164,7 +164,7 @@ impl EffectiveProviderProfile {
             AiBindingPurpose::EmbedChunk => Some(&self.embedding),
             AiBindingPurpose::QueryRetrieve => Some(&self.query_retrieve),
             AiBindingPurpose::QueryCompile => Some(&self.query_compile),
-            AiBindingPurpose::QueryAnswer => Some(&self.answer),
+            AiBindingPurpose::QueryAnswer | AiBindingPurpose::Agent => Some(&self.answer),
             AiBindingPurpose::Vision => self.vision.as_ref(),
         }
     }

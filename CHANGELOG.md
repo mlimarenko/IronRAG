@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.4.3 — 2026-05-10
+
+### Embedded picture OCR via the active vision binding
+
+- **PDF screenshots, diagrams, and image-only blocks now reach the
+  graph.** Until v0.4.2 the Docling adapter dropped embedded raster
+  pictures behind `<!-- image -->` placeholders and the local
+  rapidocr / tesseract fallback could only handle simple cases. v0.4.3
+  routes every embedded picture through the active `vision` binding —
+  the same multimodal LLM the operator already configured for
+  image-file uploads — so screenshots of UI flows, JSON payload
+  examples, and configuration tables are OCR'd at multimodal-LLM
+  recall, not at small-CPU-OCR-model recall.
+- Docling's Python extractor now exposes each picture as a
+  base64-encoded PNG alongside its placeholder ordinal. The Rust
+  ingest pipeline iterates the list, calls
+  `extraction::image::extract_image_with_provider` per picture (same
+  helper as the standalone-image route), and appends the per-picture
+  text to the document's `content_text` so chunking, embedding, and
+  graph extraction see it. Cost per call is the same as one image
+  upload (~$0.001 with `gpt-5.4-mini` vision); for a typical PDF
+  with 5–10 embedded pictures the augmentation adds <$0.01 to the
+  document.
+- The local rapidocr / tesseract fallback is preserved for offline
+  deployments and runs first; the vision-binding pass replaces those
+  snippets when the binding is configured. Cyrillic / CJK / Latin
+  Rec model selection from v0.4.2 stays in place.
+- Failures on individual pictures (provider error, content moderation
+  rejection) are logged into the extraction warnings array and do not
+  fail the document — the rest of the pictures and the text layer
+  proceed.
+
 ## 0.4.2 — 2026-05-09
 
 > Provider catalog now ships seven profiles (OpenAI, DeepSeek,

@@ -360,7 +360,7 @@ fn shell_library_query_ready(missing: &[AiBindingPurpose]) -> bool {
     })
 }
 
-const fn map_bootstrap_binding_purpose(value: AiBindingPurpose) -> BootstrapBindingPurpose {
+fn map_bootstrap_binding_purpose(value: AiBindingPurpose) -> BootstrapBindingPurpose {
     match value {
         AiBindingPurpose::ExtractText => BootstrapBindingPurpose::ExtractText,
         AiBindingPurpose::ExtractGraph => BootstrapBindingPurpose::ExtractGraph,
@@ -369,6 +369,15 @@ const fn map_bootstrap_binding_purpose(value: AiBindingPurpose) -> BootstrapBind
         AiBindingPurpose::QueryRetrieve => BootstrapBindingPurpose::QueryRetrieve,
         AiBindingPurpose::QueryAnswer => BootstrapBindingPurpose::QueryAnswer,
         AiBindingPurpose::Vision => BootstrapBindingPurpose::Vision,
+        // The agent purpose drives the in-process MCP-agent loop and has
+        // no bootstrap shape — operators wire its binding through the
+        // admin UI after the canonical query/answer bindings are in
+        // place. Bootstrap configs that ship an `agent` entry would have
+        // already failed deserialization on `BootstrapBindingPurpose`.
+        AiBindingPurpose::Agent => unreachable!(
+            "AiBindingPurpose::Agent has no BootstrapBindingPurpose; \
+             agent bindings are configured through the admin surface"
+        ),
     }
 }
 
