@@ -51,6 +51,8 @@
     "purposeQueryAnswerDesc": "Отвечать на вопросы с опорой на содержимое библиотеки",
     "purposeVision": "Визуальный анализ",
     "purposeVisionDesc": "Обрабатывать изображения и визуальный контент в документах",
+    "purposeAgent": "AI-ассистент (MCP-агент)",
+    "purposeAgentDesc": "Управлять tool-loop'ом UI-ассистента: выбирать инструмент, вызывать grounded_answer и собирать финальный ответ",
     "bundleConfiguredInEnv": "API-ключ уже настроен в окружении.",
     "bundleReadyPreview": "Для выбранного провайдера будут автоматически созданы готовые пресеты.",
     "summaryReady": "Готово",

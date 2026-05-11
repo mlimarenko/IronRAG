@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.4.6 — 2026-05-11
+
+### Fix: LoginPage TypeError on fresh stack with the new Agent purpose
+
+- **`bootstrapPurposeMetadata` was missing an `agent` entry**, so when
+  the bootstrap bundle preview iterated its presets the `Record<...>`
+  lookup returned `undefined` and `LoginPage.tsx:553` threw
+  `TypeError: Cannot read properties of undefined (reading 'labelKey')`,
+  collapsing the auth view into the error boundary on a fresh stack.
+  v0.4.5 added Agent to `AiBindingPurpose` (and the bootstrap synthesis
+  pipeline) but left this purpose-metadata table behind. v0.4.6 adds
+  the missing entry, declares Agent on `BootstrapBindingPurpose` in the
+  generated TS types so the `satisfies` check covers it, and ships
+  `login.purposeAgent` / `login.purposeAgentDesc` in `ru.json` and
+  `en.json`.
+
 ## 0.4.5 — 2026-05-11
 
 ### UI assistant: complete the MCP-agent wiring + chat-model role recompute

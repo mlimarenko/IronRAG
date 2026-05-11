@@ -51,6 +51,8 @@
     "purposeQueryAnswerDesc": "Answer questions grounded in library content",
     "purposeVision": "Vision",
     "purposeVisionDesc": "Process images and visual content in documents",
+    "purposeAgent": "AI Assistant (MCP Agent)",
+    "purposeAgentDesc": "Drive the UI assistant tool-loop: pick the tool, invoke grounded_answer, and synthesize the final answer",
     "bundleConfiguredInEnv": "API key is already configured in the environment.",
     "bundleReadyPreview": "The selected provider will be bootstrapped with ready-to-use presets.",
     "summaryReady": "Ready",

@@ -422,7 +422,7 @@ export type BootstrapAiSetup = {
     presetBundles: Array<BootstrapProviderPresetBundle>;
 };
 
-export type BootstrapBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision';
+export type BootstrapBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision' | 'agent';
 
 export type BootstrapCredentialSource = 'missing' | 'env';
 

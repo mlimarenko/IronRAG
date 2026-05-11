@@ -64,6 +64,10 @@ const bootstrapPurposeMetadata = {
     labelKey: 'login.purposeVision',
     descriptionKey: 'login.purposeVisionDesc',
   },
+  agent: {
+    labelKey: 'login.purposeAgent',
+    descriptionKey: 'login.purposeAgentDesc',
+  },
 } satisfies BootstrapPurposeCoverage;
 
 function providerBundleKey(bundle: BootstrapProviderPresetBundle) {
