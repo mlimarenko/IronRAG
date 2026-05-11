@@ -776,7 +776,7 @@ pub(crate) async fn generate_answer_query(
                                 serde_json::to_value(&prepared.query_ir)
                                     .unwrap_or(serde_json::Value::Null),
                             ),
-                        agent_loop: None,
+                            agent_loop: None,
                         },
                     );
                     let answer_with_sources = append_source_section(
@@ -848,7 +848,7 @@ pub(crate) async fn generate_answer_query(
                 query_ir: Some(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
-            agent_loop: None,
+                agent_loop: None,
             },
         );
         let verification_stage = verify_generated_answer(
@@ -884,7 +884,7 @@ pub(crate) async fn generate_answer_query(
                 query_ir: Some(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
-            agent_loop: None,
+                agent_loop: None,
             },
         );
         let answer_with_sources = append_source_section(
@@ -1048,7 +1048,7 @@ pub(crate) async fn generate_answer_query(
                                 serde_json::to_value(&prepared.query_ir)
                                     .unwrap_or(serde_json::Value::Null),
                             ),
-                        agent_loop: None,
+                            agent_loop: None,
                         },
                     );
                     let answer_with_sources = append_source_section(

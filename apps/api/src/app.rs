@@ -267,14 +267,9 @@ async fn run_startup_bootstraps(
         .seed_all_provider_presets(state)
         .await
         .map_err(|error| anyhow::anyhow!("failed to seed provider presets: {error}"))?;
-    state
-        .canonical_services
-        .ai_catalog
-        .ensure_env_provider_credentials(state)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to ensure env-keyed provider credentials: {error}")
-        })?;
+    state.canonical_services.ai_catalog.ensure_env_provider_credentials(state).await.map_err(
+        |error| anyhow::anyhow!("failed to ensure env-keyed provider credentials: {error}"),
+    )?;
 
     if state.ui_bootstrap_admin.is_some() {
         bootstrap::ensure_canonical_bootstrap_admin(state).await.map_err(|error| {

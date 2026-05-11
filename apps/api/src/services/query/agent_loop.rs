@@ -86,6 +86,7 @@ pub async fn run_single_shot_turn(
         messages: messages.clone(),
         tools: Vec::new(),
         extra_parameters_json: binding.extra_parameters_json.clone(),
+        require_tool_call: false,
     };
 
     let response = state
@@ -166,6 +167,7 @@ pub async fn run_literal_fidelity_revision_turn(
         messages: messages.clone(),
         tools: Vec::new(),
         extra_parameters_json: binding.extra_parameters_json.clone(),
+        require_tool_call: false,
     };
 
     let response = state
@@ -248,6 +250,7 @@ pub async fn run_clarify_turn(
         messages: messages.clone(),
         tools: Vec::new(),
         extra_parameters_json: binding.extra_parameters_json.clone(),
+        require_tool_call: false,
     };
 
     let response = state

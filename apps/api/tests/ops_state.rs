@@ -491,6 +491,7 @@ impl OpsStateFixture {
                 parallel_action_limit: 1,
                 failure_code: Some("failed to assemble knowledge context bundle"),
                 failure_summary_redacted: Some("failed to assemble knowledge context bundle"),
+                parent_execution_id: None,
             },
         )
         .await

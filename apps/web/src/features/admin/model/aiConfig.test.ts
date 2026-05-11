@@ -208,6 +208,7 @@ describe('summarizeAiReadiness', () => {
       'query_retrieve',
       'query_compile',
       'query_answer',
+      'agent',
     ];
     const summary = summarizeAiReadiness(summaryInput({
       bindingsForScope: runtimePurposes.map(runtimePurposeBinding),
@@ -217,8 +218,8 @@ describe('summarizeAiReadiness', () => {
       models: runtimePurposes.map(runtimePurposeModel),
     }));
 
-    expect(summary.totalPurposes).toBe(5);
-    expect(summary.executableEffectiveBindings).toBe(5);
+    expect(summary.totalPurposes).toBe(6);
+    expect(summary.executableEffectiveBindings).toBe(6);
     expect(summary.missingPurposes).toEqual([]);
   });
 

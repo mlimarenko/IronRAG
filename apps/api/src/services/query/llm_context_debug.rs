@@ -170,7 +170,7 @@ impl LlmContextDebugStore {
 mod tests {
     use super::{
         AgentLoopMetadata, AgentStopReason, LlmContextDebugStore, LlmContextSnapshot,
-        LlmIterationDebug, ResponseToolCallDebug,
+        LlmIterationDebug,
     };
     use chrono::Utc;
     use uuid::Uuid;

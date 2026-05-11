@@ -191,7 +191,15 @@ pub fn sanitize_provider_error_detail(message: &str) -> String {
             return "upstream provider request failed; response details were redacted".to_string();
         }
     }
-    "upstream provider request failed; response body was not included".to_string()
+    // Preserve the upstream body so 4xx debugging is actually possible.
+    // The marker scan above already redacts payloads that look like they
+    // could leak credentials; everything else is a structured provider
+    // error message that operators need to read.
+    if message.is_empty() {
+        "upstream provider request failed; response body was empty".to_string()
+    } else {
+        message.to_string()
+    }
 }
 
 fn abort_retry<E>(_error: &E) -> RetryDecision {

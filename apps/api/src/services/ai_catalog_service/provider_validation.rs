@@ -10,18 +10,20 @@ use reqwest::{Client, Url};
 use serde_json::{Value, json};
 use std::net::IpAddr;
 
-const TEXT_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 4] = [
+const TEXT_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 5] = [
     AiBindingPurpose::ExtractText,
     AiBindingPurpose::ExtractGraph,
     AiBindingPurpose::QueryCompile,
     AiBindingPurpose::QueryAnswer,
+    AiBindingPurpose::Agent,
 ];
-const MULTIMODAL_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 5] = [
+const MULTIMODAL_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 6] = [
     AiBindingPurpose::ExtractText,
     AiBindingPurpose::ExtractGraph,
     AiBindingPurpose::QueryCompile,
     AiBindingPurpose::QueryAnswer,
     AiBindingPurpose::Vision,
+    AiBindingPurpose::Agent,
 ];
 const EMBEDDING_BINDING_PURPOSES: [AiBindingPurpose; 2] =
     [AiBindingPurpose::EmbedChunk, AiBindingPurpose::QueryRetrieve];

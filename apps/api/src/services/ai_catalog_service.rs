@@ -288,12 +288,13 @@ impl ResolvedRuntimeBinding {
 #[derive(Clone, Default)]
 pub struct AiCatalogService;
 
-const CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES: [AiBindingPurpose; 5] = [
+const CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES: [AiBindingPurpose; 6] = [
     AiBindingPurpose::ExtractGraph,
     AiBindingPurpose::EmbedChunk,
     AiBindingPurpose::QueryRetrieve,
     AiBindingPurpose::QueryCompile,
     AiBindingPurpose::QueryAnswer,
+    AiBindingPurpose::Agent,
 ];
 
 fn provider_credential_policy(provider: &ProviderCatalogEntry) -> &ProviderCredentialPolicy {

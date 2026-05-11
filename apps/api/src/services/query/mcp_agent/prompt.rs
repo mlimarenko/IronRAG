@@ -55,8 +55,7 @@ pub fn render_agent_system_prompt(
     library_display_name: &str,
     conversation_history: Option<&str>,
 ) -> String {
-    let mut prompt =
-        AGENT_SYSTEM_PROMPT_TEMPLATE.replace("{LIBRARY_NAME}", library_display_name);
+    let mut prompt = AGENT_SYSTEM_PROMPT_TEMPLATE.replace("{LIBRARY_NAME}", library_display_name);
     if let Some(history) = conversation_history.map(str::trim).filter(|h| !h.is_empty()) {
         prompt.push_str("\n## Prior conversation\n");
         prompt.push_str(history);
@@ -71,14 +70,8 @@ mod tests {
     #[test]
     fn prompt_mentions_grounded_answer_preference() {
         let rendered = render_agent_system_prompt("Test Library", None);
-        assert!(
-            rendered.contains("grounded_answer"),
-            "prompt must mention grounded_answer"
-        );
-        assert!(
-            rendered.contains("MUST"),
-            "prompt must contain a MUST directive"
-        );
+        assert!(rendered.contains("grounded_answer"), "prompt must mention grounded_answer");
+        assert!(rendered.contains("MUST"), "prompt must contain a MUST directive");
     }
 
     #[test]
@@ -115,7 +108,8 @@ mod tests {
     #[test]
     fn prompt_does_not_hardcode_natural_languages() {
         let rendered = render_agent_system_prompt("Test Library", None);
-        for forbidden in &["Russian", "English", "русский", "английский", "Cyrillic", "Latin"] {
+        for forbidden in &["Russian", "English", "русский", "английский", "Cyrillic", "Latin"]
+        {
             assert!(
                 !rendered.contains(forbidden),
                 "prompt must be language-agnostic; found forbidden word: {forbidden}"

@@ -25,6 +25,7 @@ pub enum BootstrapBindingPurpose {
     QueryRetrieve,
     QueryAnswer,
     Vision,
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

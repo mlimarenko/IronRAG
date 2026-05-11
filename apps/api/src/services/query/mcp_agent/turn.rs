@@ -32,7 +32,9 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::{ai::AiBindingPurpose, catalog::CatalogLifecycleState, query::QueryConversationState},
+    domains::{
+        ai::AiBindingPurpose, catalog::CatalogLifecycleState, query::QueryConversationState,
+    },
     infra::repositories::query_repository,
     integrations::llm::{ChatMessage, ChatToolDef, ToolUseRequest},
     interfaces::http::{
@@ -73,23 +75,24 @@ pub async fn run_mcp_agent_turn(
     include_debug: bool,
 ) -> Result<QueryTurnExecutionResult, ApiError> {
     // ── 1. Validate conversation + library ────────────────────────────────────
-    let conversation = query_repository::get_conversation_by_id(
-        &state.persistence.postgres,
-        conversation_id,
-    )
-    .await
-    .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-    .ok_or_else(|| ApiError::resource_not_found("conversation", conversation_id))?;
+    let conversation =
+        query_repository::get_conversation_by_id(&state.persistence.postgres, conversation_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("conversation", conversation_id))?;
 
     if conversation.conversation_state != QueryConversationState::Active {
-        return Err(ApiError::Conflict(format!(
-            "conversation {} is not active",
-            conversation.id
-        )));
+        return Err(ApiError::Conflict(format!("conversation {} is not active", conversation.id)));
     }
 
     let library =
         state.canonical_services.catalog.get_library(state, conversation.library_id).await?;
+    // The grounded_answer MCP tool expects a `<workspace>/<library>`
+    // catalog ref built from the canonical slugs (not UUIDs); we fetch
+    // the workspace alongside the library so we can synthesize that ref
+    // when invoking the tool.
+    let workspace =
+        state.canonical_services.catalog.get_workspace(state, library.workspace_id).await?;
 
     if library.workspace_id != conversation.workspace_id {
         return Err(ApiError::Conflict(format!(
@@ -117,8 +120,11 @@ pub async fn run_mcp_agent_turn(
         })?;
 
     // ── 3. Derive synthetic library-scoped auth ───────────────────────────────
-    let derived_auth =
-        super::auth::derive_library_scoped_auth(auth.principal_id, library.workspace_id, library.id);
+    let derived_auth = super::auth::derive_library_scoped_auth(
+        auth.principal_id,
+        library.workspace_id,
+        library.id,
+    );
 
     // ── 4. Create user turn record ────────────────────────────────────────────
     let content_text = normalize_required_text(&content_text, "contentText")?;
@@ -142,15 +148,30 @@ pub async fn run_mcp_agent_turn(
             "internal",
         )
     })?;
+    // The MCP descriptor exposes `library` as required because external
+    // MCP clients must pick which library their token addresses. The
+    // in-process UI agent always operates inside one conversation and
+    // its library is fixed; we strip `library` from the schema we hand
+    // to the LLM so the model does not have to guess an identifier it
+    // cannot know, then auto-inject the correct id when invoking the
+    // tool below.
+    let mut parameters = descriptor.input_schema.clone();
+    if let Some(obj) = parameters.as_object_mut() {
+        if let Some(properties) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
+            properties.remove("library");
+        }
+        if let Some(required) = obj.get_mut("required").and_then(|v| v.as_array_mut()) {
+            required.retain(|item| item.as_str() != Some("library"));
+        }
+    }
     let grounded_tool = ChatToolDef {
         name: descriptor.name.to_string(),
         description: descriptor.description.to_string(),
-        parameters: descriptor.input_schema.clone(),
+        parameters,
     };
 
     // ── 6. System prompt ──────────────────────────────────────────────────────
-    let system_prompt =
-        super::prompt::render_agent_system_prompt(&library.display_name, None);
+    let system_prompt = super::prompt::render_agent_system_prompt(&library.display_name, None);
 
     // ── 7. Initialize message history ─────────────────────────────────────────
     let mut messages =
@@ -176,6 +197,15 @@ pub async fn run_mcp_agent_turn(
             messages: messages.clone(),
             tools: vec![grounded_tool.clone()],
             extra_parameters_json: binding.extra_parameters_json.clone(),
+            // Force the model to invoke grounded_answer at least once.
+            // Constitution §16 requires UI assistant turns stay grounded
+            // in retrieved citations; without `tool_choice="required"`
+            // some models (DeepSeek thinking, gpt-5.4-mini on short
+            // questions) answer from training and the post-loop guard
+            // 409s. After a tool result lands in the message history,
+            // tool_choice falls back to "auto" so the model can produce
+            // the final natural-language answer.
+            require_tool_call: tool_call_count == 0,
         };
 
         let response = state
@@ -206,7 +236,13 @@ pub async fn run_mcp_agent_turn(
         }
 
         // Append assistant tool-call message before the tool results.
-        messages.push(ChatMessage::assistant_with_tool_calls(response.tool_calls.clone()));
+        // DeepSeek thinking-mode requires the prior `reasoning_content` to
+        // be echoed back on subsequent calls, so preserve it on the
+        // assistant turn even though OpenAI/Qwen ignore the field.
+        messages.push(ChatMessage::assistant_with_reasoning_and_tool_calls(
+            response.reasoning_content.clone(),
+            response.tool_calls.clone(),
+        ));
 
         // Execute each tool call.
         for tool_call in &response.tool_calls {
@@ -232,16 +268,29 @@ pub async fn run_mcp_agent_turn(
 
             tool_call_count += 1;
 
-            let mut args: serde_json::Value =
-                serde_json::from_str(&tool_call.arguments_json).map_err(|e| {
-                    ApiError::internal_with_log(e, "agent tool args")
-                })?;
+            let mut args: serde_json::Value = serde_json::from_str(&tool_call.arguments_json)
+                .map_err(|e| ApiError::internal_with_log(e, "agent tool args"))?;
 
             // Propagate the caller's include_debug flag to grounded_answer
             // only when the LLM did not set it explicitly — so the UI agent
             // path surfaces debug metadata when the handler requests it.
+            //
+            // Auto-inject the `library` argument with the conversation's
+            // library id. The MCP grounded_answer descriptor lists
+            // `library` as required because external MCP clients
+            // (openclaw, Telegram bots) must explicitly target a library
+            // their token has access to. The in-process UI agent already
+            // knows the library from the conversation, and exposing the
+            // library ref to the LLM only invites it to invent a wrong
+            // identifier and skip the call. Always overwrite whatever the
+            // model emitted so the tool call resolves to the correct
+            // library deterministically.
             if let Some(obj) = args.as_object_mut() {
                 obj.entry("includeDebug").or_insert_with(|| include_debug.into());
+                obj.insert(
+                    "library".to_string(),
+                    serde_json::Value::String(format!("{}/{}", workspace.slug, library.slug)),
+                );
             }
 
             let ctx = ToolCallContext {
@@ -266,11 +315,8 @@ pub async fn run_mcp_agent_turn(
                         .and_then(serde_json::Value::as_str)
                         .and_then(|s| s.parse::<Uuid>().ok());
 
-                    let _text = mcp_result
-                        .content
-                        .first()
-                        .map(|b| b.text.clone())
-                        .unwrap_or_default();
+                    let _text =
+                        mcp_result.content.first().map(|b| b.text.clone()).unwrap_or_default();
                     let is_err = mcp_result.is_error;
 
                     if let Some(id) = exec_id {
@@ -347,16 +393,13 @@ pub async fn run_mcp_agent_turn(
     let canonical_execution_id = last_grounded_execution_id.ok_or_else(|| {
         ApiError::Conflict(
             "agent finished without invoking grounded_answer; \
-             UI assistant requires grounded answers per MCP-UI parity (constitution §16)"
+             UI assistant answers must be grounded"
                 .to_string(),
         )
     })?;
 
-    let detail = state
-        .canonical_services
-        .query
-        .get_execution(state, canonical_execution_id)
-        .await?;
+    let detail =
+        state.canonical_services.query.get_execution(state, canonical_execution_id).await?;
 
     // Write agent-loop debug snapshot keyed by the canonical execution_id.
     let mut snapshot = LlmContextSnapshot {
@@ -365,10 +408,7 @@ pub async fn run_mcp_agent_turn(
         question: content_text.clone(),
         iterations: Vec::new(),
         total_iterations: debug_iterations.len(),
-        final_answer: detail
-            .response_turn
-            .as_ref()
-            .map(|t| t.content_text.clone()),
+        final_answer: detail.response_turn.as_ref().map(|t| t.content_text.clone()),
         captured_at: Utc::now(),
         query_ir: None,
         agent_loop: Some(AgentLoopMetadata {

@@ -62,8 +62,8 @@ fn build_library_grants(workspace_id: Uuid, library_id: Uuid) -> Vec<AuthGrant> 
             // Deterministic ids: low 32 bits encode the index so they are stable
             // across calls for the same library.
             id: Uuid::from_u128(
-                ((library_id.as_u128() & 0xffff_ffff_ffff_ffff_ffff_ffff_0000_0000u128)
-                    | (i as u128 + 1)),
+                (library_id.as_u128() & 0xffff_ffff_ffff_ffff_ffff_ffff_0000_0000u128)
+                    | (i as u128 + 1),
             ),
             resource_kind: "library".to_string(),
             resource_id: library_id,

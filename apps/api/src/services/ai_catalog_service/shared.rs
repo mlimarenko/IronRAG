@@ -51,6 +51,7 @@ pub(super) fn parse_binding_purpose(value: &str) -> Result<AiBindingPurpose, Api
         "query_retrieve" => Ok(AiBindingPurpose::QueryRetrieve),
         "query_answer" => Ok(AiBindingPurpose::QueryAnswer),
         "vision" => Ok(AiBindingPurpose::Vision),
+        "agent" => Ok(AiBindingPurpose::Agent),
         _ => Err(ApiError::Internal),
     }
 }

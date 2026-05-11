@@ -23,6 +23,12 @@ pub(super) struct OpenAiCompatibleToolUseMessage {
     pub(super) role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) content: Option<String>,
+    /// DeepSeek thinking-mode requires that any `reasoning_content` the
+    /// assistant emitted on a previous turn be echoed back verbatim on
+    /// subsequent calls. Other OpenAI-compatible providers ignore the
+    /// field, so it stays optional and is omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) tool_calls: Vec<OpenAiCompatibleToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +70,7 @@ impl From<&ChatMessage> for OpenAiCompatibleToolUseMessage {
         Self {
             role: message.role.clone(),
             content: message.content.clone(),
+            reasoning_content: message.reasoning_content.clone(),
             tool_calls: message
                 .tool_calls
                 .iter()

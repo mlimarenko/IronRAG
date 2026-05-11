@@ -31,7 +31,7 @@
     "featureDocs": "Документы",
     "featureDocsDesc": "Загрузка файлов и веб-страниц. Отслеживание этапов обработки, мониторинг готовности и инспекция извлечённой структуры.",
     "featureEntities": "Сущности и факты",
-    "featureEntitiesDesc": "Типизированное извлечение технических фактов, канонических значений и структурированных данных из документов.",
+    "featureEntitiesDesc": "Типизированное извлечение технических фактов, нормализованных значений и структурированных данных из документов.",
     "featureGraph": "Граф знаний",
     "featureGraphDesc": "Построение и исследование связного графа документов, сущностей, тем и их связей.",
     "featureAi": "Обоснованный AI",
@@ -695,9 +695,9 @@
     "mcpServerUrl": "URL сервера MCP",
     "capabilitiesProbe": "Проверка возможностей",
     "mcpSystemPromptTitle": "Рекомендуемый системный промпт",
-    "mcpSystemPromptDesc": "Канонический промпт для подключения внешних MCP-агентов (Claude Desktop, Codex, Cursor, Continue.dev). Тот же текст использует встроенный ассистент. В отрендеренном промпте агенту явно задаётся `library` в формате `<workspace>/<library>` и правило вызывать `grounded_answer` первым на содержательные вопросы; `search_documents` / `read_document` оставлены для перечислений и точечных чтений.",
+    "mcpSystemPromptDesc": "Системный промпт для подключения внешних MCP-агентов (Claude Desktop, Codex, Cursor, Continue.dev). Тот же текст используется встроенным ассистентом.",
     "mcpParityTitle": "MCP — паритет с UI",
-    "mcpParityDesc": "UI-ассистент IronRAG — это live-demo того, что получит внешний MCP-агент. Канонический MCP-инструмент `grounded_answer` запускает тот же pipeline (QueryCompiler -> гибридный поиск -> graph-aware context -> ответ -> verifier) и возвращает тот же ответ, evidence references, verifier verdict и runtime execution id.",
+    "mcpParityDesc": "Встроенный ассистент использует те же инструменты, что и внешние MCP-агенты: `grounded_answer` для содержательных вопросов, `search_documents` и `read_document` для навигации по документам.",
     "copy": "Копировать",
     "createTokenTitle": "Создать API токен",
     "createTokenDesc": "Создайте новый токен для доступа к API.",
@@ -855,6 +855,7 @@
         "query_compile": "Разбор запроса (NL → IR)",
         "query_retrieve": "Поиск по запросу",
         "query_answer": "Генерация ответов",
+        "agent": "AI-ассистент (MCP-агент)",
         "vision": "Визуальный анализ"
       },
       "credentialStateLabels": {

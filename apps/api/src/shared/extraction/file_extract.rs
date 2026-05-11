@@ -697,11 +697,7 @@ async fn augment_with_vision_picture_ocr(
     let extra_parameters_json = extra_parameters_json.unwrap_or(&empty_extra_parameters);
     let mut snippets: Vec<String> = Vec::with_capacity(output.extracted_images.len());
     for (idx, image) in output.extracted_images.iter().enumerate() {
-        let mime = if image.mime_type.is_empty() {
-            "image/png"
-        } else {
-            image.mime_type.as_str()
-        };
+        let mime = if image.mime_type.is_empty() { "image/png" } else { image.mime_type.as_str() };
         match extraction::image::extract_image_with_provider(
             gateway,
             vision_provider.provider_kind.as_str(),
@@ -761,15 +757,12 @@ async fn augment_with_vision_picture_ocr(
         // content_text; without this rebuild the structured preparation
         // step drops everything it can't align to a known line and the
         // vision OCR snippets vanish before chunk_content runs.
-        let layout = crate::shared::extraction::build_text_layout_from_content(
-            output.content_text.trim(),
-        );
+        let layout =
+            crate::shared::extraction::build_text_layout_from_content(output.content_text.trim());
         output.content_text = layout.content_text;
         output.structure_hints = layout.structure_hints;
-        output.source_metadata.line_count = i32::try_from(
-            output.structure_hints.lines.len(),
-        )
-        .unwrap_or(i32::MAX);
+        output.source_metadata.line_count =
+            i32::try_from(output.structure_hints.lines.len()).unwrap_or(i32::MAX);
     }
 }
 

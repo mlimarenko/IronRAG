@@ -47,7 +47,7 @@ export type AiBindingAssignmentResponse = {
     workspaceId?: string | null;
 };
 
-export type AiBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision';
+export type AiBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision' | 'agent';
 
 export type AiScopeKind = 'instance' | 'workspace' | 'library';
 

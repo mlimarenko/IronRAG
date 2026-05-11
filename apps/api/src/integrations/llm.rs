@@ -143,6 +143,11 @@ pub struct ChatMessage {
     /// tool-call only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Provider-emitted reasoning trace echoed back by DeepSeek thinking
+    /// models when continuing a multi-turn tool-loop. Other providers
+    /// ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// Tool calls produced by the assistant on its previous turn.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tool_calls: Vec<ChatToolCall>,
@@ -160,6 +165,7 @@ impl ChatMessage {
         Self {
             role: "system".into(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -171,6 +177,7 @@ impl ChatMessage {
         Self {
             role: "user".into(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -182,6 +189,7 @@ impl ChatMessage {
         Self {
             role: "assistant".into(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -190,7 +198,33 @@ impl ChatMessage {
 
     #[must_use]
     pub fn assistant_with_tool_calls(tool_calls: Vec<ChatToolCall>) -> Self {
-        Self { role: "assistant".into(), content: None, tool_calls, tool_call_id: None, name: None }
+        Self {
+            role: "assistant".into(),
+            content: None,
+            reasoning_content: None,
+            tool_calls,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// Assistant turn that carries a `reasoning_content` echo plus its tool
+    /// calls. DeepSeek thinking-mode rejects subsequent tool-loop calls
+    /// when the prior reasoning is not echoed back, so the agent loop must
+    /// preserve it across iterations.
+    #[must_use]
+    pub fn assistant_with_reasoning_and_tool_calls(
+        reasoning_content: Option<String>,
+        tool_calls: Vec<ChatToolCall>,
+    ) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: None,
+            reasoning_content,
+            tool_calls,
+            tool_call_id: None,
+            name: None,
+        }
     }
 
     #[must_use]
@@ -202,6 +236,7 @@ impl ChatMessage {
         Self {
             role: "tool".into(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
             name: Some(tool_name.into()),
@@ -221,6 +256,14 @@ pub struct ToolUseRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ChatToolDef>,
     pub extra_parameters_json: serde_json::Value,
+    /// When true, the gateway sends `tool_choice="required"` so the
+    /// provider must invoke at least one declared tool on this turn.
+    /// The MCP-agent loop sets this on the first iteration to satisfy
+    /// the constitution §16 requirement that UI answers stay grounded.
+    /// Default `false` keeps the existing `tool_choice="auto"` behavior
+    /// for callers that do not need a forced tool call.
+    #[serde(default)]
+    pub require_tool_call: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -234,6 +277,10 @@ pub struct ToolUseResponse {
     pub tool_calls: Vec<ChatToolCall>,
     pub finish_reason: Option<String>,
     pub usage_json: serde_json::Value,
+    /// Provider reasoning trace, used by DeepSeek thinking models — must
+    /// be echoed back on the next turn or the provider returns 400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -715,12 +762,16 @@ fn apply_provider_auth(
     }
 }
 
+/// Parsed fields extracted from a non-streaming OpenAI-compatible
+/// chat-completions response: `(output_text, tool_calls, finish_reason,
+/// usage_json, reasoning_content)`. Bundled as a tuple alias to keep the
+/// parser signature legible at the call sites.
+type ParsedToolUseResponse =
+    (String, Vec<ChatToolCall>, Option<String>, serde_json::Value, Option<String>);
+
 fn parse_tool_use_response(
     body: &serde_json::Value,
-) -> std::result::Result<
-    (String, Vec<ChatToolCall>, Option<String>, serde_json::Value),
-    ProviderCallError,
-> {
+) -> std::result::Result<ParsedToolUseResponse, ProviderCallError> {
     let choice =
         body.get("choices").and_then(|v| v.as_array()).and_then(|arr| arr.first()).ok_or_else(
             || ProviderCallError::protocol("tool-use response missing choices array"),
@@ -732,6 +783,11 @@ fn parse_tool_use_response(
     let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str()).map(str::to_string);
 
     let output_text = message.get("content").map(extract_message_content_text).unwrap_or_default();
+    let reasoning_content = message
+        .get("reasoning_content")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     let tool_calls = message
         .get("tool_calls")
@@ -756,7 +812,7 @@ fn parse_tool_use_response(
         .unwrap_or_default();
 
     let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
-    Ok((output_text, tool_calls, finish_reason, usage_json))
+    Ok((output_text, tool_calls, finish_reason, usage_json, reasoning_content))
 }
 
 fn provider_response_format(
@@ -938,7 +994,33 @@ impl LlmGateway for UnifiedGateway {
             request.max_output_tokens_override,
         );
         let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
-        let tool_choice = (!tools.is_empty()).then_some("auto");
+        // Some reasoning models (DeepSeek `*-pro` / `*-reasoner` family,
+        // OpenAI `o*` series) reject `tool_choice` overrides. They only
+        // accept the implicit "auto", so coercing them into "required"
+        // returns 400 with `does not support this tool_choice`. Drop the
+        // override for those families and rely on the system prompt to
+        // push them through `grounded_answer`.
+        let model_lc = request.model_name.to_ascii_lowercase();
+        let provider_lc = request.provider_kind.to_ascii_lowercase();
+        // DeepSeek's hosted API exposes every `deepseek-v4-*` model
+        // through the reasoner backend (verified empirically: v4-flash,
+        // v4-pro, and the `*-reasoner` aliases all return
+        // `deepseek-reasoner does not support this tool_choice` when
+        // sent `tool_choice="required"`). Treat the entire DeepSeek v4
+        // family as reasoners; OpenAI/Qwen/etc. only need the
+        // o-series + explicit reasoner suffix detection.
+        let is_reasoner = model_lc.contains("reasoner")
+            || model_lc.starts_with("o1")
+            || model_lc.starts_with("o3")
+            || model_lc.starts_with("o4")
+            || (provider_lc == "deepseek" && model_lc.contains("v4"));
+        let tool_choice = if tools.is_empty() {
+            None
+        } else if request.require_tool_call && !is_reasoner {
+            Some("required")
+        } else {
+            Some("auto")
+        };
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
@@ -961,7 +1043,7 @@ impl LlmGateway for UnifiedGateway {
             &resolved.runtime.chat_path,
         )?;
 
-        let (output_text, tool_calls, finish_reason, usage_json) = with_retry(
+        let (output_text, tool_calls, finish_reason, usage_json, reasoning_content) = with_retry(
             || async {
                 let request_builder = self
                     .client
@@ -1029,6 +1111,7 @@ impl LlmGateway for UnifiedGateway {
             tool_calls,
             finish_reason,
             usage_json,
+            reasoning_content,
         })
     }
 
@@ -1052,7 +1135,33 @@ impl LlmGateway for UnifiedGateway {
             request.max_output_tokens_override,
         );
         let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
-        let tool_choice = (!tools.is_empty()).then_some("auto");
+        // Some reasoning models (DeepSeek `*-pro` / `*-reasoner` family,
+        // OpenAI `o*` series) reject `tool_choice` overrides. They only
+        // accept the implicit "auto", so coercing them into "required"
+        // returns 400 with `does not support this tool_choice`. Drop the
+        // override for those families and rely on the system prompt to
+        // push them through `grounded_answer`.
+        let model_lc = request.model_name.to_ascii_lowercase();
+        let provider_lc = request.provider_kind.to_ascii_lowercase();
+        // DeepSeek's hosted API exposes every `deepseek-v4-*` model
+        // through the reasoner backend (verified empirically: v4-flash,
+        // v4-pro, and the `*-reasoner` aliases all return
+        // `deepseek-reasoner does not support this tool_choice` when
+        // sent `tool_choice="required"`). Treat the entire DeepSeek v4
+        // family as reasoners; OpenAI/Qwen/etc. only need the
+        // o-series + explicit reasoner suffix detection.
+        let is_reasoner = model_lc.contains("reasoner")
+            || model_lc.starts_with("o1")
+            || model_lc.starts_with("o3")
+            || model_lc.starts_with("o4")
+            || (provider_lc == "deepseek" && model_lc.contains("v4"));
+        let tool_choice = if tools.is_empty() {
+            None
+        } else if request.require_tool_call && !is_reasoner {
+            Some("required")
+        } else {
+            Some("auto")
+        };
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
@@ -1126,6 +1235,12 @@ impl LlmGateway for UnifiedGateway {
             tool_calls,
             finish_reason,
             usage_json,
+            // Streaming path does not yet capture `reasoning_content`.
+            // The non-streaming gateway is the canonical path for the
+            // UI MCP-agent loop (run_mcp_agent_turn → generate_with_tools),
+            // and streaming is reserved for direct provider passthroughs
+            // that do not echo reasoning back to the model.
+            reasoning_content: None,
         })
     }
 

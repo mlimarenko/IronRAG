@@ -197,7 +197,7 @@ fn bootstrap_provider_ui_hints(
 fn bootstrap_provider_preset_profile(
     provider: &ProviderCatalogEntry,
 ) -> Result<Vec<BootstrapProviderPresetProfile>, ApiError> {
-    bootstrap_provider_metadata(provider)?
+    let mut profiles: Vec<BootstrapProviderPresetProfile> = bootstrap_provider_metadata(provider)?
         .bootstrap_presets
         .into_iter()
         .map(|preset| {
@@ -220,7 +220,27 @@ fn bootstrap_provider_preset_profile(
                 max_output_tokens_override: preset.max_output_tokens_override,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    // Agent purpose drives the in-process MCP-agent loop and shadows the
+    // QueryAnswer profile (same chat model, same provider). Provider metadata
+    // declares only QueryAnswer; we synthesize the Agent twin so bootstrap
+    // can seed an Agent preset+binding without each provider declaring it
+    // twice.
+    if !profiles.iter().any(|profile| profile.purpose == AiBindingPurpose::Agent)
+        && let Some(answer) =
+            profiles.iter().find(|profile| profile.purpose == AiBindingPurpose::QueryAnswer)
+    {
+        profiles.push(BootstrapProviderPresetProfile {
+            purpose: AiBindingPurpose::Agent,
+            model_name: answer.model_name.clone(),
+            temperature: answer.temperature,
+            top_p: answer.top_p,
+            max_output_tokens_override: answer.max_output_tokens_override,
+        });
+    }
+
+    Ok(profiles)
 }
 
 fn bootstrap_preset_descriptors_from_profile(
@@ -475,7 +495,7 @@ pub(super) fn validate_bootstrap_preset_inputs_cover_required_purposes(
 ) -> Result<(), ApiError> {
     if !bootstrap_preset_inputs_cover_required_purposes(inputs) {
         return Err(ApiError::BadRequest(
-            "bootstrap preset bundle must cover extract_graph, embed_chunk, query_retrieve, query_compile, and query_answer"
+            "bootstrap preset bundle must cover extract_graph, embed_chunk, query_retrieve, query_compile, query_answer, and agent"
                 .to_string(),
         ));
     }

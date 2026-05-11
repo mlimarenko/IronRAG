@@ -31,7 +31,7 @@
     "featureDocs": "Documents",
     "featureDocsDesc": "Ingest files and web pages. Track processing stages, monitor readiness, and inspect extracted structure.",
     "featureEntities": "Entities & Facts",
-    "featureEntitiesDesc": "Extract typed technical facts, canonical values, and structured data from your documents.",
+    "featureEntitiesDesc": "Extract typed technical facts, normalized values, and structured data from your documents.",
     "featureGraph": "Knowledge Graph",
     "featureGraphDesc": "Build and explore a connected graph of documents, entities, topics, and their relations.",
     "featureAi": "Grounded AI",
@@ -695,9 +695,9 @@
     "mcpServerUrl": "MCP Server URL",
     "capabilitiesProbe": "Capabilities Probe",
     "mcpSystemPromptTitle": "Recommended system prompt",
-    "mcpSystemPromptDesc": "Canonical prompt to paste into external MCP agents (Claude Desktop, Codex, Cursor, Continue.dev). The in-app assistant uses the exact same text. The rendered prompt tells the agent to pass `library` as `<workspace>/<library>` and prefer `grounded_answer` for knowledge questions; use `search_documents` / `read_document` only for enumeration or targeted reads.",
+    "mcpSystemPromptDesc": "System prompt for connecting external MCP agents (Claude Desktop, Codex, Cursor, Continue.dev). The in-app assistant uses the same text.",
     "mcpParityTitle": "MCP — UI parity",
-    "mcpParityDesc": "The IronRAG UI assistant is the live demo of what an external MCP agent gets. The canonical `grounded_answer` MCP tool runs the same pipeline (QueryCompiler -> hybrid retrieval -> graph-aware context -> answer generation -> verifier) and returns the same answer, evidence references, verifier verdict, and runtime execution id.",
+    "mcpParityDesc": "The built-in assistant uses the same tools available to external MCP agents: `grounded_answer` for knowledge questions, `search_documents` and `read_document` for document navigation.",
     "copy": "Copy",
     "createTokenTitle": "Create API Token",
     "createTokenDesc": "Create a new token for API access.",
@@ -855,6 +855,7 @@
         "query_compile": "Query Compile (NL → IR)",
         "query_retrieve": "Query Retrieval",
         "query_answer": "Answer Generation",
+        "agent": "AI Assistant (MCP Agent)",
         "vision": "Vision"
       },
       "credentialStateLabels": {

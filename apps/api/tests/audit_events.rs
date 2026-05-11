@@ -437,6 +437,7 @@ impl AuditEventsFixture {
                 parallel_action_limit: 1,
                 failure_code: None,
                 failure_summary_redacted: None,
+                parent_execution_id: None,
             },
         )
         .await

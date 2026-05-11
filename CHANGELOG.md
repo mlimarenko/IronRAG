@@ -2,6 +2,70 @@
 
 ## Unreleased
 
+## 0.4.5 — 2026-05-11
+
+### UI assistant: complete the MCP-agent wiring + chat-model role recompute
+
+- **`AiBindingPurpose::Agent` is now a first-class required runtime
+  binding.** v0.4.4 shipped migration 0006 that added the `agent` enum
+  value but left half of the binding wiring incomplete: the admin UI
+  did not list the purpose, `CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES`
+  did not include it, and `BootstrapBindingPurpose` had a deliberate
+  `unreachable!()` for it. As a result every UI-assistant turn 409'd
+  with `library X has no active 'agent' binding configured`. v0.4.5
+  promotes Agent to the canonical required tier on both ends:
+  `PURPOSE_ORDER` / `REQUIRED_RUNTIME_PURPOSE_ORDER` / i18n labels in
+  `apps/web`, plus `BootstrapBindingPurpose::Agent` + bootstrap preset
+  synthesis cloned from the active `query_answer` profile (Agent
+  shadows QueryAnswer-class chat models with tool-loop semantics).
+- **Migration 0007 recomputes chat-model `defaultRoles`** so every
+  `chat`/`text` model in `ai_model_catalog` advertises the canonical
+  text-chat purpose set (`extract_text` + `extract_graph` +
+  `query_compile` + `query_answer` + `agent`); multimodal chat models
+  also include `vision`. Migration 0005 had frozen newer chat models
+  with a narrower legacy purpose set, which is why the admin UI
+  refused to surface them under `extract_text` even when the provider
+  clearly supported it.
+- **Idempotent Agent backfill.** Same migration walks every active
+  `query_answer` binding (instance / workspace / library) and inserts
+  a paired `agent` binding pointing at the same credential and a new
+  `<Provider> Agent · <model>` preset, on conflict do nothing. Existing
+  stacks become Agent-ready on the next startup without any operator
+  action.
+- **Reasoner-class `reasoning_content` echo.** Some chat APIs
+  (notably the hosted reasoner backend that fronts the `*-flash` /
+  `*-pro` family) reject the second tool-loop turn with HTTP 400
+  `The 'reasoning_content' in the thinking mode must be passed back
+  to the API` if the assistant message in the prior history strips
+  the field. `ChatMessage` and `ToolUseResponse` now carry an optional
+  `reasoning_content`, the OpenAI-compatible gateway parses + echoes
+  it, and the in-process MCP-agent loop builds the assistant turn via
+  `assistant_with_reasoning_and_tool_calls(...)` so reasoner multi-turn
+  runs cleanly. Non-reasoner providers ignore the optional field on
+  the wire.
+- **Provider-aware `tool_choice` policy.** Reasoner-class models
+  reject `tool_choice="required"` with HTTP 400 (`* does not support
+  this tool_choice`). The unified gateway now sends
+  `tool_choice="auto"` on those providers and `tool_choice="required"`
+  only on chat-class models on the first agent iteration when the
+  loop has not yet produced a tool call.
+- **Library ref auto-injection for the in-process agent.** The shared
+  `grounded_answer` MCP descriptor lists `library` as required because
+  external MCP clients pick which library their token addresses. The
+  UI agent always operates inside one fixed library; we now strip
+  `library` from the schema we hand to the LLM and auto-inject the
+  canonical `<workspace_slug>/<library_slug>` ref before invoking the
+  tool. The model is freed from inventing identifiers it cannot know,
+  and the call resolves deterministically.
+- **Provider-error body is no longer swallowed.** `sanitize_provider_error_detail`
+  used to return the placeholder `upstream provider request failed;
+  response body was not included` even when the body had no
+  credential markers — making 4xx provider responses undebuggable. It
+  now preserves the body when no marker matches and only redacts when
+  it actually finds an `sk-` / `Bearer` / `Authorization` / `api_key`
+  fragment, so operators can read structured provider errors directly
+  from logs.
+
 ## 0.4.4 — 2026-05-10
 
 ### Install: detect & explain sqlx migration checksum drift

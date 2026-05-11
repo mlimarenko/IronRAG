@@ -89,6 +89,7 @@ export const PURPOSE_ORDER: AIPurpose[] = [
   'query_compile',
   'query_retrieve',
   'query_answer',
+  'agent',
   'vision',
 ];
 
@@ -98,6 +99,7 @@ export const REQUIRED_RUNTIME_PURPOSE_ORDER: AIPurpose[] = [
   'query_retrieve',
   'query_compile',
   'query_answer',
+  'agent',
 ];
 
 export function purposeLabel(value: AIPurpose, t: TFunction) {

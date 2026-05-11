@@ -275,6 +275,7 @@ fn model_discovery_chat_path_creates_text_model_roles() {
             AiBindingPurpose::ExtractGraph,
             AiBindingPurpose::QueryCompile,
             AiBindingPurpose::QueryAnswer,
+            AiBindingPurpose::Agent,
         ]
     );
 }
@@ -293,6 +294,7 @@ fn model_discovery_vision_path_creates_multimodal_model_roles() {
             AiBindingPurpose::QueryCompile,
             AiBindingPurpose::QueryAnswer,
             AiBindingPurpose::Vision,
+            AiBindingPurpose::Agent,
         ]
     );
 }
@@ -368,6 +370,17 @@ fn bootstrap_preset_inputs_accept_required_purposes_without_vision() {
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
+        BootstrapAiPresetInput {
+            binding_purpose: AiBindingPurpose::Agent,
+            provider_kind: "provider-alpha".to_string(),
+            model_catalog_id: Uuid::now_v7(),
+            preset_name: "Provider Alpha Agent · alpha-chat-plus".to_string(),
+            system_prompt: None,
+            temperature: Some(0.3),
+            top_p: Some(0.9),
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        },
     ];
 
     assert!(bootstrap_preset_inputs_cover_required_purposes(&inputs));
@@ -427,6 +440,17 @@ fn bootstrap_preset_inputs_reject_mismatched_embedding_models() {
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
             preset_name: "Provider Alpha Query Answer".to_string(),
+            system_prompt: None,
+            temperature: Some(0.3),
+            top_p: Some(0.9),
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        },
+        BootstrapAiPresetInput {
+            binding_purpose: AiBindingPurpose::Agent,
+            provider_kind: "provider-alpha".to_string(),
+            model_catalog_id: Uuid::now_v7(),
+            preset_name: "Provider Alpha Agent".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
@@ -517,6 +541,7 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
                 AiBindingPurpose::Vision,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -533,6 +558,7 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
                 AiBindingPurpose::Vision,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -562,7 +588,7 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
     .expect("provider-alpha bundle should be available");
 
     assert_eq!(bundle.provider_kind, "provider-alpha");
-    assert_eq!(bundle.presets.len(), 7);
+    assert_eq!(bundle.presets.len(), 8);
     assert_eq!(
         bundle
             .presets
@@ -632,6 +658,7 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
                 AiBindingPurpose::ExtractGraph,
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -647,6 +674,7 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
                 AiBindingPurpose::ExtractGraph,
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -676,6 +704,7 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
                 AiBindingPurpose::Vision,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -692,7 +721,7 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
     .expect("provider-gamma bundle should be available");
 
     assert_eq!(bundle.provider_kind, "provider-gamma");
-    assert_eq!(bundle.presets.len(), 7);
+    assert_eq!(bundle.presets.len(), 8);
     assert_eq!(
         bundle
             .presets
@@ -778,6 +807,7 @@ fn model_discovery_chat_signature_is_text_query_capable() {
             AiBindingPurpose::ExtractGraph,
             AiBindingPurpose::QueryCompile,
             AiBindingPurpose::QueryAnswer,
+            AiBindingPurpose::Agent,
         ]
     );
 }
@@ -797,6 +827,7 @@ fn model_discovery_vision_signature_is_multimodal_and_query_capable() {
             AiBindingPurpose::QueryCompile,
             AiBindingPurpose::QueryAnswer,
             AiBindingPurpose::Vision,
+            AiBindingPurpose::Agent,
         ]
     );
 }
@@ -823,6 +854,7 @@ fn model_discovery_embedding_and_vision_capabilities_classify_correctly() {
             AiBindingPurpose::QueryCompile,
             AiBindingPurpose::QueryAnswer,
             AiBindingPurpose::Vision,
+            AiBindingPurpose::Agent,
         ]
     );
 }
@@ -841,6 +873,7 @@ fn model_discovery_chat_capability_remains_text_only_without_vision_path() {
             AiBindingPurpose::ExtractGraph,
             AiBindingPurpose::QueryCompile,
             AiBindingPurpose::QueryAnswer,
+            AiBindingPurpose::Agent,
         ]
     );
 }
@@ -895,6 +928,7 @@ fn discovered_router_paths_respect_unsupported_capabilities() {
             AiBindingPurpose::ExtractGraph,
             AiBindingPurpose::QueryCompile,
             AiBindingPurpose::QueryAnswer,
+            AiBindingPurpose::Agent,
         ]
     );
 }
@@ -926,6 +960,7 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
                 AiBindingPurpose::ExtractGraph,
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -955,6 +990,7 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
                 AiBindingPurpose::Vision,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -974,7 +1010,7 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
     assert_eq!(bundle.default_base_url.as_deref(), Some("http://localhost:11434/v1"));
     assert!(!bundle.api_key_required);
     assert!(bundle.base_url_required);
-    assert_eq!(bundle.presets.len(), 7);
+    assert_eq!(bundle.presets.len(), 8);
     assert_eq!(
         bundle
             .presets
@@ -1020,6 +1056,7 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
                 AiBindingPurpose::Vision,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -1030,7 +1067,11 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
             model_name: "provider-omega/chat-vision".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
-            allowed_binding_purposes: vec![AiBindingPurpose::QueryAnswer, AiBindingPurpose::Vision],
+            allowed_binding_purposes: vec![
+                AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::Vision,
+                AiBindingPurpose::Agent,
+            ],
             context_window: None,
             max_output_tokens: None,
         },
@@ -1059,7 +1100,7 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
     .expect("provider-epsilon bundle should be available");
 
     assert_eq!(bundle.provider_kind, "provider-epsilon");
-    assert_eq!(bundle.presets.len(), 7);
+    assert_eq!(bundle.presets.len(), 8);
     assert!(bootstrap_bundle_is_self_contained(&bundle));
     assert_eq!(
         bundle
@@ -1300,6 +1341,7 @@ fn provider_bootstrap_bundle_never_borrows_models_from_another_provider() {
                 AiBindingPurpose::ExtractGraph,
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -1381,6 +1423,7 @@ fn required_bootstrap_bundle_is_self_contained_without_vision() {
             allowed_binding_purposes: vec![
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::Agent,
             ],
             context_window: None,
             max_output_tokens: None,
@@ -1395,7 +1438,7 @@ fn required_bootstrap_bundle_is_self_contained_without_vision() {
     .expect("bundle should resolve")
     .expect("bundle should be available");
 
-    assert_eq!(bundle.presets.len(), 5);
+    assert_eq!(bundle.presets.len(), 6);
     assert!(bootstrap_bundle_is_self_contained(&bundle));
     assert_eq!(bundle.ui_hints, serde_json::json!({"accent": "neutral"}));
 }

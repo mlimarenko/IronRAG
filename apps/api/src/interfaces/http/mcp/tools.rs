@@ -154,7 +154,8 @@ pub(super) async fn handle_tools_call(
         );
     }
 
-    let context = ToolCallContext { auth, state, request_id, surface_kind: RuntimeSurfaceKind::Mcp };
+    let context =
+        ToolCallContext { auth, state, request_id, surface_kind: RuntimeSurfaceKind::Mcp };
     let result = if let Some(result) =
         catalog::call_tool(parsed.name.as_str(), context, &parsed.arguments).await
     {

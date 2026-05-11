@@ -28,7 +28,7 @@ use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{persistence::Persistence, repositories::iam_repository},
     interfaces::http::{auth::hash_token, router},
-    services::catalog_service::{CreateWorkspaceCommand},
+    services::catalog_service::CreateWorkspaceCommand,
 };
 
 // ============================================================================
@@ -51,19 +51,14 @@ impl TempDatabase {
             .await
             .context("connect admin postgres")?;
         terminate_connections(&admin_pool, &name).await?;
-        sqlx::query(&format!("drop database if exists \"{name}\""))
-            .execute(&admin_pool)
-            .await?;
-        sqlx::query(&format!("create database \"{name}\""))
-            .execute(&admin_pool)
-            .await?;
+        sqlx::query(&format!("drop database if exists \"{name}\"")).execute(&admin_pool).await?;
+        sqlx::query(&format!("create database \"{name}\"")).execute(&admin_pool).await?;
         admin_pool.close().await;
         Ok(Self { name: name.clone(), admin_url, database_url: replace_db(base_url, &name)? })
     }
 
     async fn drop(self) -> Result<()> {
-        let admin_pool =
-            PgPoolOptions::new().max_connections(1).connect(&self.admin_url).await?;
+        let admin_pool = PgPoolOptions::new().max_connections(1).connect(&self.admin_url).await?;
         terminate_connections(&admin_pool, &self.name).await?;
         sqlx::query(&format!("drop database if exists \"{}\"", self.name))
             .execute(&admin_pool)
@@ -113,18 +108,15 @@ impl InboundFixture {
         settings.database_url = temp_db.database_url.clone();
         settings.destructive_fresh_bootstrap_required = true;
 
-        let postgres = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&settings.database_url)
-            .await?;
+        let postgres =
+            PgPoolOptions::new().max_connections(4).connect(&settings.database_url).await?;
         sqlx::migrate!("./migrations").run(&postgres).await?;
 
         let arango_client = Arc::new(
             ironrag_backend::infra::arangodb::client::ArangoClient::from_settings(&settings)
                 .context("arango client for inbound stub test")?,
         );
-        let redis =
-            redis::Client::open(settings.redis_url.clone()).context("redis client")?;
+        let redis = redis::Client::open(settings.redis_url.clone()).context("redis client")?;
         let persistence = Persistence::for_tests(postgres, redis);
         let state = AppState::from_dependencies(settings, persistence, arango_client)?;
 
@@ -169,7 +161,7 @@ impl InboundFixture {
         )
         .await?;
 
-        Ok(Self { state, temp_db: temp_db, token: plaintext })
+        Ok(Self { state, temp_db, token: plaintext })
     }
 
     fn app(&self) -> Router {
