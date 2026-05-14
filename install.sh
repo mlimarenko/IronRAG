@@ -210,7 +210,7 @@ wait_for_startup_authority() {
   local startup_id
 
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    startup_id="$(cd "$install_dir" && docker compose ps -q startup 2>/dev/null || true)"
+    startup_id="$(cd "$install_dir" && docker compose ps -a -q startup 2>/dev/null || true)"
     if [ -z "$startup_id" ]; then
       sleep 2
       continue
@@ -298,7 +298,7 @@ STARTUP_ERR
     sleep 3
   done
 
-  startup_id="$(cd "$install_dir" && docker compose ps -q startup 2>/dev/null || true)"
+  startup_id="$(cd "$install_dir" && docker compose ps -a -q startup 2>/dev/null || true)"
   if [ -n "$startup_id" ]; then
     docker logs "$startup_id" --tail 200 >&2 || true
   fi

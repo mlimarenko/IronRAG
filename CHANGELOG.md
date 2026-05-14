@@ -8,6 +8,9 @@
   before creating API/worker/frontend dependents, then watches the
   startup container directly. This prevents Compose from sitting forever
   on `service_completed_successfully` dependents when startup restarts.
+- The startup wait loop now reads the startup container from `docker compose
+  ps -a`, so a fast successful one-shot migration container is detected as
+  `Exited (0)` instead of being missed and waited on until timeout.
 - Backend images now include the canonical migration SQL files under
   `/app/migrations`, so checksum-drift recovery can apply the exact
   idempotent migration file from the running image before updating
