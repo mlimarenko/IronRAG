@@ -563,6 +563,7 @@ impl QueryService {
                                     &conversation_context.effective_query_text,
                                     &content_text,
                                     conversation_context.prompt_history_text.as_deref(),
+                                    &conversation_context.prompt_history_messages,
                                     prepared,
                                 )
                                 .await

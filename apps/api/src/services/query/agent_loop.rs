@@ -12,9 +12,13 @@ use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
     domains::provider_profiles::ProviderModelSelection,
-    integrations::llm::{ChatMessage, ToolUseRequest},
+    integrations::llm::{ChatMessage, ChatToolCall, ToolUseRequest},
     services::query::{assistant_grounding::AssistantGroundingEvidence, error::QueryServiceError},
 };
+
+const RUNTIME_RETRIEVED_CONTEXT_TOOL: &str = "ironrag_retrieved_context";
+const RUNTIME_LITERAL_REVISION_CONTEXT_TOOL: &str = "ironrag_literal_revision_context";
+const RUNTIME_CLARIFY_VARIANTS_TOOL: &str = "ironrag_clarify_variants";
 
 /// Final result of one assistant turn.
 #[derive(Debug, Clone)]
@@ -48,7 +52,7 @@ pub async fn run_single_shot_turn(
     state: &AppState,
     library_id: Uuid,
     user_question: &str,
-    conversation_history: Option<&str>,
+    conversation_history: &[ChatMessage],
     grounded_context: &str,
 ) -> Result<AgentTurnResult, QueryServiceError> {
     let binding = state
@@ -66,14 +70,18 @@ pub async fn run_single_shot_turn(
         model_name: binding.model_name.clone(),
     };
 
-    // The grounded context is already baked into the system prompt and
-    // no tool catalogue is exposed, so the model can only answer from
-    // retrieval-owned evidence. The caller emits `AnswerDelta` after
-    // the verifier accepts the fixed-evidence candidate.
-    let system_prompt =
-        super::assistant_prompt::render_single_shot(grounded_context, conversation_history);
-    let messages =
-        vec![ChatMessage::system(system_prompt), ChatMessage::user(user_question.to_string())];
+    // The runtime has already performed retrieval. Model-visible
+    // context is represented as the same chat transcript shape a
+    // tool-using agent would see: prior messages, current user, an
+    // assistant tool-call record, and the matching tool result.
+    let messages = build_runtime_tool_answer_messages(
+        super::assistant_prompt::render_single_shot(),
+        conversation_history,
+        user_question,
+        RUNTIME_RETRIEVED_CONTEXT_TOOL,
+        serde_json::json!({ "question": user_question }),
+        grounded_context,
+    );
 
     let tool_use_request = ToolUseRequest {
         provider_kind: binding.provider_kind.clone(),
@@ -124,7 +132,7 @@ pub async fn run_literal_fidelity_revision_turn(
     state: &AppState,
     library_id: Uuid,
     user_question: &str,
-    conversation_history: Option<&str>,
+    conversation_history: &[ChatMessage],
     original_answer: &str,
     unsupported_literals: &[String],
     grounded_context: &str,
@@ -145,13 +153,22 @@ pub async fn run_literal_fidelity_revision_turn(
     };
 
     let system_prompt = super::assistant_prompt::render_literal_fidelity_revision(
-        grounded_context,
+        "Provided in the `ironrag_literal_revision_context` runtime tool result.",
         original_answer,
         unsupported_literals,
-        conversation_history,
+        None,
     );
-    let messages =
-        vec![ChatMessage::system(system_prompt), ChatMessage::user(user_question.to_string())];
+    let messages = build_runtime_tool_answer_messages(
+        system_prompt,
+        conversation_history,
+        user_question,
+        RUNTIME_LITERAL_REVISION_CONTEXT_TOOL,
+        serde_json::json!({
+            "question": user_question,
+            "unsupportedLiterals": unsupported_literals,
+        }),
+        grounded_context,
+    );
 
     let tool_use_request = ToolUseRequest {
         provider_kind: binding.provider_kind.clone(),
@@ -214,7 +231,7 @@ pub async fn run_clarify_turn(
     state: &AppState,
     library_id: Uuid,
     user_question: &str,
-    conversation_history: Option<&str>,
+    conversation_history: &[ChatMessage],
     variants: &[String],
 ) -> Result<AgentTurnResult, QueryServiceError> {
     let binding = state
@@ -232,9 +249,20 @@ pub async fn run_clarify_turn(
         model_name: binding.model_name.clone(),
     };
 
-    let system_prompt = super::assistant_prompt::render_clarify(variants, conversation_history);
-    let messages =
-        vec![ChatMessage::system(system_prompt), ChatMessage::user(user_question.to_string())];
+    let system_prompt = super::assistant_prompt::render_clarify(variants, None);
+    let variants_result = if variants.is_empty() {
+        "- (none)".to_string()
+    } else {
+        variants.iter().map(|variant| format!("- {variant}")).collect::<Vec<_>>().join("\n")
+    };
+    let messages = build_runtime_tool_answer_messages(
+        system_prompt,
+        conversation_history,
+        user_question,
+        RUNTIME_CLARIFY_VARIANTS_TOOL,
+        serde_json::json!({ "question": user_question }),
+        &variants_result,
+    );
 
     let tool_use_request = ToolUseRequest {
         provider_kind: binding.provider_kind.clone(),
@@ -276,6 +304,32 @@ pub async fn run_clarify_turn(
         assistant_grounding: AssistantGroundingEvidence::default(),
         debug_iterations: vec![debug_iteration],
     })
+}
+
+fn build_runtime_tool_answer_messages(
+    system_prompt: String,
+    conversation_history: &[ChatMessage],
+    user_question: &str,
+    tool_name: &str,
+    tool_arguments: serde_json::Value,
+    tool_result: &str,
+) -> Vec<ChatMessage> {
+    let tool_call_id = format!("call_{tool_name}");
+    let mut messages = Vec::with_capacity(conversation_history.len().saturating_add(4));
+    messages.push(ChatMessage::system(system_prompt));
+    messages.extend(conversation_history.iter().cloned());
+    messages.push(ChatMessage::user(user_question.to_string()));
+    messages.push(ChatMessage::assistant_with_tool_calls(vec![ChatToolCall {
+        id: tool_call_id.clone(),
+        name: tool_name.to_string(),
+        arguments_json: tool_arguments.to_string(),
+    }]));
+    messages.push(ChatMessage::tool_result(
+        tool_call_id,
+        tool_name.to_string(),
+        tool_result.trim().to_string(),
+    ));
+    messages
 }
 
 /// Accumulate one iteration's `usage_json` into the running total for
@@ -345,4 +399,38 @@ pub(crate) fn merge_usage_into(accumulator: &mut serde_json::Value, iteration: &
     let existing_iterations =
         obj.get("iteration_count").and_then(serde_json::Value::as_i64).unwrap_or(0);
     obj.insert("iteration_count".to_string(), serde_json::json!(existing_iterations + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_tool_answer_messages_preserve_chat_history_and_tool_result() {
+        let history =
+            vec![ChatMessage::user("first question"), ChatMessage::assistant_text("first answer")];
+
+        let messages = build_runtime_tool_answer_messages(
+            "system prompt".to_string(),
+            &history,
+            "continue",
+            RUNTIME_RETRIEVED_CONTEXT_TOOL,
+            serde_json::json!({ "question": "continue" }),
+            "grounded context",
+        );
+
+        assert_eq!(
+            messages.iter().map(|message| message.role.as_str()).collect::<Vec<_>>(),
+            vec!["system", "user", "assistant", "user", "assistant", "tool"]
+        );
+        assert_eq!(messages[1].content.as_deref(), Some("first question"));
+        assert_eq!(messages[2].content.as_deref(), Some("first answer"));
+        assert_eq!(messages[4].tool_calls.len(), 1);
+        assert_eq!(messages[4].tool_calls[0].name, RUNTIME_RETRIEVED_CONTEXT_TOOL);
+        assert_eq!(
+            messages[5].tool_call_id,
+            Some(format!("call_{RUNTIME_RETRIEVED_CONTEXT_TOOL}"))
+        );
+        assert_eq!(messages[5].content.as_deref(), Some("grounded context"));
+    }
 }

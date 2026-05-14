@@ -1,32 +1,58 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Wrench } from 'lucide-react';
-import { McpToolsPanel } from '@/features/assistant/components/McpToolsPanel';
+import { AssistantDebugInspector } from '@/features/assistant/components/AssistantDebugInspector';
 import { SessionRail } from '@/features/assistant/components/SessionRail';
 import { useApp } from '@/shared/contexts/app-context';
-import { Button } from '@/shared/components/ui/button';
-import { AssistantDebugContext } from './components/assistant-page/AssistantDebugContext';
+import { useLocalStorageState } from '@/shared/hooks/useLocalStorageState';
 import { NoLibraryState, QueryNotConfiguredState } from './components/assistant-page/AssistantUnavailableState';
 import { ChatThread } from './components/assistant-page/ChatThread';
 import { Composer } from './components/assistant-page/Composer';
 import { useAssistantSession } from './components/assistant-page/useAssistantSession';
 
 const SESSION_RAIL_ID = 'assistant-session-rail';
+const DEBUG_PANEL_DEFAULT_WIDTH = 380;
+const DEBUG_PANEL_MIN_WIDTH = 320;
+const DEBUG_PANEL_MAX_WIDTH = 720;
+
+function parseBoolean(raw: unknown): boolean {
+  return raw === true;
+}
+
+function parseDebugPanelWidth(raw: unknown): number {
+  const value = typeof raw === 'number' && Number.isFinite(raw)
+    ? raw
+    : DEBUG_PANEL_DEFAULT_WIDTH;
+  return Math.min(DEBUG_PANEL_MAX_WIDTH, Math.max(DEBUG_PANEL_MIN_WIDTH, Math.round(value)));
+}
 
 export default function AssistantPage() {
   const { t } = useTranslation();
   const { activeLibrary, activeWorkspace, locale } = useApp();
   const navigate = useNavigate();
   const [inputText, setInputText] = useState('');
-  const [showMcpTools, setShowMcpTools] = useState(false);
-  const [showSessionRail, setShowSessionRail] = useState(true);
+  const [sessionRailCollapsed, setSessionRailCollapsed] = useLocalStorageState({
+    key: 'ironrag_assistant_sessions_collapsed',
+    defaultValue: false,
+    parse: parseBoolean,
+  });
+  const [debugInspectorOpen, setDebugInspectorOpen] = useLocalStorageState({
+    key: 'ironrag_assistant_debug_open',
+    defaultValue: false,
+    parse: parseBoolean,
+  });
+  const [debugPanelWidth, setDebugPanelWidth] = useLocalStorageState({
+    key: 'ironrag_assistant_debug_width',
+    defaultValue: DEBUG_PANEL_DEFAULT_WIDTH,
+    parse: parseDebugPanelWidth,
+  });
   const workspaceId = activeWorkspace?.id ?? activeLibrary?.workspaceId;
   const assistant = useAssistantSession({ workspaceId, libraryId: activeLibrary?.id, t });
 
   const handleSend = useCallback(() => {
     if (assistant.sendQuestion(inputText)) setInputText('');
   }, [assistant, inputText]);
+
   const handleRetry = useCallback(() => {
     const question = assistant.prepareRetry();
     if (question) setInputText(question);
@@ -44,27 +70,44 @@ export default function AssistantPage() {
 
   const { openDebugFor, setDebugContext, debugContext, debugLoadingId } = assistant;
 
-  const handleOpenDebug = useCallback(
-    (executionId: string) => {
-      setShowMcpTools(false);
-      void openDebugFor(executionId);
-    },
-    [openDebugFor],
-  );
+  const handleToggleDebug = useCallback(() => {
+    setDebugInspectorOpen((open) => {
+      const nextOpen = !open;
+      if (nextOpen && latestAssistantExecutionId) {
+        void openDebugFor(latestAssistantExecutionId);
+      }
+      return nextOpen;
+    });
+  }, [latestAssistantExecutionId, openDebugFor, setDebugInspectorOpen]);
+
+  const handleCloseDebug = useCallback(() => {
+    setDebugInspectorOpen(false);
+    assistant.setDebugError(null);
+  }, [assistant, setDebugInspectorOpen]);
 
   useEffect(() => {
-    if (!showMcpTools) {
+    if (!debugInspectorOpen) {
       return;
     }
     if (!latestAssistantExecutionId) {
       setDebugContext(null);
       return;
     }
-    if (debugContext?.executionId === latestAssistantExecutionId) {
+    if (
+      debugContext?.executionId === latestAssistantExecutionId ||
+      debugLoadingId === latestAssistantExecutionId
+    ) {
       return;
     }
     void openDebugFor(latestAssistantExecutionId);
-  }, [showMcpTools, latestAssistantExecutionId, openDebugFor, setDebugContext, debugContext]);
+  }, [
+    debugContext?.executionId,
+    debugInspectorOpen,
+    debugLoadingId,
+    latestAssistantExecutionId,
+    openDebugFor,
+    setDebugContext,
+  ]);
 
   if (!activeLibrary) return <NoLibraryState t={t} onOpenDocuments={() => navigate('/documents')} />;
 
@@ -72,104 +115,53 @@ export default function AssistantPage() {
     return <QueryNotConfiguredState t={t} onOpenAdmin={() => navigate('/admin?tab=ai')} />;
   }
 
-  const mcpToggleLabel = t('assistant.mcpToolsTitle');
-
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="page-header flex items-center justify-between">
-        <h1 className="text-lg font-bold tracking-tight">{t('assistant.title')}</h1>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="md:hidden"
-            aria-controls={SESSION_RAIL_ID}
-            aria-expanded={showSessionRail}
-            onClick={() => setShowSessionRail(!showSessionRail)}
-          >
-            {t('assistant.sessions')}
-          </Button>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={showMcpTools}
-            aria-label={mcpToggleLabel}
-            onClick={() => setShowMcpTools(value => !value)}
-            className={`group inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
-              showMcpTools
-                ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-                : 'border-border/70 bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground'
-            }`}
-          >
-            <Wrench className="h-3.5 w-3.5" />
-            <span>{mcpToggleLabel}</span>
-            <span
-              className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
-                showMcpTools ? 'bg-primary-foreground/30' : 'bg-muted'
-              }`}
-            >
-              <span
-                className={`inline-block h-3 w-3 transform rounded-full bg-background shadow transition-transform ${
-                  showMcpTools ? 'translate-x-3.5' : 'translate-x-0.5'
-                }`}
-              />
-            </span>
-          </button>
-        </div>
-      </div>
-
-      <div className="flex-1 flex overflow-hidden">
-        <SessionRail
-          id={SESSION_RAIL_ID}
-          t={t}
-          locale={locale}
-          sessions={assistant.sessions}
-          activeSession={assistant.activeSession}
-          show={showSessionRail}
-          disabled={assistant.isExecuting}
-          sessionSearch={assistant.sessionSearch}
-          onSessionSearchChange={assistant.setSessionSearch}
-          onNewSession={assistant.newSession}
-          onSelectSession={assistant.selectSession}
-        />
-
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <ChatThread
-            t={t}
-            messages={assistant.messages}
-            onStarterPromptSelect={setInputText}
-            onOpenDebug={handleOpenDebug}
-          />
-          <Composer
-            t={t}
-            inputText={inputText}
-            isExecuting={assistant.isExecuting}
-            retryable={assistant.retryable}
-            onInputTextChange={setInputText}
-            onRetry={handleRetry}
-            onSend={handleSend}
-          />
-        </div>
-
-        {showMcpTools && (
-          <McpToolsPanel
-            t={t}
-            snapshot={debugContext}
-            evidence={assistant.latestEvidence ?? null}
-            loading={Boolean(debugLoadingId) && debugContext?.executionId !== latestAssistantExecutionId}
-          />
-        )}
-      </div>
-
-      <AssistantDebugContext
+    <div className="flex-1 flex overflow-hidden bg-background">
+      <SessionRail
+        id={SESSION_RAIL_ID}
         t={t}
-        loadingId={!showMcpTools ? assistant.debugLoadingId : null}
-        snapshot={!showMcpTools ? assistant.debugContext : null}
-        error={!showMcpTools ? assistant.debugError : null}
-        onClose={() => {
-          assistant.setDebugContext(null);
-          assistant.setDebugError(null);
-        }}
+        locale={locale}
+        sessions={assistant.sessions}
+        activeSession={assistant.activeSession}
+        collapsed={sessionRailCollapsed}
+        disabled={assistant.isExecuting}
+        sessionSearch={assistant.sessionSearch}
+        onCollapsedChange={setSessionRailCollapsed}
+        onSessionSearchChange={assistant.setSessionSearch}
+        onNewSession={assistant.newSession}
+        onSelectSession={assistant.selectSession}
+      />
+
+      <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
+        <ChatThread
+          t={t}
+          messages={assistant.messages}
+          onStarterPromptSelect={setInputText}
+        />
+        <Composer
+          t={t}
+          inputText={inputText}
+          isExecuting={assistant.isExecuting}
+          debugOpen={debugInspectorOpen}
+          debugLoading={Boolean(debugLoadingId)}
+          retryable={assistant.retryable}
+          onInputTextChange={setInputText}
+          onRetry={handleRetry}
+          onToggleDebug={handleToggleDebug}
+          onSend={handleSend}
+        />
+      </div>
+
+      <AssistantDebugInspector
+        t={t}
+        open={debugInspectorOpen}
+        width={debugPanelWidth}
+        snapshot={debugContext}
+        error={assistant.debugError}
+        evidence={assistant.latestEvidence ?? null}
+        loading={Boolean(debugLoadingId)}
+        onClose={handleCloseDebug}
+        onWidthChange={setDebugPanelWidth}
       />
     </div>
   );

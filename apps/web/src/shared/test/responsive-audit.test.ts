@@ -44,7 +44,7 @@ const expectations: ResponsiveExpectation[] = [
   },
   {
     file: 'features/assistant/components/SessionRail.tsx',
-    mustContain: [/md:w-64/],
+    mustContain: [/w-12/, /w-64/, /aria-expanded/],
   },
   {
     file: 'features/assistant/components/EvidencePanel.tsx',

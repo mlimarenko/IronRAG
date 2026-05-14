@@ -58,7 +58,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 "conversationTurns": {
                     "type": "array",
                     "maxItems": 20,
-                    "description": "Optional rolling prior chat turns for short follow-ups and coreference resolution. Pass the actual earlier user/assistant turns in chronological order when the client's tool runtime has them. If the client cannot pass history, rewrite the latest follow-up into one self-contained question before calling the tool.",
+                    "description": "Optional rolling prior chat turns for ordinary chat continuity, follow-ups, and coreference resolution. Pass the actual earlier user/assistant turns in chronological order when the client's tool runtime has them. If the client cannot pass history, rewrite the latest follow-up into one self-contained question before calling the tool.",
                     "items": {
                         "type": "object",
                         "required": ["role", "content"],

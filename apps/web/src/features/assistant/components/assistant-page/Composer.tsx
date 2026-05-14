@@ -1,6 +1,6 @@
 import type { KeyboardEvent } from 'react';
 import type { TFunction } from 'i18next';
-import { Send } from 'lucide-react';
+import { Bug, Loader2, Send } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Textarea } from '@/shared/components/ui/textarea';
 import type { RetryableAssistantTurn } from './assistantPageState';
@@ -9,9 +9,12 @@ type ComposerProps = {
   t: TFunction;
   inputText: string;
   isExecuting: boolean;
+  debugOpen: boolean;
+  debugLoading: boolean;
   retryable: RetryableAssistantTurn | null;
   onInputTextChange: (value: string) => void;
   onRetry: () => void;
+  onToggleDebug: () => void;
   onSend: () => void;
 };
 
@@ -19,9 +22,12 @@ export function Composer({
   t,
   inputText,
   isExecuting,
+  debugOpen,
+  debugLoading,
   retryable,
   onInputTextChange,
   onRetry,
+  onToggleDebug,
   onSend,
 }: ComposerProps) {
   const canSend = !isExecuting && inputText.trim().length > 0;
@@ -69,6 +75,22 @@ export function Composer({
           className="min-h-[44px] max-h-[120px] resize-none text-sm rounded-xl"
           rows={1}
         />
+        <Button
+          type="button"
+          size="icon"
+          variant={debugOpen ? 'secondary' : 'outline'}
+          className="h-10 w-10 shrink-0 rounded-xl"
+          aria-label={t('assistant.debugInspectorToggle')}
+          aria-pressed={debugOpen}
+          title={t('assistant.debugInspectorToggle')}
+          onClick={onToggleDebug}
+        >
+          {debugLoading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Bug className="h-4 w-4" />
+          )}
+        </Button>
         <Button
           size="icon"
           className="shrink-0 rounded-xl h-10 w-10"

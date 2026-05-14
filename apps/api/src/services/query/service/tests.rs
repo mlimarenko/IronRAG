@@ -513,6 +513,9 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
             "User: tell me how to move items in the product\nAssistant: Sure, here are the product steps."
         )
     );
+    assert_eq!(context.prompt_history_messages.len(), 2);
+    assert_eq!(context.prompt_history_messages[0].role, "user");
+    assert_eq!(context.prompt_history_messages[1].role, "assistant");
 }
 
 #[test]
@@ -564,6 +567,7 @@ Connector TargetName uses the [TargetName] section with `targetSecret` and merch
     assert!(context.coreference_entities.contains(&"targetSecret".to_string()));
     assert!(!context.coreference_entities.contains(&"alphaSecret".to_string()));
     assert!(context.effective_query_text.ends_with("TargetNme how"));
+    assert_eq!(context.prompt_history_messages.len(), 2);
 }
 
 #[test]
@@ -594,7 +598,9 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
         build_conversation_runtime_context(&[first_turn, second_turn.clone()], second_turn.id);
 
     assert_eq!(context.effective_query_text, "tell me how to move items in the product");
-    assert_eq!(context.prompt_history_text, None);
+    assert_eq!(context.prompt_history_text.as_deref(), Some("User: how to fill in a transfer"));
+    assert_eq!(context.prompt_history_messages.len(), 1);
+    assert_eq!(context.prompt_history_messages[0].role, "user");
 }
 
 #[test]
@@ -638,7 +644,13 @@ fn build_conversation_runtime_context_standalone_question_after_assistant_answer
     );
 
     assert_eq!(context.effective_query_text, "what is the dashboard session timeout setting");
-    assert_eq!(context.prompt_history_text, None);
+    assert_eq!(
+        context.prompt_history_text.as_deref(),
+        Some(
+            "User: how do I configure connector alpha\nAssistant: Connector Alpha uses `alphaSecret` in section [Alpha]."
+        )
+    );
+    assert_eq!(context.prompt_history_messages.len(), 2);
     assert!(context.coreference_entities.is_empty());
     assert!(
         !context.effective_query_text.contains("alphaSecret"),

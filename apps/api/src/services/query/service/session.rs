@@ -9,6 +9,7 @@ use crate::{
         QueryConversation, QueryConversationDetail, QueryExecution, QueryTurn, QueryTurnKind,
     },
     infra::repositories::query_repository,
+    integrations::llm::ChatMessage,
     interfaces::http::router_support::ApiError,
     services::query::text_match::{near_token_match, normalized_alnum_tokens},
 };
@@ -205,9 +206,7 @@ pub(crate) fn build_conversation_runtime_context(
     let relevant_turns = &turns[..=current_index.min(turns.len().saturating_sub(1))];
     let views = relevant_turns
         .iter()
-        .enumerate()
-        .map(|(index, turn)| RuntimeContextTurn {
-            turn_index: i32::try_from(index.saturating_add(1)).unwrap_or(i32::MAX),
+        .map(|turn| RuntimeContextTurn {
             turn_kind: turn.turn_kind.clone(),
             content_text: turn.content_text.as_str(),
         })
@@ -229,21 +228,18 @@ pub(crate) fn build_conversation_runtime_context_with_external_history(
         Vec::with_capacity(relevant_turns.len().saturating_add(external_prior_turns.len()));
     for turn in relevant_turns.iter().take(relevant_turns.len().saturating_sub(1)) {
         views.push(RuntimeContextTurn {
-            turn_index: i32::try_from(views.len().saturating_add(1)).unwrap_or(i32::MAX),
             turn_kind: turn.turn_kind.clone(),
             content_text: turn.content_text.as_str(),
         });
     }
     for turn in external_prior_turns {
         views.push(RuntimeContextTurn {
-            turn_index: i32::try_from(views.len().saturating_add(1)).unwrap_or(i32::MAX),
             turn_kind: turn.turn_kind.clone(),
             content_text: turn.content_text.as_str(),
         });
     }
     if let Some(current_turn) = relevant_turns.last() {
         views.push(RuntimeContextTurn {
-            turn_index: i32::try_from(views.len().saturating_add(1)).unwrap_or(i32::MAX),
             turn_kind: current_turn.turn_kind.clone(),
             content_text: current_turn.content_text.as_str(),
         });
@@ -253,7 +249,6 @@ pub(crate) fn build_conversation_runtime_context_with_external_history(
 
 #[derive(Debug, Clone)]
 struct RuntimeContextTurn<'a> {
-    turn_index: i32,
     turn_kind: QueryTurnKind,
     content_text: &'a str,
 }
@@ -265,6 +260,7 @@ fn build_conversation_runtime_context_from_views(
         return ConversationRuntimeContext {
             effective_query_text: String::new(),
             prompt_history_text: None,
+            prompt_history_messages: Vec::new(),
             coreference_entities: Vec::new(),
         };
     }
@@ -277,11 +273,16 @@ fn build_conversation_runtime_context_from_views(
     let is_follow_up = is_context_dependent_follow_up(&current_text);
     let follow_up_focus_tokens =
         if is_follow_up { effective_query_focus_tokens(&current_text) } else { Vec::new() };
-    let prompt_history_text = if is_follow_up {
-        render_follow_up_prompt_history(&previous_turns, &follow_up_focus_tokens)
-    } else {
-        None
-    };
+    let prompt_history_text = render_turn_history(
+        &previous_turns,
+        MAX_PROMPT_HISTORY_TURNS,
+        MAX_PROMPT_HISTORY_TURN_CHARS,
+    );
+    let prompt_history_messages = render_prompt_history_messages(
+        &previous_turns,
+        MAX_PROMPT_HISTORY_TURNS,
+        MAX_PROMPT_HISTORY_TURN_CHARS,
+    );
 
     let coreference_entities = if is_follow_up {
         previous_turns
@@ -309,7 +310,12 @@ fn build_conversation_runtime_context_from_views(
         current_text
     };
 
-    ConversationRuntimeContext { effective_query_text, prompt_history_text, coreference_entities }
+    ConversationRuntimeContext {
+        effective_query_text,
+        prompt_history_text,
+        prompt_history_messages,
+        coreference_entities,
+    }
 }
 
 pub(crate) fn enrich_query_with_coreference_entities(query: &str, entities: &[String]) -> String {
@@ -439,53 +445,30 @@ fn render_turn_history(
     }
 }
 
-fn render_follow_up_prompt_history(
+fn render_prompt_history_messages(
     previous_turns: &[&RuntimeContextTurn<'_>],
-    focus_tokens: &[String],
-) -> Option<String> {
-    let mut selected = Vec::<(i32, String)>::new();
-
-    if let Some(user_turn) =
-        previous_turns.iter().rev().find(|turn| matches!(turn.turn_kind, QueryTurnKind::User))
-    {
-        let text =
-            compact_conversation_turn_text(&user_turn.content_text, MAX_PROMPT_HISTORY_TURN_CHARS);
-        if !text.is_empty() {
-            selected.push((
-                user_turn.turn_index,
-                format!("{}: {}", conversation_turn_speaker(&user_turn.turn_kind), text),
-            ));
-        }
-    }
-
-    if let Some(assistant_turn) =
-        previous_turns.iter().rev().find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-    {
-        let text = focused_conversation_turn_text(&assistant_turn.content_text, focus_tokens)
-            .unwrap_or_else(|| {
-                compact_conversation_turn_text(
-                    &assistant_turn.content_text,
-                    MAX_PROMPT_HISTORY_TURN_CHARS,
-                )
-            });
-        if !text.is_empty() {
-            selected.push((
-                assistant_turn.turn_index,
-                format!("{}: {}", conversation_turn_speaker(&assistant_turn.turn_kind), text),
-            ));
-        }
-    }
-
-    if selected.is_empty() {
-        return render_turn_history(
-            previous_turns,
-            MAX_PROMPT_HISTORY_TURNS.min(2),
-            MAX_PROMPT_HISTORY_TURN_CHARS,
-        );
-    }
-
-    selected.sort_by_key(|(turn_index, _)| *turn_index);
-    Some(selected.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n"))
+    limit: usize,
+    max_chars_per_turn: usize,
+) -> Vec<ChatMessage> {
+    let mut selected = previous_turns
+        .iter()
+        .rev()
+        .filter_map(|turn| {
+            let text = compact_conversation_turn_text(&turn.content_text, max_chars_per_turn);
+            (!text.is_empty()).then(|| (*turn, text))
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    selected.reverse();
+    selected
+        .into_iter()
+        .map(|(turn, text)| match &turn.turn_kind {
+            QueryTurnKind::User => ChatMessage::user(text),
+            QueryTurnKind::Assistant => ChatMessage::assistant_text(text),
+            QueryTurnKind::System => ChatMessage::assistant_text(format!("System note: {text}")),
+            QueryTurnKind::Tool => ChatMessage::assistant_text(format!("Tool observation: {text}")),
+        })
+        .collect()
 }
 
 fn compact_conversation_turn_text(value: &str, max_chars: usize) -> String {

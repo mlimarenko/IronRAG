@@ -10,6 +10,7 @@ use crate::{
         query_ir::{EntityRole, QueryAct, QueryIR},
     },
     infra::arangodb::document_store::KnowledgeDocumentRow,
+    integrations::llm::ChatMessage,
     interfaces::http::router_support::ApiError,
     services::query::{
         assistant_grounding::AssistantGroundingEvidence,
@@ -426,6 +427,7 @@ pub(crate) async fn generate_answer_query(
     effective_question: &str,
     user_question: &str,
     conversation_history: Option<&str>,
+    conversation_history_messages: &[ChatMessage],
     prepared: PreparedAnswerQueryResult,
 ) -> anyhow::Result<RuntimeAnswerQueryResult> {
     // Resolves just the QueryAnswer binding (one Postgres lookup)
@@ -564,7 +566,7 @@ pub(crate) async fn generate_answer_query(
                 state,
                 library_id,
                 user_question,
-                conversation_history,
+                conversation_history_messages,
                 &variants,
             )
             .await;
@@ -637,7 +639,7 @@ pub(crate) async fn generate_answer_query(
             state,
             library_id,
             user_question,
-            conversation_history,
+            conversation_history_messages,
             &prepared.answer_context,
         )
         .await;
@@ -721,7 +723,7 @@ pub(crate) async fn generate_answer_query(
                         state,
                         library_id,
                         user_question,
-                        conversation_history,
+                        conversation_history_messages,
                         &verification_stage.generation.answer,
                         &verification_stage.verification.unsupported_literals,
                         &revision_context,
@@ -959,7 +961,7 @@ pub(crate) async fn generate_answer_query(
             state,
             library_id,
             user_question,
-            conversation_history,
+            conversation_history_messages,
             &preflight.prompt_context,
         )
         .await
@@ -1007,7 +1009,7 @@ pub(crate) async fn generate_answer_query(
                         state,
                         library_id,
                         user_question,
-                        conversation_history,
+                        conversation_history_messages,
                         &verification_stage.generation.answer,
                         &verification_stage.verification.unsupported_literals,
                         &revision_context,

@@ -786,6 +786,33 @@
     animation: shimmer 1.5s ease-in-out infinite;
   }
 
+  /* Assistant runtime activity */
+  @keyframes agent-activity-sweep {
+    0% { transform: translateX(-120%); opacity: 0; }
+    12% { opacity: 1; }
+    82% { opacity: 1; }
+    100% { transform: translateX(120%); opacity: 0; }
+  }
+  .agent-activity-card {
+    position: relative;
+  }
+  .agent-activity-card-live::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto auto 0;
+    height: 2px;
+    width: 100%;
+    background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.85), hsl(var(--status-ready) / 0.75), transparent);
+    animation: agent-activity-sweep 1.8s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-activity-card-live::before {
+      animation: none;
+      opacity: 1;
+    }
+  }
+
   /* Ambient background pattern */
   .ambient-bg {
     position: relative;

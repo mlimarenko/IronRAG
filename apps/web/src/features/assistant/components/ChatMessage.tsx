@@ -1,6 +1,6 @@
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import type { TFunction } from 'i18next';
-import { Bug, BrainCircuit, CheckCircle2, Loader2, Wrench } from 'lucide-react';
+import { BrainCircuit, CheckCircle2, Loader2, Wrench } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { AssistantAgentActivityEvent, AssistantMessage } from '@/shared/types';
 import { VERIFICATION_CONFIG, verificationLabel } from "../model/verificationConfig";
@@ -8,7 +8,6 @@ import { VERIFICATION_CONFIG, verificationLabel } from "../model/verificationCon
 type ChatMessageProps = {
   t: TFunction;
   message: AssistantMessage;
-  onOpenDebug?: (executionId: string) => void;
 };
 
 function formatElapsed(ms: number): string {
@@ -37,10 +36,7 @@ function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
         tool: event.tool_name ?? t('assistant.activity.toolUnknown'),
       });
     case 'tool_call_progress':
-      return t('assistant.activity.toolProgress', {
-        elapsed: formatElapsed(event.elapsed_ms ?? 0),
-        tool: event.tool_name ?? t('assistant.activity.toolUnknown'),
-      });
+      return t('assistant.activity.toolProgress');
     case 'tool_call_finished':
       return event.is_error
         ? t('assistant.activity.toolFailed', {
@@ -58,9 +54,30 @@ function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
   }
 }
 
-function renderActivityIcon(event: AssistantAgentActivityEvent | undefined, live: boolean) {
-  const className = `h-4 w-4 ${event?.type === 'persisting' ? 'text-emerald-600' : 'text-primary'} ${
-    live && event?.type !== 'persisting' ? 'animate-pulse' : ''
+function activityHeadline(event: AssistantAgentActivityEvent | undefined, t: TFunction): string {
+  if (event?.type === 'tool_call_started' || event?.type === 'tool_call_progress') {
+    return t('assistant.activity.toolRunningTitle');
+  }
+  return eventLabel(event ?? { type: 'started' }, t);
+}
+
+function activityStatus(
+  event: AssistantAgentActivityEvent | undefined,
+  live: boolean,
+  t: TFunction,
+): string {
+  if (
+    (event?.type === 'tool_call_started' || event?.type === 'tool_call_progress') &&
+    event.tool_name
+  ) {
+    return event.tool_name;
+  }
+  return live ? t('assistant.activity.working') : t('assistant.activity.complete');
+}
+
+function renderActivityIcon(event: AssistantAgentActivityEvent | undefined) {
+  const className = `h-4 w-4 ${
+    event?.type === 'persisting' ? 'text-emerald-600' : 'text-primary'
   }`;
   if (event?.type?.startsWith('tool_call')) return <Wrench className={className} />;
   if (event?.type === 'model_request' || event?.type === 'model_response') {
@@ -91,40 +108,40 @@ function PendingAssistantActivity({
   const startedAtMs = Date.parse(startedAt);
   const elapsed = Number.isFinite(startedAtMs) ? now - startedAtMs : 0;
   const latest = events.at(-1);
-  const visibleEvents = useMemo(() => events.slice(-5), [events]);
+  const latestLabel = activityHeadline(latest, t);
+  const statusLabel = activityStatus(latest, live, t);
 
   return (
-    <div className="w-[min(520px,calc(100vw-3rem))] rounded-xl border bg-muted/30 p-3 text-xs">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-2 font-semibold text-foreground">
-          {renderActivityIcon(latest, live)}
-          <span>{eventLabel(latest ?? { type: 'started' }, t)}</span>
+    <div
+      className={`agent-activity-card w-full max-w-[560px] overflow-hidden rounded-xl border border-primary/15 bg-card text-xs shadow-lifted ${
+        live ? 'agent-activity-card-live' : ''
+      }`}
+    >
+      <div className="flex items-start gap-3 p-3.5">
+        <div className="relative mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10">
+          <span className="relative z-10">{renderActivityIcon(latest)}</span>
         </div>
-        <span className="shrink-0 tabular-nums text-muted-foreground">
-          {formatElapsed(elapsed)}
-        </span>
-      </div>
 
-      <div className="mt-3 space-y-1.5">
-        {visibleEvents.length === 0 ? (
-          <div className="rounded-md bg-background/70 px-2 py-1.5 text-muted-foreground">
-            {t('assistant.activity.waitingForRuntime')}
-          </div>
-        ) : (
-          visibleEvents.map((event, index) => (
-            <div
-              key={`${event.type}-${event.iteration ?? 0}-${event.tool_name ?? ''}-${index}`}
-              className="flex items-start justify-between gap-2 rounded-md bg-background/70 px-2 py-1.5"
-            >
-              <span className="min-w-0 truncate">{eventLabel(event, t)}</span>
-              {event.result_preview && (
-                <span className="max-w-[45%] truncate text-right text-muted-foreground">
-                  {event.result_preview}
-                </span>
-              )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold tracking-tight text-foreground">
+                {latestLabel}
+              </div>
+              <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    live ? 'bg-primary' : 'bg-status-ready'
+                  }`}
+                />
+                <span className="truncate">{statusLabel}</span>
+              </div>
             </div>
-          ))
-        )}
+            <span className="shrink-0 rounded-md border border-border/70 bg-background/70 px-2 py-1 font-mono text-[11px] tabular-nums text-muted-foreground">
+              {formatElapsed(elapsed)}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -160,17 +177,22 @@ const markdownComponents = {
   ),
 };
 
-function ChatMessageImpl({ t, message, onOpenDebug }: ChatMessageProps) {
+function ChatMessageImpl({ t, message }: ChatMessageProps) {
   const isUser = message.role === 'user';
   const vcState = message.evidence?.verificationState;
   const vc = vcState && vcState !== 'not_run' ? VERIFICATION_CONFIG[vcState] : null;
   const vcLabel = vcState && vcState !== 'not_run' ? verificationLabel(vcState, t) : null;
-  const hasActivityTrace = !isUser && (message.activityEvents?.length ?? 0) > 0;
+  const isPendingAssistant = !isUser && !message.content;
+  const messageWidthClass = isUser
+    ? 'max-w-[80%]'
+    : isPendingAssistant
+      ? 'w-full max-w-[560px]'
+      : 'max-w-[80%]';
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} animate-fade-in`}>
       <div
-        className={`max-w-[80%] ${
+        className={`${messageWidthClass} ${
           isUser ? 'text-primary-foreground rounded-2xl rounded-br-sm px-4 py-3' : 'space-y-2'
         }`}
         style={
@@ -191,20 +213,11 @@ function ChatMessageImpl({ t, message, onOpenDebug }: ChatMessageProps) {
         )}
         <div
           className={`text-sm leading-relaxed ${
-            !isUser ? 'bg-card border rounded-2xl rounded-bl-sm px-4 py-3 shadow-soft' : ''
+            !isUser && !isPendingAssistant
+              ? 'bg-card border rounded-2xl rounded-bl-sm px-4 py-3 shadow-soft'
+              : ''
           }`}
         >
-          {!isUser && message.executionId && onOpenDebug && (
-            <button
-              type="button"
-              onClick={() => message.executionId && onOpenDebug(message.executionId)}
-              className="float-right ml-2 -mt-1 text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-              title={t('assistant.showLlmContext')}
-              aria-label={t('assistant.showLlmContext')}
-            >
-              <Bug className="h-3 w-3" />
-            </button>
-          )}
           {!isUser && !message.content && (
             <PendingAssistantActivity
               events={message.activityEvents}
@@ -224,16 +237,6 @@ function ChatMessageImpl({ t, message, onOpenDebug }: ChatMessageProps) {
                 {line}
               </p>
             ))
-          )}
-          {!isUser && message.content && hasActivityTrace && !message.executionId && (
-            <div className="mt-3">
-              <PendingAssistantActivity
-                events={message.activityEvents}
-                live={false}
-                startedAt={message.timestamp}
-                t={t}
-              />
-            </div>
           )}
         </div>
       </div>

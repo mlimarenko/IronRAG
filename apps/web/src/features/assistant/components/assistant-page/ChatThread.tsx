@@ -9,16 +9,24 @@ type ChatThreadProps = {
   t: TFunction;
   messages: AssistantMessage[];
   onStarterPromptSelect: (prompt: string) => void;
-  onOpenDebug: (executionId: string) => void;
 };
 
 export function ChatThread({
   t,
   messages,
   onStarterPromptSelect,
-  onOpenDebug,
 }: ChatThreadProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastMessage = messages.at(-1);
+  const scrollSignature = lastMessage
+    ? [
+        messages.length,
+        lastMessage.id,
+        lastMessage.content?.length ?? 0,
+        lastMessage.activityEvents?.length ?? 0,
+        lastMessage.executionId ?? '',
+      ].join(':')
+    : '';
 
   useEffect(() => {
     if (messages.length === 0) return;
@@ -31,7 +39,7 @@ export function ChatThread({
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [messages.length]);
+  }, [messages.length, scrollSignature]);
 
   return (
     <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -74,7 +82,6 @@ export function ChatThread({
             key={message.id}
             t={t}
             message={message}
-            onOpenDebug={onOpenDebug}
           />
         ))
       )}

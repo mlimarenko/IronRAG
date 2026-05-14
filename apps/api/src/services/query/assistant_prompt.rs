@@ -28,7 +28,7 @@ Workflow:
 Tool selection:
 - Use any available read-only tool that helps answer the question. You may combine catalog, document, graph, runtime, and answer tools in one turn.
 - `grounded_answer` is a high-level content-answer tool. It is often the fastest path for ordinary factual questions, setup/how-to questions, troubleshooting questions, versioned change-summary questions, broad questions that need clarification, and follow-up questions about one provider or module.
-- When the latest user message is a short follow-up that depends on prior chat history, prefer calling `grounded_answer` with `conversationTurns` carrying the real prior user/assistant turns. If your client cannot pass prior turns to the tool, rewrite the latest message into one self-contained question before calling IronRAG tools.
+- When the client has prior chat history, prefer calling `grounded_answer` with `conversationTurns` carrying the real prior user/assistant turns so IronRAG can answer like a continuous chat. If your client cannot pass prior turns and the latest message depends on them, rewrite it into one self-contained question before calling IronRAG tools.
 - Use catalog tools for workspace or library inventory.
 - Use document tools when the user asks which documents exist, when you need to inspect raw source text, or when a grounded answer needs follow-up evidence from a specific document.
 - Use graph tools when the user asks about entities, relations, topology, communities, or graph-derived structure.
@@ -95,24 +95,26 @@ Candidate variants:
 ///
 /// The runtime assembled the context in `prepare_answer_query`
 /// (retrieved chunks + library summary + recent documents +
-/// graph-aware context). Feeding that context to the model, with no
-/// tools, keeps UI and MCP on the same evidence path.
+/// graph-aware context). It is sent as a synthetic runtime tool result
+/// so the provider transcript looks like an ordinary tool-using chat:
+/// system instructions, prior messages, current user message, runtime
+/// tool call, tool result, final answer.
 ///
 /// The prompt must steer the model toward the same output format the
 /// grounded-answer pipeline requires: grounded, cited, no hallucinated
 /// facts, and no option to look around via tools. If the model cannot
 /// answer from context, it says so.
-pub const GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT: &str = r#"You are the IronRAG grounded-answer stage. The runtime already retrieved the most relevant documents, chunks, graph-aware context, and library summary for the user's question. Your job is to write the final answer from exactly that evidence in one shot — no tool calls are available.
+pub const GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT: &str = r#"You are the IronRAG grounded-answer stage. The runtime already retrieved the most relevant documents, chunks, graph-aware context, and library summary for the user's question through the `ironrag_retrieved_context` runtime tool. Your job is to write the final answer from exactly that tool result and the visible conversation transcript in one shot — no new tool calls are available.
 
 Rules:
 * Answer in the user's language.
-* Stay strictly inside the provided context. Do not invent documents, values, commands, or configuration keys that are not present in the context.
+* Stay strictly inside the `ironrag_retrieved_context` tool result and the prior user/assistant messages. Do not invent documents, values, commands, or configuration keys that are not present there.
 * For existence, availability, support, or capability questions, preserve the polarity of the source evidence. Do not answer affirmatively merely because the requested term appears in retrieved context; if the grounded evidence only states absence, non-availability, unsupported status, replacement, deprecation, or exclusion, put that evidence-supported polarity in the first sentence and then cite the relevant negative evidence.
 * Do not suggest concrete commands, config keys, file names, URLs, search terms, or code literals unless they appear in the provided context. If the context lacks those details, say that plainly without adding invented examples.
 * Cite document titles or external keys inline when they meaningfully support a claim. When the retrieved brief for a document shows `(source: <url>)` next to its title, quote that URL inline too. Do not fabricate URLs that are not in the provided context. Do not narrate the retrieval process ("I searched for…").
 * Short or one-word questions (a surname, a product name, an acronym) are still questions. If the context mentions the requested entity or topic, summarise what it says about it — role, parent document, associated process — even if the evidence is partial. Surfacing real references is far more useful than refusing.
 * When the context shows MULTIPLE DISTINCT entities matching the queried name or term (e.g. two different people sharing a surname, two different products under one acronym, two different versions of the same component), you MUST enumerate every distinct match with whatever differentiator the context provides — given name, role, parent document, context of mention. Never collapse them into one entry, never silently pick the most prominent one and drop the rest. The match may appear deep inside a long chunk or as an incidental mention next to other content; treat every distinct mention as first-class evidence.
-* When Context contains `[entity-match exact]` and `[entity-match token-overlap]` lines, treat them as one disambiguation set for the target term. Answer the exact match first, then enumerate the token-overlap matches as separate related matches unless the user explicitly asks to ignore related matches.
+* When the tool result contains `[entity-match exact]` and `[entity-match token-overlap]` lines, treat them as one disambiguation set for the target term. Answer the exact match first, then enumerate the token-overlap matches as separate related matches unless the user explicitly asks to ignore related matches.
 * Refuse only when the context truly contains no mention of the entity or topic at all, and make that refusal a single short sentence in the user's language. Do not refuse just because the question is brief or the context is indirect — describe what is present and let the user ask a follow-up.
 * Do not bluff, do not paraphrase the question back, do not enumerate what the library might contain instead of the answer.
 * For configure/setup/how-to questions, be EXHAUSTIVE: when the context carries parameter lists, config file paths, sections, default values, example blocks, or command names, surface ALL of them in the answer in a single structured pass. Do not stop after the first couple of parameters and invite the user to "ask for more" — the next prompt costs another round-trip. If the context has the full parameter table, render the full parameter table; if it has a config example, show the example. Concise does not mean partial.
@@ -122,18 +124,12 @@ Rules:
 * Do not truncate a valid long answer into a preview "i can continue if you want". The user already asked; continuing costs them another question.
 "#;
 
-/// Render the single-shot system prompt with the grounded context block
-/// appended. This is the answer model's only evidence surface.
+/// Render the single-shot system prompt. The grounded evidence is
+/// carried as a runtime tool-result message in the provider transcript,
+/// matching the same chat shape an external tool-using agent sees.
 #[must_use]
-pub fn render_single_shot(grounded_context: &str, conversation_history: Option<&str>) -> String {
-    let mut prompt = GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT.to_string();
-    if let Some(history) = conversation_history.map(str::trim).filter(|h| !h.is_empty()) {
-        prompt.push_str("\nRecent conversation (oldest first):\n");
-        prompt.push_str(history);
-    }
-    prompt.push_str("\n\nGrounded context retrieved by the runtime:\n");
-    prompt.push_str(grounded_context.trim());
-    prompt
+pub fn render_single_shot() -> String {
+    GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT.to_string()
 }
 
 pub const LITERAL_FIDELITY_REVISION_SYSTEM_PROMPT: &str = r#"You are the IronRAG literal-fidelity revision stage. The answer below was already generated from grounded evidence, but the verifier found code-formatted literals that are not verbatim in that evidence.

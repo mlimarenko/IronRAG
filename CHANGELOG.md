@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.4.9 — 2026-05-14
+
+### Assistant: chat transcript and runtime activity UX
+
+- Grounded-answer generation now sends prior user/assistant turns as real chat
+  messages and exposes runtime retrieval evidence as a synthetic tool-call plus
+  matching tool result, so provider debug payloads read like a normal agent
+  conversation instead of a flattened prompt block.
+- Query rewrite and coreference sharpening remain scoped to short follow-up
+  questions, while standalone questions still carry visible prior chat history
+  for answer continuity without rewriting the effective query.
+- The in-chat runtime activity bubble now focuses on the current agent step,
+  the active tool name, and a single live elapsed timer with one processing
+  animation. Once the assistant answer starts streaming, the chat focuses on
+  the answer instead of leaving completed runtime cards below it.
+- The assistant layout now uses a collapsible session rail, a composer-level
+  debug button, and a resizable right debug inspector for full context,
+  messages, tool calls, runtime stages, and evidence. The old top MCP toggle
+  and per-message debug popover were removed.
+
 ## 0.4.8 — 2026-05-14
 
 ### Admin access: token cleanup panel

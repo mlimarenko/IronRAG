@@ -33,8 +33,8 @@ use crate::{
 
 pub(crate) const MAX_LIBRARY_CONVERSATIONS: usize = 5;
 pub(crate) const QUERY_CONVERSATION_TITLE_LIMIT: usize = 72;
-pub(crate) const MAX_PROMPT_HISTORY_TURNS: usize = 6;
-pub(crate) const MAX_PROMPT_HISTORY_TURN_CHARS: usize = 360;
+pub(crate) const MAX_PROMPT_HISTORY_TURNS: usize = 12;
+pub(crate) const MAX_PROMPT_HISTORY_TURN_CHARS: usize = 1_200;
 pub(crate) const MAX_EFFECTIVE_QUERY_HISTORY_TURNS: usize = 3;
 pub(crate) const MAX_EFFECTIVE_QUERY_TURN_CHARS: usize = 220;
 pub(crate) const CANONICAL_QUERY_MODE: RuntimeQueryMode = RuntimeQueryMode::Mix;
@@ -47,10 +47,11 @@ pub(crate) const MAX_ANSWER_SOURCE_LINKS: usize = 5;
 /// `planner.rs::TOKEN_MIN_LEN`.
 pub(crate) const PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN: usize = 4;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ConversationRuntimeContext {
     pub(crate) effective_query_text: String,
     pub(crate) prompt_history_text: Option<String>,
+    pub(crate) prompt_history_messages: Vec<crate::integrations::llm::ChatMessage>,
     pub(crate) coreference_entities: Vec<String>,
 }
 
