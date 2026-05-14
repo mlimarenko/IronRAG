@@ -477,8 +477,7 @@ pub async fn load_async_operation_and_authorize(
                 accepted_permissions,
             )?;
         }
-        None if !auth.is_system_admin => return Err(ApiError::Unauthorized),
-        None => {}
+        None => authorize_workspace_permission(auth, operation.workspace_id, accepted_permissions)?,
     }
     Ok(operation)
 }

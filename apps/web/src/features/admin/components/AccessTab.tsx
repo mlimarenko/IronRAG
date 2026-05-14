@@ -4,6 +4,7 @@ import type { TFunction } from 'i18next';
 import { toast } from 'sonner';
 import { z } from 'zod';
 import {
+  Ban,
   BookOpen,
   Copy,
   Eye,
@@ -316,6 +317,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
 
   const [selectedTokenId, setSelectedTokenId] = useState<string | null | undefined>(undefined);
   const [tokenSearch, setTokenSearch] = useState('');
+  const [deleteToken, setDeleteToken] = useState<APIToken | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createdToken, setCreatedToken] = useState<string | null>(null);
@@ -545,12 +547,17 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
       queryClient.setQueryData<TokenResponse[]>(
         tokenListQuery.queryKey,
         (current = []) =>
-          current.filter((candidate) => candidate.principalId !== token.id),
+          current.map((candidate) =>
+            candidate.principalId === token.id
+              ? {
+                  ...candidate,
+                  revokedAt: new Date().toISOString(),
+                  status: 'revoked',
+                }
+              : candidate,
+          ),
       );
-      setSelectedTokenId(
-        previousTokens?.find((candidate) => candidate.principalId !== token.id)
-          ?.principalId ?? null,
-      );
+      setSelectedTokenId(token.id);
       return { previousSelectedTokenId, previousTokens };
     },
     onError: (err, _token, context) => {
@@ -561,6 +568,50 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
       toast.error(
         t('admin.mutations.tokenRevoke.failed', {
           error: errorMessage(err, t('admin.revokeTokenFailed')),
+        }),
+      );
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: tokenListQuery.queryKey });
+    },
+  });
+
+  const deleteTokenMutation = useMutation<
+    void,
+    unknown,
+    APIToken,
+    TokenMutationContext
+  >({
+    mutationKey: ['admin', 'iam', 'tokens', 'delete'],
+    mutationFn: (token) => adminApi.deleteToken(token.id),
+    onMutate: async (token) => {
+      await queryClient.cancelQueries({ queryKey: tokenListQuery.queryKey });
+      const previousTokens = queryClient.getQueryData<TokenResponse[]>(
+        tokenListQuery.queryKey,
+      );
+      const previousSelectedTokenId = selectedTokenId;
+      queryClient.setQueryData<TokenResponse[]>(
+        tokenListQuery.queryKey,
+        (current = []) =>
+          current.filter((candidate) => candidate.principalId !== token.id),
+      );
+      setSelectedTokenId(
+        previousSelectedTokenId === token.id
+          ? (previousTokens?.find((candidate) => candidate.principalId !== token.id)
+              ?.principalId ?? null)
+          : previousSelectedTokenId,
+      );
+      setDeleteToken(null);
+      return { previousSelectedTokenId, previousTokens };
+    },
+    onError: (err, _token, context) => {
+      if (context) {
+        queryClient.setQueryData(tokenListQuery.queryKey, context.previousTokens);
+        setSelectedTokenId(context.previousSelectedTokenId);
+      }
+      toast.error(
+        t('admin.mutations.tokenDelete.failed', {
+          error: errorMessage(err, t('admin.deleteTokenFailed')),
         }),
       );
     },
@@ -609,6 +660,14 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
     revokeTokenMutation.mutate(token);
   };
 
+  const handleDeleteToken = () => {
+    if (!deleteToken || deleteToken.status !== 'revoked') {
+      setDeleteToken(null);
+      return;
+    }
+    deleteTokenMutation.mutate(deleteToken);
+  };
+
   const filteredTokens = tokens.filter(
     (token) => !tokenSearch || token.label.toLowerCase().includes(tokenSearch.toLowerCase()),
   );
@@ -631,109 +690,110 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
 
   return (
     <>
-      <div className="flex items-center justify-between mb-5">
-        <div className="flex gap-4 text-xs font-semibold">
-          {loading ? (
-            <span className="text-muted-foreground flex items-center gap-1.5">
-              <Loader2 className="h-3 w-3 animate-spin" /> {t('admin.loading')}
-            </span>
-          ) : loadError ? (
-            <span className="text-status-failed">{loadError}</span>
-          ) : (
-            <>
-              <span className="text-muted-foreground">
-                {tokens.length} {t('admin.total')}
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex gap-4 text-xs font-semibold">
+            {loading ? (
+              <span className="text-muted-foreground flex items-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" /> {t('admin.loading')}
               </span>
-              <span className="text-status-ready">
-                {tokens.filter((token) => token.status === 'active').length} {t('admin.active')}
-              </span>
-            </>
-          )}
-        </div>
-        <div className="flex gap-2">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              className="h-9 pl-9 w-48 text-sm"
-              placeholder={t('admin.searchTokens')}
-              value={tokenSearch}
-              onChange={(e) => setTokenSearch(e.target.value)}
-            />
+            ) : loadError ? (
+              <span className="text-status-failed">{loadError}</span>
+            ) : (
+              <>
+                <span className="text-muted-foreground">
+                  {tokens.length} {t('admin.total')}
+                </span>
+                <span className="text-status-ready">
+                  {tokens.filter((token) => token.status === 'active').length} {t('admin.active')}
+                </span>
+              </>
+            )}
           </div>
-          <Button
-            size="sm"
-            onClick={() => {
-              resetTokenForm({
-                expiryDays: '90',
-                label: '',
-                libraryIds: [],
-                permissionKinds: [],
-                scope: 'workspace',
-                workspaceId: activeWorkspaceId ?? '',
-              });
-              setCreateOpen(true);
-            }}
-          >
-            <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('admin.createToken')}
-          </Button>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-6 xl:flex-row xl:items-start">
-        <div className="flex-1 space-y-1.5">
-          {filteredTokens.map((token) => (
-            <button
-              key={token.id}
-              className={`w-full rounded-xl border p-4 text-left transition-all duration-200 ${
-                selectedToken?.id === token.id
-                  ? 'border-primary/15 bg-card shadow-lifted'
-                  : 'border-transparent hover:bg-accent/50 hover:shadow-soft'
-              }`}
-              onClick={() => setSelectedTokenId(token.id)}
+          <div className="flex gap-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <Input
+                className="h-9 pl-9 w-48 text-sm"
+                placeholder={t('admin.searchTokens')}
+                value={tokenSearch}
+                onChange={(e) => setTokenSearch(e.target.value)}
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={() => {
+                resetTokenForm({
+                  expiryDays: '90',
+                  label: '',
+                  libraryIds: [],
+                  permissionKinds: [],
+                  scope: 'workspace',
+                  workspaceId: activeWorkspaceId ?? '',
+                });
+                setCreateOpen(true);
+              }}
             >
-              <div className="flex items-start gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-surface-sunken">
-                  <Key className="h-4 w-4 text-muted-foreground" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-bold">{token.label}</div>
-                      <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs font-medium text-muted-foreground">
-                        <span className="font-mono">{token.tokenPrefix}...</span>
-                        <span className="text-border">&middot;</span>
-                        <span className="min-w-0 truncate">
-                          {tokenScopeLine(token, t)}
-                        </span>
-                      </div>
-                    </div>
-                    <span className={`status-badge shrink-0 ${tokenStatusCls(token.status)}`}>
-                      {humanizeTokenStatus(token.status, t)}
-                    </span>
+              <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('admin.createToken')}
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid gap-6 xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_380px] xl:items-stretch xl:overflow-hidden">
+          <div className="min-w-0 space-y-1.5 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
+            {filteredTokens.map((token) => (
+              <button
+                key={token.id}
+                className={`w-full rounded-xl border p-4 text-left transition-all duration-200 ${
+                  selectedToken?.id === token.id
+                    ? 'border-primary/15 bg-card shadow-lifted'
+                    : 'border-transparent hover:bg-accent/50 hover:shadow-soft'
+                }`}
+                onClick={() => setSelectedTokenId(token.id)}
+              >
+                <div className="flex items-start gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-surface-sunken">
+                    <Key className="h-4 w-4 text-muted-foreground" />
                   </div>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {uniquePermissionLabels(token, t).slice(0, 3).map((label) => (
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-bold">{token.label}</div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs font-medium text-muted-foreground">
+                          <span className="font-mono">{token.tokenPrefix}...</span>
+                          <span className="text-border">&middot;</span>
+                          <span className="min-w-0 truncate">
+                            {tokenScopeLine(token, t)}
+                          </span>
+                        </div>
+                      </div>
+                      <span className={`status-badge shrink-0 ${tokenStatusCls(token.status)}`}>
+                        {humanizeTokenStatus(token.status, t)}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {uniquePermissionLabels(token, t).slice(0, 3).map((label) => (
                         <Badge key={label} variant="outline" className="max-w-full truncate">
                           {label}
                         </Badge>
                       ))}
-                    {uniquePermissionLabels(token, t).length > 3 ? (
-                      <Badge variant="outline">+{uniquePermissionLabels(token, t).length - 3}</Badge>
-                    ) : null}
+                      {uniquePermissionLabels(token, t).length > 3 ? (
+                        <Badge variant="outline">+{uniquePermissionLabels(token, t).length - 3}</Badge>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
+              </button>
+            ))}
+            {!loading && !loadError && filteredTokens.length === 0 && (
+              <div className="text-sm text-muted-foreground text-center p-8">
+                {t('admin.noTokens')}
               </div>
-            </button>
-          ))}
-          {!loading && !loadError && filteredTokens.length === 0 && (
-            <div className="text-sm text-muted-foreground text-center p-8">
-              {t('admin.noTokens')}
-            </div>
-          )}
-        </div>
+            )}
+          </div>
 
         {selectedToken && (
-          <div className="w-full shrink-0 animate-slide-in-right xl:w-[380px]">
+          <aside className="w-full min-w-0 animate-slide-in-right xl:min-h-0 xl:overflow-y-auto">
             <div className="workbench-surface space-y-4 p-5">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -746,6 +806,30 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                   {humanizeTokenStatus(selectedToken.status, t)}
                 </span>
               </div>
+
+              {selectedToken.status === 'active' && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="w-full"
+                  disabled={revokeTokenMutation.isPending}
+                  onClick={() => handleRevoke(selectedToken)}
+                >
+                  <Ban className="h-3.5 w-3.5 mr-1.5" /> {t('admin.revokeToken')}
+                </Button>
+              )}
+
+              {selectedToken.status === 'revoked' && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="w-full"
+                  disabled={deleteTokenMutation.isPending}
+                  onClick={() => setDeleteToken(selectedToken)}
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('admin.deleteToken')}
+                </Button>
+              )}
 
               <div className="rounded-xl border bg-surface-sunken/70 p-4">
                 <div className="space-y-4">
@@ -849,21 +933,49 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                 )}
               </div>
 
-              {selectedToken.status === 'active' && (
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  className="w-full"
-                  disabled={revokeTokenMutation.isPending}
-                  onClick={() => handleRevoke(selectedToken)}
-                >
-                  <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('admin.revokeToken')}
-                </Button>
-              )}
             </div>
-          </div>
+          </aside>
         )}
+        </div>
       </div>
+
+      <Dialog open={Boolean(deleteToken)} onOpenChange={(open) => {
+        if (!open) {
+          setDeleteToken(null);
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('admin.deleteTokenTitle')}</DialogTitle>
+            <DialogDescription>
+              {deleteToken
+                ? t('admin.deleteTokenDesc', { label: deleteToken.label })
+                : t('admin.deleteTokenDesc', { label: '' })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteToken(null)}
+              disabled={deleteTokenMutation.isPending}
+            >
+              {t('admin.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteToken}
+              disabled={deleteTokenMutation.isPending}
+            >
+              {deleteTokenMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+              )}
+              {t('admin.deleteToken')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={createOpen}

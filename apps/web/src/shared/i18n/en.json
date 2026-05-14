@@ -681,6 +681,7 @@
     "settings": "Settings",
     "createToken": "Create Token",
     "revokeToken": "Revoke",
+    "deleteToken": "Delete",
     "providers": "Providers",
     "credentials": "Credentials",
     "modelPresets": "Model Presets",
@@ -754,6 +755,8 @@
     "copy": "Copy",
     "createTokenTitle": "Create API Token",
     "createTokenDesc": "Create a new token for API access.",
+    "deleteTokenTitle": "Delete revoked token",
+    "deleteTokenDesc": "Delete revoked token “{{label}}” from the access panel. Active tokens must be revoked before deletion.",
     "tokenLabel": "Label",
     "tokenExpiry": "Expiry",
     "tokenWorkspace": "Workspace",
@@ -815,12 +818,16 @@
     "loadWorkspacesFailed": "Failed to load workspaces",
     "loadLibrariesFailed": "Failed to load libraries",
     "revokeTokenFailed": "Failed to revoke token",
+    "deleteTokenFailed": "Failed to delete token",
     "mutations": {
       "tokenMint": {
         "failed": "Token creation was rolled back: {{error}}"
       },
       "tokenRevoke": {
         "failed": "Token revoke was rolled back: {{error}}"
+      },
+      "tokenDelete": {
+        "failed": "Token deletion was rolled back: {{error}}"
       }
     },
     "pricingOverrideCreated": "Pricing override created",
@@ -1097,6 +1104,8 @@
     "accessFallback": "Operator",
     "workspaceCreated": "Workspace created",
     "libraryCreated": "Library created",
+    "workspaceDeletionStarted": "Deleting workspace {{name}}...",
+    "libraryDeletionStarted": "Deleting library {{name}}...",
     "workspaceDeleted": "Workspace deleted",
     "libraryDeleted": "Library deleted",
     "workspaceCreateFailed": "Failed to create workspace",

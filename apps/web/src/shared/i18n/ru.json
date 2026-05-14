@@ -681,6 +681,7 @@
     "settings": "Настройки",
     "createToken": "Создать токен",
     "revokeToken": "Отозвать",
+    "deleteToken": "Удалить",
     "providers": "Провайдеры",
     "credentials": "Учётные данные",
     "modelPresets": "Пресеты моделей",
@@ -754,6 +755,8 @@
     "copy": "Копировать",
     "createTokenTitle": "Создать API токен",
     "createTokenDesc": "Создайте новый токен для доступа к API.",
+    "deleteTokenTitle": "Удалить отозванный токен",
+    "deleteTokenDesc": "Удалить отозванный токен «{{label}}» из панели доступа. Активные токены сначала нужно отозвать.",
     "tokenLabel": "Название",
     "tokenExpiry": "Срок действия",
     "tokenWorkspace": "Рабочее пространство",
@@ -815,12 +818,16 @@
     "loadWorkspacesFailed": "Не удалось загрузить рабочие пространства",
     "loadLibrariesFailed": "Не удалось загрузить библиотеки",
     "revokeTokenFailed": "Не удалось отозвать токен",
+    "deleteTokenFailed": "Не удалось удалить токен",
     "mutations": {
       "tokenMint": {
         "failed": "Создание токена было откатано: {{error}}"
       },
       "tokenRevoke": {
         "failed": "Отзыв токена был откатан: {{error}}"
+      },
+      "tokenDelete": {
+        "failed": "Удаление токена было откатано: {{error}}"
       }
     },
     "pricingOverrideCreated": "Переопределение тарифа создано",
@@ -1097,6 +1104,8 @@
     "accessFallback": "Оператор",
     "workspaceCreated": "Рабочее пространство создано",
     "libraryCreated": "Библиотека создана",
+    "workspaceDeletionStarted": "Удаление рабочего пространства {{name}}...",
+    "libraryDeletionStarted": "Удаление библиотеки {{name}}...",
     "workspaceDeleted": "Рабочее пространство удалено",
     "libraryDeleted": "Библиотека удалена",
     "workspaceCreateFailed": "Не удалось создать рабочее пространство",

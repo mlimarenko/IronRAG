@@ -23,6 +23,7 @@ export function ModelsSection({ modelsState, providers }: ModelsSectionProps) {
 
   return (
     <EntityWorkbench<AIModelOption>
+      tableId="admin.ai.models"
       title={t('admin.aiPanel.metrics.visibleModels')}
       count={models.length}
       state={modelsState}

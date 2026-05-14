@@ -267,6 +267,7 @@ export function CredentialsSection({
   return (
     <div className="flex flex-1 min-h-0 flex-col">
       <EntityWorkbench<AICredential>
+        tableId="admin.ai.credentials"
         title={t('admin.aiPanel.credentialsTitle')}
         count={sortedCredentials.length}
         state={credentialsState}

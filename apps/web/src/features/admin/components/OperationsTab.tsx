@@ -25,6 +25,12 @@ import {
 } from '@/shared/components/ui/select';
 import { mapAuditPage, mapOps } from '@/features/admin/model/adminAdapter';
 import { errorMessage } from '@/shared/lib/errorMessage';
+import {
+  isStorageRecord,
+  parseNumberOption,
+  parseStringOption,
+  useTableState,
+} from '@/shared/hooks/useTableState';
 import type {
   AuditEvent,
   AuditEventPage,
@@ -39,6 +45,18 @@ const AUDIT_RESULT_OPTIONS = ['all', 'succeeded', 'rejected', 'failed'] as const
 type AuditResultFilter = (typeof AUDIT_RESULT_OPTIONS)[number];
 type AuditSurfaceFilter = (typeof AUDIT_SURFACE_OPTIONS)[number];
 type AuditPageSize = (typeof AUDIT_PAGE_SIZE_OPTIONS)[number];
+
+type AuditTableState = {
+  pageSize: AuditPageSize;
+  resultFilter: AuditResultFilter;
+  surfaceFilter: AuditSurfaceFilter;
+};
+
+const DEFAULT_AUDIT_TABLE_STATE: AuditTableState = {
+  pageSize: AUDIT_PAGE_SIZE_OPTIONS[0],
+  resultFilter: 'all',
+  surfaceFilter: 'all',
+};
 
 type OperationsStatusMeta = {
   label: string;
@@ -168,9 +186,35 @@ export function OperationsTab({
   const [importDialogOpen, setImportDialogOpen] = useState(false);
 
   const [auditSearch, setAuditSearch] = useState('');
-  const [auditResultFilter, setAuditResultFilter] = useState<AuditResultFilter>('all');
-  const [auditSurfaceFilter, setAuditSurfaceFilter] = useState<AuditSurfaceFilter>('all');
-  const [auditPageSize, setAuditPageSize] = useState<AuditPageSize>(AUDIT_PAGE_SIZE_OPTIONS[0]);
+  const [auditTableState, setAuditTableState] = useTableState<AuditTableState>({
+    tableId: 'admin.operations.audit',
+    defaultValue: DEFAULT_AUDIT_TABLE_STATE,
+    parse: raw => {
+      const record = isStorageRecord(raw) ? raw : {};
+      return {
+        pageSize: parseNumberOption(
+          record.pageSize,
+          AUDIT_PAGE_SIZE_OPTIONS,
+          DEFAULT_AUDIT_TABLE_STATE.pageSize,
+        ),
+        resultFilter: parseStringOption(
+          record.resultFilter,
+          AUDIT_RESULT_OPTIONS,
+          DEFAULT_AUDIT_TABLE_STATE.resultFilter,
+        ),
+        surfaceFilter: parseStringOption(
+          record.surfaceFilter,
+          AUDIT_SURFACE_OPTIONS,
+          DEFAULT_AUDIT_TABLE_STATE.surfaceFilter,
+        ),
+      };
+    },
+  });
+  const {
+    pageSize: auditPageSize,
+    resultFilter: auditResultFilter,
+    surfaceFilter: auditSurfaceFilter,
+  } = auditTableState;
   const [auditPage, setAuditPage] = useState(1);
 
   const opsQuery = useQuery({
@@ -329,7 +373,13 @@ export function OperationsTab({
               onChange={(e) => { setAuditSearch(e.target.value); setAuditPage(1); }}
             />
           </div>
-          <Select value={auditResultFilter} onValueChange={(v) => { setAuditResultFilter(v as AuditResultFilter); setAuditPage(1); }}>
+          <Select
+            value={auditResultFilter}
+            onValueChange={(v) => {
+              setAuditTableState(prev => ({ ...prev, resultFilter: v as AuditResultFilter }));
+              setAuditPage(1);
+            }}
+          >
             <SelectTrigger className="h-8 w-32 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               {AUDIT_RESULT_OPTIONS.map((o) => (
@@ -337,7 +387,13 @@ export function OperationsTab({
               ))}
             </SelectContent>
           </Select>
-          <Select value={auditSurfaceFilter} onValueChange={(v) => { setAuditSurfaceFilter(v as AuditSurfaceFilter); setAuditPage(1); }}>
+          <Select
+            value={auditSurfaceFilter}
+            onValueChange={(v) => {
+              setAuditTableState(prev => ({ ...prev, surfaceFilter: v as AuditSurfaceFilter }));
+              setAuditPage(1);
+            }}
+          >
             <SelectTrigger className="h-8 w-32 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               {AUDIT_SURFACE_OPTIONS.map((o) => (
@@ -345,7 +401,13 @@ export function OperationsTab({
               ))}
             </SelectContent>
           </Select>
-          <Select value={String(auditPageSize)} onValueChange={(v) => { setAuditPageSize(Number(v) as AuditPageSize); setAuditPage(1); }}>
+          <Select
+            value={String(auditPageSize)}
+            onValueChange={(v) => {
+              setAuditTableState(prev => ({ ...prev, pageSize: Number(v) as AuditPageSize }));
+              setAuditPage(1);
+            }}
+          >
             <SelectTrigger className="h-8 w-24 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               {AUDIT_PAGE_SIZE_OPTIONS.map((o) => (

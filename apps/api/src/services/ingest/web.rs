@@ -355,7 +355,7 @@ impl WebIngestService {
                 state,
                 CreateAsyncOperationCommand {
                     workspace_id: command.workspace_id,
-                    library_id: command.library_id,
+                    library_id: Some(command.library_id),
                     operation_kind: "web_capture".to_string(),
                     surface_kind: command.request_surface.clone(),
                     requested_by_principal_id: command.requested_by_principal_id,

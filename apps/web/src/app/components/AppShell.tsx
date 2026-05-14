@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useApp } from '@/shared/contexts/app-context';
-import { adminApi, Catalog, unwrap } from '@/shared/api';
+import { adminApi, ASYNC_OPERATION_TERMINAL_STATES, Catalog, Ops, unwrap } from '@/shared/api';
 import { ShellFooter } from '@/app/components/ShellFooter';
 import {
   Home, FileText, Share2, MessageSquare, Settings, Code2,
@@ -38,11 +38,19 @@ const NAV_ITEMS = [
   { id: 'swagger', path: '/swagger', icon: Code2 },
 ] as const;
 
+const CATALOG_DELETE_POLL_INTERVAL_MS = 2000;
+
+function delay(ms: number) {
+  return new Promise(resolve => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
   const {
     user, workspaces, activeWorkspace, libraries, activeLibrary,
-    setActiveWorkspace, setActiveLibrary, logout,
+    setWorkspaces, setActiveWorkspace, setLibraries, setActiveLibrary, logout,
     refreshSession
   } = useApp();
   const navigate = useNavigate();
@@ -56,6 +64,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [newWsName, setNewWsName] = useState('');
   const [newLibName, setNewLibName] = useState('');
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [workspaceSearch, setWorkspaceSearch] = useState('');
   const [librarySearch, setLibrarySearch] = useState('');
   const shellUserName = user?.displayName ?? t('shell.userFallback');
@@ -110,33 +119,89 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   const handleDeleteWorkspace = async () => {
-    if (!activeWorkspace || deleteConfirmName !== activeWorkspace.name) return;
+    if (!activeWorkspace || deleteConfirmName !== activeWorkspace.name || deleteSubmitting) return;
+    const workspace = activeWorkspace;
+    setDeleteSubmitting(true);
     try {
-      unwrap(await Catalog.deleteCatalogWorkspace({ path: { workspaceId: activeWorkspace.id } }));
-      toast.success(t('shell.workspaceDeleted'));
-      await refreshSession();
+      const admission = unwrap(
+        await Catalog.deleteCatalogWorkspace({ path: { workspaceId: workspace.id } }),
+      );
+      setDeleteConfirmName('');
+      setDeleteWsOpen(false);
+      setWorkspaces(prev => prev.filter(item => item.id !== workspace.id));
+      setLibraries(prev => prev.filter(item => item.workspaceId !== workspace.id));
+      setActiveWorkspace(null);
+      setActiveLibrary(null);
+      const toastId = toast.loading(t('shell.workspaceDeletionStarted', { name: workspace.name }));
+      void pollCatalogDeletion(
+        admission.operationId,
+        toastId,
+        t('shell.workspaceDeleted'),
+        t('shell.workspaceDeleteFailed'),
+      );
     } catch (err: unknown) {
       toast.error(errorMessage(err, t('shell.workspaceDeleteFailed')));
+    } finally {
+      setDeleteSubmitting(false);
     }
-    setDeleteConfirmName('');
-    setDeleteWsOpen(false);
   };
 
   const handleDeleteLibrary = async () => {
-    if (!activeLibrary || deleteConfirmName !== activeLibrary.name || !activeWorkspace) return;
+    if (!activeLibrary || deleteConfirmName !== activeLibrary.name || !activeWorkspace || deleteSubmitting) return;
+    const workspace = activeWorkspace;
+    const library = activeLibrary;
+    setDeleteSubmitting(true);
     try {
-      unwrap(
+      const admission = unwrap(
         await Catalog.deleteCatalogLibrary({
-          path: { workspaceId: activeWorkspace.id, libraryId: activeLibrary.id },
+          path: { workspaceId: workspace.id, libraryId: library.id },
         }),
       );
-      toast.success(t('shell.libraryDeleted'));
-      await refreshSession();
+      setDeleteConfirmName('');
+      setDeleteLibOpen(false);
+      setLibraries(prev => prev.filter(item => item.id !== library.id));
+      setActiveLibrary(null);
+      const toastId = toast.loading(t('shell.libraryDeletionStarted', { name: library.name }));
+      void pollCatalogDeletion(
+        admission.operationId,
+        toastId,
+        t('shell.libraryDeleted'),
+        t('shell.libraryDeleteFailed'),
+      );
     } catch (err: unknown) {
       toast.error(errorMessage(err, t('shell.libraryDeleteFailed')));
+    } finally {
+      setDeleteSubmitting(false);
     }
-    setDeleteConfirmName('');
-    setDeleteLibOpen(false);
+  };
+
+  const pollCatalogDeletion = async (
+    operationId: string,
+    toastId: string | number,
+    successMessage: string,
+    failureMessage: string,
+  ) => {
+    try {
+      for (;;) {
+        await delay(CATALOG_DELETE_POLL_INTERVAL_MS);
+        const operation = unwrap(await Ops.getAsyncOperation({ path: { operationId } }));
+        if (!ASYNC_OPERATION_TERMINAL_STATES.has(operation.status)) continue;
+        if (operation.status === 'ready') {
+          toast.success(successMessage, { id: toastId });
+        } else {
+          toast.error(failureMessage, { id: toastId });
+        }
+        await refreshSession();
+        return;
+      }
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, failureMessage), { id: toastId });
+      try {
+        await refreshSession();
+      } catch {
+        // Keep the original polling error visible; the next navigation/session refresh reconciles state.
+      }
+    }
   };
 
   const missingPurposes = activeLibrary?.missingBindingPurposes ?? [];
@@ -438,8 +503,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Input id="del-ws-confirm" value={deleteConfirmName} onChange={e => setDeleteConfirmName(e.target.value)} className="mt-1.5" />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteWsOpen(false)}>{t('shell.cancel')}</Button>
-            <Button variant="destructive" onClick={handleDeleteWorkspace} disabled={deleteConfirmName !== activeWorkspace?.name}>{t('shell.delete')}</Button>
+            <Button variant="outline" onClick={() => setDeleteWsOpen(false)} disabled={deleteSubmitting}>{t('shell.cancel')}</Button>
+            <Button variant="destructive" onClick={handleDeleteWorkspace} disabled={deleteConfirmName !== activeWorkspace?.name || deleteSubmitting}>{t('shell.delete')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -455,8 +520,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Input id="del-lib-confirm" value={deleteConfirmName} onChange={e => setDeleteConfirmName(e.target.value)} className="mt-1.5" />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteLibOpen(false)}>{t('shell.cancel')}</Button>
-            <Button variant="destructive" onClick={handleDeleteLibrary} disabled={deleteConfirmName !== activeLibrary?.name}>{t('shell.delete')}</Button>
+            <Button variant="outline" onClick={() => setDeleteLibOpen(false)} disabled={deleteSubmitting}>{t('shell.cancel')}</Button>
+            <Button variant="destructive" onClick={handleDeleteLibrary} disabled={deleteConfirmName !== activeLibrary?.name || deleteSubmitting}>{t('shell.delete')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

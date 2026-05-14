@@ -707,6 +707,51 @@ pub async fn revoke_api_token(
     .await
 }
 
+pub async fn delete_revoked_api_token(
+    postgres: &PgPool,
+    principal_id: Uuid,
+) -> Result<Option<IamApiTokenRow>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let deleted_token = sqlx::query_as::<_, IamApiTokenRow>(
+        "delete from iam_api_token
+         where principal_id = $1
+           and status = 'revoked'
+         returning
+            principal_id,
+            workspace_id,
+            label,
+            token_prefix,
+            status::text as status,
+            expires_at,
+            revoked_at,
+            issued_by_principal_id,
+            last_used_at",
+    )
+    .bind(principal_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+
+    if deleted_token.is_some() {
+        sqlx::query("delete from iam_grant where principal_id = $1")
+            .bind(principal_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "update iam_principal
+             set status = 'disabled',
+                 disabled_at = coalesce(disabled_at, now())
+             where id = $1
+               and principal_kind = 'api_token'",
+        )
+        .bind(principal_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    transaction.commit().await?;
+    Ok(deleted_token)
+}
+
 pub async fn touch_api_token_if_stale(
     postgres: &PgPool,
     principal_id: Uuid,

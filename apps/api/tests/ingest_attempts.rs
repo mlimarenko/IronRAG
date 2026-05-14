@@ -379,7 +379,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                 &fixture.state,
                 CreateAsyncOperationCommand {
                     workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
+                    library_id: Some(fixture.library_id),
                     operation_kind: "content_mutation".to_string(),
                     surface_kind: "rest".to_string(),
                     requested_by_principal_id: None,

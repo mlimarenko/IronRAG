@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.1
+  version: 0.4.8
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -962,8 +962,12 @@ paths:
           type: string
           format: uuid
       responses:
-        '204':
-          description: Workspace deleted
+        '202':
+          description: Workspace deletion accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogDeletionAcceptedResponse'
         '401':
           description: Caller is not a system administrator
         '404':
@@ -1044,8 +1048,12 @@ paths:
           type: string
           format: uuid
       responses:
-        '204':
-          description: Library deleted
+        '202':
+          description: Library deletion accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogDeletionAcceptedResponse'
         '401':
           description: Caller is not authenticated
         '403':
@@ -2116,6 +2124,30 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller is not an IAM administrator
+  /v1/iam/tokens/{tokenPrincipalId}:
+    delete:
+      tags:
+      - iam
+      operationId: deleteIamToken
+      parameters:
+      - name: tokenPrincipalId
+        in: path
+        description: Revoked API token principal id to delete
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '204':
+          description: Revoked token deleted
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not an IAM administrator
+        '404':
+          description: Token principal not found
+        '409':
+          description: Token must be revoked before deletion
   /v1/iam/tokens/{tokenPrincipalId}/revoke:
     post:
       tags:
@@ -2771,10 +2803,7 @@ paths:
       - query
       summary: |-
         Returns the raw LLM request/response chain that was sent to the
-        provider for this assistant execution, if it is still in the
-        in-memory debug cache. The cache is volatile (bounded FIFO) so old
-        executions return 404 — that is by design, not an error the UI
-        should treat as fatal.
+        provider for this assistant execution.
       operationId: getQueryExecutionLlmContext
       parameters:
       - name: executionId
@@ -2786,7 +2815,7 @@ paths:
           format: uuid
       responses:
         '200':
-          description: Volatile in-memory LLM request/response capture for the execution
+          description: Durable LLM request/response capture for the execution
           content:
             application/json:
               schema:
@@ -2796,7 +2825,7 @@ paths:
         '403':
           description: Caller is not authorized for the execution
         '404':
-          description: Execution not found or no longer in the debug cache
+          description: Execution not found or no LLM context snapshot was recorded
   /v1/query/sessions:
     get:
       tags:
@@ -3299,6 +3328,38 @@ components:
         principalId:
           type: string
           format: uuid
+    AgentLoopMetadata:
+      type: object
+      description: |-
+        Metadata describing the tool-use loop that produced this snapshot.
+        Present only on turns driven by tool-use execution; absent on
+        single-shot grounded-answer turns.
+      required:
+      - iterationCap
+      - deadlineMs
+      - stoppedReason
+      - toolCallCount
+      properties:
+        deadlineMs:
+          type: integer
+          format: int64
+          minimum: 0
+        iterationCap:
+          type: integer
+          minimum: 0
+        stoppedReason:
+          $ref: '#/components/schemas/AgentStopReason'
+        toolCallCount:
+          type: integer
+          minimum: 0
+    AgentStopReason:
+      type: string
+      description: Reason the tool-use loop stopped iterating.
+      enum:
+      - final_answer
+      - iteration_cap
+      - deadline
+      - tool_error
     AiBindingAssignmentResponse:
       type: object
       required:
@@ -3344,6 +3405,7 @@ components:
       - query_retrieve
       - query_answer
       - vision
+      - agent
     AiScopeKind:
       type: string
       enum:
@@ -4455,6 +4517,7 @@ components:
       - query_retrieve
       - query_answer
       - vision
+      - agent
     BootstrapCredentialSource:
       type: string
       enum:
@@ -4603,6 +4666,23 @@ components:
           - 'null'
         section:
           $ref: '#/components/schemas/AdminSection'
+    CatalogDeletionAcceptedResponse:
+      type: object
+      required:
+      - operationId
+      - workspaceId
+      properties:
+        libraryId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        operationId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
     CatalogLibraryIngestionReadinessResponse:
       type: object
       required:
@@ -4692,6 +4772,14 @@ components:
           - string
           - 'null'
           description: 'For role="tool" messages: the tool name (some providers want it).'
+        reasoning_content:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Provider-emitted reasoning trace echoed back by DeepSeek thinking
+            models when continuing a multi-turn tool-loop. Other providers
+            ignore the field.
         role:
           type: string
           description: 'One of: "system", "user", "assistant", "tool".'
@@ -4892,6 +4980,10 @@ components:
           type:
           - string
           - 'null'
+        failureMessage:
+          type:
+          - string
+          - 'null'
         fileName:
           type: string
         fileSize:
@@ -4919,6 +5011,11 @@ components:
           - string
           - 'null'
           format: date-time
+        progressPercent:
+          type:
+          - integer
+          - 'null'
+          format: int32
         readiness:
           $ref: '#/components/schemas/DocumentReadiness'
           description: Canonical readiness bucket derived server-side.
@@ -5856,6 +5953,10 @@ components:
         attemptNo:
           type: integer
           format: int32
+        currencyCode:
+          type:
+          - string
+          - 'null'
         finishedAt:
           type:
           - string
@@ -5878,6 +5979,10 @@ components:
           format: date-time
         status:
           type: string
+        totalCost:
+          type:
+          - string
+          - 'null'
         totalElapsedMs:
           type:
           - integer
@@ -6065,6 +6170,7 @@ components:
           type:
           - string
           - 'null'
+        details: {}
         elapsedMs:
           type:
           - integer
@@ -6088,6 +6194,11 @@ components:
           - integer
           - 'null'
           format: int32
+        providerCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
         providerKind:
           type:
           - string
@@ -6601,6 +6712,7 @@ components:
       - attempt_number
       - attempt_state
       - started_at
+      - progress_percent
       - retryable
       properties:
         attempt_number:
@@ -6617,6 +6729,10 @@ components:
           - string
           - 'null'
         failure_code:
+          type:
+          - string
+          - 'null'
+        failure_message:
           type:
           - string
           - 'null'
@@ -6645,6 +6761,9 @@ components:
           type:
           - string
           - 'null'
+        progress_percent:
+          type: integer
+          format: int32
         retryable:
           type: boolean
         started_at:
@@ -8361,6 +8480,13 @@ components:
       - totalIterations
       - capturedAt
       properties:
+        agentLoop:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/AgentLoopMetadata'
+            description: |-
+              Tool-use loop metadata. `None` for single-shot grounded-answer turns;
+              `Some` when tool-use execution drove this turn.
         capturedAt:
           type: string
           format: date-time
@@ -8405,6 +8531,16 @@ components:
       - responseToolCalls
       - usage
       properties:
+        childRuntimeExecutionIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |-
+            Runtime execution IDs spawned by tool calls in this iteration.
+            Populated when a tool call (e.g. `grounded_answer`) recursed into
+            `execute_turn` and produced its own `LlmContextSnapshot`. Empty
+            for all single-shot grounded-answer iterations.
         iteration:
           type: integer
           minimum: 0

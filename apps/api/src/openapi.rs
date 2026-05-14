@@ -113,6 +113,7 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::iam::get_me,
         crate::interfaces::http::iam::list_tokens,
         crate::interfaces::http::iam::mint_token,
+        crate::interfaces::http::iam::delete_token,
         crate::interfaces::http::iam::revoke_token,
         crate::interfaces::http::iam::list_grants,
         crate::interfaces::http::iam::create_grant,

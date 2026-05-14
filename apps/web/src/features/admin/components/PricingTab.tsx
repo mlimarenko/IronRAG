@@ -167,6 +167,7 @@ export function PricingTab({ t, activeWorkspaceId, active }: PricingTabProps) {
   return (
     <div className="flex flex-1 min-h-0 flex-col">
       <EntityWorkbench<PricingRule>
+        tableId="admin.pricing"
         title={t('admin.pricing')}
         count={filteredPricing.length}
         state={{ isLoading, error: queryError, data: filteredPricing }}

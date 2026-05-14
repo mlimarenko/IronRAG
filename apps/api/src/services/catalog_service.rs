@@ -5,16 +5,21 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::ai::AiBindingPurpose,
-    domains::catalog::{
-        CatalogLibrary, CatalogLibraryConnector, CatalogLibraryIngestionReadiness,
-        CatalogLibraryRuntimeReadiness, CatalogLifecycleState, CatalogWorkspace, ChunkingTemplate,
-    },
     domains::recognition::{LibraryRecognitionPolicy, RecognitionEngine},
+    domains::{
+        ai::AiBindingPurpose,
+        catalog::{
+            CatalogLibrary, CatalogLibraryConnector, CatalogLibraryIngestionReadiness,
+            CatalogLibraryRuntimeReadiness, CatalogLifecycleState, CatalogWorkspace,
+            ChunkingTemplate,
+        },
+        ops::OpsAsyncOperationStatus,
+    },
     infra::repositories::{ai_repository, catalog_repository},
     interfaces::http::router_support::{
         ApiError, map_library_create_error, map_workspace_create_error,
     },
+    services::ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
     shared::slugs::slugify,
     shared::web::ingest::{WebIngestPolicy, validate_web_ingest_policy},
 };
@@ -79,6 +84,15 @@ pub struct UpdateLibraryWebIngestPolicyCommand {
 pub struct UpdateLibraryRecognitionPolicyCommand {
     pub library_id: Uuid,
     pub recognition_policy: LibraryRecognitionPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogDeletionAdmission {
+    pub operation_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Option<Uuid>,
+    pub display_name: String,
+    pub should_start_worker: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +283,96 @@ impl CatalogService {
 
         purge_stashed_directory(state, stashed_directory.as_ref()).await;
         Ok(workspace)
+    }
+
+    /// Admits a workspace deletion as a canonical async operation.
+    ///
+    /// The foreground HTTP path persists only the operation row. The destructive
+    /// storage/database work is executed by [`Self::execute_workspace_deletion`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ApiError`] when the workspace cannot be loaded or the
+    /// operation row cannot be created.
+    pub async fn admit_workspace_deletion(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+        requested_by_principal_id: Option<Uuid>,
+    ) -> Result<CatalogDeletionAdmission, ApiError> {
+        let workspace = self.get_workspace(state, workspace_id).await?;
+        if let Some(operation) = state
+            .canonical_services
+            .ops
+            .get_latest_async_operation_by_subject(state, "catalog_workspace", workspace.id)
+            .await?
+            .filter(|operation| operation.operation_kind == "delete_workspace")
+            .filter(|operation| catalog_delete_operation_is_active(operation.status))
+        {
+            return Ok(CatalogDeletionAdmission {
+                operation_id: operation.id,
+                workspace_id: workspace.id,
+                library_id: None,
+                display_name: workspace.display_name,
+                should_start_worker: false,
+            });
+        }
+        let operation = state
+            .canonical_services
+            .ops
+            .create_async_operation(
+                state,
+                CreateAsyncOperationCommand {
+                    workspace_id: workspace.id,
+                    library_id: None,
+                    operation_kind: "delete_workspace".to_string(),
+                    surface_kind: "rest".to_string(),
+                    requested_by_principal_id,
+                    status: "processing".to_string(),
+                    subject_kind: "catalog_workspace".to_string(),
+                    subject_id: Some(workspace.id),
+                    parent_async_operation_id: None,
+                    completed_at: None,
+                    failure_code: None,
+                },
+            )
+            .await?;
+        Ok(CatalogDeletionAdmission {
+            operation_id: operation.id,
+            workspace_id: workspace.id,
+            library_id: None,
+            display_name: workspace.display_name,
+            should_start_worker: true,
+        })
+    }
+
+    /// Executes an admitted workspace deletion and settles its async operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original delete error after marking the async operation as failed.
+    pub async fn execute_workspace_deletion(
+        &self,
+        state: &AppState,
+        operation_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<CatalogWorkspace, ApiError> {
+        match self.delete_workspace(state, workspace_id).await {
+            Ok(workspace) => {
+                settle_catalog_delete_operation(state, operation_id, "ready", None).await;
+                Ok(workspace)
+            }
+            Err(error) => {
+                settle_catalog_delete_operation(
+                    state,
+                    operation_id,
+                    "failed",
+                    Some("catalog_delete_failed".to_string()),
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 
     /// Lists libraries for a workspace together with ingestion readiness.
@@ -491,6 +595,97 @@ impl CatalogService {
 
         purge_stashed_directory(state, stashed_directory.as_ref()).await;
         Ok(library)
+    }
+
+    /// Admits a library deletion as a canonical async operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ApiError`] when the library cannot be loaded, does not belong
+    /// to the path workspace, or the operation row cannot be created.
+    pub async fn admit_library_deletion(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        requested_by_principal_id: Option<Uuid>,
+    ) -> Result<CatalogDeletionAdmission, ApiError> {
+        let library = self.get_library(state, library_id).await?;
+        if library.workspace_id != workspace_id {
+            return Err(ApiError::resource_not_found("library", library_id));
+        }
+        if let Some(operation) = state
+            .canonical_services
+            .ops
+            .get_latest_async_operation_by_subject(state, "catalog_library", library.id)
+            .await?
+            .filter(|operation| operation.operation_kind == "delete_library")
+            .filter(|operation| catalog_delete_operation_is_active(operation.status))
+        {
+            return Ok(CatalogDeletionAdmission {
+                operation_id: operation.id,
+                workspace_id: library.workspace_id,
+                library_id: Some(library.id),
+                display_name: library.display_name,
+                should_start_worker: false,
+            });
+        }
+        let operation = state
+            .canonical_services
+            .ops
+            .create_async_operation(
+                state,
+                CreateAsyncOperationCommand {
+                    workspace_id: library.workspace_id,
+                    library_id: Some(library.id),
+                    operation_kind: "delete_library".to_string(),
+                    surface_kind: "rest".to_string(),
+                    requested_by_principal_id,
+                    status: "processing".to_string(),
+                    subject_kind: "catalog_library".to_string(),
+                    subject_id: Some(library.id),
+                    parent_async_operation_id: None,
+                    completed_at: None,
+                    failure_code: None,
+                },
+            )
+            .await?;
+        Ok(CatalogDeletionAdmission {
+            operation_id: operation.id,
+            workspace_id: library.workspace_id,
+            library_id: Some(library.id),
+            display_name: library.display_name,
+            should_start_worker: true,
+        })
+    }
+
+    /// Executes an admitted library deletion and settles its async operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original delete error after marking the async operation as failed.
+    pub async fn execute_library_deletion(
+        &self,
+        state: &AppState,
+        operation_id: Uuid,
+        library_id: Uuid,
+    ) -> Result<CatalogLibrary, ApiError> {
+        match self.delete_library(state, library_id).await {
+            Ok(library) => {
+                settle_catalog_delete_operation(state, operation_id, "ready", None).await;
+                Ok(library)
+            }
+            Err(error) => {
+                settle_catalog_delete_operation(
+                    state,
+                    operation_id,
+                    "failed",
+                    Some("catalog_delete_failed".to_string()),
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 
     /// Loads ingestion readiness for one library.
@@ -841,6 +1036,38 @@ fn map_connector_write_error(error: sqlx::Error) -> ApiError {
         }
         _ => ApiError::Internal,
     }
+}
+
+async fn settle_catalog_delete_operation(
+    state: &AppState,
+    operation_id: Uuid,
+    status: &str,
+    failure_code: Option<String>,
+) {
+    if let Err(update_error) = state
+        .canonical_services
+        .ops
+        .update_async_operation(
+            state,
+            UpdateAsyncOperationCommand {
+                operation_id,
+                status: status.to_string(),
+                completed_at: Some(chrono::Utc::now()),
+                failure_code,
+            },
+        )
+        .await
+    {
+        error!(
+            operation_id = %operation_id,
+            error = %update_error,
+            "failed to settle catalog deletion async operation"
+        );
+    }
+}
+
+const fn catalog_delete_operation_is_active(status: OpsAsyncOperationStatus) -> bool {
+    matches!(status, OpsAsyncOperationStatus::Accepted | OpsAsyncOperationStatus::Processing)
 }
 
 async fn restore_stashed_directory(

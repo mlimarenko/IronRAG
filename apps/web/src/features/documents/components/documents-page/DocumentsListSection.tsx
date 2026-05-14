@@ -1,4 +1,5 @@
 import type { TFunction } from "i18next";
+import type { Dispatch, SetStateAction } from "react";
 import { FileText, Loader2, RotateCw, Upload, XCircle } from "lucide-react";
 
 import type {
@@ -18,7 +19,9 @@ import { DocumentsFiltersBar } from "./DocumentsFiltersBar";
 import { DocumentsPaginationFooter } from "./DocumentsPaginationFooter";
 import { DocumentsTable } from "./DocumentsTable";
 import type {
+  DocumentsTableState,
   DocumentsStatusBucket,
+  LocalSortState,
   PageSizeOption,
   SortValue,
   UpdateSearchParamState,
@@ -53,6 +56,7 @@ type DocumentsListSectionProps = {
   loadError: string | null;
   loadFirstPage: () => Promise<void>;
   locale: Locale;
+  localSort: LocalSortState;
   onSelectionModeChange: (selectionMode: boolean) => void;
   pageSize: PageSizeOption;
   pagination: PaginationState;
@@ -67,6 +71,7 @@ type DocumentsListSectionProps = {
   statusBucket: DocumentsStatusBucket;
   statusCounts: DocumentListPageResponse["statusCounts"] | null;
   t: TFunction;
+  setTableState: Dispatch<SetStateAction<DocumentsTableState>>;
   updateSearchParamState: UpdateSearchParamState;
   uploadController: UploadQueueController;
   workspaceCost: number;
@@ -81,6 +86,7 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
     filteredTotal: props.filteredTotal,
     items: props.items,
     loadFirstPage: props.loadFirstPage,
+    localSort: props.localSort,
     onSelectionModeChange: props.onSelectionModeChange,
     pageSize: props.pageSize,
     sortBy: props.sortBy,
@@ -88,6 +94,7 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
     sortValue: props.sortValue,
     statusBackendFilter: props.statusBackendFilter,
     t: props.t,
+    setTableState: props.setTableState,
     updateSearchParamState: props.updateSearchParamState,
   });
 

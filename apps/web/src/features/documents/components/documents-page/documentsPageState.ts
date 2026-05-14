@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type {
@@ -11,6 +12,13 @@ import type {
   WebIngestUrlFilterMode,
 } from "@/shared/api";
 import type { DocumentListStatusCounts } from "@/shared/api/generated";
+import {
+  isStorageRecord,
+  parseNumberOption,
+  parseTableSort,
+  useTableState,
+  type TableSortState,
+} from "@/shared/hooks/useTableState";
 
 import { formatWebIngestPatterns } from "@/features/documents/model/webIngestPatterns";
 
@@ -104,22 +112,50 @@ export type BulkRerunState = {
 };
 
 export type LocalSortKey = "cost" | "time" | "finished";
-export type LocalSortState = {
-  key: LocalSortKey;
-  direction: "asc" | "desc";
-} | null;
+export type LocalSortState = TableSortState<LocalSortKey>;
+
+export type DocumentsTableState = {
+  pageSize: PageSizeOption;
+  sort: TableSortState<DocumentListSortKey>;
+  localSort: LocalSortState;
+};
 
 export type UpdateSearchParamState = (
   updates: Record<string, string | null>,
 ) => void;
 
+const DOCUMENTS_TABLE_ID = "documents.list";
+const DEFAULT_SORT_VALUE: SortValue = "uploaded_at:desc";
+const DEFAULT_DOCUMENTS_TABLE_STATE: DocumentsTableState = {
+  pageSize: DEFAULT_PAGE_SIZE,
+  sort: { key: "uploaded_at", direction: "desc" },
+  localSort: null,
+};
+
+const DOCUMENT_SORT_KEYS: readonly DocumentListSortKey[] = [
+  "uploaded_at",
+  "file_name",
+  "file_type",
+  "file_size",
+  "status",
+];
+
+const DOCUMENT_LOCAL_SORT_KEYS: readonly LocalSortKey[] = [
+  "cost",
+  "time",
+  "finished",
+];
+
 function isPageSizeOption(value: number): value is PageSizeOption {
   return PAGE_SIZE_OPTIONS.some((option) => option === value);
 }
 
-function parsePageSize(value: string | null): PageSizeOption {
+function parsePageSize(
+  value: string | null,
+  fallback: PageSizeOption = DEFAULT_PAGE_SIZE,
+): PageSizeOption {
   const parsed = Number.parseInt(value ?? "", 10);
-  return isPageSizeOption(parsed) ? parsed : DEFAULT_PAGE_SIZE;
+  return isPageSizeOption(parsed) ? parsed : fallback;
 }
 
 function parseStatusBucket(value: string | null): DocumentsStatusBucket {
@@ -135,8 +171,11 @@ function parseStatusBucket(value: string | null): DocumentsStatusBucket {
   return "all";
 }
 
-function parseSortValue(raw: string | null): SortValue {
-  return SORT_VALUES.find((value) => value === raw) ?? "uploaded_at:desc";
+export function parseSortValue(
+  raw: string | null,
+  fallback: SortValue = DEFAULT_SORT_VALUE,
+): SortValue {
+  return SORT_VALUES.find((value) => value === raw) ?? fallback;
 }
 
 export function splitSortValue(sort: SortValue): {
@@ -144,6 +183,48 @@ export function splitSortValue(sort: SortValue): {
   sortOrder: DocumentListSortOrder;
 } {
   return SORT_PARTS[sort];
+}
+
+function sortPreferenceToSortValue(sort: TableSortState<DocumentListSortKey>): SortValue {
+  if (!sort) return DEFAULT_SORT_VALUE;
+  return parseSortValue(`${sort.key}:${sort.direction}`);
+}
+
+function sortValueToPreference(sort: SortValue): TableSortState<DocumentListSortKey> {
+  const parts = splitSortValue(sort);
+  return { key: parts.sortBy, direction: parts.sortOrder };
+}
+
+function parseDocumentsTableState(raw: unknown): DocumentsTableState {
+  const record = isStorageRecord(raw) ? raw : {};
+  return {
+    pageSize: parseNumberOption(
+      record.pageSize,
+      PAGE_SIZE_OPTIONS,
+      DEFAULT_DOCUMENTS_TABLE_STATE.pageSize,
+    ),
+    sort: parseTableSort(
+      record.sort,
+      DOCUMENT_SORT_KEYS,
+      DEFAULT_DOCUMENTS_TABLE_STATE.sort,
+    ),
+    localSort: parseTableSort(
+      record.localSort,
+      DOCUMENT_LOCAL_SORT_KEYS,
+      DEFAULT_DOCUMENTS_TABLE_STATE.localSort,
+    ),
+  };
+}
+
+export function useDocumentsTableState(): [
+  DocumentsTableState,
+  Dispatch<SetStateAction<DocumentsTableState>>,
+] {
+  return useTableState<DocumentsTableState>({
+    tableId: DOCUMENTS_TABLE_ID,
+    defaultValue: DEFAULT_DOCUMENTS_TABLE_STATE,
+    parse: parseDocumentsTableState,
+  });
 }
 
 export function extractWebIngestUrlFilter(
@@ -189,13 +270,22 @@ export function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-export function useDocumentsPageUrlState() {
+export function useDocumentsPageUrlState({
+  tableState,
+  setTableState,
+}: {
+  tableState: DocumentsTableState;
+  setTableState: Dispatch<SetStateAction<DocumentsTableState>>;
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const searchQuery = searchParams.get("q") ?? "";
-  const sortValue = parseSortValue(searchParams.get("sort"));
+  const sortValue = parseSortValue(
+    searchParams.get("sort"),
+    sortPreferenceToSortValue(tableState.sort),
+  );
   const selectedDocumentId = searchParams.get("documentId");
   const statusBucket = parseStatusBucket(searchParams.get("status"));
-  const pageSize = parsePageSize(searchParams.get("pageSize"));
+  const pageSize = parsePageSize(searchParams.get("pageSize"), tableState.pageSize);
   const statusBackendFilter = useMemo(
     () => (statusBucket === "all" ? [] : BUCKET_TO_BACKEND[statusBucket]),
     [statusBucket],
@@ -210,9 +300,21 @@ export function useDocumentsPageUrlState() {
           next.set(key, value);
         }
       }
+      if (Object.prototype.hasOwnProperty.call(updates, "pageSize")) {
+        setTableState((prev) => ({
+          ...prev,
+          pageSize: parsePageSize(updates.pageSize, DEFAULT_PAGE_SIZE),
+        }));
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, "sort")) {
+        setTableState((prev) => ({
+          ...prev,
+          sort: sortValueToPreference(parseSortValue(updates.sort, DEFAULT_SORT_VALUE)),
+        }));
+      }
       setSearchParams(next, { replace: true });
     },
-    [searchParams, setSearchParams],
+    [searchParams, setSearchParams, setTableState],
   );
 
   return {

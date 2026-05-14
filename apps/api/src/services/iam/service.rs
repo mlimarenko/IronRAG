@@ -451,6 +451,35 @@ impl IamService {
         Ok(map_api_token(token_row))
     }
 
+    pub async fn delete_revoked_api_token(
+        &self,
+        state: &AppState,
+        token_principal_id: Uuid,
+    ) -> Result<ApiToken, ApiError> {
+        let token_row = iam_repository::get_api_token_by_principal_id(
+            &state.persistence.postgres,
+            token_principal_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
+
+        if token_row.status != "revoked" {
+            return Err(ApiError::Conflict(
+                "api token must be revoked before deletion".to_string(),
+            ));
+        }
+
+        let deleted_row = iam_repository::delete_revoked_api_token(
+            &state.persistence.postgres,
+            token_principal_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
+        Ok(map_api_token(deleted_row))
+    }
+
     pub async fn list_api_tokens(
         &self,
         state: &AppState,

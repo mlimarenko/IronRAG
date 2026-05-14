@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+## 0.4.8 — 2026-05-14
+
+### Admin access: token cleanup panel
+
+- Revoked API tokens can now be deleted from the access inspector through a
+  dedicated `DELETE /v1/iam/tokens/{tokenPrincipalId}` endpoint; active tokens
+  must still be revoked first, and deletion is recorded in the audit log.
+- The token inspector now stays pinned as the right-side panel while operators
+  scroll long token lists, matching the document table inspector behavior.
+
+### UI state: persistent table controls
+
+- Document and admin tables now persist table-specific pagination size and sort
+  choices in browser `localStorage`, while explicit URL parameters on the
+  documents page still take precedence for shareable links.
+
+### Catalog deletion: async workspace and library cleanup
+
+- Workspace and library DELETE endpoints now return `202 Accepted` with a
+  canonical async operation id, while destructive storage/database cleanup runs
+  in the background. The shell closes delete dialogs immediately, removes the
+  catalog item optimistically, and polls the operation until it is terminal.
+- Catalog delete admission now reuses an already active delete operation for
+  the same workspace or library and enforces partial unique indexes so repeated
+  clicks/retries do not spawn competing cleanup workers.
+- Workspace billing cost summaries now have a covering workspace-scope index,
+  reducing the chance of large-workspace cost reads timing out before deletion.
+
 ## 0.4.7 — 2026-05-14
 
 ### Installer: fail fast on startup migration drift

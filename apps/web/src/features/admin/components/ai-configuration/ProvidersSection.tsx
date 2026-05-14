@@ -20,6 +20,7 @@ export function ProvidersSection({ providersState }: ProvidersSectionProps) {
 
   return (
     <EntityWorkbench<AIProvider>
+      tableId="admin.ai.providers"
       title={t('admin.providers')}
       count={providers.length}
       state={providersState}

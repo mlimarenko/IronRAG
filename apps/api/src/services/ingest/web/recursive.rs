@@ -23,7 +23,7 @@ pub(super) async fn enqueue_recursive_run(
             state,
             CreateAsyncOperationCommand {
                 workspace_id: row.workspace_id,
-                library_id: row.library_id,
+                library_id: Some(row.library_id),
                 operation_kind: "web_discovery".to_string(),
                 surface_kind: "worker".to_string(),
                 requested_by_principal_id: row.requested_by_principal_id,
@@ -666,7 +666,7 @@ pub(super) async fn queue_recursive_page_jobs(
                 state,
                 CreateAsyncOperationCommand {
                     workspace_id: run.workspace_id,
-                    library_id: run.library_id,
+                    library_id: Some(run.library_id),
                     operation_kind: "web_materialize_page".to_string(),
                     surface_kind: "worker".to_string(),
                     requested_by_principal_id: run.requested_by_principal_id,

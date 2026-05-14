@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 
@@ -17,6 +18,7 @@ import { getDocumentProcessingDurationMs } from "@/features/documents/model/docu
 import {
   splitSortValue,
   type BulkRerunState,
+  type DocumentsTableState,
   type LocalSortKey,
   type LocalSortState,
   type PageSizeOption,
@@ -33,8 +35,10 @@ type DocumentsListControllerInput = {
   filteredTotal: number | null;
   items: DocumentItem[];
   loadFirstPage: () => Promise<void>;
+  localSort: LocalSortState;
   onSelectionModeChange: (selectionMode: boolean) => void;
   pageSize: PageSizeOption;
+  setTableState: Dispatch<SetStateAction<DocumentsTableState>>;
   sortBy: DocumentListSortKey;
   sortOrder: DocumentListSortOrder;
   sortValue: SortValue;
@@ -51,8 +55,10 @@ export function useDocumentsListController({
   filteredTotal,
   items,
   loadFirstPage,
+  localSort,
   onSelectionModeChange,
   pageSize,
+  setTableState,
   sortBy,
   sortOrder,
   sortValue,
@@ -64,7 +70,6 @@ export function useDocumentsListController({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [expandingSelection, setExpandingSelection] = useState(false);
   const [bulkRerun, setBulkRerun] = useState<BulkRerunState | null>(null);
-  const [localSort, setLocalSort] = useState<LocalSortState>(null);
   const [processingClockMs, setProcessingClockMs] = useState(() => Date.now());
   const terminalToastFiredRef = useRef(false);
   const bulkQuery = useBulkRerunProgressQuery(bulkRerun);
@@ -142,13 +147,18 @@ export function useDocumentsListController({
     },
     [onSortChange, sortBy, sortOrder],
   );
-  const toggleLocalSort = useCallback((key: LocalSortKey) => {
-    setLocalSort((prev) =>
-      prev && prev.key === key
-        ? { key, direction: prev.direction === "asc" ? "desc" : "asc" }
-        : { key, direction: "desc" },
-    );
-  }, []);
+  const toggleLocalSort = useCallback(
+    (key: LocalSortKey) => {
+      setTableState((prev) => ({
+        ...prev,
+        localSort:
+          prev.localSort && prev.localSort.key === key
+            ? { key, direction: prev.localSort.direction === "asc" ? "desc" : "asc" }
+            : { key, direction: "desc" },
+      }));
+    },
+    [setTableState],
+  );
 
   const selectAllMatching = useCallback(async () => {
     if (expandingSelection) return;

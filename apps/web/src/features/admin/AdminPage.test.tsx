@@ -22,6 +22,7 @@ const {
     listLibraries: vi.fn(),
     mintToken: vi.fn(),
     revokeToken: vi.fn(),
+    deleteToken: vi.fn(),
     listProviders: vi.fn(),
     listModels: vi.fn(),
     listCredentials: vi.fn(),
@@ -122,6 +123,41 @@ vi.mock('@/features/admin/components/AiConfigurationPanel', () => ({
   default: () => <div data-testid="ai-panel">AI panel</div>,
 }));
 
+function makeOpsToken(status: 'active' | 'revoked' = 'active') {
+  return {
+    principalId: 'principal-1',
+    label: 'Ops token',
+    tokenPrefix: 'irr_abc',
+    status,
+    revokedAt: status === 'revoked' ? '2026-05-14T10:00:00Z' : undefined,
+    issuer: {
+      principalId: 'admin-1',
+      displayLabel: 'admin',
+    },
+    scope: {
+      kind: 'library',
+      workspace: { id: 'ws-1', displayName: 'Workspace 1' },
+      libraries: [{ id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' }],
+    },
+    grants: [
+      {
+        resourceKind: 'library',
+        resourceId: 'library-1',
+        permissionKind: 'library_write',
+        workspace: { id: 'ws-1', displayName: 'Workspace 1' },
+        library: { id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' },
+      },
+      {
+        resourceKind: 'library',
+        resourceId: 'library-1',
+        permissionKind: 'document_read',
+        workspace: { id: 'ws-1', displayName: 'Workspace 1' },
+        library: { id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' },
+      },
+    ],
+  };
+}
+
 describe('AdminPage integration', () => {
   let container: HTMLDivElement;
   let root: Root | null;
@@ -139,39 +175,7 @@ describe('AdminPage integration', () => {
       setLocale: vi.fn(),
     });
 
-    adminApiMock.listTokens.mockResolvedValue([
-      {
-        principalId: 'principal-1',
-        label: 'Ops token',
-        tokenPrefix: 'irr_abc',
-        status: 'active',
-        issuer: {
-          principalId: 'admin-1',
-          displayLabel: 'admin',
-        },
-        scope: {
-          kind: 'library',
-          workspace: { id: 'ws-1', displayName: 'Workspace 1' },
-          libraries: [{ id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' }],
-        },
-        grants: [
-          {
-            resourceKind: 'library',
-            resourceId: 'library-1',
-            permissionKind: 'library_write',
-            workspace: { id: 'ws-1', displayName: 'Workspace 1' },
-            library: { id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' },
-          },
-          {
-            resourceKind: 'library',
-            resourceId: 'library-1',
-            permissionKind: 'document_read',
-            workspace: { id: 'ws-1', displayName: 'Workspace 1' },
-            library: { id: 'library-1', workspaceId: 'ws-1', displayName: 'Library 1' },
-          },
-        ],
-      },
-    ]);
+    adminApiMock.listTokens.mockResolvedValue([makeOpsToken()]);
     adminApiMock.listProviders.mockResolvedValue([]);
     adminApiMock.listModels.mockResolvedValue([]);
     adminApiMock.listPrices.mockResolvedValue([]);
@@ -205,6 +209,7 @@ describe('AdminPage integration', () => {
       },
     });
     adminApiMock.revokeToken.mockResolvedValue(undefined);
+    adminApiMock.deleteToken.mockResolvedValue(undefined);
     dashboardApiMock.getLibraryState.mockResolvedValue({
       state: {
         queueDepth: 0,
@@ -330,7 +335,7 @@ describe('AdminPage integration', () => {
     expect(findTabTrigger('MCP')).toBeTruthy();
   });
 
-  it('optimistically removes a revoked token and rolls back with a toast on failure', async () => {
+  it('optimistically marks a token revoked and rolls back with a toast on failure', async () => {
     let rejectRevoke!: (reason: Error) => void;
     adminApiMock.revokeToken.mockReturnValue(
       new Promise((_resolve, reject) => {
@@ -350,7 +355,13 @@ describe('AdminPage integration', () => {
     });
     await flushUi();
 
-    expect(container.textContent).not.toContain('Ops token');
+    expect(container.textContent).toContain('Ops token');
+    expect(container.textContent).toContain('revoked');
+    expect(
+      Array.from(container.querySelectorAll('button')).some((button) =>
+        button.textContent?.includes('Delete'),
+      ),
+    ).toBe(true);
 
     await act(async () => {
       rejectRevoke(new Error('revoke unavailable'));
@@ -359,8 +370,58 @@ describe('AdminPage integration', () => {
     await flushUi();
 
     expect(container.textContent).toContain('Ops token');
+    expect(
+      Array.from(container.querySelectorAll('button')).some((button) =>
+        button.textContent?.includes('Revoke'),
+      ),
+    ).toBe(true);
     expect(toastErrorMock).toHaveBeenCalledWith(
       expect.stringContaining('revoke unavailable'),
+    );
+  });
+
+  it('optimistically deletes a revoked token and rolls back with a toast on failure', async () => {
+    let rejectDelete!: (reason: Error) => void;
+    adminApiMock.listTokens.mockResolvedValue([makeOpsToken('revoked')]);
+    adminApiMock.deleteToken.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectDelete = reject;
+      }),
+    );
+
+    await renderPage();
+
+    const openDeleteButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Delete'),
+    );
+    expect(openDeleteButton).toBeTruthy();
+
+    await act(async () => {
+      openDeleteButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
+    const confirmDeleteButton = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.includes('Delete'))
+      .at(-1);
+    expect(confirmDeleteButton).toBeTruthy();
+
+    await act(async () => {
+      confirmDeleteButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
+    expect(container.textContent).not.toContain('Ops token');
+
+    await act(async () => {
+      rejectDelete(new Error('delete unavailable'));
+    });
+    await flushUi();
+    await flushUi();
+
+    expect(container.textContent).toContain('Ops token');
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      expect.stringContaining('delete unavailable'),
     );
   });
 

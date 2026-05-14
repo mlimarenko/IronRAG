@@ -52,6 +52,7 @@ pub fn router() -> Router<AppState> {
         .route("/iam/session/logout", post(logout_session))
         .route("/iam/me", get(get_me))
         .route("/iam/tokens", get(list_tokens).post(mint_token))
+        .route("/iam/tokens/{token_principal_id}", delete(delete_token))
         .route("/iam/tokens/{token_principal_id}/revoke", post(revoke_token))
         .route("/iam/grants", get(list_grants).post(create_grant))
         .route("/iam/grants/{grant_id}", delete(revoke_grant))
@@ -517,6 +518,121 @@ pub async fn revoke_token(
         "succeeded",
         Some(format!("api token {} revoked", row.label)),
         Some(format!("principal {} revoked api token {}", auth.principal_id, token_principal_id)),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "api_token".to_string(),
+            subject_id: token_principal_id,
+            workspace_id: row.workspace_id,
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.delete_token",
+    skip_all,
+    fields(token_principal_id = %token_principal_id)
+)]
+#[utoipa::path(
+    delete,
+    path = "/v1/iam/tokens/{tokenPrincipalId}",
+    tag = "iam",
+    operation_id = "deleteIamToken",
+    params(("tokenPrincipalId" = uuid::Uuid, Path, description = "Revoked API token principal id to delete")),
+    responses(
+        (status = 204, description = "Revoked token deleted"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+        (status = 404, description = "Token principal not found"),
+        (status = 409, description = "Token must be revoked before deletion"),
+    ),
+)]
+pub async fn delete_token(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(token_principal_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    auth.require_any_scope(POLICY_IAM_ADMIN)?;
+    let request_id = request_id.map(|value| value.0.0);
+
+    let row = iam_repository::get_api_token_by_principal_id(
+        &state.persistence.postgres,
+        token_principal_id,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            token_principal_id = %token_principal_id,
+            ?error,
+            "failed to load api token for delete",
+        );
+        ApiError::Internal
+    })?
+    .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
+
+    if let Err(error) = authorize_workspace_scope_for_row(&auth, row.workspace_id) {
+        record_iam_audit_event(
+            &state,
+            &auth,
+            request_id.clone(),
+            "iam.api_token.delete",
+            "rejected",
+            Some("api token delete denied".to_string()),
+            Some(format!(
+                "principal {} was denied api token delete for {}",
+                auth.principal_id, token_principal_id
+            )),
+            vec![AppendAuditEventSubjectCommand {
+                subject_kind: "api_token".to_string(),
+                subject_id: token_principal_id,
+                workspace_id: row.workspace_id,
+                library_id: None,
+                document_id: None,
+            }],
+        )
+        .await;
+        return Err(error);
+    }
+
+    if row.status != "revoked" {
+        record_iam_audit_event(
+            &state,
+            &auth,
+            request_id.clone(),
+            "iam.api_token.delete",
+            "rejected",
+            Some("api token delete requires revoked status".to_string()),
+            Some(format!(
+                "principal {} tried to delete non-revoked api token {}",
+                auth.principal_id, token_principal_id
+            )),
+            vec![AppendAuditEventSubjectCommand {
+                subject_kind: "api_token".to_string(),
+                subject_id: token_principal_id,
+                workspace_id: row.workspace_id,
+                library_id: None,
+                document_id: None,
+            }],
+        )
+        .await;
+        return Err(ApiError::Conflict("api token must be revoked before deletion".to_string()));
+    }
+
+    state.canonical_services.iam.delete_revoked_api_token(&state, token_principal_id).await?;
+    record_iam_audit_event(
+        &state,
+        &auth,
+        request_id,
+        "iam.api_token.delete",
+        "succeeded",
+        Some(format!("api token {} deleted", row.label)),
+        Some(format!("principal {} deleted api token {}", auth.principal_id, token_principal_id)),
         vec![AppendAuditEventSubjectCommand {
             subject_kind: "api_token".to_string(),
             subject_id: token_principal_id,

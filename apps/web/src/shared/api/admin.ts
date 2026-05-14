@@ -183,6 +183,10 @@ export const adminApi = {
     Iam.revokeIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
       unwrap(result);
     }),
+  deleteToken: (principalId: string) =>
+    Iam.deleteIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
+      unwrap(result);
+    }),
 
   listProviders: () =>
     Ai.listAiProviders().then(

@@ -287,7 +287,7 @@ impl QueryService {
                 state,
                 CreateAsyncOperationCommand {
                     workspace_id: conversation.workspace_id,
-                    library_id: conversation.library_id,
+                    library_id: Some(conversation.library_id),
                     operation_kind: "query_execution".to_string(),
                     surface_kind: command.surface_kind.as_str().to_string(),
                     requested_by_principal_id: command.author_principal_id,

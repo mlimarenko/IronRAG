@@ -25,7 +25,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct CreateAsyncOperationCommand {
     pub workspace_id: Uuid,
-    pub library_id: Uuid,
+    pub library_id: Option<Uuid>,
     pub operation_kind: String,
     pub surface_kind: String,
     pub requested_by_principal_id: Option<Uuid>,

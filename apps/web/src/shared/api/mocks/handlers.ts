@@ -82,6 +82,7 @@ export const handlers = [
   http.get("/v1/iam/session/resolve", () => HttpResponse.json({}, { status: 200 })), // resolveIamSession
   http.get("/v1/iam/tokens", () => HttpResponse.json({}, { status: 200 })), // listIamTokens
   http.post("/v1/iam/tokens", () => HttpResponse.json({}, { status: 200 })), // mintIamToken
+  http.delete("/v1/iam/tokens/:tokenPrincipalId", () => HttpResponse.json({}, { status: 200 })), // deleteIamToken
   http.post("/v1/iam/tokens/:tokenPrincipalId/revoke", () => HttpResponse.json({}, { status: 200 })), // revokeIamToken
   http.get("/v1/ingest/attempts/:attemptId", () => HttpResponse.json({}, { status: 200 })), // getIngestAttempt
   http.get("/v1/ingest/attempts/:attemptId/stages", () => HttpResponse.json({}, { status: 200 })), // listIngestStageEvents

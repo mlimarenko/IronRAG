@@ -150,7 +150,7 @@ pub async fn batch_delete_documents(
             &state,
             CreateAsyncOperationCommand {
                 workspace_id,
-                library_id,
+                library_id: Some(library_id),
                 operation_kind: "batch_delete_documents".to_string(),
                 surface_kind: "rest".to_string(),
                 requested_by_principal_id: Some(auth.principal_id),
@@ -334,7 +334,7 @@ pub async fn batch_reprocess_documents(
             &state,
             CreateAsyncOperationCommand {
                 workspace_id,
-                library_id,
+                library_id: Some(library_id),
                 operation_kind: "batch_reprocess_documents".to_string(),
                 surface_kind: "rest".to_string(),
                 requested_by_principal_id: Some(auth.principal_id),

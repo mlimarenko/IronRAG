@@ -32,7 +32,7 @@ pub struct OpsAsyncOperationProgressRow {
 #[derive(Debug, Clone)]
 pub struct NewOpsAsyncOperation<'a> {
     pub workspace_id: Uuid,
-    pub library_id: Uuid,
+    pub library_id: Option<Uuid>,
     pub operation_kind: &'a str,
     pub surface_kind: &'a str,
     pub requested_by_principal_id: Option<Uuid>,

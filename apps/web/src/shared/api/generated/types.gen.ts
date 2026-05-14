@@ -495,6 +495,12 @@ export type CapabilityGate = {
     section: AdminSection;
 };
 
+export type CatalogDeletionAcceptedResponse = {
+    libraryId?: string | null;
+    operationId: string;
+    workspaceId: string;
+};
+
 export type CatalogLibraryIngestionReadinessResponse = {
     missingBindingPurposes: Array<AiBindingPurpose>;
     ready: boolean;
@@ -3731,9 +3737,9 @@ export type DeleteCatalogWorkspaceErrors = {
 
 export type DeleteCatalogWorkspaceResponses = {
     /**
-     * Workspace deleted
+     * Workspace deletion accepted
      */
-    204: void;
+    202: CatalogDeletionAcceptedResponse;
 };
 
 export type DeleteCatalogWorkspaceResponse = DeleteCatalogWorkspaceResponses[keyof DeleteCatalogWorkspaceResponses];
@@ -3871,9 +3877,9 @@ export type DeleteCatalogLibraryErrors = {
 
 export type DeleteCatalogLibraryResponses = {
     /**
-     * Library deleted
+     * Library deletion accepted
      */
-    204: void;
+    202: CatalogDeletionAcceptedResponse;
 };
 
 export type DeleteCatalogLibraryResponse = DeleteCatalogLibraryResponses[keyof DeleteCatalogLibraryResponses];
@@ -5157,6 +5163,46 @@ export type MintIamTokenResponses = {
 };
 
 export type MintIamTokenResponse = MintIamTokenResponses[keyof MintIamTokenResponses];
+
+export type DeleteIamTokenData = {
+    body?: never;
+    path: {
+        /**
+         * Revoked API token principal id to delete
+         */
+        tokenPrincipalId: string;
+    };
+    query?: never;
+    url: '/v1/iam/tokens/{tokenPrincipalId}';
+};
+
+export type DeleteIamTokenErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not an IAM administrator
+     */
+    403: unknown;
+    /**
+     * Token principal not found
+     */
+    404: unknown;
+    /**
+     * Token must be revoked before deletion
+     */
+    409: unknown;
+};
+
+export type DeleteIamTokenResponses = {
+    /**
+     * Revoked token deleted
+     */
+    204: void;
+};
+
+export type DeleteIamTokenResponse = DeleteIamTokenResponses[keyof DeleteIamTokenResponses];
 
 export type RevokeIamTokenData = {
     body?: never;

@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DocumentsPage from '@/features/documents/DocumentsPage';
+import { getTableStateStorageKey } from '@/shared/hooks/useTableState';
 
 const {
   useAppMock,
@@ -204,6 +205,7 @@ describe('DocumentsPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = null;
@@ -267,7 +269,7 @@ describe('DocumentsPage', () => {
     });
   }
 
-  async function renderPage() {
+  async function renderPage(initialEntry = '/documents') {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: 0, refetchOnWindowFocus: false } },
     });
@@ -275,7 +277,7 @@ describe('DocumentsPage', () => {
       root = createRoot(container);
       root.render(
         <QueryClientProvider client={queryClient}>
-          <MemoryRouter initialEntries={['/documents']}>
+          <MemoryRouter initialEntries={[initialEntry]}>
             <DocumentsPage />
           </MemoryRouter>
         </QueryClientProvider>,
@@ -285,6 +287,48 @@ describe('DocumentsPage', () => {
     await flushUi();
     await flushUi();
   }
+
+  it('uses persisted document table controls when the URL does not override them', async () => {
+    localStorage.setItem(
+      getTableStateStorageKey('documents.list'),
+      JSON.stringify({
+        pageSize: 100,
+        sort: { key: 'file_name', direction: 'asc' },
+        localSort: null,
+      }),
+    );
+
+    await renderPage();
+
+    expect(documentsApiMock.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 100,
+        sortBy: 'file_name',
+        sortOrder: 'asc',
+      }),
+    );
+  });
+
+  it('keeps document table URL parameters stronger than persisted controls', async () => {
+    localStorage.setItem(
+      getTableStateStorageKey('documents.list'),
+      JSON.stringify({
+        pageSize: 100,
+        sort: { key: 'file_name', direction: 'asc' },
+        localSort: null,
+      }),
+    );
+
+    await renderPage('/documents?pageSize=250&sort=status:desc');
+
+    expect(documentsApiMock.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 250,
+        sortBy: 'status',
+        sortOrder: 'desc',
+      }),
+    );
+  });
 
   it('opens the editor from the table action', async () => {
     await renderPage();

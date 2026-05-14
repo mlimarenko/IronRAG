@@ -318,6 +318,7 @@ export function PresetsSection({
   return (
     <div className="flex flex-1 min-h-0 flex-col">
       <EntityWorkbench<ModelPreset>
+        tableId="admin.ai.presets"
         title={t('admin.aiPanel.presetsTitle')}
         count={providerPresets.length}
         state={presetsState}

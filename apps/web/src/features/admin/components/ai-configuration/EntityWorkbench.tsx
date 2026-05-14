@@ -13,6 +13,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import {
+  isStorageRecord,
+  parseNumberOption,
+  parseTableSort,
+  useTableState,
+  type TableSortState,
+} from '@/shared/hooks/useTableState';
 import type { AiConfigDataState } from '@/features/admin/model/aiConfig';
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
@@ -27,7 +34,15 @@ export type EntityColumn<T> = {
   sortValue?: (row: T) => string | number | null | undefined;
 };
 
-type SortState = { key: string; dir: 'asc' | 'desc' };
+type EntityTableState = {
+  pageSize: (typeof PAGE_SIZE_OPTIONS)[number];
+  sort: TableSortState<string>;
+};
+
+const DEFAULT_TABLE_STATE: EntityTableState = {
+  pageSize: DEFAULT_PAGE_SIZE,
+  sort: null,
+};
 
 function getPageItems(current: number, total: number): Array<number | 'ellipsis'> {
   if (total <= 7) {
@@ -68,6 +83,7 @@ export type EntityInspector<T> = {
 };
 
 type EntityWorkbenchProps<T> = {
+  tableId: string;
   title: string;
   count: number;
   state: AiConfigDataState<unknown>;
@@ -82,6 +98,7 @@ type EntityWorkbenchProps<T> = {
 };
 
 export function EntityWorkbench<T>({
+  tableId,
   title,
   count,
   state,
@@ -97,21 +114,40 @@ export function EntityWorkbench<T>({
   const { t } = useTranslation();
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [sort, setSort] = useState<SortState | null>(null);
+  const sortableColumnKeysList = useMemo(
+    () => columns.filter(col => col.sortValue).map(col => col.key),
+    [columns],
+  );
+  const [tableState, setTableState] = useTableState<EntityTableState>({
+    tableId,
+    defaultValue: DEFAULT_TABLE_STATE,
+    parse: raw => {
+      const record = isStorageRecord(raw) ? raw : {};
+      return {
+        pageSize: parseNumberOption(record.pageSize, PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE),
+        sort: parseTableSort(record.sort, sortableColumnKeysList, DEFAULT_TABLE_STATE.sort),
+      };
+    },
+  });
+  const { pageSize, sort } = tableState;
 
   const sortableColumnKeys = useMemo(
-    () => new Set(columns.filter(col => col.sortValue).map(col => col.key)),
-    [columns],
+    () => new Set(sortableColumnKeysList),
+    [sortableColumnKeysList],
   );
 
   const toggleSort = (key: string) => {
     if (!sortableColumnKeys.has(key)) return;
-    setSort(prev => {
-      if (!prev || prev.key !== key) return { key, dir: 'asc' };
-      if (prev.dir === 'asc') return { key, dir: 'desc' };
-      return null;
+    setTableState(prev => {
+      const current = prev.sort;
+      const nextSort =
+        !current || current.key !== key
+          ? { key, direction: 'asc' as const }
+          : current.direction === 'asc'
+            ? { key, direction: 'desc' as const }
+            : null;
+      return { ...prev, sort: nextSort };
     });
   };
 
@@ -123,7 +159,7 @@ export function EntityWorkbench<T>({
     const column = columns.find(col => col.key === sort.key);
     if (!column?.sortValue) return base;
     const sortValue = column.sortValue;
-    const dir = sort.dir === 'asc' ? 1 : -1;
+    const dir = sort.direction === 'asc' ? 1 : -1;
     return base
       .slice()
       .sort((left, right) => compareSortValues(sortValue(left), sortValue(right)) * dir);
@@ -207,7 +243,7 @@ export function EntityWorkbench<T>({
                             const sortable = Boolean(col.sortValue);
                             const active = sort?.key === col.key;
                             const Icon = active
-                              ? sort?.dir === 'asc'
+                              ? sort?.direction === 'asc'
                                 ? ArrowUp
                                 : ArrowDown
                               : ArrowUpDown;
@@ -285,7 +321,10 @@ export function EntityWorkbench<T>({
                         <Select
                           value={String(pageSize)}
                           onValueChange={value => {
-                            setPageSize(Number(value));
+                            setTableState(prev => ({
+                              ...prev,
+                              pageSize: Number(value) as EntityTableState['pageSize'],
+                            }));
                             setPage(1);
                           }}
                         >

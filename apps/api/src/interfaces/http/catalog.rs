@@ -5,6 +5,7 @@ use axum::{
     routing::{delete, get, put},
 };
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -25,8 +26,9 @@ use crate::{
     },
     services::{
         catalog_service::{
-            CreateLibraryCommand, CreateWorkspaceCommand, UpdateLibraryCommand,
-            UpdateLibraryRecognitionPolicyCommand, UpdateLibraryWebIngestPolicyCommand,
+            CatalogDeletionAdmission, CreateLibraryCommand, CreateWorkspaceCommand,
+            UpdateLibraryCommand, UpdateLibraryRecognitionPolicyCommand,
+            UpdateLibraryWebIngestPolicyCommand,
         },
         iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     },
@@ -62,6 +64,14 @@ pub struct CatalogLibraryResponse {
     pub recognition_policy: LibraryRecognitionPolicy,
     pub lifecycle_state: String,
     pub ingestion_readiness: CatalogLibraryIngestionReadinessResponse,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogDeletionAcceptedResponse {
+    pub operation_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -252,7 +262,7 @@ pub async fn create_workspace(
     operation_id = "deleteCatalogWorkspace",
     params(("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier")),
     responses(
-        (status = 204, description = "Workspace deleted"),
+        (status = 202, description = "Workspace deletion accepted", body = CatalogDeletionAcceptedResponse),
         (status = 401, description = "Caller is not a system administrator"),
         (status = 404, description = "Workspace not found"),
     ),
@@ -268,12 +278,13 @@ pub async fn delete_workspace(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(workspace_id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<CatalogDeletionAcceptedResponse>), ApiError> {
+    let request_id = request_id.map(|value| value.0.0);
     if !auth.is_system_admin {
         record_catalog_audit_event(
             &state,
             &auth,
-            request_id.map(|value| value.0.0),
+            request_id,
             "catalog.workspace.delete",
             "rejected",
             Some("workspace delete denied".to_string()),
@@ -284,27 +295,45 @@ pub async fn delete_workspace(
         return Err(ApiError::Unauthorized);
     }
 
-    let workspace = state.canonical_services.catalog.delete_workspace(&state, workspace_id).await?;
+    let admission = state
+        .canonical_services
+        .catalog
+        .admit_workspace_deletion(&state, workspace_id, Some(auth.principal_id))
+        .await?;
 
     record_catalog_audit_event(
         &state,
         &auth,
-        request_id.map(|value| value.0.0),
+        request_id.clone(),
         "catalog.workspace.delete",
         "succeeded",
-        Some(format!("workspace {} deleted", workspace.display_name)),
-        Some(format!("principal {} deleted workspace {}", auth.principal_id, workspace.id)),
+        Some(format!("workspace {} deletion accepted", admission.display_name)),
+        Some(format!(
+            "principal {} accepted workspace {} deletion via async operation {}",
+            auth.principal_id, admission.workspace_id, admission.operation_id
+        )),
         vec![AppendAuditEventSubjectCommand {
             subject_kind: "workspace".to_string(),
-            subject_id: workspace.id,
-            workspace_id: Some(workspace.id),
+            subject_id: admission.workspace_id,
+            workspace_id: Some(admission.workspace_id),
             library_id: None,
             document_id: None,
         }],
     )
     .await;
 
-    Ok(StatusCode::NO_CONTENT)
+    if admission.should_start_worker {
+        spawn_workspace_deletion_worker(
+            state.clone(),
+            admission.operation_id,
+            admission.workspace_id,
+            admission.display_name.clone(),
+            auth.principal_id,
+            request_id,
+        );
+    }
+
+    Ok((StatusCode::ACCEPTED, Json(map_deletion_admission(admission))))
 }
 
 #[utoipa::path(
@@ -421,7 +450,7 @@ pub async fn create_library(
         ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
     ),
     responses(
-        (status = 204, description = "Library deleted"),
+        (status = 202, description = "Library deletion accepted", body = CatalogDeletionAcceptedResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not a workspace admin"),
         (status = 404, description = "Library not found"),
@@ -438,38 +467,53 @@ pub async fn delete_library(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path((workspace_id, library_id)): Path<(Uuid, Uuid)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<CatalogDeletionAcceptedResponse>), ApiError> {
+    let request_id = request_id.map(|value| value.0.0);
     load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
-    let library = state.canonical_services.catalog.get_library(&state, library_id).await?;
-    if library.workspace_id != workspace_id {
-        return Err(ApiError::resource_not_found("library", library_id));
-    }
 
-    let deleted_library =
-        state.canonical_services.catalog.delete_library(&state, library_id).await?;
+    let admission = state
+        .canonical_services
+        .catalog
+        .admit_library_deletion(&state, workspace_id, library_id, Some(auth.principal_id))
+        .await?;
 
     record_catalog_audit_event(
         &state,
         &auth,
-        request_id.map(|value| value.0.0),
+        request_id.clone(),
         "catalog.library.delete",
         "succeeded",
-        Some(format!("library {} deleted", deleted_library.display_name)),
+        Some(format!("library {} deletion accepted", admission.display_name)),
         Some(format!(
-            "principal {} deleted library {} in workspace {}",
-            auth.principal_id, deleted_library.id, deleted_library.workspace_id
+            "principal {} accepted library {} deletion in workspace {} via async operation {}",
+            auth.principal_id,
+            admission.library_id.unwrap_or(library_id),
+            admission.workspace_id,
+            admission.operation_id
         )),
         vec![AppendAuditEventSubjectCommand {
             subject_kind: "library".to_string(),
-            subject_id: deleted_library.id,
-            workspace_id: Some(deleted_library.workspace_id),
-            library_id: Some(deleted_library.id),
+            subject_id: admission.library_id.unwrap_or(library_id),
+            workspace_id: Some(admission.workspace_id),
+            library_id: admission.library_id,
             document_id: None,
         }],
     )
     .await;
 
-    Ok(StatusCode::NO_CONTENT)
+    if admission.should_start_worker {
+        spawn_library_deletion_worker(
+            state.clone(),
+            admission.operation_id,
+            admission.workspace_id,
+            admission.library_id.unwrap_or(library_id),
+            admission.display_name.clone(),
+            auth.principal_id,
+            request_id,
+        );
+    }
+
+    Ok((StatusCode::ACCEPTED, Json(map_deletion_admission(admission))))
 }
 
 #[utoipa::path(
@@ -711,6 +755,167 @@ pub async fn update_library_recognition_policy(
     Ok(Json(map_library(library)))
 }
 
+fn spawn_workspace_deletion_worker(
+    state: AppState,
+    operation_id: Uuid,
+    workspace_id: Uuid,
+    display_name: String,
+    principal_id: Uuid,
+    request_id: Option<String>,
+) {
+    tokio::spawn(
+        async move {
+            match state
+                .canonical_services
+                .catalog
+                .execute_workspace_deletion(&state, operation_id, workspace_id)
+                .await
+            {
+                Ok(workspace) => {
+                    record_catalog_audit_event_for_principal(
+                        &state,
+                        principal_id,
+                        request_id,
+                        "catalog.workspace.delete",
+                        "succeeded",
+                        Some(format!("workspace {} deleted", workspace.display_name)),
+                        Some(format!(
+                            "principal {principal_id} deleted workspace {} via async operation {operation_id}",
+                            workspace.id
+                        )),
+                        vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "workspace".to_string(),
+                            subject_id: workspace.id,
+                            workspace_id: Some(workspace.id),
+                            library_id: None,
+                            document_id: None,
+                        }],
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %operation_id,
+                        %workspace_id,
+                        error = ?error,
+                        "workspace deletion worker failed"
+                    );
+                    record_catalog_audit_event_for_principal(
+                        &state,
+                        principal_id,
+                        request_id,
+                        "catalog.workspace.delete",
+                        "failed",
+                        Some(format!("workspace {display_name} deletion failed")),
+                        Some(format!(
+                            "principal {principal_id} failed to delete workspace {workspace_id} via async operation {operation_id}: {error:?}"
+                        )),
+                        vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "workspace".to_string(),
+                            subject_id: workspace_id,
+                            workspace_id: Some(workspace_id),
+                            library_id: None,
+                            document_id: None,
+                        }],
+                    )
+                    .await;
+                }
+            }
+        }
+        .instrument(tracing::info_span!(
+            "catalog.workspace_delete.worker",
+            %operation_id,
+            %workspace_id
+        )),
+    );
+}
+
+fn spawn_library_deletion_worker(
+    state: AppState,
+    operation_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    display_name: String,
+    principal_id: Uuid,
+    request_id: Option<String>,
+) {
+    tokio::spawn(
+        async move {
+            match state
+                .canonical_services
+                .catalog
+                .execute_library_deletion(&state, operation_id, library_id)
+                .await
+            {
+                Ok(library) => {
+                    record_catalog_audit_event_for_principal(
+                        &state,
+                        principal_id,
+                        request_id,
+                        "catalog.library.delete",
+                        "succeeded",
+                        Some(format!("library {} deleted", library.display_name)),
+                        Some(format!(
+                            "principal {principal_id} deleted library {} in workspace {} via async operation {operation_id}",
+                            library.id, library.workspace_id
+                        )),
+                        vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "library".to_string(),
+                            subject_id: library.id,
+                            workspace_id: Some(library.workspace_id),
+                            library_id: Some(library.id),
+                            document_id: None,
+                        }],
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %operation_id,
+                        %workspace_id,
+                        %library_id,
+                        error = ?error,
+                        "library deletion worker failed"
+                    );
+                    record_catalog_audit_event_for_principal(
+                        &state,
+                        principal_id,
+                        request_id,
+                        "catalog.library.delete",
+                        "failed",
+                        Some(format!("library {display_name} deletion failed")),
+                        Some(format!(
+                            "principal {principal_id} failed to delete library {library_id} in workspace {workspace_id} via async operation {operation_id}: {error:?}"
+                        )),
+                        vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "library".to_string(),
+                            subject_id: library_id,
+                            workspace_id: Some(workspace_id),
+                            library_id: Some(library_id),
+                            document_id: None,
+                        }],
+                    )
+                    .await;
+                }
+            }
+        }
+        .instrument(tracing::info_span!(
+            "catalog.library_delete.worker",
+            %operation_id,
+            %workspace_id,
+            %library_id
+        )),
+    );
+}
+
+fn map_deletion_admission(admission: CatalogDeletionAdmission) -> CatalogDeletionAcceptedResponse {
+    CatalogDeletionAcceptedResponse {
+        operation_id: admission.operation_id,
+        workspace_id: admission.workspace_id,
+        library_id: admission.library_id,
+    }
+}
+
 fn map_workspace(workspace: CatalogWorkspace) -> CatalogWorkspaceResponse {
     CatalogWorkspaceResponse {
         id: workspace.id,
@@ -764,13 +969,36 @@ async fn record_catalog_audit_event(
     internal_message: Option<String>,
     subjects: Vec<AppendAuditEventSubjectCommand>,
 ) {
+    record_catalog_audit_event_for_principal(
+        state,
+        auth.principal_id,
+        request_id,
+        action_kind,
+        result_kind,
+        redacted_message,
+        internal_message,
+        subjects,
+    )
+    .await;
+}
+
+async fn record_catalog_audit_event_for_principal(
+    state: &AppState,
+    principal_id: Uuid,
+    request_id: Option<String>,
+    action_kind: &str,
+    result_kind: &str,
+    redacted_message: Option<String>,
+    internal_message: Option<String>,
+    subjects: Vec<AppendAuditEventSubjectCommand>,
+) {
     if let Err(error) = state
         .canonical_services
         .audit
         .append_event(
             state,
             AppendAuditEventCommand {
-                actor_principal_id: Some(auth.principal_id),
+                actor_principal_id: Some(principal_id),
                 surface_kind: "rest".to_string(),
                 action_kind: action_kind.to_string(),
                 request_id,

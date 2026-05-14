@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.6
+  version: 0.4.8
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -962,8 +962,12 @@ paths:
           type: string
           format: uuid
       responses:
-        '204':
-          description: Workspace deleted
+        '202':
+          description: Workspace deletion accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogDeletionAcceptedResponse'
         '401':
           description: Caller is not a system administrator
         '404':
@@ -1044,8 +1048,12 @@ paths:
           type: string
           format: uuid
       responses:
-        '204':
-          description: Library deleted
+        '202':
+          description: Library deletion accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogDeletionAcceptedResponse'
         '401':
           description: Caller is not authenticated
         '403':
@@ -2116,6 +2124,30 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller is not an IAM administrator
+  /v1/iam/tokens/{tokenPrincipalId}:
+    delete:
+      tags:
+      - iam
+      operationId: deleteIamToken
+      parameters:
+      - name: tokenPrincipalId
+        in: path
+        description: Revoked API token principal id to delete
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '204':
+          description: Revoked token deleted
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not an IAM administrator
+        '404':
+          description: Token principal not found
+        '409':
+          description: Token must be revoked before deletion
   /v1/iam/tokens/{tokenPrincipalId}/revoke:
     post:
       tags:
@@ -4634,6 +4666,23 @@ components:
           - 'null'
         section:
           $ref: '#/components/schemas/AdminSection'
+    CatalogDeletionAcceptedResponse:
+      type: object
+      required:
+      - operationId
+      - workspaceId
+      properties:
+        libraryId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        operationId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
     CatalogLibraryIngestionReadinessResponse:
       type: object
       required:

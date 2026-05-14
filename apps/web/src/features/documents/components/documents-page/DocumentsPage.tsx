@@ -12,7 +12,11 @@ import { NoLibraryState } from "./NoLibraryState";
 import { UploadQueueSection } from "./UploadQueueSection";
 import { useUploadQueueController } from "./useUploadQueueController";
 import { WebIngestSection } from "./WebIngestSection";
-import { useDocumentsPageUrlState, type DocumentsPageTab } from "./documentsPageState";
+import {
+  useDocumentsPageUrlState,
+  useDocumentsTableState,
+  type DocumentsPageTab,
+} from "./documentsPageState";
 import { useDocumentsQueries } from "./useDocumentsQueries";
 import { useWebIngestController } from "./useWebIngestController";
 
@@ -20,7 +24,8 @@ export function DocumentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { activeLibrary, activeWorkspace, locale } = useApp();
-  const urlState = useDocumentsPageUrlState();
+  const [tableState, setTableState] = useDocumentsTableState();
+  const urlState = useDocumentsPageUrlState({ tableState, setTableState });
   const [activeTab, setActiveTab] = useState<DocumentsPageTab>("documents");
   const [selectionMode, setSelectionMode] = useState(false);
   const documents = useDocumentsQueries({
@@ -86,6 +91,7 @@ export function DocumentsPage() {
               filteredTotal={documents.filteredTotal} isLoading={documents.isLoading}
               items={documents.items} libraryCost={documents.libraryCost}
               loadError={documents.loadError} loadFirstPage={documents.loadFirstPage} locale={locale}
+              localSort={tableState.localSort}
               onSelectionModeChange={setSelectionMode}
               pageSize={urlState.pageSize} pagination={documents.pagination}
               pendingUploads={uploadQueue.pendingUploads} searchQuery={urlState.searchQuery}
@@ -93,6 +99,7 @@ export function DocumentsPage() {
               sortBy={documents.sortBy} sortOrder={documents.sortOrder} sortValue={urlState.sortValue}
               statusBackendFilter={urlState.statusBackendFilter} statusBucket={urlState.statusBucket}
               statusCounts={documents.statusCounts} t={t}
+              setTableState={setTableState}
               updateSearchParamState={urlState.updateSearchParamState}
               uploadController={uploadQueue} workspaceCost={documents.workspaceCost}
             />
