@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
@@ -12,8 +13,8 @@ use crate::{
     },
     infra::repositories::{
         ingest_repository::{
-            self, NewIngestAttempt, NewIngestJob, NewIngestStageEvent, UpdateIngestAttempt,
-            UpdateIngestJob,
+            self, IngestStageEventRow, NewIngestAttempt, NewIngestJob, NewIngestStageEvent,
+            UpdateIngestAttempt, UpdateIngestJob,
         },
         ops_repository,
     },
@@ -33,14 +34,92 @@ pub const INGEST_STAGE_WEB_DISCOVERY: &str = "web_discovery";
 pub const INGEST_STAGE_WEB_MATERIALIZE_PAGE: &str = "web_materialize_page";
 pub const INGEST_STAGE_WEBHOOK_DELIVERY: &str = "webhook_delivery";
 
-const CONTENT_MUTATION_PROGRESS_STAGES: [&str; 7] = [
-    INGEST_STAGE_EXTRACT_CONTENT,
-    INGEST_STAGE_PREPARE_STRUCTURE,
-    INGEST_STAGE_CHUNK_CONTENT,
-    INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
-    INGEST_STAGE_EMBED_CHUNK,
-    INGEST_STAGE_EXTRACT_GRAPH,
-    INGEST_STAGE_FINALIZING,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalIngestProgressProfile {
+    Balanced,
+    InlineText,
+    ExtractionHeavy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CanonicalIngestStageProgressWeight {
+    stage_name: &'static str,
+    percent_weight: i32,
+}
+
+const BALANCED_PROGRESS_WEIGHTS: [CanonicalIngestStageProgressWeight; 7] = [
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_CONTENT,
+        percent_weight: 12,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_PREPARE_STRUCTURE,
+        percent_weight: 6,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_CHUNK_CONTENT,
+        percent_weight: 5,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
+        percent_weight: 5,
+    },
+    CanonicalIngestStageProgressWeight { stage_name: INGEST_STAGE_EMBED_CHUNK, percent_weight: 30 },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_GRAPH,
+        percent_weight: 40,
+    },
+    CanonicalIngestStageProgressWeight { stage_name: INGEST_STAGE_FINALIZING, percent_weight: 2 },
+];
+
+const INLINE_TEXT_PROGRESS_WEIGHTS: [CanonicalIngestStageProgressWeight; 7] = [
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_CONTENT,
+        percent_weight: 4,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_PREPARE_STRUCTURE,
+        percent_weight: 6,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_CHUNK_CONTENT,
+        percent_weight: 5,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
+        percent_weight: 5,
+    },
+    CanonicalIngestStageProgressWeight { stage_name: INGEST_STAGE_EMBED_CHUNK, percent_weight: 35 },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_GRAPH,
+        percent_weight: 43,
+    },
+    CanonicalIngestStageProgressWeight { stage_name: INGEST_STAGE_FINALIZING, percent_weight: 2 },
+];
+
+const EXTRACTION_HEAVY_PROGRESS_WEIGHTS: [CanonicalIngestStageProgressWeight; 7] = [
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_CONTENT,
+        percent_weight: 30,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_PREPARE_STRUCTURE,
+        percent_weight: 6,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_CHUNK_CONTENT,
+        percent_weight: 4,
+    },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
+        percent_weight: 4,
+    },
+    CanonicalIngestStageProgressWeight { stage_name: INGEST_STAGE_EMBED_CHUNK, percent_weight: 24 },
+    CanonicalIngestStageProgressWeight {
+        stage_name: INGEST_STAGE_EXTRACT_GRAPH,
+        percent_weight: 30,
+    },
+    CanonicalIngestStageProgressWeight { stage_name: INGEST_STAGE_FINALIZING, percent_weight: 2 },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,17 +129,124 @@ pub struct CanonicalIngestStageMetadata {
     pub lifecycle_kind: &'static str,
 }
 
-#[must_use]
-pub fn canonical_ingest_stage_progress_percent(stage_name: &str, stage_state: &str) -> Option<i32> {
-    let stage_index =
-        CONTENT_MUTATION_PROGRESS_STAGES.iter().position(|candidate| *candidate == stage_name)?;
-    let total_stages = i32::try_from(CONTENT_MUTATION_PROGRESS_STAGES.len()).ok()?;
-    let stage_index = i32::try_from(stage_index).ok()?;
+fn progress_weights_for_profile(
+    profile: CanonicalIngestProgressProfile,
+) -> &'static [CanonicalIngestStageProgressWeight; 7] {
+    match profile {
+        CanonicalIngestProgressProfile::Balanced => &BALANCED_PROGRESS_WEIGHTS,
+        CanonicalIngestProgressProfile::InlineText => &INLINE_TEXT_PROGRESS_WEIGHTS,
+        CanonicalIngestProgressProfile::ExtractionHeavy => &EXTRACTION_HEAVY_PROGRESS_WEIGHTS,
+    }
+}
+
+fn canonical_ingest_stage_progress_percent_for_profile(
+    profile: CanonicalIngestProgressProfile,
+    stage_name: &str,
+    stage_state: &str,
+) -> Option<i32> {
+    let weights = progress_weights_for_profile(profile);
+    let stage_index = weights.iter().position(|candidate| candidate.stage_name == stage_name)?;
+    let progress_before_stage: i32 =
+        weights.iter().take(stage_index).map(|weight| weight.percent_weight).sum();
+    let stage_weight = weights[stage_index].percent_weight;
 
     match stage_state {
-        "started" | "failed" => Some((((stage_index * 100) / total_stages) + 5).min(99)),
-        "completed" => Some((((stage_index + 1) * 100) / total_stages).min(100)),
+        "started" | "failed" => {
+            let visible_started_bump = (stage_weight / 5).clamp(1, 5);
+            Some((progress_before_stage + visible_started_bump).min(99))
+        }
+        "completed" => Some((progress_before_stage + stage_weight).min(100)),
         _ => None,
+    }
+}
+
+#[must_use]
+fn canonical_ingest_stage_unit_progress_percent_for_profile(
+    profile: CanonicalIngestProgressProfile,
+    stage_name: &str,
+    completed_units: u32,
+    total_units: u32,
+) -> Option<i32> {
+    if total_units == 0 {
+        return None;
+    }
+
+    let stage_started =
+        canonical_ingest_stage_progress_percent_for_profile(profile, stage_name, "started")?;
+    let stage_completed =
+        canonical_ingest_stage_progress_percent_for_profile(profile, stage_name, "completed")?;
+    let stage_span = (stage_completed - stage_started).max(1);
+    let completed_units = completed_units.min(total_units);
+    let stage_offset =
+        ((i64::from(completed_units) * i64::from(stage_span)) / i64::from(total_units)) as i32;
+
+    Some((stage_started + stage_offset).clamp(stage_started, stage_completed.min(99)))
+}
+
+fn canonical_ingest_attempt_stage_progress_percent(
+    existing_events: &[IngestStageEventRow],
+    stage_name: &str,
+    stage_state: &str,
+    current_details: &Value,
+) -> Option<i32> {
+    let profile = canonical_ingest_progress_profile(existing_events, current_details);
+    canonical_ingest_stage_progress_percent_for_profile(profile, stage_name, stage_state)
+}
+
+fn canonical_ingest_attempt_stage_unit_progress_percent(
+    existing_events: &[IngestStageEventRow],
+    stage_name: &str,
+    completed_units: u32,
+    total_units: u32,
+    current_details: &Value,
+) -> Option<i32> {
+    let profile = canonical_ingest_progress_profile(existing_events, current_details);
+    canonical_ingest_stage_unit_progress_percent_for_profile(
+        profile,
+        stage_name,
+        completed_units,
+        total_units,
+    )
+}
+
+fn canonical_ingest_progress_profile(
+    existing_events: &[IngestStageEventRow],
+    current_details: &Value,
+) -> CanonicalIngestProgressProfile {
+    progress_profile_from_stage_details(current_details)
+        .or_else(|| {
+            existing_events
+                .iter()
+                .rev()
+                .find_map(|event| progress_profile_from_stage_details(&event.details_json))
+        })
+        .unwrap_or(CanonicalIngestProgressProfile::Balanced)
+}
+
+fn progress_profile_from_stage_details(details: &Value) -> Option<CanonicalIngestProgressProfile> {
+    let source = details.get("source").and_then(Value::as_str);
+    if source == Some("knowledge_revision") {
+        return Some(CanonicalIngestProgressProfile::InlineText);
+    }
+
+    let file_kind = details.get("fileKind").and_then(Value::as_str);
+    match file_kind {
+        Some("text_like") => Some(CanonicalIngestProgressProfile::InlineText),
+        Some("pdf" | "image" | "docx" | "spreadsheet" | "pptx") => {
+            Some(CanonicalIngestProgressProfile::ExtractionHeavy)
+        }
+        Some(_) => Some(CanonicalIngestProgressProfile::Balanced),
+        None => {
+            let has_pages =
+                details.get("pageCount").and_then(Value::as_i64).unwrap_or_default() > 0;
+            let has_extract_units =
+                details.get("extractUnitCount").and_then(Value::as_i64).unwrap_or_default() > 0;
+            if has_pages || has_extract_units {
+                Some(CanonicalIngestProgressProfile::ExtractionHeavy)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -123,6 +309,15 @@ pub struct RecordStageEventCommand {
     pub estimated_cost: Option<rust_decimal::Decimal>,
     pub currency_code: Option<String>,
     pub elapsed_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordStageUnitProgressCommand {
+    pub attempt_id: Uuid,
+    pub stage_name: String,
+    pub completed_units: u32,
+    pub total_units: u32,
+    pub details_json: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -633,6 +828,42 @@ impl IngestService {
         Ok(map_job_row(row))
     }
 
+    pub async fn pause_job(&self, state: &AppState, job_id: Uuid) -> Result<(), ApiError> {
+        let existing = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
+        let paused = ingest_repository::pause_ingest_job(&state.persistence.postgres, job_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if paused.is_none() {
+            return Err(ApiError::BadRequest(
+                "Only queued or running jobs can be paused".to_string(),
+            ));
+        }
+        update_linked_async_operation(state, existing.async_operation_id, "accepted", None, None)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn resume_job(&self, state: &AppState, job_id: Uuid) -> Result<(), ApiError> {
+        let existing = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
+        let resumed = ingest_repository::resume_ingest_job(&state.persistence.postgres, job_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if resumed.is_none() {
+            return Err(ApiError::BadRequest(
+                "Only paused jobs with no active worker attempt can be resumed".to_string(),
+            ));
+        }
+        update_linked_async_operation(state, existing.async_operation_id, "accepted", None, None)
+            .await?;
+        Ok(())
+    }
+
     pub async fn record_stage_event(
         &self,
         state: &AppState,
@@ -654,6 +885,7 @@ impl IngestService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let stage_details = command.details_json.clone();
         let row = ingest_repository::create_ingest_stage_event(
             &state.persistence.postgres,
             &NewIngestStageEvent {
@@ -700,9 +932,11 @@ impl IngestService {
                 } else {
                     attempt.failure_message
                 },
-                progress_percent: canonical_ingest_stage_progress_percent(
+                progress_percent: canonical_ingest_attempt_stage_progress_percent(
+                    &existing_events,
                     &stage_name,
                     &stage_state,
+                    &stage_details,
                 )
                 .map(|progress| progress.max(attempt.progress_percent))
                 .unwrap_or(attempt.progress_percent),
@@ -712,6 +946,51 @@ impl IngestService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_stage_event_row(row))
+    }
+
+    pub async fn record_stage_unit_progress(
+        &self,
+        state: &AppState,
+        command: RecordStageUnitProgressCommand,
+    ) -> Result<(), ApiError> {
+        let stage_name = normalize_stage_name(&command.stage_name)?;
+        if command.total_units == 0 {
+            return Ok(());
+        }
+        let attempt = ingest_repository::get_ingest_attempt_by_id(
+            &state.persistence.postgres,
+            command.attempt_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
+        if attempt.attempt_state != "leased" {
+            return Ok(());
+        }
+        let existing_events = ingest_repository::list_ingest_stage_events_by_attempt(
+            &state.persistence.postgres,
+            command.attempt_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let Some(progress_percent) = canonical_ingest_attempt_stage_unit_progress_percent(
+            &existing_events,
+            &stage_name,
+            command.completed_units,
+            command.total_units,
+            &command.details_json,
+        ) else {
+            return Ok(());
+        };
+        let _ = ingest_repository::update_leased_attempt_stage_progress(
+            &state.persistence.postgres,
+            command.attempt_id,
+            &stage_name,
+            progress_percent,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(())
     }
 
     pub async fn list_stage_events(
@@ -969,12 +1248,43 @@ async fn update_linked_async_operation(
 #[cfg(test)]
 mod tests {
     use super::{
-        INGEST_STAGE_EMBED_CHUNK, INGEST_STAGE_EXTRACT_CONTENT,
+        CanonicalIngestProgressProfile, INGEST_STAGE_CHUNK_CONTENT, INGEST_STAGE_EMBED_CHUNK,
+        INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH,
         INGEST_STAGE_EXTRACT_TECHNICAL_FACTS, INGEST_STAGE_FINALIZING,
         INGEST_STAGE_PREPARE_STRUCTURE, INGEST_STAGE_WEB_DISCOVERY,
-        INGEST_STAGE_WEB_MATERIALIZE_PAGE, canonical_ingest_stage_metadata,
-        canonical_ingest_stage_progress_percent, normalize_stage_name,
+        INGEST_STAGE_WEB_MATERIALIZE_PAGE, canonical_ingest_attempt_stage_unit_progress_percent,
+        canonical_ingest_progress_profile, canonical_ingest_stage_metadata,
+        canonical_ingest_stage_progress_percent_for_profile,
+        canonical_ingest_stage_unit_progress_percent_for_profile, normalize_stage_name,
+        progress_profile_from_stage_details,
     };
+    use crate::infra::repositories::ingest_repository::IngestStageEventRow;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn stage_event(stage_name: &str, details_json: serde_json::Value) -> IngestStageEventRow {
+        IngestStageEventRow {
+            id: Uuid::now_v7(),
+            attempt_id: Uuid::now_v7(),
+            stage_name: stage_name.to_string(),
+            stage_state: "completed".to_string(),
+            ordinal: 1,
+            message: None,
+            details_json,
+            recorded_at: Utc::now(),
+            provider_kind: None,
+            model_name: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            cached_tokens: None,
+            estimated_cost: None,
+            currency_code: None,
+            elapsed_ms: None,
+            started_at: None,
+        }
+    }
 
     #[test]
     fn normalizes_and_accepts_new_canonical_stage_names() {
@@ -1027,19 +1337,157 @@ mod tests {
     #[test]
     fn exposes_content_mutation_stage_progress() {
         assert_eq!(
-            canonical_ingest_stage_progress_percent(INGEST_STAGE_EXTRACT_CONTENT, "started"),
-            Some(5)
+            canonical_ingest_stage_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::Balanced,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                "started"
+            ),
+            Some(2)
         );
         assert_eq!(
-            canonical_ingest_stage_progress_percent(
+            canonical_ingest_stage_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::Balanced,
                 INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
                 "completed"
             ),
-            Some(57)
+            Some(28)
         );
         assert_eq!(
-            canonical_ingest_stage_progress_percent(INGEST_STAGE_FINALIZING, "completed"),
+            canonical_ingest_stage_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::Balanced,
+                INGEST_STAGE_FINALIZING,
+                "completed"
+            ),
             Some(100)
+        );
+    }
+
+    #[test]
+    fn exposes_profile_aware_content_mutation_stage_progress() {
+        assert_eq!(
+            canonical_ingest_stage_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::InlineText,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                "completed"
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            canonical_ingest_stage_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::InlineText,
+                INGEST_STAGE_EMBED_CHUNK,
+                "completed"
+            ),
+            Some(55)
+        );
+        assert_eq!(
+            canonical_ingest_stage_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::InlineText,
+                INGEST_STAGE_EXTRACT_GRAPH,
+                "started"
+            ),
+            Some(60)
+        );
+        assert_eq!(
+            canonical_ingest_stage_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::ExtractionHeavy,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                "completed"
+            ),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn infers_progress_profile_from_extraction_details() {
+        assert_eq!(
+            progress_profile_from_stage_details(&json!({ "source": "knowledge_revision" })),
+            Some(CanonicalIngestProgressProfile::InlineText)
+        );
+        assert_eq!(
+            progress_profile_from_stage_details(&json!({ "fileKind": "text_like" })),
+            Some(CanonicalIngestProgressProfile::InlineText)
+        );
+        assert_eq!(
+            progress_profile_from_stage_details(&json!({ "fileKind": "pdf", "pageCount": 10 })),
+            Some(CanonicalIngestProgressProfile::ExtractionHeavy)
+        );
+        assert_eq!(
+            progress_profile_from_stage_details(&json!({ "pageCount": 1 })),
+            Some(CanonicalIngestProgressProfile::ExtractionHeavy)
+        );
+        assert_eq!(progress_profile_from_stage_details(&json!({})), None);
+    }
+
+    #[test]
+    fn carries_progress_profile_forward_from_prior_stage_events() {
+        let existing_events = vec![
+            stage_event(INGEST_STAGE_EXTRACT_CONTENT, json!({ "fileKind": "text_like" })),
+            stage_event(INGEST_STAGE_CHUNK_CONTENT, json!({ "chunkCount": 4 })),
+        ];
+
+        assert_eq!(
+            canonical_ingest_progress_profile(&existing_events, &json!({})),
+            CanonicalIngestProgressProfile::InlineText
+        );
+        assert_eq!(
+            canonical_ingest_attempt_stage_unit_progress_percent(
+                &existing_events,
+                INGEST_STAGE_EMBED_CHUNK,
+                1,
+                2,
+                &json!({})
+            ),
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn exposes_content_mutation_stage_unit_progress() {
+        assert_eq!(
+            canonical_ingest_stage_unit_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::ExtractionHeavy,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                0,
+                100
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            canonical_ingest_stage_unit_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::ExtractionHeavy,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                50,
+                100
+            ),
+            Some(17)
+        );
+        assert_eq!(
+            canonical_ingest_stage_unit_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::ExtractionHeavy,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                100,
+                100
+            ),
+            Some(30)
+        );
+        assert_eq!(
+            canonical_ingest_stage_unit_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::ExtractionHeavy,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                101,
+                100
+            ),
+            Some(30)
+        );
+        assert_eq!(
+            canonical_ingest_stage_unit_progress_percent_for_profile(
+                CanonicalIngestProgressProfile::ExtractionHeavy,
+                INGEST_STAGE_EXTRACT_CONTENT,
+                1,
+                0
+            ),
+            None
         );
     }
 }

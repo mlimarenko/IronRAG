@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+## 0.4.10 — 2026-05-15
+
+### AI providers: OpenRouter embeddings
+
+- OpenRouter now has first-class 3072-dimension embedding presets for
+  `embed_chunk` and `query_retrieve`, including the Qwen embedding model that
+  requires an explicit 3072-dimension request parameter, so fresh stacks can
+  bind compatible OpenRouter embeddings without waiting for credential-driven
+  model discovery.
+- The OpenRouter provider capability table and multi-provider smoke profile now
+  mark embeddings as supported instead of falling back to another provider.
+
+### Ingest: document progress profiles
+
+- Document ingest progress now uses source-aware stage weights instead of
+  splitting the pipeline equally by stage count, so small text documents no
+  longer jump straight from early extraction to graph-stage percentages while
+  extraction-heavy files still show meaningful page/unit progress.
+
+### Administration: ingest queue observability
+
+- Added a global administration queue view for active ingest work across
+  workspaces and libraries, with running/queued counts, searchable job list,
+  document navigation, queued-job reordering, and operator cancellation.
+- Running jobs now open an inspector with progress, scope, heartbeat, failure
+  text, and the live ingest stage timeline so operators can see what a worker
+  is doing without leaving the admin console.
+- The ingest queue now follows the documents table interaction pattern with a
+  paginated list, persistent page-size control, and a fixed selected-job
+  inspector instead of a detached two-column card layout.
+- Queue rows now sort by the operator-visible rank, and administrators can
+  reorder queued or paused jobs, pause queued/running jobs, and resume paused
+  jobs once the current worker attempt has stopped.
+
+### Ingest: adaptive Docling throughput
+
+- Docling extraction concurrency now defaults to `auto`, resolving the
+  effective cgroup CPU and memory limits at worker startup and choosing a
+  bounded local Docling process count instead of relying on a fixed
+  one-process default.
+- Docker Compose now gives the worker a dedicated resource profile with a
+  6 CPU / 8 GiB limit and a 2 CPU / 2 GiB reservation, leaving API and
+  database service profiles unchanged.
+- Restarted or requeued large PDF jobs now sync active-stage progress from
+  durable page-range ingest units before waiting on the heavy-document slot,
+  so already extracted pages remain visible in progress immediately after
+  worker replacement or lease recovery.
+
 ## 0.4.9 — 2026-05-14
 
 ### Assistant: chat transcript and runtime activity UX
@@ -85,8 +133,16 @@ summary refresh; summary refresh is treated as derived cache work.
 the runtime: `IRONRAG_DOCLING_PAGE_BATCH_SIZE`,
 `IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES`,
 `IRONRAG_DOCLING_MAX_CONCURRENCY`,
+`IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM`,
 `IRONRAG_INGESTION_EMBEDDING_PARALLELISM`, and
 `IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC`.
+- `IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM` now defaults to
+`auto`, resolves from the worker CPU and memory cgroup limits, and caps
+automatic scheduling at four heavy PDF pipelines. The automatic value is
+also bounded by configured Docling subprocess concurrency so heavy jobs
+do not pile up unbounded behind `IRONRAG_DOCLING_MAX_CONCURRENCY`;
+invalid values and missing resource detection fall back to the safe
+single-pipeline mode.
 
 ### Documents: processing progress and failure visibility
 

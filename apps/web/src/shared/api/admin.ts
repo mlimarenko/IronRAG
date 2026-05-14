@@ -1,4 +1,4 @@
-import { Admin, Ai, Audit, Catalog, Iam } from "./generated";
+import { Admin, Ai, Audit, Catalog, Iam, Ops } from "./generated";
 import { unwrap } from "./runtime";
 import {
   resolveProviderBaseUrlPolicy,
@@ -24,6 +24,8 @@ import type {
   CreateModelPresetRequest as GeneratedCreateModelPresetRequest,
   CreateProviderCredentialRequest as GeneratedCreateCredentialRequest,
   CreateWorkspacePriceOverrideRequest as GeneratedCreatePriceOverrideRequest,
+  IngestQueueMoveDirection,
+  IngestQueueResponse,
   ModelAvailabilityState,
   ModelCatalogEntryResponse,
   ModelPresetResponse,
@@ -36,6 +38,7 @@ import type {
   ListAiCredentialsData,
   ListAiModelsData,
   ListAuditEventsData,
+  ListIngestQueueData,
   UpdateLibraryRecognitionPolicyRequest,
   UpdateLibraryWebIngestPolicyRequest,
   MintTokenRequest as GeneratedMintTokenRequest,
@@ -48,6 +51,7 @@ import type {
 } from "./generated";
 
 type ListAuditEventsParams = NonNullable<ListAuditEventsData["query"]>;
+type ListIngestQueueParams = NonNullable<ListIngestQueueData["query"]>;
 
 type AiScopeParams = NonNullable<ListAiCredentialsData["query"]>;
 
@@ -55,6 +59,8 @@ export type ListModelsParams = NonNullable<ListAiModelsData["query"]>;
 export type {
   CatalogLibraryResponse,
   CatalogWorkspaceResponse,
+  IngestQueueMoveDirection,
+  IngestQueueResponse,
   WebIngestPattern,
   WebIngestUrlFilter,
   WebIngestUrlFilterMode,
@@ -79,9 +85,15 @@ const MODEL_AVAILABILITY_STATE: Record<ModelAvailabilityState, true> = {
   unknown: true,
 };
 
-const PROVIDER_CAPABILITY_STATES = new Set(["supported", "unsupported", "unknown"]);
+const PROVIDER_CAPABILITY_STATES = new Set([
+  "supported",
+  "unsupported",
+  "unknown",
+]);
 
-function isModelAvailabilityState(value: unknown): value is ModelAvailabilityState {
+function isModelAvailabilityState(
+  value: unknown,
+): value is ModelAvailabilityState {
   return typeof value === "string" && value in MODEL_AVAILABILITY_STATE;
 }
 
@@ -95,8 +107,13 @@ function assertStringEnumField(
   policyName: string,
   allowedValues: Set<string>,
 ) {
-  if (typeof value[fieldName] !== "string" || !allowedValues.has(value[fieldName])) {
-    throw new Error(`Provider catalog entry ${policyName}.${fieldName} is not canonical`);
+  if (
+    typeof value[fieldName] !== "string" ||
+    !allowedValues.has(value[fieldName])
+  ) {
+    throw new Error(
+      `Provider catalog entry ${policyName}.${fieldName} is not canonical`,
+    );
   }
 }
 
@@ -107,12 +124,16 @@ function assertRecordField(
 ): Record<string, unknown> {
   const field = value[fieldName];
   if (!isRecord(field)) {
-    throw new Error(`Provider catalog entry ${providerId}.${fieldName} must be an object`);
+    throw new Error(
+      `Provider catalog entry ${providerId}.${fieldName} must be an object`,
+    );
   }
   return field;
 }
 
-export function parseModelCatalogResponse(payload: unknown): ModelCatalogEntryResponse[] {
+export function parseModelCatalogResponse(
+  payload: unknown,
+): ModelCatalogEntryResponse[] {
   if (!Array.isArray(payload)) {
     throw new Error("Model catalog response must be an array");
   }
@@ -125,17 +146,23 @@ export function parseModelCatalogResponse(payload: unknown): ModelCatalogEntryRe
     const model = entry as Partial<ModelCatalogEntryResponse>;
     const id = typeof model.id === "string" ? model.id : "<unknown>";
     if (!isModelAvailabilityState(model.availabilityState)) {
-      throw new Error(`Model catalog entry ${id} has invalid availabilityState`);
+      throw new Error(
+        `Model catalog entry ${id} has invalid availabilityState`,
+      );
     }
     if (!Array.isArray(model.availableCredentialIds)) {
-      throw new Error(`Model catalog entry ${id} has invalid availableCredentialIds`);
+      throw new Error(
+        `Model catalog entry ${id} has invalid availableCredentialIds`,
+      );
     }
   }
 
   return payload as ModelCatalogEntryResponse[];
 }
 
-export function parseProviderCatalogResponse(payload: unknown): ProviderCatalogEntryResponse[] {
+export function parseProviderCatalogResponse(
+  payload: unknown,
+): ProviderCatalogEntryResponse[] {
   if (!Array.isArray(payload)) {
     throw new Error("Provider catalog response must be an array");
   }
@@ -146,13 +173,27 @@ export function parseProviderCatalogResponse(payload: unknown): ProviderCatalogE
     }
 
     const id = typeof entry.id === "string" ? entry.id : "<unknown>";
-    resolveProviderCredentialPolicy({ credentialPolicy: entry.credentialPolicy });
+    resolveProviderCredentialPolicy({
+      credentialPolicy: entry.credentialPolicy,
+    });
     resolveProviderBaseUrlPolicy({ baseUrlPolicy: entry.baseUrlPolicy });
     resolveProviderModelDiscovery({ modelDiscovery: entry.modelDiscovery });
 
     const capabilities = assertRecordField(entry, "capabilities", id);
-    for (const capabilityName of ["chat", "embeddings", "modelDiscovery", "streaming", "tools", "vision"]) {
-      assertStringEnumField(capabilities, capabilityName, "capabilities", PROVIDER_CAPABILITY_STATES);
+    for (const capabilityName of [
+      "chat",
+      "embeddings",
+      "modelDiscovery",
+      "streaming",
+      "tools",
+      "vision",
+    ]) {
+      assertStringEnumField(
+        capabilities,
+        capabilityName,
+        "capabilities",
+        PROVIDER_CAPABILITY_STATES,
+      );
     }
   }
 
@@ -178,103 +219,129 @@ export const adminApi = {
   listTokens: () =>
     Iam.listIamTokens({}).then((result) => unwrap<TokenResponse[]>(result)),
   mintToken: (request: MintTokenRequest) =>
-    Iam.mintIamToken({ body: request }).then((result) => unwrap<MintTokenResponse>(result)),
+    Iam.mintIamToken({ body: request }).then((result) =>
+      unwrap<MintTokenResponse>(result),
+    ),
   revokeToken: (principalId: string) =>
-    Iam.revokeIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
-      unwrap(result);
-    }),
+    Iam.revokeIamToken({ path: { tokenPrincipalId: principalId } }).then(
+      (result) => {
+        unwrap(result);
+      },
+    ),
   deleteToken: (principalId: string) =>
-    Iam.deleteIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
-      unwrap(result);
-    }),
+    Iam.deleteIamToken({ path: { tokenPrincipalId: principalId } }).then(
+      (result) => {
+        unwrap(result);
+      },
+    ),
 
   listProviders: () =>
-    Ai.listAiProviders().then(
-      (result) => parseProviderCatalogResponse(unwrap(result)),
+    Ai.listAiProviders().then((result) =>
+      parseProviderCatalogResponse(unwrap(result)),
     ),
   listModels: (params: ListModelsParams = {}) =>
-    Ai.listAiModels({ query: params }).then(
-      (result) => parseModelCatalogResponse(unwrap(result)),
+    Ai.listAiModels({ query: params }).then((result) =>
+      parseModelCatalogResponse(unwrap(result)),
     ),
   listCredentials: (params: AiScopeParams = {}) =>
-    Ai.listAiCredentials({ query: params }).then(
-      (result) => unwrap<ProviderCredentialResponse[]>(result),
+    Ai.listAiCredentials({ query: params }).then((result) =>
+      unwrap<ProviderCredentialResponse[]>(result),
     ),
   createCredential: (data: CreateCredentialRequest) =>
-    Ai.createAiCredential({ body: toGeneratedRequest<GeneratedCreateCredentialRequest>(data) }).then(
-      (result) => unwrap<ProviderCredentialResponse>(result),
-    ),
+    Ai.createAiCredential({
+      body: toGeneratedRequest<GeneratedCreateCredentialRequest>(data),
+    }).then((result) => unwrap<ProviderCredentialResponse>(result)),
   updateCredential: (credentialId: string, data: UpdateCredentialRequest) =>
     Ai.updateAiCredential({
       path: { credentialId },
       body: toGeneratedRequest<GeneratedUpdateCredentialRequest>(data),
-    }).then(
-      (result) => unwrap<ProviderCredentialResponse>(result),
-    ),
+    }).then((result) => unwrap<ProviderCredentialResponse>(result)),
   listBindings: (
     params: Required<Pick<AiScopeParams, "scopeKind">> & AiScopeParams,
   ) =>
-    Ai.listAiLibraryBindings({ query: params }).then(
-      (result) => unwrap<AiBindingAssignmentResponse[]>(result),
+    Ai.listAiLibraryBindings({ query: params }).then((result) =>
+      unwrap<AiBindingAssignmentResponse[]>(result),
     ),
   createBinding: (data: CreateBindingRequest) =>
-    Ai.createAiLibraryBinding({ body: toGeneratedRequest<GeneratedCreateBindingRequest>(data) }).then(
-      (result) => unwrap<AiBindingAssignmentResponse>(result),
-    ),
+    Ai.createAiLibraryBinding({
+      body: toGeneratedRequest<GeneratedCreateBindingRequest>(data),
+    }).then((result) => unwrap<AiBindingAssignmentResponse>(result)),
   updateBinding: (bindingId: string, data: UpdateBindingRequest) =>
     Ai.updateAiLibraryBinding({
       path: { bindingId },
       body: toGeneratedRequest<GeneratedUpdateBindingRequest>(data),
-    }).then(
-      (result) => unwrap<AiBindingAssignmentResponse>(result),
-    ),
+    }).then((result) => unwrap<AiBindingAssignmentResponse>(result)),
   deleteBinding: (bindingId: string) =>
     Ai.deleteAiLibraryBinding({ path: { bindingId } }).then((result) => {
       unwrap(result);
     }),
   validateBinding: (bindingId: string) =>
-    Ai.validateAiLibraryBinding({ path: { bindingId } }).then(
-      (result) => unwrap<BindingValidationResponse>(result),
+    Ai.validateAiLibraryBinding({ path: { bindingId } }).then((result) =>
+      unwrap<BindingValidationResponse>(result),
     ),
   listModelPresets: (params: AiScopeParams = {}) =>
-    Ai.listAiModelPresets({ query: params }).then(
-      (result) => unwrap<ModelPresetResponse[]>(result),
+    Ai.listAiModelPresets({ query: params }).then((result) =>
+      unwrap<ModelPresetResponse[]>(result),
     ),
   createModelPreset: (data: CreateModelPresetRequest) =>
-    Ai.createAiModelPreset({ body: toGeneratedRequest<GeneratedCreateModelPresetRequest>(data) }).then(
-      (result) => unwrap<ModelPresetResponse>(result),
-    ),
+    Ai.createAiModelPreset({
+      body: toGeneratedRequest<GeneratedCreateModelPresetRequest>(data),
+    }).then((result) => unwrap<ModelPresetResponse>(result)),
   updateModelPreset: (presetId: string, data: UpdateModelPresetRequest) =>
     Ai.updateAiModelPreset({
       path: { presetId },
       body: toGeneratedRequest<GeneratedUpdateModelPresetRequest>(data),
-    }).then(
-      (result) => unwrap<ModelPresetResponse>(result),
-    ),
+    }).then((result) => unwrap<ModelPresetResponse>(result)),
   listPrices: () =>
-    Ai.listAiPrices({}).then((result) => unwrap<PriceCatalogEntryResponse[]>(result)),
-  createPriceOverride: (data: CreatePriceOverrideRequest) =>
-    Ai.createAiPriceOverride({ body: toGeneratedRequest<GeneratedCreatePriceOverrideRequest>(data) }).then(
-      (result) => unwrap<PriceCatalogEntryResponse>(result),
+    Ai.listAiPrices({}).then((result) =>
+      unwrap<PriceCatalogEntryResponse[]>(result),
     ),
+  createPriceOverride: (data: CreatePriceOverrideRequest) =>
+    Ai.createAiPriceOverride({
+      body: toGeneratedRequest<GeneratedCreatePriceOverrideRequest>(data),
+    }).then((result) => unwrap<PriceCatalogEntryResponse>(result)),
 
   getAdminSurface: () =>
-    Admin.getAdminSurface().then((result) => unwrap<AdminSurfaceResponse>(result)),
+    Admin.getAdminSurface().then((result) =>
+      unwrap<AdminSurfaceResponse>(result),
+    ),
 
   listAuditEvents: (params: ListAuditEventsParams = {}) =>
-    Audit.listAuditEvents({ query: params }).then((result) => unwrap<AuditEventPageResponse>(result)),
+    Audit.listAuditEvents({ query: params }).then((result) =>
+      unwrap<AuditEventPageResponse>(result),
+    ),
+  listIngestQueue: (params: ListIngestQueueParams = {}) =>
+    Ops.listIngestQueue({ query: params }).then((result) =>
+      unwrap<IngestQueueResponse>(result),
+    ),
+  moveIngestQueueJob: (jobId: string, direction: IngestQueueMoveDirection) =>
+    Ops.moveIngestQueueJob({ path: { jobId }, body: { direction } }).then(
+      (result) => unwrap<IngestQueueResponse>(result),
+    ),
+  pauseIngestQueueJob: (jobId: string) =>
+    Ops.pauseIngestQueueJob({ path: { jobId } }).then((result) =>
+      unwrap<IngestQueueResponse>(result),
+    ),
+  resumeIngestQueueJob: (jobId: string) =>
+    Ops.resumeIngestQueueJob({ path: { jobId } }).then((result) =>
+      unwrap<IngestQueueResponse>(result),
+    ),
+  cancelIngestQueueJob: (jobId: string) =>
+    Ops.cancelIngestQueueJob({ path: { jobId } }).then((result) =>
+      unwrap<IngestQueueResponse>(result),
+    ),
 
   listWorkspaces: () =>
-    Catalog.listCatalogWorkspaces().then(
-      (result) => unwrap<CatalogWorkspaceResponse[]>(result),
+    Catalog.listCatalogWorkspaces().then((result) =>
+      unwrap<CatalogWorkspaceResponse[]>(result),
     ),
   listLibraries: (workspaceId: string) =>
-    Catalog.listCatalogLibraries({ path: { workspaceId } }).then(
-      (result) => unwrap<CatalogLibraryResponse[]>(result),
+    Catalog.listCatalogLibraries({ path: { workspaceId } }).then((result) =>
+      unwrap<CatalogLibraryResponse[]>(result),
     ),
   getLibrary: (libraryId: string) =>
-    Catalog.getCatalogLibrary({ path: { libraryId } }).then(
-      (result) => unwrap<CatalogLibraryResponse>(result),
+    Catalog.getCatalogLibrary({ path: { libraryId } }).then((result) =>
+      unwrap<CatalogLibraryResponse>(result),
     ),
   updateWebIngestPolicy: (libraryId: string, policy: WebIngestPolicy) =>
     Catalog.updateCatalogLibraryWebIngestPolicy({

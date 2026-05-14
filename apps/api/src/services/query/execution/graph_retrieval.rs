@@ -18,6 +18,7 @@ use crate::{
             RelatedTokenSelection, near_token_overlap_count, normalized_alnum_tokens,
             select_related_overlap_tokens, token_sequence_exact_or_contains,
         },
+        vector_dimensions::validate_embedding_vector_dimensions,
     },
 };
 
@@ -50,6 +51,7 @@ pub(crate) async fn retrieve_entity_hits(
     } else if let Some(context) =
         resolve_runtime_vector_search_context(state, library_id, provider_profile).await?
     {
+        validate_embedding_vector_dimensions(state, question_embedding, "runtime entity search")?;
         state
             .arango_search_store
             .search_entity_vectors_by_similarity(

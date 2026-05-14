@@ -27,18 +27,29 @@ use tokio::{
     time::timeout,
 };
 
-use crate::shared::extraction::{
-    ExtractionOutput, ExtractionSourceMetadata, build_text_layout_from_content,
+use crate::shared::{
+    extraction::{ExtractionOutput, ExtractionSourceMetadata, build_text_layout_from_content},
+    telemetry,
 };
 
 const DEFAULT_EXTRACT_BIN: &str = "ironrag-docling-extract";
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
-const DEFAULT_MAX_CONCURRENCY: usize = 1;
 const DEFAULT_PAGE_BATCH_SIZE: u32 = 5;
+const DOCLING_AUTO_MAX_CONCURRENCY: usize = 4;
+const DOCLING_AUTO_RESERVED_MEMORY_MIB: u64 = 2048;
+const DOCLING_AUTO_MEMORY_PER_PROCESS_MIB: u64 = 2560;
 const STDERR_PREVIEW_LIMIT: usize = 4_000;
 
-static DOCLING_CONCURRENCY: LazyLock<Arc<Semaphore>> =
-    LazyLock::new(|| Arc::new(Semaphore::new(docling_max_concurrency())));
+static DOCLING_MAX_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
+    let concurrency = resolve_docling_max_concurrency();
+    tracing::info!(concurrency, "docling concurrency configured");
+    concurrency
+});
+
+static DOCLING_CONCURRENCY: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    let concurrency = *DOCLING_MAX_CONCURRENCY;
+    Arc::new(Semaphore::new(concurrency))
+});
 
 #[derive(Debug, Error)]
 pub enum DoclingExtractionError {
@@ -221,7 +232,7 @@ pub fn configured_page_batch_size() -> u32 {
 }
 
 pub fn configured_max_concurrency() -> usize {
-    docling_max_concurrency()
+    *DOCLING_MAX_CONCURRENCY
 }
 
 /// Extracts a PDF through the page-range Docling path, merging results into
@@ -730,12 +741,77 @@ fn docling_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
 }
 
-fn docling_max_concurrency() -> usize {
-    std::env::var("IRONRAG_DOCLING_MAX_CONCURRENCY")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_CONCURRENCY)
+fn resolve_docling_max_concurrency() -> usize {
+    let raw = std::env::var("IRONRAG_DOCLING_MAX_CONCURRENCY").ok();
+    match raw.as_deref().map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("auto") || value == "0" || value.is_empty() => {
+            auto_docling_max_concurrency()
+        }
+        Some(value) => match value.parse::<usize>().ok().filter(|value| *value > 0) {
+            Some(value) => value,
+            None => {
+                tracing::warn!(
+                    raw = value,
+                    "invalid IRONRAG_DOCLING_MAX_CONCURRENCY; using automatic docling concurrency"
+                );
+                auto_docling_max_concurrency()
+            }
+        },
+        None => auto_docling_max_concurrency(),
+    }
+}
+
+fn auto_docling_max_concurrency() -> usize {
+    let cpu_parallelism = telemetry::detect_container_cpu_parallelism().unwrap_or(1);
+    let memory_limit_bytes = telemetry::detect_container_memory_limit_bytes();
+    let concurrency = auto_docling_max_concurrency_for_limits(cpu_parallelism, memory_limit_bytes);
+    let memory_limit_mib = memory_limit_bytes.map(|bytes| bytes / (1024 * 1024));
+    let soft_limit_mib = memory_limit_mib.map(|mib| mib.saturating_mul(9) / 10);
+    let docling_budget_mib =
+        soft_limit_mib.map(|mib| mib.saturating_sub(DOCLING_AUTO_RESERVED_MEMORY_MIB));
+    tracing::info!(
+        cpu_parallelism,
+        ?memory_limit_mib,
+        ?soft_limit_mib,
+        ?docling_budget_mib,
+        reserved_mib = DOCLING_AUTO_RESERVED_MEMORY_MIB,
+        per_process_mib = DOCLING_AUTO_MEMORY_PER_PROCESS_MIB,
+        max_concurrency = DOCLING_AUTO_MAX_CONCURRENCY,
+        concurrency,
+        "docling auto concurrency resolved"
+    );
+    if docling_budget_mib.is_some_and(|budget| budget < DOCLING_AUTO_MEMORY_PER_PROCESS_MIB) {
+        tracing::warn!(
+            ?memory_limit_mib,
+            ?soft_limit_mib,
+            ?docling_budget_mib,
+            required_mib = DOCLING_AUTO_MEMORY_PER_PROCESS_MIB,
+            "docling auto concurrency has only enough memory budget for the mandatory single process"
+        );
+    }
+    concurrency
+}
+
+fn auto_docling_max_concurrency_for_limits(
+    cpu_parallelism: usize,
+    memory_limit_bytes: Option<u64>,
+) -> usize {
+    // One Docling process is internally CPU-heavy (Torch/RapidOCR); reserve
+    // roughly half of the worker CPU quota for the Rust pipeline, embeddings,
+    // health checks, and query traffic while extraction is running.
+    let cpu_bound = cpu_parallelism.max(1).saturating_div(2).max(1);
+    let memory_bound = memory_limit_bytes
+        .map(|bytes| bytes / (1024 * 1024))
+        .map(|memory_mib| {
+            let soft_limit_mib = memory_mib.saturating_mul(9) / 10;
+            soft_limit_mib
+                .saturating_sub(DOCLING_AUTO_RESERVED_MEMORY_MIB)
+                .checked_div(DOCLING_AUTO_MEMORY_PER_PROCESS_MIB)
+                .unwrap_or(0) as usize
+        })
+        .unwrap_or(1);
+
+    cpu_bound.min(memory_bound.max(1)).clamp(1, DOCLING_AUTO_MAX_CONCURRENCY)
 }
 
 fn normalized_input_file_name(
@@ -900,5 +976,13 @@ mod tests {
             normalized_input_file_name(Some("../unsafe/report"), None, "docx"),
             "report.docx"
         );
+    }
+
+    #[test]
+    fn auto_docling_concurrency_uses_cpu_and_memory_bounds() {
+        assert_eq!(auto_docling_max_concurrency_for_limits(4, Some(8 * 1024 * 1024 * 1024)), 2);
+        assert_eq!(auto_docling_max_concurrency_for_limits(8, Some(16 * 1024 * 1024 * 1024)), 4);
+        assert_eq!(auto_docling_max_concurrency_for_limits(8, Some(4 * 1024 * 1024 * 1024)), 1);
+        assert_eq!(auto_docling_max_concurrency_for_limits(8, None), 1);
     }
 }

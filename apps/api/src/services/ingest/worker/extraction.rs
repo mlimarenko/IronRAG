@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-use super::super::service::INGEST_STAGE_EXTRACT_CONTENT;
+use super::super::service::{INGEST_STAGE_EXTRACT_CONTENT, RecordStageUnitProgressCommand};
 
 const DEFAULT_PDF_EXTRACT_STREAM_WINDOW_PAGES: u32 = 40;
 
@@ -273,7 +273,6 @@ async fn resolve_resumable_pdf_extract_content(
             .filter(|row| row.unit_state == "completed" && row.unit_kind == "pdf_page_range")
             .map(|row| (row.unit_ordinal, row))
             .collect();
-
     let mut output_units: Vec<(i32, PdfExtractUnitMergeFragment)> = Vec::new();
     let mut missing_units: Vec<PdfExtractUnit> = Vec::new();
     let mut reused_unit_count = 0_i32;
@@ -303,6 +302,17 @@ async fn resolve_resumable_pdf_extract_content(
             range_end,
         });
     }
+    sync_pdf_extract_stage_progress(state, attempt_id, revision.revision_id, page_count)
+        .await
+        .map_err(|error| {
+            CanonicalExtractContentError::extraction_failed(
+                "extract_progress_sync_failed",
+                format!(
+                    "failed to sync extract progress for revision {}: {error}",
+                    revision.revision_id
+                ),
+            )
+        })?;
 
     let extracted_unit_count = i32::try_from(missing_units.len()).unwrap_or(i32::MAX);
     let stream_window_pages = pdf_extract_stream_window_pages(batch_size);
@@ -497,6 +507,8 @@ async fn extract_pdf_run_streamed(
                     .lock()
                     .await
                     .push((unit.unit_ordinal, PdfExtractUnitMergeFragment::from_output(output)));
+                sync_pdf_extract_stage_progress(&state, attempt_id, revision_id, page_count)
+                    .await?;
                 Ok(())
             }
         },
@@ -511,6 +523,73 @@ async fn extract_pdf_run_streamed(
             ),
         )
     })
+}
+
+async fn sync_pdf_extract_stage_progress(
+    state: &AppState,
+    attempt_id: Uuid,
+    revision_id: Uuid,
+    page_count: u32,
+) -> anyhow::Result<()> {
+    let completed_page_count = ingest_repository::sum_completed_content_revision_ingest_unit_pages(
+        &state.persistence.postgres,
+        revision_id,
+        INGEST_STAGE_EXTRACT_CONTENT,
+    )
+    .await?
+    .clamp(0, i64::from(page_count)) as u32;
+    state
+        .canonical_services
+        .ingest
+        .record_stage_unit_progress(
+            state,
+            RecordStageUnitProgressCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
+                completed_units: completed_page_count,
+                total_units: page_count,
+                details_json: serde_json::json!({ "fileKind": "pdf" }),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn sync_resumable_pdf_extract_stage_progress_from_units(
+    state: &AppState,
+    attempt_id: Uuid,
+    revision_id: Uuid,
+) -> anyhow::Result<()> {
+    let progress = ingest_repository::get_content_revision_ingest_unit_page_progress(
+        &state.persistence.postgres,
+        revision_id,
+        INGEST_STAGE_EXTRACT_CONTENT,
+    )
+    .await?;
+    let Some(total_page_count) = progress
+        .total_page_count
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+    else {
+        return Ok(());
+    };
+    let completed_page_count =
+        progress.completed_page_count.clamp(0, i64::from(total_page_count)) as u32;
+    state
+        .canonical_services
+        .ingest
+        .record_stage_unit_progress(
+            state,
+            RecordStageUnitProgressCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
+                completed_units: completed_page_count,
+                total_units: total_page_count,
+                details_json: serde_json::json!({ "fileKind": "pdf" }),
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 fn merge_fragment_from_unit(

@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{content_repository, ingest_repository},
+    integrations::docling,
     services::{
         content::service::{
             MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand,
@@ -43,11 +44,17 @@ use crate::{
             RecordStageEventCommand,
         },
     },
-    shared::extraction::file_extract::{FileExtractionPlan, UploadAdmissionError},
+    shared::{
+        extraction::file_extract::{FileExtractionPlan, UploadAdmissionError},
+        telemetry,
+    },
 };
 
 use self::{
-    extraction::{generate_document_summary_from_blocks, resolve_canonical_extract_content},
+    extraction::{
+        generate_document_summary_from_blocks, resolve_canonical_extract_content,
+        sync_resumable_pdf_extract_stage_progress_from_units,
+    },
     failure::fail_canonical_ingest_job,
     runtime::run_ingestion_worker_pool,
     web_jobs::{run_canonical_web_discovery_job, run_canonical_web_materialize_page_job},
@@ -71,6 +78,10 @@ const CANONICAL_STALE_LEASE_SECONDS: i64 = 60;
 /// sibling worker in a multi-worker deployment is never falsely reclaimed.
 const CANONICAL_STARTUP_LEASE_RECOVERY_SECONDS: i64 = 30;
 const DEFAULT_HEAVY_REVISION_BYTES: i64 = 8 * 1024 * 1024;
+const HEAVY_PIPELINE_AUTO_MAX_PARALLELISM: usize = 4;
+const HEAVY_PIPELINE_AUTO_RESERVED_MEMORY_MIB: u64 = 2048;
+const HEAVY_PIPELINE_AUTO_MEMORY_PER_JOB_MIB: u64 = 1024;
+const HEAVY_PIPELINE_AUTO_DOCLING_WAITERS_PER_PROCESS: usize = 2;
 
 static HEAVY_REVISION_PIPELINE: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(heavy_revision_pipeline_parallelism())));
@@ -116,6 +127,12 @@ struct JobCanceledByRequest {
 }
 
 #[derive(Debug, Error)]
+#[error("canonical ingest job {job_id} was paused by operator request")]
+struct JobPausedByOperator {
+    job_id: Uuid,
+}
+
+#[derive(Debug, Error)]
 #[error("canonical ingest job {job_id} stopped because worker shutdown was requested")]
 struct JobCanceledByShutdown {
     job_id: Uuid,
@@ -130,10 +147,13 @@ struct JobLeaseLost {
 fn job_cancellation_error(
     job_id: Uuid,
     user_cancel_requested: &AtomicBool,
+    operator_pause_requested: &AtomicBool,
     lease_lost_requested: &AtomicBool,
 ) -> anyhow::Error {
     if user_cancel_requested.load(Ordering::Relaxed) {
         anyhow::Error::new(JobCanceledByRequest { job_id })
+    } else if operator_pause_requested.load(Ordering::Relaxed) {
+        anyhow::Error::new(JobPausedByOperator { job_id })
     } else if lease_lost_requested.load(Ordering::Relaxed) {
         anyhow::Error::new(JobLeaseLost { job_id })
     } else {
@@ -144,11 +164,17 @@ fn job_cancellation_error(
 fn check_job_cancellation(
     cancellation_token: &CancellationToken,
     user_cancel_requested: &AtomicBool,
+    operator_pause_requested: &AtomicBool,
     lease_lost_requested: &AtomicBool,
     job_id: Uuid,
 ) -> anyhow::Result<()> {
     if cancellation_token.is_cancelled() {
-        Err(job_cancellation_error(job_id, user_cancel_requested, lease_lost_requested))
+        Err(job_cancellation_error(
+            job_id,
+            user_cancel_requested,
+            operator_pause_requested,
+            lease_lost_requested,
+        ))
     } else {
         Ok(())
     }
@@ -188,22 +214,112 @@ fn heavy_revision_byte_threshold() -> i64 {
 }
 
 fn heavy_revision_pipeline_parallelism() -> usize {
-    std::env::var("IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(1)
+    let raw = std::env::var("IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM").ok();
+    match raw.as_deref().map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("auto") || value.is_empty() => {
+            auto_heavy_revision_pipeline_parallelism()
+        }
+        Some(value) => match value.parse::<usize>().ok().filter(|value| *value > 0) {
+            Some(value) => {
+                tracing::info!(
+                    parallelism = value,
+                    "heavy revision pipeline parallelism configured"
+                );
+                value
+            }
+            None => {
+                tracing::warn!(
+                    raw = value,
+                    fallback_parallelism = 1,
+                    "invalid IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM; using fail-safe heavy revision pipeline parallelism"
+                );
+                1
+            }
+        },
+        None => auto_heavy_revision_pipeline_parallelism(),
+    }
+}
+
+fn auto_heavy_revision_pipeline_parallelism() -> usize {
+    let cpu_parallelism = telemetry::detect_container_cpu_parallelism().unwrap_or(1);
+    let memory_limit_bytes = telemetry::detect_container_memory_limit_bytes();
+    let docling_parallelism = docling::configured_max_concurrency();
+    let parallelism = auto_heavy_revision_pipeline_parallelism_for_limits(
+        cpu_parallelism,
+        memory_limit_bytes,
+        docling_parallelism,
+    );
+    let memory_limit_mib = memory_limit_bytes.map(|bytes| bytes / (1024 * 1024));
+    let soft_limit_mib = memory_limit_mib.map(|mib| mib.saturating_mul(9) / 10);
+    let heavy_budget_mib =
+        soft_limit_mib.map(|mib| mib.saturating_sub(HEAVY_PIPELINE_AUTO_RESERVED_MEMORY_MIB));
+    tracing::info!(
+        cpu_parallelism,
+        ?memory_limit_mib,
+        ?soft_limit_mib,
+        ?heavy_budget_mib,
+        reserved_mib = HEAVY_PIPELINE_AUTO_RESERVED_MEMORY_MIB,
+        per_job_mib = HEAVY_PIPELINE_AUTO_MEMORY_PER_JOB_MIB,
+        max_parallelism = HEAVY_PIPELINE_AUTO_MAX_PARALLELISM,
+        docling_parallelism,
+        docling_waiters_per_process = HEAVY_PIPELINE_AUTO_DOCLING_WAITERS_PER_PROCESS,
+        parallelism,
+        "heavy revision pipeline auto parallelism resolved"
+    );
+    if heavy_budget_mib.is_some_and(|budget| budget < HEAVY_PIPELINE_AUTO_MEMORY_PER_JOB_MIB) {
+        tracing::warn!(
+            ?memory_limit_mib,
+            ?soft_limit_mib,
+            ?heavy_budget_mib,
+            required_mib = HEAVY_PIPELINE_AUTO_MEMORY_PER_JOB_MIB,
+            "heavy revision pipeline auto parallelism has only enough memory budget for the mandatory single job"
+        );
+    }
+    parallelism
+}
+
+fn auto_heavy_revision_pipeline_parallelism_for_limits(
+    cpu_parallelism: usize,
+    memory_limit_bytes: Option<u64>,
+    docling_parallelism: usize,
+) -> usize {
+    let cpu_bound = cpu_parallelism.clamp(1, HEAVY_PIPELINE_AUTO_MAX_PARALLELISM);
+    let docling_bound = docling_parallelism
+        .max(1)
+        .saturating_mul(HEAVY_PIPELINE_AUTO_DOCLING_WAITERS_PER_PROCESS)
+        .min(HEAVY_PIPELINE_AUTO_MAX_PARALLELISM);
+    let memory_bound = memory_limit_bytes
+        .map(|bytes| bytes / (1024 * 1024))
+        .map(|memory_mib| {
+            let soft_limit_mib = memory_mib.saturating_mul(9) / 10;
+            soft_limit_mib
+                .saturating_sub(HEAVY_PIPELINE_AUTO_RESERVED_MEMORY_MIB)
+                .checked_div(HEAVY_PIPELINE_AUTO_MEMORY_PER_JOB_MIB)
+                .unwrap_or(0) as usize
+        })
+        .unwrap_or(1);
+
+    cpu_bound
+        .min(docling_bound)
+        .min(memory_bound.max(1))
+        .clamp(1, HEAVY_PIPELINE_AUTO_MAX_PARALLELISM)
 }
 
 fn map_stage_error(
     error: anyhow::Error,
     user_cancel_requested: &AtomicBool,
+    operator_pause_requested: &AtomicBool,
     lease_lost_requested: &AtomicBool,
     job_id: Uuid,
     context: &'static str,
 ) -> anyhow::Error {
     if anyhow_is_cancelled(&error) {
-        job_cancellation_error(job_id, user_cancel_requested, lease_lost_requested)
+        job_cancellation_error(
+            job_id,
+            user_cancel_requested,
+            operator_pause_requested,
+            lease_lost_requested,
+        )
     } else {
         error.context(context)
     }
@@ -279,6 +395,7 @@ fn spawn_attempt_heartbeat_observer(
     heartbeat_running: Arc<AtomicBool>,
     cancellation_token: CancellationToken,
     user_cancel_requested: Arc<AtomicBool>,
+    operator_pause_requested: Arc<AtomicBool>,
     lease_lost_requested: Arc<AtomicBool>,
 ) {
     let thread_name = format!("ironrag-heartbeat-{}", attempt_id.simple());
@@ -322,6 +439,15 @@ fn spawn_attempt_heartbeat_observer(
                             "cancellation observed on heartbeat tick, signalling pipeline abort"
                         );
                         user_cancel_requested.store(true, Ordering::Relaxed);
+                        cancellation_token.cancel();
+                    }
+                    Ok(Some(queue_state)) if queue_state == "paused" => {
+                        info!(
+                            %job_id,
+                            %attempt_id,
+                            "operator pause observed on heartbeat tick, signalling pipeline pause"
+                        );
+                        operator_pause_requested.store(true, Ordering::Relaxed);
                         cancellation_token.cancel();
                     }
                     Ok(Some(queue_state)) => {
@@ -399,6 +525,7 @@ async fn execute_canonical_ingest_job(
     let heartbeat_running = Arc::new(AtomicBool::new(true));
     let heartbeat_guard = AttemptHeartbeatGuard::new(Arc::clone(&heartbeat_running));
     let user_cancel_requested = Arc::new(AtomicBool::new(false));
+    let operator_pause_requested = Arc::new(AtomicBool::new(false));
     let lease_lost_requested = Arc::new(AtomicBool::new(false));
 
     let heartbeat_interval =
@@ -411,6 +538,7 @@ async fn execute_canonical_ingest_job(
         Arc::clone(&heartbeat_running),
         cancellation_token.clone(),
         Arc::clone(&user_cancel_requested),
+        Arc::clone(&operator_pause_requested),
         Arc::clone(&lease_lost_requested),
     );
 
@@ -424,13 +552,21 @@ async fn execute_canonical_ingest_job(
     if current_job.as_ref().is_some_and(|j| j.queue_state == "canceled") {
         user_cancel_requested.store(true, Ordering::Relaxed);
         cancellation_token.cancel();
+    } else if current_job.as_ref().is_some_and(|j| j.queue_state == "paused") {
+        operator_pause_requested.store(true, Ordering::Relaxed);
+        cancellation_token.cancel();
     } else if current_job.as_ref().is_some_and(|j| j.queue_state != "leased") {
         lease_lost_requested.store(true, Ordering::Relaxed);
         cancellation_token.cancel();
     }
 
     let result = if cancellation_token.is_cancelled() {
-        Err(job_cancellation_error(job.id, &user_cancel_requested, &lease_lost_requested))
+        Err(job_cancellation_error(
+            job.id,
+            &user_cancel_requested,
+            &operator_pause_requested,
+            &lease_lost_requested,
+        ))
     } else {
         match job.job_kind.as_str() {
             "content_mutation" => {
@@ -474,6 +610,7 @@ async fn execute_canonical_ingest_job(
                     revision_id,
                     &cancellation_token,
                     &user_cancel_requested,
+                    &operator_pause_requested,
                     &lease_lost_requested,
                 )
                 .await
@@ -520,6 +657,34 @@ async fn execute_canonical_ingest_job(
                 .await;
             if let Err(error) = finalize_result {
                 if matches!(error, crate::interfaces::http::router_support::ApiError::Conflict(_)) {
+                    match ingest_repository::get_ingest_job_by_id(
+                        &state.persistence.postgres,
+                        job_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(row)) if row.queue_state == "paused" => {
+                            if let Err(e) = ingest_repository::abandon_paused_ingest_attempt(
+                                &state.persistence.postgres,
+                                attempt_id,
+                            )
+                            .await
+                            {
+                                tracing::warn!(%attempt_id, ?e, "failed to finalize paused ingest attempt after successful pipeline return");
+                            }
+                            info!(
+                                %worker_id,
+                                %job_id,
+                                %attempt_id,
+                                "canonical ingest job completed after operator pause; preserving paused queue state"
+                            );
+                            return Ok(());
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(%attempt_id, ?e, "failed to reload ingest job after finalize conflict");
+                        }
+                    }
                     warn!(
                         %worker_id,
                         %job_id,
@@ -547,6 +712,23 @@ async fn execute_canonical_ingest_job(
                     %job_id,
                     %attempt_id,
                     "canonical ingest job observed user cancel request and stopped cooperatively",
+                );
+                return Ok(());
+            }
+            if error.downcast_ref::<JobPausedByOperator>().is_some() {
+                if let Err(e) = ingest_repository::abandon_paused_ingest_attempt(
+                    &state.persistence.postgres,
+                    attempt_id,
+                )
+                .await
+                {
+                    tracing::warn!(%attempt_id, ?e, "failed to finalize paused ingest attempt");
+                }
+                info!(
+                    %worker_id,
+                    %job_id,
+                    %attempt_id,
+                    "canonical ingest job observed operator pause request and stopped cooperatively",
                 );
                 return Ok(());
             }
@@ -691,12 +873,14 @@ async fn run_canonical_ingest_pipeline(
     revision_id: Uuid,
     cancellation_token: &CancellationToken,
     user_cancel_requested: &AtomicBool,
+    operator_pause_requested: &AtomicBool,
     lease_lost_requested: &AtomicBool,
 ) -> anyhow::Result<()> {
     // --- Stage: extract_content -----------------------------------------------
     check_job_cancellation(
         cancellation_token,
         user_cancel_requested,
+        operator_pause_requested,
         lease_lost_requested,
         job.id,
     )?;
@@ -736,6 +920,16 @@ async fn run_canonical_ingest_pipeline(
             .await
             .context("failed to load knowledge revision from postgres")?
             .with_context(|| format!("knowledge revision {revision_id} not found in postgres"))?;
+    if let Err(error) =
+        sync_resumable_pdf_extract_stage_progress_from_units(state, attempt_id, revision_id).await
+    {
+        warn!(
+            %attempt_id,
+            %revision_id,
+            ?error,
+            "failed to sync resumable extract_content progress before heavy revision wait"
+        );
+    }
     let heavy_revision_pipeline_permit =
         acquire_heavy_revision_pipeline_permit(&revision_row).await?;
     let heavy_revision_pipeline_limited = heavy_revision_pipeline_permit.is_some();
@@ -988,6 +1182,7 @@ async fn run_canonical_ingest_pipeline(
     check_job_cancellation(
         cancellation_token,
         user_cancel_requested,
+        operator_pause_requested,
         lease_lost_requested,
         job.id,
     )?;
@@ -1036,6 +1231,7 @@ async fn run_canonical_ingest_pipeline(
             let mapped_error = map_stage_error(
                 error.into(),
                 user_cancel_requested,
+                operator_pause_requested,
                 lease_lost_requested,
                 job.id,
                 "failed to prepare and persist structured revision",
@@ -1223,6 +1419,7 @@ async fn run_canonical_ingest_pipeline(
     check_job_cancellation(
         cancellation_token,
         user_cancel_requested,
+        operator_pause_requested,
         lease_lost_requested,
         job.id,
     )?;
@@ -1257,7 +1454,13 @@ async fn run_canonical_ingest_pipeline(
     let embed_chunk_outcome = state
         .canonical_services
         .search
-        .embed_chunks_for_revision(state, revision.library_id, revision_id, cancellation_token)
+        .embed_chunks_for_revision(
+            state,
+            revision.library_id,
+            revision_id,
+            Some(attempt_id),
+            cancellation_token,
+        )
         .await;
     let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
     let mut embed_chunk_failure: Option<String> = None;
@@ -1325,6 +1528,7 @@ async fn run_canonical_ingest_pipeline(
                 return Err(job_cancellation_error(
                     job.id,
                     user_cancel_requested,
+                    operator_pause_requested,
                     lease_lost_requested,
                 ));
             }
@@ -1375,6 +1579,7 @@ async fn run_canonical_ingest_pipeline(
     check_job_cancellation(
         cancellation_token,
         user_cancel_requested,
+        operator_pause_requested,
         lease_lost_requested,
         job.id,
     )?;
@@ -1436,6 +1641,7 @@ async fn run_canonical_ingest_pipeline(
             return Err(job_cancellation_error(
                 job.id,
                 user_cancel_requested,
+                operator_pause_requested,
                 lease_lost_requested,
             ));
         }
@@ -1464,6 +1670,7 @@ async fn run_canonical_ingest_pipeline(
                     return Err(job_cancellation_error(
                         job.id,
                         user_cancel_requested,
+                        operator_pause_requested,
                         lease_lost_requested,
                     ));
                 }
@@ -1642,6 +1849,7 @@ async fn run_canonical_ingest_pipeline(
     check_job_cancellation(
         cancellation_token,
         user_cancel_requested,
+        operator_pause_requested,
         lease_lost_requested,
         job.id,
     )?;
@@ -1840,4 +2048,24 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record finalizing stage event")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mib(value: u64) -> u64 {
+        value * 1024 * 1024
+    }
+
+    #[test]
+    fn auto_heavy_pipeline_parallelism_uses_cpu_memory_and_default_cap() {
+        assert_eq!(auto_heavy_revision_pipeline_parallelism_for_limits(6, Some(mib(8192)), 2), 4);
+        assert_eq!(auto_heavy_revision_pipeline_parallelism_for_limits(2, Some(mib(8192)), 4), 2);
+        assert_eq!(auto_heavy_revision_pipeline_parallelism_for_limits(8, Some(mib(6144)), 4), 3);
+        assert_eq!(auto_heavy_revision_pipeline_parallelism_for_limits(8, Some(mib(4096)), 4), 1);
+        assert_eq!(auto_heavy_revision_pipeline_parallelism_for_limits(8, Some(mib(8192)), 1), 2);
+        assert_eq!(auto_heavy_revision_pipeline_parallelism_for_limits(8, None, 4), 1);
+        assert_eq!(auto_heavy_revision_pipeline_parallelism_for_limits(0, Some(mib(8192)), 4), 1);
+    }
 }

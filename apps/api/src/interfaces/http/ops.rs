@@ -1,9 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    routing::get,
+    extract::{Path, Query, State},
+    routing::{get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -16,10 +16,12 @@ use crate::{
             OpsLibraryWarning,
         },
     },
+    infra::repositories::ingest_repository,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_USAGE_READ, load_async_operation_and_authorize, load_library_and_authorize,
+            POLICY_LIBRARY_WRITE, POLICY_USAGE_READ, authorize_library_permission,
+            load_async_operation_and_authorize, load_library_and_authorize,
         },
         router_support::ApiError,
     },
@@ -81,11 +83,81 @@ pub struct OpsLibraryStateResponse {
     pub warnings: Vec<OpsLibraryWarningResponse>,
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct IngestQueueQuery {
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestQueueSummaryResponse {
+    pub running: i64,
+    pub queued: i64,
+    pub paused: i64,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestQueueItemResponse {
+    pub job_id: Uuid,
+    pub workspace_id: Uuid,
+    pub workspace_name: String,
+    pub library_id: Uuid,
+    pub library_name: String,
+    pub document_id: Option<Uuid>,
+    pub document_name: String,
+    pub job_kind: String,
+    pub queue_state: String,
+    pub queue_position: Option<i64>,
+    pub queued_at: chrono::DateTime<chrono::Utc>,
+    pub available_at: chrono::DateTime<chrono::Utc>,
+    pub attempt_id: Option<Uuid>,
+    pub attempt_state: Option<String>,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub current_stage: Option<String>,
+    pub progress_percent: Option<i32>,
+    pub attempt_number: Option<i32>,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestQueueResponse {
+    pub summary: IngestQueueSummaryResponse,
+    pub items: Vec<IngestQueueItemResponse>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveIngestQueueJobRequest {
+    pub direction: IngestQueueMoveDirection,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestQueueMoveDirection {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/ops/operations/{operation_id}", get(get_async_operation))
         .route("/ops/libraries/{library_id}", get(get_library_state))
         .route("/ops/libraries/{library_id}/dashboard", get(get_library_dashboard))
+        .route("/ops/ingest-queue", get(list_ingest_queue))
+        .route("/ops/ingest-queue/jobs/{job_id}/move", post(move_ingest_queue_job))
+        .route("/ops/ingest-queue/jobs/{job_id}/pause", post(pause_ingest_queue_job))
+        .route("/ops/ingest-queue/jobs/{job_id}/resume", post(resume_ingest_queue_job))
+        .route("/ops/ingest-queue/jobs/{job_id}/cancel", post(cancel_ingest_queue_job))
 }
 
 /// Canonical async-operation polling payload. Exposes the raw parent row
@@ -199,6 +271,214 @@ pub async fn get_library_state(
             .collect(),
         warnings: warnings.iter().map(map_ops_warning).collect(),
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/ops/ingest-queue",
+    tag = "ops",
+    operation_id = "listIngestQueue",
+    params(IngestQueueQuery),
+    responses(
+        (status = 200, description = "Active ingest queue visible to the caller", body = IngestQueueResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized to read operations"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_ingest_queue",
+    skip_all,
+    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id, item_count)
+)]
+pub async fn list_ingest_queue(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Query(query): Query<IngestQueueQuery>,
+) -> Result<Json<IngestQueueResponse>, ApiError> {
+    auth.require_any_scope(POLICY_USAGE_READ)?;
+    if let Some(library_id) = query.library_id {
+        let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
+    }
+
+    let rows = ingest_repository::list_active_ingest_queue(
+        &state.persistence.postgres,
+        query.workspace_id,
+        query.library_id,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+
+    let mut running = 0_i64;
+    let mut queued = 0_i64;
+    let mut paused = 0_i64;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !auth.has_library_permission(row.workspace_id, row.library_id, POLICY_USAGE_READ) {
+            continue;
+        }
+        match row.queue_state.as_str() {
+            "leased" => running += 1,
+            "queued" => queued += 1,
+            "paused" => paused += 1,
+            _ => {}
+        }
+        items.push(map_ingest_queue_item(row));
+    }
+    tracing::Span::current().record("item_count", items.len());
+    Ok(Json(IngestQueueResponse {
+        summary: IngestQueueSummaryResponse {
+            running,
+            queued,
+            paused,
+            total: running + queued + paused,
+        },
+        items,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ops/ingest-queue/jobs/{jobId}/move",
+    tag = "ops",
+    operation_id = "moveIngestQueueJob",
+    params(("jobId" = uuid::Uuid, Path, description = "Queued or paused ingest job identifier")),
+    request_body = MoveIngestQueueJobRequest,
+    responses(
+        (status = 200, description = "Updated active ingest queue", body = IngestQueueResponse),
+        (status = 400, description = "Job is not queued/paused or direction is invalid"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot mutate the job's library"),
+        (status = 404, description = "Job not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.move_ingest_queue_job", skip_all, fields(job_id = %job_id))]
+pub async fn move_ingest_queue_job(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+    Json(payload): Json<MoveIngestQueueJobRequest>,
+) -> Result<Json<IngestQueueResponse>, ApiError> {
+    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
+    let moved = ingest_repository::move_queued_ingest_job(
+        &state.persistence.postgres,
+        job_id,
+        map_move_direction(payload.direction),
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    if moved.is_none() {
+        return Err(ApiError::BadRequest(
+            "Only queued or paused jobs can be reordered".to_string(),
+        ));
+    }
+    list_ingest_queue(
+        auth,
+        State(state),
+        Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+    )
+    .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ops/ingest-queue/jobs/{jobId}/pause",
+    tag = "ops",
+    operation_id = "pauseIngestQueueJob",
+    params(("jobId" = uuid::Uuid, Path, description = "Queued or running ingest job identifier")),
+    responses(
+        (status = 200, description = "Updated active ingest queue", body = IngestQueueResponse),
+        (status = 400, description = "Job is not queued or running"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot mutate the job's library"),
+        (status = 404, description = "Job not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.pause_ingest_queue_job", skip_all, fields(job_id = %job_id))]
+pub async fn pause_ingest_queue_job(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<IngestQueueResponse>, ApiError> {
+    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
+    state.canonical_services.ingest.pause_job(&state, job_id).await?;
+    list_ingest_queue(
+        auth,
+        State(state),
+        Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+    )
+    .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ops/ingest-queue/jobs/{jobId}/resume",
+    tag = "ops",
+    operation_id = "resumeIngestQueueJob",
+    params(("jobId" = uuid::Uuid, Path, description = "Paused ingest job identifier")),
+    responses(
+        (status = 200, description = "Updated active ingest queue", body = IngestQueueResponse),
+        (status = 400, description = "Job is not paused"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot mutate the job's library"),
+        (status = 404, description = "Job not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.resume_ingest_queue_job", skip_all, fields(job_id = %job_id))]
+pub async fn resume_ingest_queue_job(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<IngestQueueResponse>, ApiError> {
+    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
+    state.canonical_services.ingest.resume_job(&state, job_id).await?;
+    list_ingest_queue(
+        auth,
+        State(state),
+        Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+    )
+    .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ops/ingest-queue/jobs/{jobId}/cancel",
+    tag = "ops",
+    operation_id = "cancelIngestQueueJob",
+    params(("jobId" = uuid::Uuid, Path, description = "Active ingest job identifier")),
+    responses(
+        (status = 200, description = "Updated active ingest queue", body = IngestQueueResponse),
+        (status = 400, description = "Job is already terminal"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot mutate the job's library"),
+        (status = 404, description = "Job not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.cancel_ingest_queue_job", skip_all, fields(job_id = %job_id))]
+pub async fn cancel_ingest_queue_job(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<IngestQueueResponse>, ApiError> {
+    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
+    let canceled = ingest_repository::cancel_ingest_job(&state.persistence.postgres, job_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    if canceled == 0 {
+        return Err(ApiError::BadRequest(
+            "Only queued or running jobs can be canceled".to_string(),
+        ));
+    }
+    list_ingest_queue(
+        auth,
+        State(state),
+        Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -686,6 +966,43 @@ fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSumm
             canceled: saturating_i32_from_i64(summary.counts.canceled),
         },
         last_activity_at: summary.last_activity_at,
+    }
+}
+
+fn map_ingest_queue_item(row: ingest_repository::IngestQueueItemRow) -> IngestQueueItemResponse {
+    IngestQueueItemResponse {
+        job_id: row.job_id,
+        workspace_id: row.workspace_id,
+        workspace_name: row.workspace_name,
+        library_id: row.library_id,
+        library_name: row.library_name,
+        document_id: row.knowledge_document_id,
+        document_name: row.document_name.unwrap_or_else(|| row.job_kind.clone()),
+        job_kind: row.job_kind,
+        queue_state: row.queue_state,
+        queue_position: row.queue_position,
+        queued_at: row.queued_at,
+        available_at: row.available_at,
+        attempt_id: row.attempt_id,
+        attempt_state: row.attempt_state,
+        started_at: row.started_at,
+        heartbeat_at: row.heartbeat_at,
+        current_stage: row.current_stage,
+        progress_percent: row.progress_percent,
+        attempt_number: row.attempt_number,
+        failure_code: row.failure_code,
+        failure_message: row.failure_message,
+    }
+}
+
+const fn map_move_direction(
+    direction: IngestQueueMoveDirection,
+) -> ingest_repository::QueueMoveDirection {
+    match direction {
+        IngestQueueMoveDirection::Up => ingest_repository::QueueMoveDirection::Up,
+        IngestQueueMoveDirection::Down => ingest_repository::QueueMoveDirection::Down,
+        IngestQueueMoveDirection::Top => ingest_repository::QueueMoveDirection::Top,
+        IngestQueueMoveDirection::Bottom => ingest_repository::QueueMoveDirection::Bottom,
     }
 }
 

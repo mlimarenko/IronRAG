@@ -31,6 +31,12 @@ pub struct ContentRevisionIngestUnitRow {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct ContentRevisionIngestUnitPageProgress {
+    pub completed_page_count: i64,
+    pub total_page_count: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct UpsertContentRevisionIngestUnitCompleted {
     pub revision_id: Uuid,
@@ -218,5 +224,54 @@ pub async fn list_content_revision_ingest_units(
     .bind(revision_id)
     .bind(stage_name)
     .fetch_all(postgres)
+    .await
+}
+
+pub async fn sum_completed_content_revision_ingest_unit_pages(
+    postgres: &PgPool,
+    revision_id: Uuid,
+    stage_name: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select coalesce(sum(greatest(range_end - range_start + 1, 0)), 0)::bigint
+         from content_revision_ingest_unit
+         where revision_id = $1
+           and stage_name = $2
+           and unit_kind = 'pdf_page_range'
+           and unit_state = 'completed'",
+    )
+    .bind(revision_id)
+    .bind(stage_name)
+    .fetch_one(postgres)
+    .await
+}
+
+pub async fn get_content_revision_ingest_unit_page_progress(
+    postgres: &PgPool,
+    revision_id: Uuid,
+    stage_name: &str,
+) -> Result<ContentRevisionIngestUnitPageProgress, sqlx::Error> {
+    sqlx::query_as::<_, ContentRevisionIngestUnitPageProgress>(
+        "select
+            coalesce(
+                sum(greatest(range_end - range_start + 1, 0))
+                    filter (where unit_state = 'completed'),
+                0
+            )::bigint as completed_page_count,
+            max(
+                case
+                    when details_json ->> 'pageCount' ~ '^[0-9]+$'
+                    then (details_json ->> 'pageCount')::bigint
+                    else null
+                end
+            ) as total_page_count
+         from content_revision_ingest_unit
+         where revision_id = $1
+           and stage_name = $2
+           and unit_kind = 'pdf_page_range'",
+    )
+    .bind(revision_id)
+    .bind(stage_name)
+    .fetch_one(postgres)
     .await
 }

@@ -100,6 +100,50 @@ pub fn detect_container_memory_limit_bytes() -> Option<u64> {
     None
 }
 
+/// Detects the effective CPU parallelism available to this process.
+///
+/// Resolution order:
+/// 1. cgroup v2 — `/sys/fs/cgroup/cpu.max`
+/// 2. cgroup v1 — `cpu.cfs_quota_us` / `cpu.cfs_period_us`
+/// 3. Rust's `available_parallelism`, which is cgroup-aware on modern Linux.
+#[must_use]
+pub fn detect_container_cpu_parallelism() -> Option<usize> {
+    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        if let Some(value) = parse_cgroup_cpu_max(&raw) {
+            return Some(value);
+        }
+    }
+
+    let quota = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").ok();
+    let period = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us").ok();
+    if let (Some(quota), Some(period)) = (quota, period) {
+        if let Some(value) = parse_cgroup_cpu_quota_period(&quota, &period) {
+            return Some(value);
+        }
+    }
+
+    std::thread::available_parallelism().ok().map(usize::from).filter(|value| *value > 0)
+}
+
+fn parse_cgroup_cpu_max(raw: &str) -> Option<usize> {
+    let mut parts = raw.split_whitespace();
+    let quota = parts.next()?;
+    if quota == "max" {
+        return None;
+    }
+    let period = parts.next()?;
+    parse_cgroup_cpu_quota_period(quota, period)
+}
+
+fn parse_cgroup_cpu_quota_period(quota: &str, period: &str) -> Option<usize> {
+    let quota = quota.trim().parse::<u64>().ok()?;
+    let period = period.trim().parse::<u64>().ok()?;
+    if quota == 0 || period == 0 {
+        return None;
+    }
+    Some(((quota / period).max(1)) as usize)
+}
+
 /// Resolves the memory soft limit (MiB) the ingest dispatcher should use as
 /// backpressure. When `explicit_mib > 0` the caller's config wins. Otherwise
 /// we take 90% of the detected container/host memory ceiling, so deployments
@@ -230,4 +274,23 @@ pub fn web_cancel_event(
         canceled = counts.canceled,
         "web ingest cancellation accepted"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_cgroup_cpu_max_quota() {
+        assert_eq!(parse_cgroup_cpu_max("400000 100000"), Some(4));
+        assert_eq!(parse_cgroup_cpu_max("150000 100000"), Some(1));
+        assert_eq!(parse_cgroup_cpu_max("max 100000"), None);
+    }
+
+    #[test]
+    fn parses_cgroup_cpu_quota_period() {
+        assert_eq!(parse_cgroup_cpu_quota_period("800000", "100000"), Some(8));
+        assert_eq!(parse_cgroup_cpu_quota_period("0", "100000"), None);
+        assert_eq!(parse_cgroup_cpu_quota_period("100000", "0"), None);
+    }
 }

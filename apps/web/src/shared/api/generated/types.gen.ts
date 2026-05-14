@@ -12,7 +12,7 @@ export type AdminCapabilityState = {
     canReadOperations: boolean;
 };
 
-export type AdminSection = 'access' | 'mcp' | 'operations' | 'ai' | 'pricing' | 'settings';
+export type AdminSection = 'access' | 'mcp' | 'operations' | 'queue' | 'ai' | 'pricing' | 'settings';
 
 export type AdminSectionSummary = {
     gate: CapabilityGate;
@@ -1249,6 +1249,44 @@ export type IngestJobResponse = {
     readiness: IngestReadinessResponse;
 };
 
+export type IngestQueueItemResponse = {
+    attemptId?: string | null;
+    attemptNumber?: number | null;
+    attemptState?: string | null;
+    availableAt: string;
+    currentStage?: string | null;
+    documentId?: string | null;
+    documentName: string;
+    failureCode?: string | null;
+    failureMessage?: string | null;
+    heartbeatAt?: string | null;
+    jobId: string;
+    jobKind: string;
+    libraryId: string;
+    libraryName: string;
+    progressPercent?: number | null;
+    queuePosition?: number | null;
+    queueState: string;
+    queuedAt: string;
+    startedAt?: string | null;
+    workspaceId: string;
+    workspaceName: string;
+};
+
+export type IngestQueueMoveDirection = 'up' | 'down' | 'top' | 'bottom';
+
+export type IngestQueueResponse = {
+    items: Array<IngestQueueItemResponse>;
+    summary: IngestQueueSummaryResponse;
+};
+
+export type IngestQueueSummaryResponse = {
+    paused: number;
+    queued: number;
+    running: number;
+    total: number;
+};
+
 export type IngestReadinessResponse = {
     graphReady: boolean;
     graphState?: string | null;
@@ -1878,6 +1916,10 @@ export type ModelPresetResponse = {
     topP?: number | null;
     updatedAt: string;
     workspaceId?: string | null;
+};
+
+export type MoveIngestQueueJobRequest = {
+    direction: IngestQueueMoveDirection;
 };
 
 export type OperatorWarning = {
@@ -5848,6 +5890,196 @@ export type GetOpenApiContractResponses = {
 };
 
 export type GetOpenApiContractResponse = GetOpenApiContractResponses[keyof GetOpenApiContractResponses];
+
+export type ListIngestQueueData = {
+    body?: never;
+    path?: never;
+    query?: {
+        workspaceId?: string;
+        libraryId?: string;
+    };
+    url: '/v1/ops/ingest-queue';
+};
+
+export type ListIngestQueueErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized to read operations
+     */
+    403: unknown;
+};
+
+export type ListIngestQueueResponses = {
+    /**
+     * Active ingest queue visible to the caller
+     */
+    200: IngestQueueResponse;
+};
+
+export type ListIngestQueueResponse = ListIngestQueueResponses[keyof ListIngestQueueResponses];
+
+export type CancelIngestQueueJobData = {
+    body?: never;
+    path: {
+        /**
+         * Active ingest job identifier
+         */
+        jobId: string;
+    };
+    query?: never;
+    url: '/v1/ops/ingest-queue/jobs/{jobId}/cancel';
+};
+
+export type CancelIngestQueueJobErrors = {
+    /**
+     * Job is already terminal
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot mutate the job's library
+     */
+    403: unknown;
+    /**
+     * Job not found
+     */
+    404: unknown;
+};
+
+export type CancelIngestQueueJobResponses = {
+    /**
+     * Updated active ingest queue
+     */
+    200: IngestQueueResponse;
+};
+
+export type CancelIngestQueueJobResponse = CancelIngestQueueJobResponses[keyof CancelIngestQueueJobResponses];
+
+export type MoveIngestQueueJobData = {
+    body: MoveIngestQueueJobRequest;
+    path: {
+        /**
+         * Queued or paused ingest job identifier
+         */
+        jobId: string;
+    };
+    query?: never;
+    url: '/v1/ops/ingest-queue/jobs/{jobId}/move';
+};
+
+export type MoveIngestQueueJobErrors = {
+    /**
+     * Job is not queued/paused or direction is invalid
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot mutate the job's library
+     */
+    403: unknown;
+    /**
+     * Job not found
+     */
+    404: unknown;
+};
+
+export type MoveIngestQueueJobResponses = {
+    /**
+     * Updated active ingest queue
+     */
+    200: IngestQueueResponse;
+};
+
+export type MoveIngestQueueJobResponse = MoveIngestQueueJobResponses[keyof MoveIngestQueueJobResponses];
+
+export type PauseIngestQueueJobData = {
+    body?: never;
+    path: {
+        /**
+         * Queued or running ingest job identifier
+         */
+        jobId: string;
+    };
+    query?: never;
+    url: '/v1/ops/ingest-queue/jobs/{jobId}/pause';
+};
+
+export type PauseIngestQueueJobErrors = {
+    /**
+     * Job is not queued or running
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot mutate the job's library
+     */
+    403: unknown;
+    /**
+     * Job not found
+     */
+    404: unknown;
+};
+
+export type PauseIngestQueueJobResponses = {
+    /**
+     * Updated active ingest queue
+     */
+    200: IngestQueueResponse;
+};
+
+export type PauseIngestQueueJobResponse = PauseIngestQueueJobResponses[keyof PauseIngestQueueJobResponses];
+
+export type ResumeIngestQueueJobData = {
+    body?: never;
+    path: {
+        /**
+         * Paused ingest job identifier
+         */
+        jobId: string;
+    };
+    query?: never;
+    url: '/v1/ops/ingest-queue/jobs/{jobId}/resume';
+};
+
+export type ResumeIngestQueueJobErrors = {
+    /**
+     * Job is not paused
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot mutate the job's library
+     */
+    403: unknown;
+    /**
+     * Job not found
+     */
+    404: unknown;
+};
+
+export type ResumeIngestQueueJobResponses = {
+    /**
+     * Updated active ingest queue
+     */
+    200: IngestQueueResponse;
+};
+
+export type ResumeIngestQueueJobResponse = ResumeIngestQueueJobResponses[keyof ResumeIngestQueueJobResponses];
 
 export type GetLibraryStateData = {
     body?: never;

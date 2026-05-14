@@ -12,3 +12,4 @@ pub mod search;
 pub mod service;
 pub(crate) mod support;
 pub(crate) mod text_match;
+pub(crate) mod vector_dimensions;

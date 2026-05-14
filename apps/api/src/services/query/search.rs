@@ -24,12 +24,15 @@ use crate::{
     infra::repositories::{ai_repository, content_repository},
     integrations::llm::EmbeddingBatchRequest,
     services::{
-        ingest::cancellation::{StageError, ensure_not_cancelled},
+        ingest::{
+            cancellation::{StageError, ensure_not_cancelled},
+            service::{INGEST_STAGE_EMBED_CHUNK, RecordStageUnitProgressCommand},
+        },
         knowledge::service::RefreshKnowledgeLibraryGenerationCommand,
     },
 };
 
-use super::error::QueryServiceError;
+use super::{error::QueryServiceError, vector_dimensions::validate_embedding_vector_dimensions};
 
 /// Per-batch size used for chunk embedding requests. Keeps each call below
 /// the typical 8k-token provider soft cap even when chunks run long and
@@ -83,6 +86,36 @@ pub struct QueryEvidenceSearchResult {
 
 #[derive(Clone, Default)]
 pub struct SearchService;
+
+async fn sync_embed_chunk_stage_progress(
+    state: &AppState,
+    attempt_id: Option<Uuid>,
+    completed_units: usize,
+    total_units: usize,
+) {
+    let Some(attempt_id) = attempt_id else {
+        return;
+    };
+    if total_units == 0 {
+        return;
+    }
+    let command = RecordStageUnitProgressCommand {
+        attempt_id,
+        stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
+        completed_units: u32::try_from(completed_units).unwrap_or(u32::MAX),
+        total_units: u32::try_from(total_units).unwrap_or(u32::MAX),
+        details_json: serde_json::json!({}),
+    };
+    if let Err(error) =
+        state.canonical_services.ingest.record_stage_unit_progress(state, command).await
+    {
+        tracing::warn!(
+            attempt_id = %attempt_id,
+            ?error,
+            "failed to sync embed_chunk stage progress"
+        );
+    }
+}
 
 impl SearchService {
     #[must_use]
@@ -205,7 +238,12 @@ impl SearchService {
                 revision_id: chunk.revision_id,
                 embedding_model_key: write.model_catalog_id.to_string(),
                 vector_kind: VECTOR_KIND_CHUNK.to_string(),
-                dimensions: embedding_dimensions(&vector).with_context(|| {
+                dimensions: validate_embedding_vector_dimensions(
+                    state,
+                    &vector,
+                    format!("chunk {}", write.chunk_id),
+                )
+                .with_context(|| {
                     format!("failed to resolve chunk embedding dimensions for {}", write.chunk_id)
                 })?,
                 vector,
@@ -262,7 +300,12 @@ impl SearchService {
                 entity_id: entity.entity_id,
                 embedding_model_key: write.model_catalog_id.to_string(),
                 vector_kind: VECTOR_KIND_ENTITY.to_string(),
-                dimensions: embedding_dimensions(&vector).with_context(|| {
+                dimensions: validate_embedding_vector_dimensions(
+                    state,
+                    &vector,
+                    format!("entity {}", write.node_id),
+                )
+                .with_context(|| {
                     format!("failed to resolve entity embedding dimensions for {}", write.node_id)
                 })?,
                 vector,
@@ -348,6 +391,7 @@ impl SearchService {
         state: &AppState,
         library_id: Uuid,
         revision_id: Uuid,
+        attempt_id: Option<Uuid>,
         cancellation_token: &CancellationToken,
     ) -> std::result::Result<EmbedChunksStageOutcome, QueryServiceError> {
         ensure_not_cancelled(cancellation_token)?;
@@ -428,6 +472,8 @@ impl SearchService {
         ensure_not_cancelled(cancellation_token)?;
         let chunks_to_embed: Vec<&KnowledgeChunkRow> =
             chunks.iter().filter(|chunk| !reused_chunk_ids.contains(&chunk.chunk_id)).collect();
+        sync_embed_chunk_stage_progress(state, attempt_id, reused_chunk_ids.len(), chunks.len())
+            .await;
 
         let provider_kind_owned = binding.provider_kind.clone();
         let model_name_owned = binding.model_name.clone();
@@ -541,7 +587,12 @@ impl SearchService {
             for (chunk_index, vector) in batch.iter().zip(batch_response.embeddings.iter()) {
                 fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
                 let chunk = chunks_ref[*chunk_index];
-                let dimensions = match embedding_dimensions(vector.as_slice()).with_context(|| {
+                let dimensions = match validate_embedding_vector_dimensions(
+                    state,
+                    vector.as_slice(),
+                    format!("chunk {}", chunk.chunk_id),
+                )
+                .with_context(|| {
                     format!("failed to resolve chunk embedding dimensions for {}", chunk.chunk_id)
                 }) {
                     Ok(dimensions) => dimensions,
@@ -585,6 +636,13 @@ impl SearchService {
                     return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
                 }
                 chunks_embedded += batch_rows.len();
+                sync_embed_chunk_stage_progress(
+                    state,
+                    attempt_id,
+                    chunks_embedded.saturating_add(reused_chunk_ids.len()),
+                    chunks.len(),
+                )
+                .await;
                 fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
             }
         }
@@ -816,7 +874,12 @@ impl SearchService {
                         revision_id: chunk.revision_id,
                         embedding_model_key: embedding_model_key_ref.clone(),
                         vector_kind: VECTOR_KIND_CHUNK.to_string(),
-                        dimensions: embedding_dimensions(embedding.as_slice()).with_context(
+                        dimensions: validate_embedding_vector_dimensions(
+                            state,
+                            embedding.as_slice(),
+                            format!("rebuilt chunk {}", chunk.chunk_id),
+                        )
+                        .with_context(
                             || {
                                 format!(
                                     "failed to resolve rebuilt chunk vector dimensions for {}",
@@ -945,7 +1008,12 @@ impl SearchService {
                     entity_id: entity.entity_id,
                     embedding_model_key: model_catalog_id.to_string(),
                     vector_kind: VECTOR_KIND_ENTITY.to_string(),
-                    dimensions: embedding_dimensions(embedding.as_slice()).with_context(|| {
+                    dimensions: validate_embedding_vector_dimensions(
+                        state,
+                        embedding.as_slice(),
+                        format!("rebuilt entity {}", entity.entity_id),
+                    )
+                    .with_context(|| {
                         format!(
                             "failed to resolve rebuilt entity vector dimensions for {}",
                             entity.entity_id
@@ -1067,13 +1135,6 @@ fn build_entity_vector_key(
     freshness_generation: i64,
 ) -> String {
     format!("{entity_id}:{model_catalog_id}:{freshness_generation}")
-}
-
-fn embedding_dimensions(vector: &[f32]) -> AnyhowResult<i32> {
-    if vector.is_empty() {
-        return Err(anyhow!("embedding vector must not be empty"));
-    }
-    i32::try_from(vector.len()).context("embedding vector dimension overflowed i32")
 }
 
 async fn load_current_revision_chunk_vector_ids(

@@ -2660,6 +2660,153 @@ paths:
               schema:
                 type: string
       security: []
+  /v1/ops/ingest-queue:
+    get:
+      tags:
+      - ops
+      operationId: listIngestQueue
+      parameters:
+      - name: workspaceId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: libraryId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Active ingest queue visible to the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized to read operations
+  /v1/ops/ingest-queue/jobs/{jobId}/cancel:
+    post:
+      tags:
+      - ops
+      operationId: cancelIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Active ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is already terminal
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/move:
+    post:
+      tags:
+      - ops
+      operationId: moveIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Queued or paused ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveIngestQueueJobRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is not queued/paused or direction is invalid
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/pause:
+    post:
+      tags:
+      - ops
+      operationId: pauseIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Queued or running ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is not queued or running
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/resume:
+    post:
+      tags:
+      - ops
+      operationId: resumeIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Paused ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is not paused
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
   /v1/ops/libraries/{libraryId}:
     get:
       tags:
@@ -3267,6 +3414,7 @@ components:
       - access
       - mcp
       - operations
+      - queue
       - ai
       - pricing
       - settings
@@ -6877,6 +7025,135 @@ components:
           - $ref: '#/components/schemas/IngestAttempt'
         readiness:
           $ref: '#/components/schemas/IngestReadinessResponse'
+    IngestQueueItemResponse:
+      type: object
+      required:
+      - jobId
+      - workspaceId
+      - workspaceName
+      - libraryId
+      - libraryName
+      - documentName
+      - jobKind
+      - queueState
+      - queuedAt
+      - availableAt
+      properties:
+        attemptId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        attemptNumber:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        attemptState:
+          type:
+          - string
+          - 'null'
+        availableAt:
+          type: string
+          format: date-time
+        currentStage:
+          type:
+          - string
+          - 'null'
+        documentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        documentName:
+          type: string
+        failureCode:
+          type:
+          - string
+          - 'null'
+        failureMessage:
+          type:
+          - string
+          - 'null'
+        heartbeatAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        jobId:
+          type: string
+          format: uuid
+        jobKind:
+          type: string
+        libraryId:
+          type: string
+          format: uuid
+        libraryName:
+          type: string
+        progressPercent:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        queuePosition:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        queueState:
+          type: string
+        queuedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        workspaceId:
+          type: string
+          format: uuid
+        workspaceName:
+          type: string
+    IngestQueueMoveDirection:
+      type: string
+      enum:
+      - up
+      - down
+      - top
+      - bottom
+    IngestQueueResponse:
+      type: object
+      required:
+      - summary
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestQueueItemResponse'
+        summary:
+          $ref: '#/components/schemas/IngestQueueSummaryResponse'
+    IngestQueueSummaryResponse:
+      type: object
+      required:
+      - running
+      - queued
+      - paused
+      - total
+      properties:
+        paused:
+          type: integer
+          format: int64
+        queued:
+          type: integer
+          format: int64
+        running:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
     IngestReadinessResponse:
       type: object
       required:
@@ -8789,6 +9066,13 @@ components:
           - string
           - 'null'
           format: uuid
+    MoveIngestQueueJobRequest:
+      type: object
+      required:
+      - direction
+      properties:
+        direction:
+          $ref: '#/components/schemas/IngestQueueMoveDirection'
     OperatorWarning:
       type: object
       required:

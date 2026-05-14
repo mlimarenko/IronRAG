@@ -65,8 +65,8 @@ x-ironrag-app-env: &ironrag-app-env
   IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
   IRONRAG_DOCLING_PAGE_BATCH_SIZE: ${IRONRAG_DOCLING_PAGE_BATCH_SIZE:-10}
   IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: ${IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES:-40}
-  IRONRAG_DOCLING_MAX_CONCURRENCY: ${IRONRAG_DOCLING_MAX_CONCURRENCY:-1}
-  IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: ${IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM:-1}
+  IRONRAG_DOCLING_MAX_CONCURRENCY: ${IRONRAG_DOCLING_MAX_CONCURRENCY:-auto}
+  IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: ${IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM:-auto}
   IRONRAG_INGESTION_EMBEDDING_PARALLELISM: ${IRONRAG_INGESTION_EMBEDDING_PARALLELISM:-8}
   IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC: ${IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC:-16}
 
@@ -92,6 +92,14 @@ x-ironrag-resources-large: &ironrag-resources-large
     memory: 8G
   reservations:
     cpus: "1.00"
+    memory: 2G
+
+x-ironrag-resources-worker: &ironrag-resources-worker
+  limits:
+    cpus: "6.00"
+    memory: 8G
+  reservations:
+    cpus: "2.00"
     memory: 2G
 
 services:
@@ -270,7 +278,7 @@ services:
       start_period: 15s
     deploy:
       resources:
-        <<: *ironrag-resources-large
+        <<: *ironrag-resources-worker
   frontend:
     image: ${IRONRAG_FRONTEND_IMAGE:-ironrag-frontend:local}
     build:

@@ -3,7 +3,7 @@
 
 Runs the full alpha-relay scenario through ONE provider (or hybrid mode
 where the chat roles use the provider and embedding falls back to
-gptunnel when the provider has no embedding catalog row).
+gptunnel only when the provider has no native embedding catalog row).
 
 Usage:
     python3 multi-provider-e2e.py PROVIDER
@@ -12,8 +12,8 @@ PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai}.
 
 Embed fallback: if the chosen provider exposes no embedding catalog
 row, the embed_chunk + query_retrieve bindings are wired through the
-gptunnel text-embedding-3-large model (which we already validated
-end-to-end). The fallback is logged so failures are easy to attribute.
+gptunnel text-embedding-3-large model. Providers with native 3072-dim
+embedding presets must use their own embedding lane.
 
 Writes /tmp/multi-provider-e2e-<provider>.json with the full report.
 """
@@ -77,7 +77,7 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
         "chat":      ["openai/gpt-4o-mini", "anthropic/claude-3-haiku"],
         "answer":    ["openai/gpt-4o", "anthropic/claude-3.5-sonnet"],
         "vision":    ["openai/gpt-4o", "anthropic/claude-3.5-sonnet", "google/gemini-pro-vision"],
-        "embedding": [],
+        "embedding": ["openai/text-embedding-3-large", "qwen/qwen3-embedding-8b"],
     },
     "routerai": {
         "chat":      ["openai/gpt-4o-mini", "anthropic/claude-3-haiku"],

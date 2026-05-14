@@ -9,7 +9,10 @@ use crate::{
     app::state::AppState,
     domains::{ai::AiBindingPurpose, provider_profiles::EffectiveProviderProfile},
     integrations::llm::EmbeddingRequest,
-    services::ai_catalog_service::ResolvedRuntimeBinding,
+    services::{
+        ai_catalog_service::ResolvedRuntimeBinding,
+        query::vector_dimensions::validate_embedding_vector_dimensions,
+    },
 };
 
 const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
@@ -59,6 +62,11 @@ pub(super) async fn embed_question(
 
     if let Ok(cache) = EMBEDDING_CACHE.lock() {
         if let Some(cached_embedding) = cache.get(&cache_key) {
+            validate_embedding_vector_dimensions(
+                state,
+                cached_embedding,
+                format!("cached runtime query {}", embedding_binding.model_name),
+            )?;
             return Ok(QuestionEmbeddingResult {
                 embedding: cached_embedding.clone(),
                 provider_kind: embedding_binding.provider_kind,
@@ -80,6 +88,11 @@ pub(super) async fn embed_question(
         })
         .await
         .context("failed to embed runtime query")?;
+    validate_embedding_vector_dimensions(
+        state,
+        &response.embedding,
+        format!("runtime query {}", response.model_name),
+    )?;
 
     if let Ok(mut cache) = EMBEDDING_CACHE.lock() {
         if cache.len() >= EMBEDDING_CACHE_MAX_ENTRIES {

@@ -447,3 +447,45 @@ pub async fn touch_attempt_heartbeat_and_load_job_state(
     .fetch_optional(postgres)
     .await
 }
+
+pub async fn update_leased_attempt_stage_progress(
+    postgres: &PgPool,
+    attempt_id: Uuid,
+    current_stage: &str,
+    progress_percent: i32,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "update ingest_attempt
+         set heartbeat_at = now(),
+             current_stage = $2,
+             progress_percent = greatest(progress_percent, $3)
+         where id = $1 and attempt_state = 'leased'",
+    )
+    .bind(attempt_id)
+    .bind(current_stage)
+    .bind(progress_percent.clamp(0, 99))
+    .execute(postgres)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn abandon_paused_ingest_attempt(
+    postgres: &PgPool,
+    attempt_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "update ingest_attempt
+         set attempt_state = 'abandoned',
+             heartbeat_at = now(),
+             finished_at = now(),
+             failure_class = 'operator_control',
+             failure_code = 'paused_by_operator',
+             failure_message = 'Processing was paused from the administration queue',
+             retryable = true
+         where id = $1 and attempt_state = 'leased'",
+    )
+    .bind(attempt_id)
+    .execute(postgres)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}

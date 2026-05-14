@@ -70,7 +70,7 @@ IRONRAG_ROUTERAI_API_KEY=...
 | **DeepSeek**              | ✅    | —      | —         | Very low cost; may be slower than other APIs; no native vision/embeddings |
 | **Qwen / DashScope-intl** | ✅    | ✅      | ✅         | Cost is close to DeepSeek; API is often faster; strong chat/vision/embedding lane |
 | **GPTunnel**              | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
-| **OpenRouter**            | ✅    | ✅      | —         | Router provider: many upstream model families behind one key         |
+| **OpenRouter**            | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
 | **RouterAI**              | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
 | **Ollama**                | ✅    | ✅      | ✅         | Fully local, air-gapped, GPU optional                                |
 

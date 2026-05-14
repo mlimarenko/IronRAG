@@ -1191,6 +1191,7 @@ impl ContentService {
                 state,
                 context.library_id,
                 context.revision_id,
+                Some(attempt_id),
                 &cancellation_token,
             )
             .await;

@@ -43,7 +43,10 @@ use crate::{
         graph::projection::resolve_projection_scope,
         ingest::cancellation::ensure_not_cancelled,
         ingest::runtime::resolve_effective_runtime_task_context,
-        ingest::service::{INGEST_STAGE_EXTRACT_CONTENT, LeaseAttemptCommand},
+        ingest::service::{
+            INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH, LeaseAttemptCommand,
+            RecordStageUnitProgressCommand,
+        },
         ingest::structured_preparation::{
             PrepareStructuredRevisionCommand, StructuredPreparationService,
         },
@@ -145,6 +148,44 @@ fn record_stream_reprocess_file_name(revision: &ContentRevision) -> String {
     let stem = trimmed.rsplit_once('.').map_or(trimmed, |(stem, _)| stem).trim();
     let normalized_stem = if stem.is_empty() { "revision" } else { stem };
     format!("{normalized_stem}.jsonl")
+}
+
+fn should_sync_stage_unit_progress(completed_units: usize, total_units: usize) -> bool {
+    if total_units <= 20 || completed_units >= total_units {
+        return true;
+    }
+    let stride = (total_units / 20).max(1);
+    completed_units.is_multiple_of(stride)
+}
+
+async fn sync_extract_graph_stage_progress(
+    state: &AppState,
+    attempt_id: Option<Uuid>,
+    completed_units: usize,
+    total_units: usize,
+) {
+    let Some(attempt_id) = attempt_id else {
+        return;
+    };
+    if total_units == 0 {
+        return;
+    }
+    let command = RecordStageUnitProgressCommand {
+        attempt_id,
+        stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
+        completed_units: u32::try_from(completed_units).unwrap_or(u32::MAX),
+        total_units: u32::try_from(total_units).unwrap_or(u32::MAX),
+        details_json: serde_json::json!({}),
+    };
+    if let Err(error) =
+        state.canonical_services.ingest.record_stage_unit_progress(state, command).await
+    {
+        warn!(
+            attempt_id = %attempt_id,
+            ?error,
+            "failed to sync extract_graph stage progress"
+        );
+    }
 }
 
 impl ContentService {
@@ -1580,6 +1621,27 @@ impl ContentService {
             .into_iter()
             .filter(|chunk| !reused_chunk_ids.contains(&chunk.chunk_id))
             .collect();
+        let remaining_graph_chunk_count = chunks
+            .iter()
+            .filter(|chunk| {
+                build_graph_chunk_content(
+                    chunk,
+                    table_graph_context.profile_for_chunk(chunk),
+                    table_graph_context.requires_row_only_graph(),
+                    &graph_chunk_policy,
+                )
+                .is_some()
+            })
+            .count();
+        let graph_progress_total =
+            reused_chunk_ids.len().saturating_add(remaining_graph_chunk_count);
+        sync_extract_graph_stage_progress(
+            state,
+            command.attempt_id,
+            reused_chunk_ids.len(),
+            graph_progress_total,
+        )
+        .await;
 
         // Per-chunk graph extraction shares immutable state across the
         // in-flight futures. Wrapping the heavy structures in `Arc` keeps the
@@ -1719,6 +1781,7 @@ impl ContentService {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 Ok::<ChunkExtractAggregate, anyhow::Error>(ChunkExtractAggregate {
+                    processed_graph_chunks: 1,
                     extracted_entities,
                     extracted_relations,
                     prompt_tokens,
@@ -1764,6 +1827,7 @@ impl ContentService {
         );
         let aggregate_result: anyhow::Result<ChunkExtractAggregate> = async {
             let mut aggregate = ChunkExtractAggregate::default();
+            let mut graph_progress_completed = reused_chunk_ids.len();
             let buffered = per_chunk_stream.buffer_unordered(graph_extract_parallelism);
             futures::pin_mut!(buffered);
             loop {
@@ -1781,6 +1845,9 @@ impl ContentService {
                 };
 
                 ensure_not_cancelled(&fold_cancellation_token)?;
+                aggregate.processed_graph_chunks = aggregate
+                    .processed_graph_chunks
+                    .saturating_add(item.processed_graph_chunks);
                 aggregate.extracted_entities = aggregate
                     .extracted_entities
                     .saturating_add(item.extracted_entities);
@@ -1790,6 +1857,22 @@ impl ContentService {
                 aggregate.prompt_tokens += item.prompt_tokens;
                 aggregate.completion_tokens += item.completion_tokens;
                 aggregate.total_tokens += item.total_tokens;
+                if item.processed_graph_chunks > 0 {
+                    graph_progress_completed =
+                        graph_progress_completed.saturating_add(item.processed_graph_chunks);
+                    if should_sync_stage_unit_progress(
+                        graph_progress_completed,
+                        graph_progress_total,
+                    ) {
+                        sync_extract_graph_stage_progress(
+                            state,
+                            command.attempt_id,
+                            graph_progress_completed,
+                            graph_progress_total,
+                        )
+                        .await;
+                    }
+                }
                 progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             Ok(aggregate)
@@ -2184,6 +2267,7 @@ fn test_graph_input_hashes_by_chunk(
 /// aggregates, keeping ~96 bytes per chunk in flight.
 #[derive(Debug, Default)]
 struct ChunkExtractAggregate {
+    processed_graph_chunks: usize,
     extracted_entities: usize,
     extracted_relations: usize,
     prompt_tokens: i64,

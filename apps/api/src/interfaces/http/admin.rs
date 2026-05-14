@@ -102,6 +102,7 @@ fn build_section_summaries(capabilities: &AdminCapabilityState) -> Vec<AdminSect
         AdminSection::Access,
         AdminSection::Mcp,
         AdminSection::Operations,
+        AdminSection::Queue,
         AdminSection::Ai,
         AdminSection::Pricing,
         AdminSection::Settings,
@@ -127,6 +128,9 @@ fn map_section_summary(
             AdminSection::Operations => {
                 "Operations diagnostics are available for the authenticated administrator."
             }
+            AdminSection::Queue => {
+                "Ingest queue control is available for the authenticated administrator."
+            }
             AdminSection::Ai => {
                 "AI catalog and binding administration is available for the authenticated administrator."
             }
@@ -142,6 +146,7 @@ fn map_section_summary(
             AdminSection::Access => "IAM administration permission is required.",
             AdminSection::Mcp => "Administrator access is required for MCP administration.",
             AdminSection::Operations => "Operations-read capability is required.",
+            AdminSection::Queue => "Operations-read capability is required.",
             AdminSection::Ai => "Provider and binding administration capability is required.",
             AdminSection::Pricing => {
                 "AI administration capability is required for pricing controls."
@@ -170,6 +175,10 @@ fn section_gate(section: AdminSection, capabilities: &AdminCapabilityState) -> C
             Some("Administrator access is required for MCP administration.".to_string()),
         ),
         AdminSection::Operations => (
+            capabilities.can_read_operations,
+            Some("Operations-read capability is required.".to_string()),
+        ),
+        AdminSection::Queue => (
             capabilities.can_read_operations,
             Some("Operations-read capability is required.".to_string()),
         ),

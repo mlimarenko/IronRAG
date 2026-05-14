@@ -54,6 +54,11 @@ pages are streamed through one Docling process (default: 40 pages), and
 `IRONRAG_DOCLING_MAX_CONCURRENCY` bounds local Docling processes. Already
 completed page ranges are reused after worker restart, backend restart, lease
 loss, or network interruption.
+`IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM=auto` controls how many large
+PDF pipelines may be active before provider-bound stages. The automatic value
+uses the worker CPU and memory cgroup limits and is capped at 4 by default;
+it is also bounded by the configured Docling subprocess concurrency so heavy
+jobs do not pile up unbounded behind `IRONRAG_DOCLING_MAX_CONCURRENCY`.
 
 ### Table contract
 
