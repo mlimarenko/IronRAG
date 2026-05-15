@@ -22,7 +22,7 @@
 
 - **Typed knowledge graph.** Documents are decomposed into entities, typed relationships, and chunk-level evidence references. Retrieval combines vector, lexical, graph-traversal, and technical-fact lanes; the answer pipeline returns citations to the underlying chunks.
 - **Native MCP server.** 21 tools across documents, graph, web ingest, and grounded `ask`. Connect it to MCP-compatible agents and clients such as Claude Desktop, Claude Code, Cursor, Codex, VS Code with Continue / Cline / Roo, Zed, OpenClaw, Hermes, Lobe-style chat agents, or a custom HTTP MCP client. Tools are scoped per IAM token.
-- **Provider-agnostic AI runtime.** Seven LLM providers ship in the catalog — OpenAI, DeepSeek, Qwen (DashScope-intl), GPTunnel, OpenRouter, RouterAI, Ollama. Each pipeline purpose (`extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `vision`) is bound independently and can use a different provider.
+- **Provider-agnostic AI runtime.** Seven LLM providers ship in the catalog — OpenAI, DeepSeek, Qwen (DashScope-intl), GPTunnel, OpenRouter, RouterAI, Ollama. Each pipeline purpose (`extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `vision`) is bound independently, with an Arango vector rebuild utility for dimension-changing embedding switches.
 - **USD cost catalog.** Every binding stores prices in USD. Per-call billing rows are written for every LLM request and rolled up per document and per query in the UI.
 - **Multi-tenant IAM.** Principals, scoped tokens (system / workspace / library), and permission groups gate every API surface. Audit log captures resource access.
 - **Self-hosted runtime.** Single `docker compose up -d` boots the full stack (PostgreSQL, ArangoDB, Redis, backend, worker, frontend). Helm chart available for Kubernetes.
@@ -34,8 +34,9 @@
 
 ## Quick start
 
+Install or update:
+
 ```bash
-# One line, Docker required
 curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh | bash
 ```
 
@@ -59,7 +60,7 @@ IRONRAG_OPENAI_API_KEY=sk-...
 IRONRAG_DEEPSEEK_API_KEY=...
 IRONRAG_QWEN_API_KEY=sk-...
 IRONRAG_GPTUNNEL_API_KEY=...
-IRONRAG_OPENROUTER_API_KEY=sk-or-v1-...
+IRONRAG_OPENROUTER_API_KEY=<openrouter-api-key>
 IRONRAG_ROUTERAI_API_KEY=...
 ```
 

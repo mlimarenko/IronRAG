@@ -20,7 +20,7 @@ drop index if exists idx_ingest_job_active_queue_rank;
 
 create index idx_ingest_job_active_queue_rank
     on ingest_job (queue_state, queue_rank, priority, available_at, queued_at, id)
-    where queue_state in ('queued', 'leased', 'paused');
+    where queue_state in ('queued', 'leased');
 
 -- Canonical OpenRouter 3072-dimension embedding baseline.
 --

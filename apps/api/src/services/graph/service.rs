@@ -347,17 +347,15 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
-        let chunk_embeddings =
-            state.canonical_services.search.rebuild_chunk_embeddings(state, library_id).await?;
-        let graph_node_embeddings = state
+        let vector_rebuild = state
             .canonical_services
             .search
-            .rebuild_graph_node_embeddings(state, library_id)
+            .rebuild_vector_plane_from_library_binding(state, library_id)
             .await?;
         Ok(ArangoGraphRebuildOutcome {
             target: Some(ArangoGraphRebuildTarget::Vector),
-            chunk_embeddings_rebuilt: chunk_embeddings,
-            graph_node_embeddings_rebuilt: graph_node_embeddings,
+            chunk_embeddings_rebuilt: vector_rebuild.chunk_embeddings_rebuilt,
+            graph_node_embeddings_rebuilt: vector_rebuild.graph_node_embeddings_rebuilt,
             ..Default::default()
         })
     }

@@ -105,16 +105,19 @@ flowchart LR
   Route -->|broad / ambiguous| Response
 ```
 
-Bindings `query_retrieve` и `embed_chunk` синхронизированы — bootstrap
-и admin-операции отвергают несовпадающие vector-модели до того, как
-runtime войдёт в состояние «retrieval сломан».
+Bindings `query_retrieve` и `embed_chunk` синхронизированы. Если оператор
+переключается на embedding-модель с другой размерностью, нужно запустить
+vector rebuild от source-библиотеки с этим binding'ом; так как Arango
+vector-индексы instance-wide, rebuild пересоздаёт chunk/entity индексы и
+пересчитывает весь существующий vector material до использования нового
+retrieval lane.
 
 ## Карта хранилищ
 
 | Хранилище | Роль |
 |---|---|
 | **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, presets, prices), bindings, IAM, sessions, query executions, billing. Источник правды для всего, кроме самого графа знаний. |
-| **ArangoDB** | Knowledge graph (nodes, edges, evidence), document store, chunk vectors (3072-dim cosine), structured-block search, technical-fact индекс. |
+| **ArangoDB** | Knowledge graph (nodes, edges, evidence), document store, cosine chunk/entity vectors, structured-block search, technical-fact индекс. |
 | **Redis** | Graph topology cache, IR cache, answer-context cache, координация prewarm. |
 | **Filesystem / S3** | Source-document блобы (конфигурируется; включённый `s4core` даёт встроенный S3-совместимый blob-store). |
 
@@ -134,6 +137,8 @@ runtime-paths, конфигурацию model-discovery и список bootstra
   (`ai_catalog_service::catalog::validate_model_binding_purpose`).
 - `embed_chunk` и `query_retrieve` указывают на один catalog-entry;
   vector-counterpart sync делает upsert парного binding на каждой записи.
+- Смена embedding-модели с другой размерностью финализируется запуском
+  vector rebuild, чтобы Arango-индексы и сохранённые векторы менялись вместе.
 
 Scopes резолвятся library → workspace → instance, поэтому workspace
 может переопределить instance-default для одной purpose без влияния

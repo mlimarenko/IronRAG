@@ -196,30 +196,66 @@ pub async fn bootstrap_knowledge_plane(
     }
 
     if options.vector_indexes {
-        client
-            .ensure_vector_index(
+        let chunk_dimensions = client
+            .vector_index_dimensions(
                 KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
                 KNOWLEDGE_CHUNK_VECTOR_INDEX,
                 "vector",
-                options.vector_dimensions,
-                options.vector_index_n_lists,
-                options.vector_index_default_n_probe,
-                options.vector_index_training_iterations,
             )
             .await
-            .context("failed to ensure chunk vector index")?;
-        client
-            .ensure_vector_index(
+            .context("failed to inspect chunk vector index dimensions")?;
+        let entity_dimensions = client
+            .vector_index_dimensions(
                 KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
                 KNOWLEDGE_ENTITY_VECTOR_INDEX,
                 "vector",
-                options.vector_dimensions,
-                options.vector_index_n_lists,
-                options.vector_index_default_n_probe,
-                options.vector_index_training_iterations,
             )
             .await
-            .context("failed to ensure entity vector index")?;
+            .context("failed to inspect entity vector index dimensions")?;
+        match (chunk_dimensions, entity_dimensions) {
+            (Some(chunk), Some(entity)) if chunk == entity => {}
+            (None, None) => {
+                client
+                    .ensure_vector_index(
+                        KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                        KNOWLEDGE_CHUNK_VECTOR_INDEX,
+                        "vector",
+                        options.vector_dimensions,
+                        options.vector_index_n_lists,
+                        options.vector_index_default_n_probe,
+                        options.vector_index_training_iterations,
+                    )
+                    .await
+                    .context("failed to ensure chunk vector index")?;
+                client
+                    .ensure_vector_index(
+                        KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+                        KNOWLEDGE_ENTITY_VECTOR_INDEX,
+                        "vector",
+                        options.vector_dimensions,
+                        options.vector_index_n_lists,
+                        options.vector_index_default_n_probe,
+                        options.vector_index_training_iterations,
+                    )
+                    .await
+                    .context("failed to ensure entity vector index")?;
+            }
+            (Some(chunk), Some(entity)) => {
+                anyhow::bail!(
+                    "Arango vector indexes have different dimensions: chunk index has {chunk}, entity index has {entity}"
+                );
+            }
+            (Some(chunk), None) => {
+                anyhow::bail!(
+                    "Arango vector indexes are incomplete: chunk index has {chunk} dimensions, entity index is missing"
+                );
+            }
+            (None, Some(entity)) => {
+                anyhow::bail!(
+                    "Arango vector indexes are incomplete: chunk index is missing, entity index has {entity} dimensions"
+                );
+            }
+        }
     }
 
     Ok(())

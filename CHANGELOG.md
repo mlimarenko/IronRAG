@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-## 0.4.10 — 2026-05-15
+## 0.4.11 — 2026-05-15
+
+### Startup: fixed clean-stack migration
+
+- Fixed the `0.4.10` clean-stack startup failure where migration `0010`
+  added the `paused` ingest queue enum value and used it in the same partial
+  index definition before PostgreSQL had committed the enum change.
 
 ### AI providers: OpenRouter embeddings
 
@@ -13,6 +19,18 @@
   model discovery.
 - The OpenRouter provider capability table and multi-provider smoke profile now
   mark embeddings as supported instead of falling back to another provider.
+- Arango vector rebuilds now use the active `embed_chunk` / `query_retrieve`
+  bindings of a source library as the dimension source of truth, recreate the
+  instance-wide chunk and entity vector indexes from freshly materialized
+  vectors, and rebuild all existing vector material before search resumes on
+  the selected embedding dimension.
+- Vector rebuild, vector writes, and vector search now share a PostgreSQL
+  advisory lock across backend, worker, and CLI processes, so dimension
+  switches cannot race the ingest pipeline or live retrieval paths.
+- The public multi-provider smoke script now requires
+  `IRONRAG_ADMIN_PASSWORD` instead of carrying a built-in test password.
+
+## 0.4.10 — 2026-05-15
 
 ### Ingest: document progress profiles
 

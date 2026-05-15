@@ -9,6 +9,8 @@ use crate::app::config::Settings;
 
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 struct ArangoIndexRow {
+    #[serde(default)]
+    id: Option<String>,
     name: String,
     #[serde(rename = "type")]
     index_type: String,
@@ -18,6 +20,8 @@ struct ArangoIndexRow {
     unique: bool,
     #[serde(default)]
     sparse: bool,
+    #[serde(default)]
+    params: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -199,6 +203,30 @@ impl ArangoClient {
             .is_some_and(|index| index.index_type == "vector"))
     }
 
+    pub async fn vector_index_dimensions(
+        &self,
+        collection: &str,
+        index_name: &str,
+        field: &str,
+    ) -> anyhow::Result<Option<u64>> {
+        let Some(index) = self.find_index_by_name(collection, index_name).await? else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            index.index_type == "vector",
+            "index {index_name} on {collection} exists but has type {} instead of vector",
+            index.index_type
+        );
+        anyhow::ensure!(
+            index.fields == [field],
+            "vector index {index_name} on {collection} has fields {:?}, expected [{field}]",
+            index.fields
+        );
+        vector_index_dimension(&index)
+            .map(Some)
+            .ok_or_else(|| anyhow!("vector index {index_name} on {collection} has no dimension"))
+    }
+
     pub async fn persistent_index_matches(
         &self,
         collection: &str,
@@ -356,10 +384,30 @@ impl ArangoClient {
         default_n_probe: u64,
         training_iterations: u64,
     ) -> anyhow::Result<()> {
-        if self.index_exists(collection, index_name).await? {
+        if let Some(existing) = self.find_index_by_name(collection, index_name).await? {
+            anyhow::ensure!(
+                vector_index_definition_matches(&existing, field, dimension),
+                "vector index {index_name} on {collection} exists with a different definition"
+            );
             return Ok(());
         }
 
+        self.delete_vector_training_rows(collection).await?;
+        let source_rows = self.count_vector_index_source_rows(collection).await?;
+        let effective_n_lists = effective_vector_index_n_lists(n_lists, source_rows);
+        if effective_n_lists != n_lists {
+            tracing::warn!(
+                collection,
+                index_name,
+                configured_n_lists = n_lists,
+                effective_n_lists,
+                source_rows,
+                "clamped Arango vector index nLists to available vector rows"
+            );
+        }
+        if source_rows == 0 {
+            self.seed_vector_training_rows(collection, field, dimension, effective_n_lists).await?;
+        }
         let body = serde_json::json!({
             "name": index_name,
             "type": "vector",
@@ -367,7 +415,7 @@ impl ArangoClient {
             "params": {
                 "metric": "cosine",
                 "dimension": dimension,
-                "nLists": n_lists,
+                "nLists": effective_n_lists,
                 "defaultNProbe": default_n_probe,
                 "trainingIterations": training_iterations
             }
@@ -378,6 +426,7 @@ impl ArangoClient {
             .send()
             .await?;
         if response.status().is_success() || response.status().as_u16() == 409 {
+            self.ensure_vector_index_definition(collection, index_name, field, dimension).await?;
             return Ok(());
         }
         let status = response.status();
@@ -386,13 +435,15 @@ impl ArangoClient {
             && (response_body.contains("Number of training points")
                 || response_body.contains("nx >= k"))
         {
-            self.seed_vector_training_rows(collection, field, dimension, n_lists).await?;
+            self.seed_vector_training_rows(collection, field, dimension, effective_n_lists).await?;
             let retry = self
                 .request(Method::POST, &format!("_api/index?collection={collection}"))
                 .json(&body)
                 .send()
                 .await?;
             if retry.status().is_success() || retry.status().as_u16() == 409 {
+                self.ensure_vector_index_definition(collection, index_name, field, dimension)
+                    .await?;
                 return Ok(());
             }
             let retry_status = retry.status();
@@ -403,6 +454,75 @@ impl ArangoClient {
         }
         Err(anyhow!(
             "failed to ensure vector index {index_name} on {collection}: status {status}, body {response_body}",
+        ))
+    }
+
+    pub async fn delete_index_by_name(
+        &self,
+        collection: &str,
+        index_name: &str,
+    ) -> anyhow::Result<()> {
+        let Some(existing) = self.find_index_by_name(collection, index_name).await? else {
+            return Ok(());
+        };
+        let index_id = existing.id.as_deref().ok_or_else(|| {
+            anyhow!("ArangoDB index {index_name} on {collection} did not include an id")
+        })?;
+        self.delete_index(index_id)
+            .await
+            .with_context(|| format!("failed to delete vector index {index_name}"))
+    }
+
+    pub async fn recreate_vector_index(
+        &self,
+        collection: &str,
+        index_name: &str,
+        field: &str,
+        dimension: u64,
+        n_lists: u64,
+        default_n_probe: u64,
+        training_iterations: u64,
+    ) -> anyhow::Result<()> {
+        self.delete_index_by_name(collection, index_name).await?;
+        self.ensure_vector_index(
+            collection,
+            index_name,
+            field,
+            dimension,
+            n_lists,
+            default_n_probe,
+            training_iterations,
+        )
+        .await
+    }
+
+    async fn ensure_vector_index_definition(
+        &self,
+        collection: &str,
+        index_name: &str,
+        field: &str,
+        dimension: u64,
+    ) -> anyhow::Result<()> {
+        let Some(index) = self.find_index_by_name(collection, index_name).await? else {
+            return Err(anyhow!("vector index {index_name} on {collection} was not created"));
+        };
+        anyhow::ensure!(
+            vector_index_definition_matches(&index, field, dimension),
+            "vector index {index_name} on {collection} conflicts with the canonical definition"
+        );
+        Ok(())
+    }
+
+    async fn delete_index(&self, index_id: &str) -> anyhow::Result<()> {
+        let response =
+            self.request(Method::DELETE, &format!("_api/index/{index_id}")).send().await?;
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            return Ok(());
+        }
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        Err(anyhow!(
+            "failed to delete ArangoDB index {index_id}: status {status}, body {response_body}"
         ))
     }
 
@@ -493,6 +613,44 @@ impl ArangoClient {
             .with_context(|| format!("failed to seed vector training rows for {collection}"))?;
 
         Ok(())
+    }
+
+    async fn delete_vector_training_rows(&self, collection: &str) -> anyhow::Result<()> {
+        let _ = self
+            .query_json(
+                "FOR row IN @@collection
+                 FILTER row.__bootstrap_vector_seed__ == true
+                 REMOVE row IN @@collection",
+                serde_json::json!({
+                    "@collection": collection,
+                }),
+            )
+            .await
+            .with_context(|| format!("failed to delete vector training rows for {collection}"))?;
+        Ok(())
+    }
+
+    async fn count_vector_index_source_rows(&self, collection: &str) -> anyhow::Result<u64> {
+        let cursor = self
+            .query_json(
+                "FOR row IN @@collection
+                 FILTER row.__bootstrap_vector_seed__ != true
+                 COLLECT WITH COUNT INTO length
+                 RETURN length",
+                serde_json::json!({
+                    "@collection": collection,
+                }),
+            )
+            .await
+            .with_context(|| {
+                format!("failed to count vector index source rows for {collection}")
+            })?;
+        cursor
+            .get("result")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|rows| rows.first())
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow!("ArangoDB count query returned no row for {collection}"))
     }
 
     pub async fn query_json(
@@ -709,10 +867,6 @@ impl ArangoClient {
             .with_context(|| format!("failed to decode {operation} response"))
     }
 
-    async fn index_exists(&self, collection: &str, index_name: &str) -> anyhow::Result<bool> {
-        Ok(self.find_index_by_name(collection, index_name).await?.is_some())
-    }
-
     async fn find_index_by_name(
         &self,
         collection: &str,
@@ -805,6 +959,20 @@ impl ArangoClient {
         };
         Ok(view_links_semantically_match(expected_links, &actual_links))
     }
+}
+
+fn vector_index_definition_matches(index: &ArangoIndexRow, field: &str, dimension: u64) -> bool {
+    index.index_type == "vector"
+        && index.fields == [field]
+        && vector_index_dimension(index) == Some(dimension)
+}
+
+fn vector_index_dimension(index: &ArangoIndexRow) -> Option<u64> {
+    index.params.get("dimension").and_then(serde_json::Value::as_u64)
+}
+
+fn effective_vector_index_n_lists(configured_n_lists: u64, source_rows: u64) -> u64 {
+    configured_n_lists.max(1).min(source_rows.max(1))
 }
 
 fn persistent_index_definition_matches(
@@ -955,7 +1123,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        ArangoClient, ArangoIndexRow, persistent_index_definition_matches,
+        ArangoClient, ArangoIndexRow, effective_vector_index_n_lists,
+        persistent_index_definition_matches, vector_index_definition_matches,
         view_links_semantically_match,
     };
 
@@ -1037,6 +1206,7 @@ mod tests {
     #[test]
     fn persistent_index_definition_requires_exact_match() {
         let index = ArangoIndexRow {
+            id: Some("knowledge_chunk/123".to_string()),
             name: "knowledge_document_library_updated_index".to_string(),
             index_type: "persistent".to_string(),
             fields: vec![
@@ -1047,6 +1217,7 @@ mod tests {
             ],
             unique: false,
             sparse: false,
+            params: serde_json::Value::Null,
         };
 
         assert!(persistent_index_definition_matches(
@@ -1061,6 +1232,35 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn vector_index_definition_requires_dimension_and_field_match() {
+        let index = ArangoIndexRow {
+            id: Some("knowledge_chunk_vector/123".to_string()),
+            name: "knowledge_chunk_vector_index".to_string(),
+            index_type: "vector".to_string(),
+            fields: vec!["vector".to_string()],
+            unique: false,
+            sparse: false,
+            params: serde_json::json!({
+                "metric": "cosine",
+                "dimension": 3072,
+            }),
+        };
+
+        assert!(vector_index_definition_matches(&index, "vector", 3072));
+        assert!(!vector_index_definition_matches(&index, "embedding", 3072));
+        assert!(!vector_index_definition_matches(&index, "vector", 1536));
+    }
+
+    #[test]
+    fn effective_vector_index_n_lists_tracks_available_source_rows() {
+        assert_eq!(effective_vector_index_n_lists(100, 0), 1);
+        assert_eq!(effective_vector_index_n_lists(100, 1), 1);
+        assert_eq!(effective_vector_index_n_lists(100, 32), 32);
+        assert_eq!(effective_vector_index_n_lists(100, 256), 100);
+        assert_eq!(effective_vector_index_n_lists(0, 256), 1);
     }
 
     #[test]

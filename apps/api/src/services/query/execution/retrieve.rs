@@ -33,7 +33,9 @@ use crate::{
             text_match::{
                 normalized_alnum_token_sequence, normalized_alnum_tokens, token_sequence_contains,
             },
-            vector_dimensions::validate_embedding_vector_dimensions,
+            vector_dimensions::{
+                require_current_vector_index_dimensions, validate_embedding_vector_dimensions,
+            },
         },
     },
     shared::extraction::text_render::repair_technical_layout_noise,
@@ -1247,7 +1249,13 @@ pub(crate) async fn retrieve_document_chunks(
             );
             return Ok::<(Vec<RuntimeMatchedChunk>, u128), anyhow::Error>((Vec::new(), 0));
         };
-        validate_embedding_vector_dimensions(state, question_embedding, "runtime chunk search")?;
+        let _vector_guard = state.canonical_services.search.vector_plane_read_guard(state).await?;
+        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        validate_embedding_vector_dimensions(
+            expected_dimensions,
+            question_embedding,
+            "runtime chunk search",
+        )?;
         let raw_hits = state
             .arango_search_store
             .search_chunk_vectors_by_similarity(

@@ -36,7 +36,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg \
       --bin ironrag-backend \
       --bin rebuild_runtime_graph \
       --bin ironrag-cli \
-      --bin ironrag-embed-chunks-backfill \
+      --bin ironrag-vector-rebuild \
       --bin ironrag-promote-null-heads \
       --bin ironrag-gc-stale-chunks \
       --bin ironrag-backfill-chunk-temporal-bounds \
@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg \
     && cp target/release/ironrag-backend /out/ \
     && cp target/release/rebuild_runtime_graph /out/ \
     && cp target/release/ironrag-cli /out/ \
-    && cp target/release/ironrag-embed-chunks-backfill /out/ \
+    && cp target/release/ironrag-vector-rebuild /out/ \
     && cp target/release/ironrag-promote-null-heads /out/ \
     && cp target/release/ironrag-gc-stale-chunks /out/ \
     && cp target/release/ironrag-backfill-chunk-temporal-bounds /out/ \
@@ -100,7 +100,7 @@ FROM docling-base AS runtime
 COPY --from=builder /out/ironrag-backend /usr/local/bin/ironrag-backend
 COPY --from=builder /out/rebuild_runtime_graph /usr/local/bin/rebuild_runtime_graph
 COPY --from=builder /out/ironrag-cli /usr/local/bin/ironrag-cli
-COPY --from=builder /out/ironrag-embed-chunks-backfill /usr/local/bin/ironrag-embed-chunks-backfill
+COPY --from=builder /out/ironrag-vector-rebuild /usr/local/bin/ironrag-vector-rebuild
 COPY --from=builder /out/ironrag-promote-null-heads /usr/local/bin/ironrag-promote-null-heads
 COPY --from=builder /out/ironrag-gc-stale-chunks /usr/local/bin/ironrag-gc-stale-chunks
 COPY --from=builder /out/ironrag-backfill-chunk-temporal-bounds /usr/local/bin/ironrag-backfill-chunk-temporal-bounds

@@ -6,6 +6,7 @@ where the chat roles use the provider and embedding falls back to
 gptunnel only when the provider has no native embedding catalog row).
 
 Usage:
+    IRONRAG_ADMIN_PASSWORD=... \
     python3 multi-provider-e2e.py PROVIDER
 
 PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai}.
@@ -31,7 +32,7 @@ import requests
 
 BASE = os.environ.get("IRONRAG_BASE_URL", "http://127.0.0.1:19000/v1")
 ADMIN_LOGIN = os.environ.get("IRONRAG_ADMIN_LOGIN", "admin")
-ADMIN_PASSWORD = os.environ.get("IRONRAG_ADMIN_PASSWORD", "ironrag123")
+ADMIN_PASSWORD = os.environ.get("IRONRAG_ADMIN_PASSWORD")
 
 ALPHA_RELAY_TEXT = (
     "Alpha Relay runbook.\n"
@@ -65,7 +66,7 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
         "chat":      ["qwen3.6-plus", "qwen3.5-plus", "qwen-plus"],
         "answer":    ["qwen3.6-max-preview", "qwen3.6-plus", "qwen3.5-plus"],
         "vision":    ["qwen3-vl-plus", "qwen-vl-max", "qwen-vl-plus"],
-        "embedding": [],  # qwen embeddings are 1024-dim, Arango wants 3072
+        "embedding": [],  # qwen native embedding presets are not part of this smoke profile
     },
     "gptunnel": {
         "chat":      ["gpt-4o-mini", "gpt-4.1-mini"],
@@ -94,8 +95,8 @@ VISION_FALLBACK_PROVIDER = "gptunnel"
 VISION_FALLBACK_MODELS = ["gpt-4o", "claude-4.6-sonnet", "gemini-3.1-pro"]
 
 # Purposes that may fall back to gptunnel when the chosen provider has
-# no native preset for that role. Embedding falls back because Arango
-# requires a fixed 3072-dim index. Vision falls back ONLY when the
+# no native preset for that role. Embedding falls back only when the provider
+# profile has no compatible native embedding preset. Vision falls back ONLY when the
 # provider profile explicitly opts in by leaving its `vision` list
 # empty (e.g. deepseek, which has no vision API). Providers that DO
 # expose vision must use their own model — silent cross-provider
@@ -115,6 +116,8 @@ def step(msg: str) -> None:
 
 
 def login(s: requests.Session) -> None:
+    if not ADMIN_PASSWORD:
+        fail("IRONRAG_ADMIN_PASSWORD is required")
     step("login admin")
     r = s.post(f"{BASE}/iam/session/login",
                json={"login": ADMIN_LOGIN, "password": ADMIN_PASSWORD})
@@ -340,8 +343,9 @@ def main() -> int:
         cred = credential_id
         if preset is None:
             # Fall back to gptunnel when the chosen provider has no native
-            # preset for embedding or vision (Arango index requires 3072-dim
-            # embeddings; vision binding is required by extract_graph stage).
+            # preset for embedding or vision. Embedding fallback keeps the
+            # smoke runnable for providers without a native embedding lane;
+            # vision binding is required by the extract_graph stage.
             if purpose not in FALLBACK_PURPOSES:
                 fail(f"no preset for {provider}/{purpose}", candidates)
             if fallback_credential_id is None:

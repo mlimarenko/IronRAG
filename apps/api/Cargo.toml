@@ -128,8 +128,8 @@ name = "ironrag-cli"
 path = "src/bin/ironrag_cli.rs"
 
 [[bin]]
-name = "ironrag-embed-chunks-backfill"
-path = "src/bin/embed_chunks_backfill.rs"
+name = "ironrag-vector-rebuild"
+path = "src/bin/vector_rebuild.rs"
 
 [[bin]]
 name = "ironrag-promote-null-heads"

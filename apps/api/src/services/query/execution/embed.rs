@@ -11,7 +11,9 @@ use crate::{
     integrations::llm::EmbeddingRequest,
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
-        query::vector_dimensions::validate_embedding_vector_dimensions,
+        query::vector_dimensions::{
+            require_current_vector_index_dimensions, validate_embedding_vector_dimensions,
+        },
     },
 };
 
@@ -60,20 +62,22 @@ pub(super) async fn embed_question(
     let trimmed_input = question.trim().to_string();
     let cache_key = embedding_cache_key(&trimmed_input, &embedding_binding);
 
-    if let Ok(cache) = EMBEDDING_CACHE.lock() {
-        if let Some(cached_embedding) = cache.get(&cache_key) {
-            validate_embedding_vector_dimensions(
-                state,
-                cached_embedding,
-                format!("cached runtime query {}", embedding_binding.model_name),
-            )?;
-            return Ok(QuestionEmbeddingResult {
-                embedding: cached_embedding.clone(),
-                provider_kind: embedding_binding.provider_kind,
-                model_name: embedding_binding.model_name,
-                usage_json: serde_json::json!({"cached": true}),
-            });
-        }
+    let cached_embedding =
+        EMBEDDING_CACHE.lock().ok().and_then(|cache| cache.get(&cache_key).cloned());
+    if let Some(cached_embedding) = cached_embedding {
+        let _vector_guard = state.canonical_services.search.vector_plane_read_guard(state).await?;
+        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        validate_embedding_vector_dimensions(
+            expected_dimensions,
+            &cached_embedding,
+            format!("cached runtime query {}", embedding_binding.model_name),
+        )?;
+        return Ok(QuestionEmbeddingResult {
+            embedding: cached_embedding,
+            provider_kind: embedding_binding.provider_kind,
+            model_name: embedding_binding.model_name,
+            usage_json: serde_json::json!({"cached": true}),
+        });
     }
 
     let response = state
@@ -88,11 +92,15 @@ pub(super) async fn embed_question(
         })
         .await
         .context("failed to embed runtime query")?;
-    validate_embedding_vector_dimensions(
-        state,
-        &response.embedding,
-        format!("runtime query {}", response.model_name),
-    )?;
+    {
+        let _vector_guard = state.canonical_services.search.vector_plane_read_guard(state).await?;
+        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        validate_embedding_vector_dimensions(
+            expected_dimensions,
+            &response.embedding,
+            format!("runtime query {}", response.model_name),
+        )?;
+    }
 
     if let Ok(mut cache) = EMBEDDING_CACHE.lock() {
         if cache.len() >= EMBEDDING_CACHE_MAX_ENTRIES {

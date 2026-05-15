@@ -398,6 +398,42 @@ impl ArangoSearchStore {
         u64::try_from(deleted.len()).context("deleted chunk vector count overflowed u64")
     }
 
+    pub async fn delete_chunk_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<u64> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 FILTER vector.library_id == @library_id
+                 REMOVE vector IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "library_id": library_id,
+                }),
+            )
+            .await
+            .context("failed to delete knowledge chunk vectors by library")?;
+        let deleted: Vec<String> = decode_many_results(cursor)?;
+        u64::try_from(deleted.len()).context("deleted chunk vector count overflowed u64")
+    }
+
+    pub async fn delete_all_chunk_vectors(&self) -> anyhow::Result<u64> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 REMOVE vector IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                }),
+            )
+            .await
+            .context("failed to delete all knowledge chunk vectors")?;
+        let deleted: Vec<String> = decode_many_results(cursor)?;
+        u64::try_from(deleted.len()).context("deleted chunk vector count overflowed u64")
+    }
+
     pub async fn list_chunk_vectors_by_chunk(
         &self,
         chunk_id: Uuid,
@@ -578,6 +614,23 @@ impl ArangoSearchStore {
             .context("failed to delete knowledge entity vectors by library")?;
         let _: Vec<String> = decode_many_results(cursor)?;
         Ok(())
+    }
+
+    pub async fn delete_all_entity_vectors(&self) -> anyhow::Result<u64> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 REMOVE vector IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+                }),
+            )
+            .await
+            .context("failed to delete all knowledge entity vectors")?;
+        let deleted: Vec<String> = decode_many_results(cursor)?;
+        u64::try_from(deleted.len()).context("deleted entity vector count overflowed u64")
     }
 
     pub async fn list_entity_vectors_by_entity(

@@ -359,6 +359,12 @@ async fn search_documents_impl(
 
     let (mut vector_chunk_hits, vector_entity_hits) = if let Some(context) = hybrid_context.as_ref()
     {
+        let _vector_guard = state
+            .canonical_services
+            .search
+            .vector_plane_read_guard(&state)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
         let embedding_model_key = context.model_catalog_id.to_string();
         let vector_chunk_future = state.arango_search_store.search_chunk_vectors_by_similarity(
             library_id,

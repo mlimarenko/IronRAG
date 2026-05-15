@@ -105,16 +105,19 @@ flowchart LR
   Route -->|broad / ambiguous| Response
 ```
 
-`query_retrieve` and `embed_chunk` bindings are kept in sync — bootstrap
-and admin writes reject non-matching vector models before the runtime
-can enter a broken retrieval state.
+`query_retrieve` and `embed_chunk` bindings are kept in sync. When an operator
+switches to an embedding model with a different dimension, they must run the
+vector rebuild utility from a source library using that binding; because Arango
+vector indexes are instance-wide, the rebuild recreates the chunk/entity vector
+indexes and recalculates all existing vector material before the new retrieval
+lane is used.
 
 ## Storage map
 
 | Store | Role |
 |---|---|
 | **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, presets, prices), bindings, IAM, sessions, query executions, billing. Authoritative for everything except the knowledge graph itself. |
-| **ArangoDB** | Knowledge graph (nodes, edges, evidence), document store, chunk vectors (3072-dim cosine), structured-block search, technical-fact index. |
+| **ArangoDB** | Knowledge graph (nodes, edges, evidence), document store, cosine chunk/entity vectors, structured-block search, technical-fact index. |
 | **Redis** | Graph topology cache, IR cache, answer-context cache, prewarm coordination. |
 | **Filesystem / S3** | Source-document blobs (configurable; bundled `s4core` provides a built-in S3-compatible blob store). |
 
@@ -137,6 +140,8 @@ Binding writes enforce two invariants the runtime depends on:
 - `embed_chunk` and `query_retrieve` must point at the same model
   catalog entry; the vector-counterpart sync upserts the partner
   on every write to keep the active retrieval path consistent.
+- A dimension-changing embedding model switch is finalized by running the
+  vector rebuild utility, so Arango indexes and stored vectors move together.
 
 Per-purpose binding scopes resolve from library → workspace →
 instance, so a workspace can override the instance default for a

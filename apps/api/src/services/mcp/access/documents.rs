@@ -74,6 +74,12 @@ pub async fn search_documents(
         let embedding_context =
             resolve_search_embedding_context(state, library.library.id, query).await?;
         let vector_chunk_hits = if let Some(context) = embedding_context.as_ref() {
+            let _vector_guard = state
+                .canonical_services
+                .search
+                .vector_plane_read_guard(state)
+                .await
+                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
             match state
                 .arango_search_store
                 .search_chunk_vectors_by_similarity(
