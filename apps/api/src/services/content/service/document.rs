@@ -1581,6 +1581,11 @@ pub struct ContentDocumentListEntry {
     pub source_kind: Option<String>,
     pub source_uri: Option<String>,
     pub source_access: Option<crate::domains::content::ContentSourceAccess>,
+    /// Canonical connector identity for this document. Comes straight
+    /// from `content_document.external_key` and is the key connectors
+    /// use to look up "do I already own a doc here?" without paging the
+    /// whole library.
+    pub external_key: String,
     /// Summed cost across every billable execution attributed to this
     /// document — computed server-side via the per-document LATERAL on
     /// `billing_execution_cost` in the list query, so the frontend never
@@ -1771,6 +1776,7 @@ fn build_document_list_entry(
         file_size,
         uploaded_at: row.created_at,
         document_state: row.document_state.clone(),
+        external_key: row.external_key.clone(),
         status,
         readiness,
         stage,

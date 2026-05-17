@@ -241,6 +241,7 @@ fn map_document_list_entry(entry: ContentDocumentListEntry) -> ContentDocumentLi
         file_size: entry.file_size,
         uploaded_at: entry.uploaded_at,
         document_state: entry.document_state,
+        external_key: entry.external_key,
         status: entry.status,
         readiness: entry.readiness,
         stage: entry.stage,

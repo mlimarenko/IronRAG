@@ -83,6 +83,11 @@ pub struct ContentDocumentListItem {
     pub file_size: Option<i64>,
     pub uploaded_at: DateTime<Utc>,
     pub document_state: String,
+    /// Canonical connector identity (`content_document.external_key`).
+    /// Connectors look this up via list to decide whether to upload or
+    /// replace; exposed so a paginated list pass is sufficient instead
+    /// of a per-document detail roundtrip.
+    pub external_key: String,
     /// Canonical status bucket derived server-side.
     pub status: DocumentStatus,
     /// Canonical readiness bucket derived server-side.

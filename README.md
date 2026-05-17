@@ -31,6 +31,7 @@
 - **Restart-safe processing.** Long document jobs keep durable extraction units, reusable embedding / graph outputs, and lease-guarded finalization, so stack restarts or transient network breaks resume from the last completed unit instead of discarding hours of work.
 - **Durable assistant turns.** UI answer streaming is an activity channel over the same persisted query execution; if the browser or proxy drops the stream after work starts, the frontend reloads the completed session result instead of submitting the question again. LLM debug snapshots are stored per execution for post-reload inspection.
 - **Backup and restore.** Streaming `tar.zst` archive with selective sections (catalog only, with blobs, with graph). Restore to the same or a different deployment.
+- **Pluggable source connectors.** Push content into IronRAG from any vendor system via a small Python adapter. Build your own on the [IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate), or run the production [BookStack connector](https://github.com/mlimarenko/IronRAG.BookStack) (pages + attachments + images, periodic poll + webhook intake).
 
 ## Quick start
 
@@ -199,3 +200,15 @@ helm upgrade --install ironrag charts/ironrag \
 ## License
 
 [MIT](./LICENSE)
+
+---
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/mlimarencka">
+    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=mlimarencka&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" />
+  </a>
+</p>
+
+<p align="center">
+  <sub>Support open-source work on IronRAG, Piping, and practical developer infrastructure.</sub>
+</p>

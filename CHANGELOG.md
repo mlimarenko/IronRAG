@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.4.12 — 2026-05-17
+
+### Connectors: external_key surfaced
+
+- `GET /v1/content/documents` now returns `externalKey` on every list
+  item. Source connectors can now look up "do I already own a document
+  for this external_key?" in a single paginated pass instead of
+  fetching each document's detail endpoint individually.
+- The documents inspector panel now displays the external key for
+  connector-owned documents alongside the document id, so operators
+  can see which BookStack page (or other source item) backs each
+  IronRAG document.
+- New companion projects:
+  - [IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate)
+    — Python framework for writing custom source connectors.
+  - [BookStack connector](https://github.com/mlimarenko/IronRAG.BookStack)
+    — production reference adapter (pages + attachments + inline images,
+    periodic poll + webhook intake), published as
+    `pipingspace/ironrag.bookstack` on Docker Hub.
+
 ## 0.4.11 — 2026-05-15
 
 ### Startup: fixed clean-stack migration

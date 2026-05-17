@@ -269,6 +269,7 @@
     "cost": "Cost",
     "status": "Status",
     "documentId": "Document ID",
+    "externalKey": "External key",
     "pipeline": "Processing Pipeline",
     "pipelineStage": "Stage",
     "pipelineTime": "Time",

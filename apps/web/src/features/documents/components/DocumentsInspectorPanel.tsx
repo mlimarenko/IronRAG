@@ -652,6 +652,15 @@ export function DocumentsInspectorPanel({
                 value: compactDocumentId.text,
                 title: selectedDoc.id,
               },
+              ...(selectedDoc.externalKey
+                ? [
+                    {
+                      label: t('documents.externalKey'),
+                      value: selectedDoc.externalKey,
+                      title: selectedDoc.externalKey,
+                    },
+                  ]
+                : []),
             ].map((item) => (
               <div key={item.label} className="min-w-0">
                 <div className="truncate leading-4 text-muted-foreground">{item.label}</div>

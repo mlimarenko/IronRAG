@@ -628,6 +628,10 @@ export type ContentDocumentListItem = {
     cost: string;
     costCurrencyCode: string;
     documentState: string;
+    /**
+     * Canonical connector identity (`content_document.external_key`).
+     */
+    externalKey: string;
     failureCode?: string | null;
     failureMessage?: string | null;
     fileName: string;
