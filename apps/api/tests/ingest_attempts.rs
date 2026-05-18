@@ -258,6 +258,7 @@ impl IngestAttemptsFixture {
                     revision_kind: "upload".to_string(),
                     storage_ref: Some(format!("memory://ingest-attempts/{revision_id}")),
                     source_uri: Some(format!("memory://ingest-attempts/source/{revision_id}")),
+                    document_hint: None,
                     mime_type: "text/plain".to_string(),
                     checksum: format!("checksum-{revision_id}"),
                     byte_size: 128,
@@ -691,6 +692,7 @@ async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discove
     let server = web_ingest_support::WebTestServer::start().await?;
 
     let result = async {
+        let web_policy = ironrag_backend::shared::web::ingest::default_web_ingest_policy();
         let run = fixture
             .state
             .canonical_services
@@ -705,8 +707,8 @@ async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discove
                     boundary_policy: Some("same_host".to_string()),
                     max_depth: Some(1),
                     max_pages: Some(20),
-                    url_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
-                        .url_filter,
+                    crawl_filter: web_policy.crawl_filter,
+                    materialization_filter: web_policy.materialization_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,

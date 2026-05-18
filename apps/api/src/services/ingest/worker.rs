@@ -1004,6 +1004,7 @@ async fn run_canonical_ingest_pipeline(
             revision_kind: revision_row.content_source_kind.clone(),
             storage_ref: revision_row.storage_key.clone(),
             source_uri: revision_row.source_uri.clone(),
+            document_hint: revision_row.document_hint.clone(),
             mime_type: revision_row.mime_type.clone(),
             checksum: revision_row.checksum.clone(),
             byte_size: revision_row.byte_size,

@@ -16,6 +16,24 @@ server {
 
     client_max_body_size 100M;
 
+    location ~ ^/v1/content/libraries/[^/]+/snapshot$ {
+        client_max_body_size 0;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+        send_timeout 1800s;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_pass $ironrag_api_upstream;
+    }
+
     location /v1/ {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -37,8 +55,8 @@ server {
         # JSON bodies we exchange for /v1/query/sessions and /v1/mcp
         # tool-calls handled pathologically (request hung at the FE
         # nginx layer with no log line, never reached backend). Streaming
-        # uploads are not part of our surface, so request buffering
-        # stays on.
+        # snapshot uploads use the dedicated location above, so request
+        # buffering stays on for the rest of /v1.
         proxy_buffering off;
         proxy_pass $ironrag_api_upstream;
     }

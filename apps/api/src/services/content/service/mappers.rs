@@ -84,7 +84,7 @@ pub(super) fn map_knowledge_revision_row(row: KnowledgeRevisionRow) -> ContentRe
         title: row.title,
         language_code: None,
         source_uri: row.source_uri,
-        document_hint: None,
+        document_hint: row.document_hint,
         storage_key: row.storage_ref,
         created_by_principal_id: None,
         created_at: row.created_at,
@@ -237,5 +237,51 @@ pub(super) fn map_mutation_item_row(
         result_revision_id: row.result_revision_id,
         item_state: row.item_state,
         message: row.message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn knowledge_revision_mapping_preserves_document_hint() {
+        let now = Utc::now();
+        let revision_id = Uuid::now_v7();
+        let mapped = map_knowledge_revision_row(KnowledgeRevisionRow {
+            key: revision_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            revision_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_number: 1,
+            revision_state: "active".to_string(),
+            revision_kind: "web_page".to_string(),
+            storage_ref: Some("content/web.html".to_string()),
+            source_uri: Some("https://example.com/source".to_string()),
+            document_hint: Some("https://example.com/smoke/v2".to_string()),
+            mime_type: "text/html".to_string(),
+            checksum: "sha256:source".to_string(),
+            title: Some("Smoke".to_string()),
+            byte_size: 128,
+            normalized_text: Some("body".to_string()),
+            text_checksum: Some("sha256:text".to_string()),
+            image_checksum: None,
+            text_state: "text_readable".to_string(),
+            vector_state: "vector_ready".to_string(),
+            graph_state: "graph_ready".to_string(),
+            text_readable_at: Some(now),
+            vector_ready_at: Some(now),
+            graph_ready_at: Some(now),
+            superseded_by_revision_id: None,
+            created_at: now,
+        });
+
+        assert_eq!(mapped.document_hint.as_deref(), Some("https://example.com/smoke/v2"));
     }
 }

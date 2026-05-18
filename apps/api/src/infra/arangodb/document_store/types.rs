@@ -43,6 +43,8 @@ pub struct KnowledgeRevisionRow {
     pub revision_kind: String,
     pub storage_ref: Option<String>,
     pub source_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_hint: Option<String>,
     pub mime_type: String,
     pub checksum: String,
     pub title: Option<String>,

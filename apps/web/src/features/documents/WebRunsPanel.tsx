@@ -109,9 +109,12 @@ function humanizePageState(state: string, t: TFunction): string {
   return translated === `documents.pageStateLabels.${state}` ? state.replaceAll("_", " ") : translated;
 }
 
-function humanizeUrlFilterMode(mode: string | undefined, t: TFunction): string {
-  if (mode === "allowlist") return t("documents.urlFilterModeAllowlist");
-  return t("documents.urlFilterModeBlocklist");
+function filterPatternCount(
+  filter: WebIngestRunListItem["crawlFilter"] | undefined,
+): number {
+  return (
+    (filter?.allowPatterns?.length ?? 0) + (filter?.blockPatterns?.length ?? 0)
+  );
 }
 
 function pagePrimaryUrl(page: WebIngestRunPageItem): string {
@@ -617,9 +620,14 @@ export function WebRunsPanel({
                           </span>
                         )}
                         <span>
-                          {humanizeUrlFilterMode(run.urlFilterMode, t)} ·{" "}
-                          {t("documents.urlFilterPatterns")}:{" "}
-                          {(run.urlPatterns?.length ?? 0).toLocaleString()}
+                          {t("documents.crawlFilterTitle")}:{" "}
+                          {filterPatternCount(
+                            run.crawlFilter,
+                          ).toLocaleString()} ·{" "}
+                          {t("documents.materializationFilterTitle")}:{" "}
+                          {filterPatternCount(
+                            run.materializationFilter,
+                          ).toLocaleString()}
                         </span>
                         <span>
                           {(run.counts?.processed ?? 0).toLocaleString()} /{" "}

@@ -25,7 +25,7 @@ use crate::{
             document_store::{KnowledgeLibraryGenerationRow, KnowledgeTechnicalFactRow},
             graph_store::{KnowledgeEvidenceRow, KnowledgeGraphTraversalRow},
         },
-        repositories::{catalog_repository, content_repository, query_repository},
+        repositories::{catalog_repository, query_repository},
     },
     interfaces::http::router_support::ApiError,
     services::content::document_hint::resolve_document_hint,
@@ -1094,14 +1094,6 @@ async fn load_prepared_segment_revision_info(
         .map(|document| (document.document_id, document.title))
         .collect();
 
-    let postgres_revisions: HashMap<Uuid, content_repository::ContentRevisionRow> =
-        content_repository::list_revisions_by_ids(&state.persistence.postgres, &revision_ids)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|revision| (revision.id, revision))
-            .collect();
-
     let library_ids = blocks
         .iter()
         .map(|block| block.library_id)
@@ -1127,7 +1119,6 @@ async fn load_prepared_segment_revision_info(
         .unwrap_or_default()
         .into_iter()
         .map(|revision| {
-            let postgres_revision = postgres_revisions.get(&revision.revision_id);
             let source_descriptor =
                 crate::services::content::source_access::describe_content_source(
                     revision.document_id,
@@ -1145,30 +1136,17 @@ async fn load_prepared_segment_revision_info(
                 .get(&revision.document_id)
                 .cloned()
                 .flatten()
-                .or_else(|| postgres_revision.and_then(|row| row.title.clone()))
                 .or_else(|| revision.title.clone())
                 .or_else(|| Some(source_descriptor.file_name.clone()));
             let library_setting =
                 library_settings.get(&revision.library_id).copied().unwrap_or(true);
-            let document_hint = postgres_revision
-                .map(|row| {
-                    resolve_document_hint(
-                        &row.content_source_kind,
-                        row.source_uri.as_deref(),
-                        row.document_hint.as_deref(),
-                        document_title.as_deref(),
-                        library_setting,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    resolve_document_hint(
-                        &revision.revision_kind,
-                        revision.source_uri.as_deref(),
-                        None,
-                        document_title.as_deref(),
-                        library_setting,
-                    )
-                });
+            let document_hint = resolve_document_hint(
+                &revision.revision_kind,
+                revision.source_uri.as_deref(),
+                revision.document_hint.as_deref(),
+                document_title.as_deref(),
+                library_setting,
+            );
             (
                 revision.revision_id,
                 PreparedSegmentRevisionInfo {

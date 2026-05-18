@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    interfaces::http::router_support::ApiError,
+    interfaces::http::{
+        content::types::{normalize_optional_document_hint, normalize_optional_text},
+        router_support::ApiError,
+    },
     shared::extraction::file_extract::{UploadAdmissionError, classify_multipart_file_body_error},
 };
 
@@ -23,6 +26,7 @@ pub struct ParsedUploadMultipart {
 #[derive(Debug)]
 pub struct ParsedReplaceMultipart {
     pub idempotency_key: Option<String>,
+    pub document_hint: Option<String>,
     pub file_name: String,
     pub mime_type: Option<String>,
     pub file_bytes: Vec<u8>,
@@ -124,6 +128,7 @@ pub(super) async fn parse_replace_multipart(
     mut multipart: Multipart,
 ) -> Result<ParsedReplaceMultipart, ApiError> {
     let mut idempotency_key = None;
+    let mut document_hint = None;
     let mut file_name = None;
     let mut mime_type = None;
     let mut file_bytes = None;
@@ -141,6 +146,14 @@ pub(super) async fn parse_replace_multipart(
                         .map_err(|_| ApiError::BadRequest("invalid idempotency_key".to_string()))?,
                 );
             }
+            "document_hint" => {
+                document_hint = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| ApiError::BadRequest("invalid document_hint".to_string()))?,
+                );
+            }
             "file" => {
                 let parsed_file = read_multipart_file_field(state, field).await?;
                 file_name = Some(parsed_file.file_name);
@@ -153,6 +166,7 @@ pub(super) async fn parse_replace_multipart(
 
     Ok(ParsedReplaceMultipart {
         idempotency_key: idempotency_key.and_then(normalize_optional_text),
+        document_hint: normalize_optional_document_hint(document_hint)?,
         file_name: file_name.unwrap_or_else(|| format!("replace-{}", Uuid::now_v7())),
         mime_type,
         file_bytes: file_bytes.ok_or_else(|| {
@@ -210,23 +224,6 @@ fn map_content_multipart_file_body_error(
         state.ui_runtime.upload_max_size_mb,
         &error.to_string(),
     ))
-}
-
-fn normalize_optional_text(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-fn normalize_optional_document_hint(value: Option<String>) -> Result<Option<String>, ApiError> {
-    let Some(value) = value.and_then(normalize_optional_text) else {
-        return Ok(None);
-    };
-    if value.chars().count() > 1024 {
-        return Err(ApiError::BadRequest(
-            "document_hint must be at most 1024 characters".to_string(),
-        ));
-    }
-    Ok(Some(value))
 }
 
 pub(super) fn resolve_upload_external_key(

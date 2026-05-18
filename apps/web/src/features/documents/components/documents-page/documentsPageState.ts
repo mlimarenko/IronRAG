@@ -9,7 +9,7 @@ import type {
   DocumentListSortOrder,
   DocumentListStatusFilter,
   WebIngestPattern,
-  WebIngestUrlFilterMode,
+  WebIngestUrlFilter,
 } from "@/shared/api";
 import type { DocumentListStatusCounts } from "@/shared/api/generated";
 import {
@@ -83,16 +83,24 @@ const SORT_PARTS: Record<
   "status:desc": { sortBy: "status", sortOrder: "desc" },
 };
 
-export type WebIngestUrlFilterSnapshot = {
-  mode: WebIngestUrlFilterMode;
-  patterns: WebIngestPattern[];
-  text: string;
+export type WebIngestFilterSnapshot = {
+  allowPatterns: WebIngestPattern[];
+  blockPatterns: WebIngestPattern[];
+  allowText: string;
+  blockText: string;
 };
 
-export type WebIngestUrlFilterDraft = {
+export type WebIngestPolicySnapshot = {
+  crawlFilter: WebIngestFilterSnapshot;
+  materializationFilter: WebIngestFilterSnapshot;
+};
+
+export type WebIngestPolicyDraft = {
   libraryId: string;
-  mode: WebIngestUrlFilterMode;
-  patternsText: string;
+  crawlAllowText: string;
+  crawlBlockText: string;
+  materializationAllowText: string;
+  materializationBlockText: string;
 };
 
 export type UploadQueueItem = {
@@ -227,15 +235,26 @@ export function useDocumentsTableState(): [
   });
 }
 
-export function extractWebIngestUrlFilter(
-  library: CatalogLibraryResponse | null | undefined,
-): WebIngestUrlFilterSnapshot {
-  const policyFilter = library?.webIngestPolicy?.urlFilter;
-  const patterns = policyFilter?.patterns ?? [];
+function toWebIngestFilterSnapshot(
+  filter: WebIngestUrlFilter | undefined,
+): WebIngestFilterSnapshot {
+  const allowPatterns = filter?.allowPatterns ?? [];
+  const blockPatterns = filter?.blockPatterns ?? [];
   return {
-    mode: policyFilter?.mode ?? "blocklist",
-    patterns,
-    text: formatWebIngestPatterns(patterns),
+    allowPatterns,
+    blockPatterns,
+    allowText: formatWebIngestPatterns(allowPatterns),
+    blockText: formatWebIngestPatterns(blockPatterns),
+  };
+}
+
+export function extractWebIngestPolicy(
+  library: CatalogLibraryResponse | null | undefined,
+): WebIngestPolicySnapshot {
+  const policy = library?.webIngestPolicy;
+  return {
+    crawlFilter: toWebIngestFilterSnapshot(policy?.crawlFilter),
+    materializationFilter: toWebIngestFilterSnapshot(policy?.materializationFilter),
   };
 }
 

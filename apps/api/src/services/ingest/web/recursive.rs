@@ -66,16 +66,56 @@ pub(super) async fn discover_recursive_scope(
     run: &WebIngestRunRow,
     seed_candidate: WebDiscoveredPageRow,
 ) -> Result<Vec<WebDiscoveredPageRow>, ApiError> {
+    let crawl_filter =
+        parse_run_url_filter(run.crawl_allow_patterns.clone(), run.crawl_block_patterns.clone())?;
+    let materialization_filter = parse_run_url_filter(
+        run.materialization_allow_patterns.clone(),
+        run.materialization_block_patterns.clone(),
+    )?;
+
+    if let Some(filter_exclusion) =
+        classify_web_crawl_filter_exclusion(&seed_candidate.normalized_url, &crawl_filter)
+    {
+        let excluded_seed = ingest_repository::update_web_discovered_page(
+            &state.persistence.postgres,
+            seed_candidate.id,
+            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                final_url: Some(seed_candidate.normalized_url.as_str()),
+                canonical_url: Some(seed_candidate.normalized_url.as_str()),
+                host_classification: None,
+                candidate_state: WebCandidateState::Excluded.as_str(),
+                classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
+                classification_detail: Some(filter_exclusion.detail.as_str()),
+                content_type: None,
+                http_status: None,
+                snapshot_storage_key: None,
+                updated_at: Some(Utc::now()),
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", seed_candidate.id))?;
+        telemetry::web_candidate_event(
+            "candidate_excluded_url_filter",
+            run.id,
+            excluded_seed.id,
+            WebCandidateState::Excluded.as_str(),
+            &excluded_seed.normalized_url,
+            excluded_seed.depth,
+            Some(WebClassificationReason::UrlFilter.as_str()),
+            Some(filter_exclusion.detail.as_str()),
+        );
+        return Ok(Vec::new());
+    }
+
     let mut frontier = VecDeque::from([seed_candidate]);
     let mut seen_urls = HashSet::from([run.normalized_seed_url.clone()]);
     let mut budgeted_urls = HashSet::from([run.normalized_seed_url.clone()]);
     let mut canonical_urls = HashSet::<String>::new();
     let mut eligible_pages = Vec::<WebDiscoveredPageRow>::new();
-    let url_filter = WebIngestUrlFilter {
-        mode: parse_run_url_filter_mode(&run.url_filter_mode)?,
-        patterns: parse_run_url_patterns(run.url_patterns.clone())?,
-    };
-
     let fetch_concurrency = state.settings.web_ingest_crawl_concurrency.max(1);
 
     'outer: while !frontier.is_empty() {
@@ -219,7 +259,7 @@ pub(super) async fn discover_recursive_scope(
             }
 
             if let Some(filter_exclusion) =
-                classify_web_crawl_filter_exclusion(&resource.final_url, &url_filter)
+                classify_web_crawl_filter_exclusion(&resource.final_url, &crawl_filter)
             {
                 let _ = ingest_repository::update_web_discovered_page(
                     &state.persistence.postgres,
@@ -315,9 +355,10 @@ pub(super) async fn discover_recursive_scope(
             }
             canonical_urls.insert(resource_canonical_url.clone());
 
-            if let Some(filter_exclusion) =
-                classify_web_materialization_filter_exclusion(&resource.final_url, &url_filter)
-            {
+            if let Some(filter_exclusion) = classify_web_materialization_filter_exclusion(
+                &resource.final_url,
+                &materialization_filter,
+            ) {
                 let candidate_row = ingest_repository::update_web_discovered_page(
                     &state.persistence.postgres,
                     candidate.id,
@@ -367,7 +408,8 @@ pub(super) async fn discover_recursive_scope(
                     run,
                     &candidate_row,
                     &resource,
-                    &url_filter,
+                    &crawl_filter,
+                    &materialization_filter,
                     &mut seen_urls,
                     &mut budgeted_urls,
                     &mut frontier,
@@ -438,7 +480,8 @@ pub(super) async fn discover_recursive_scope(
                 run,
                 &candidate_row,
                 &resource,
-                &url_filter,
+                &crawl_filter,
+                &materialization_filter,
                 &mut seen_urls,
                 &mut budgeted_urls,
                 &mut frontier,
@@ -457,7 +500,8 @@ async fn discover_outbound_candidates(
     run: &WebIngestRunRow,
     referrer: &WebDiscoveredPageRow,
     resource: &FetchedWebResource,
-    url_filter: &WebIngestUrlFilter,
+    crawl_filter: &WebIngestUrlFilter,
+    materialization_filter: &WebIngestUrlFilter,
     seen_urls: &mut HashSet<String>,
     budgeted_urls: &mut HashSet<String>,
     frontier: &mut VecDeque<WebDiscoveredPageRow>,
@@ -489,54 +533,57 @@ async fn discover_outbound_candidates(
         seen_urls.insert(resolved_url.clone());
 
         let mut enqueue_for_fetch = false;
-        let (candidate_state, classification_reason, classification_detail) =
-            if next_depth > run.max_depth {
-                (
-                    WebCandidateState::Excluded,
-                    Some(WebClassificationReason::ExceededMaxDepth.as_str()),
-                    None,
-                )
-            } else if run.boundary_policy == "same_host"
-                && discovered_host != HostClassification::SameHost
+        let (candidate_state, classification_reason, classification_detail) = if next_depth
+            > run.max_depth
+        {
+            (
+                WebCandidateState::Excluded,
+                Some(WebClassificationReason::ExceededMaxDepth.as_str()),
+                None,
+            )
+        } else if run.boundary_policy == "same_host"
+            && discovered_host != HostClassification::SameHost
+        {
+            (
+                WebCandidateState::Excluded,
+                Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
+                None,
+            )
+        } else if let Some(filter_exclusion) =
+            classify_web_crawl_filter_exclusion(&resolved_url, crawl_filter)
+        {
+            (
+                WebCandidateState::Excluded,
+                Some(WebClassificationReason::UrlFilter.as_str()),
+                Some(filter_exclusion.detail),
+            )
+        } else if i32::try_from(budgeted_urls.len()).unwrap_or(i32::MAX) >= run.max_pages {
+            (
+                WebCandidateState::Excluded,
+                Some(WebClassificationReason::ExceededMaxPages.as_str()),
+                None,
+            )
+        } else {
+            budgeted_urls.insert(resolved_url.clone());
+            enqueue_for_fetch = true;
+            // Materialization filters suppress documents, not traversal: a
+            // skipped page can still expose links to pages that should ingest.
+            if let Some(filter_exclusion) =
+                classify_web_materialization_filter_exclusion(&resolved_url, materialization_filter)
             {
                 (
-                    WebCandidateState::Excluded,
-                    Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
-                    None,
-                )
-            } else if let Some(filter_exclusion) =
-                classify_web_crawl_filter_exclusion(&resolved_url, url_filter)
-            {
-                (
-                    WebCandidateState::Excluded,
+                    WebCandidateState::Discovered,
                     Some(WebClassificationReason::UrlFilter.as_str()),
                     Some(filter_exclusion.detail),
                 )
-            } else if i32::try_from(budgeted_urls.len()).unwrap_or(i32::MAX) >= run.max_pages {
+            } else {
                 (
-                    WebCandidateState::Excluded,
-                    Some(WebClassificationReason::ExceededMaxPages.as_str()),
+                    WebCandidateState::Eligible,
+                    Some(WebClassificationReason::SeedAccepted.as_str()),
                     None,
                 )
-            } else {
-                budgeted_urls.insert(resolved_url.clone());
-                enqueue_for_fetch = true;
-                if let Some(filter_exclusion) =
-                    classify_web_materialization_filter_exclusion(&resolved_url, url_filter)
-                {
-                    (
-                        WebCandidateState::Discovered,
-                        Some(WebClassificationReason::UrlFilter.as_str()),
-                        Some(filter_exclusion.detail),
-                    )
-                } else {
-                    (
-                        WebCandidateState::Eligible,
-                        Some(WebClassificationReason::SeedAccepted.as_str()),
-                        None,
-                    )
-                }
-            };
+            }
+        };
         if service.run_cancel_requested(state, run.id).await? {
             return Ok(());
         }
@@ -867,7 +914,7 @@ pub(super) async fn finalize_recursive_run(
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
     )
     .counts;
-    let terminal_state = derive_terminal_run_state(&crate::shared::web::ingest::WebRunCounts {
+    let mut terminal_state = derive_terminal_run_state(&crate::shared::web::ingest::WebRunCounts {
         discovered: counts.discovered,
         eligible: counts.eligible,
         processed: counts.processed,
@@ -879,15 +926,19 @@ pub(super) async fn finalize_recursive_run(
         failed: counts.failed,
         canceled: counts.canceled,
     });
+    if row.cancel_requested_at.is_some() && counts.queued == 0 && counts.processing == 0 {
+        terminal_state = WebRunState::Canceled;
+    }
     let completed_at = now_if_terminal(terminal_state.as_str());
+    let failure_code = (terminal_state == WebRunState::Failed)
+        .then_some(WebRunFailureCode::RecursiveCrawlFailed.as_str());
     let completed_row = ingest_repository::update_web_ingest_run(
         &state.persistence.postgres,
         row.id,
         &UpdateWebIngestRun {
             run_state: terminal_state.as_str(),
             completed_at,
-            failure_code: (terminal_state == WebRunState::Failed)
-                .then_some(WebRunFailureCode::RecursiveCrawlFailed.as_str()),
+            failure_code,
             cancel_requested_at: row.cancel_requested_at,
         },
     )
@@ -919,8 +970,7 @@ pub(super) async fn finalize_recursive_run(
                     operation_id: async_operation_id,
                     status: status.to_string(),
                     completed_at,
-                    failure_code: (terminal_state == WebRunState::Failed)
-                        .then_some(WebRunFailureCode::RecursiveCrawlFailed.as_str().to_string()),
+                    failure_code: failure_code.map(str::to_string),
                 },
             )
             .await?;

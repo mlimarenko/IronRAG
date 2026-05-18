@@ -1,18 +1,27 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import {
   Eye,
   FilePenLine,
   Download,
+  Info,
+  Pencil,
   RotateCw,
   Trash2,
   Upload,
   X,
   XCircle,
 } from 'lucide-react';
+import { toast } from 'sonner';
 
 import { Button } from '@/shared/components/ui/button';
-import type { DocumentLifecycleDetail } from '@/shared/api';
+import { Input } from '@/shared/components/ui/input';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/shared/components/ui/tooltip';
+import { documentsApi, type DocumentLifecycleDetail } from '@/shared/api';
 import type { DocumentItem } from '@/shared/types';
 import { compactText, truncatedTitle } from '@/shared/lib/compactText';
 
@@ -25,9 +34,11 @@ import {
 } from '@/features/documents/model/documentAdapter';
 
 type DocumentsInspectorPanelProps = {
+  documentHintEditable?: boolean;
   editorActionDisabledReason?: string | null;
   editorActionEnabled: boolean;
   editorActionReadOnly?: boolean;
+  formatErrorMessage?: (error: unknown, fallback: string) => string;
   locale: string;
   t: TFunction;
   lifecycle: DocumentLifecycleDetail | null;
@@ -37,11 +48,19 @@ type DocumentsInspectorPanelProps = {
   setReplaceFileOpen: (open: boolean) => void;
   updateSearchParamState: (updates: Record<string, string | null>) => void;
   onOpenEditor: () => void;
+  onDocumentHintUpdated?: (documentId: string, documentHint: string | null) => void;
   onRetry: () => void;
   presentation?: 'sidebar' | 'drawer';
 };
 
 const EMPTY_VALUE = '\u2014';
+
+type DocumentHintEditState = {
+  documentId: string;
+  draft: string;
+  editing: boolean;
+  saving: boolean;
+};
 
 type PipelineStageEvent = DocumentLifecycleDetail['attempts'][number]['stageEvents'][number] & {
   details?: Record<string, unknown> | null;
@@ -380,9 +399,11 @@ function buildPipelineDetails(
 }
 
 export function DocumentsInspectorPanel({
+  documentHintEditable = false,
   editorActionDisabledReason,
   editorActionEnabled,
   editorActionReadOnly = false,
+  formatErrorMessage,
   locale,
   t,
   lifecycle,
@@ -392,6 +413,7 @@ export function DocumentsInspectorPanel({
   setReplaceFileOpen,
   updateSearchParamState,
   onOpenEditor,
+  onDocumentHintUpdated,
   onRetry,
   presentation = 'sidebar',
 }: DocumentsInspectorPanelProps) {
@@ -402,9 +424,17 @@ export function DocumentsInspectorPanel({
   );
   const displayName =
     isWebPage && selectedDoc.sourceUri ? selectedDoc.sourceUri : selectedDoc.fileName;
+  const documentHint = selectedDoc.documentHint?.trim() ?? '';
   const [nameExpansion, setNameExpansion] = useState({
     documentId: selectedDoc.id,
     expanded: false,
+  });
+  const [documentHintTooltipOpen, setDocumentHintTooltipOpen] = useState(false);
+  const [documentHintEditState, setDocumentHintEditState] = useState<DocumentHintEditState>({
+    documentId: selectedDoc.id,
+    draft: documentHint,
+    editing: false,
+    saving: false,
   });
   const [pipelineSelection, setPipelineSelection] = useState<{
     documentId: string;
@@ -413,6 +443,19 @@ export function DocumentsInspectorPanel({
     documentId: selectedDoc.id,
     stage: null,
   });
+  const activeDocumentHintEditState =
+    documentHintEditState.documentId === selectedDoc.id
+      ? documentHintEditState
+      : {
+          documentId: selectedDoc.id,
+          draft: documentHint,
+          editing: false,
+          saving: false,
+        };
+  const documentHintEditing = activeDocumentHintEditState.editing;
+  const documentHintDraft = activeDocumentHintEditState.draft;
+  const documentHintSaving = activeDocumentHintEditState.saving;
+
   const showFullName = nameExpansion.documentId === selectedDoc.id && nameExpansion.expanded;
   const compactDisplayName = compactText(displayName, 96);
   const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t, {
@@ -421,10 +464,11 @@ export function DocumentsInspectorPanel({
   });
   const compactTypeLabel = compactText(typeLabel, 54);
   const compactDocumentId = compactText(selectedDoc.id, 30);
-  const documentHint = selectedDoc.documentHint?.trim() ?? '';
   const documentHintDisplay = documentHint.length > 80 ? documentHint.slice(0, 80) : documentHint;
   const documentHintIsUrl =
     documentHint.startsWith('http://') || documentHint.startsWith('https://');
+  const showDocumentHintField =
+    documentHint.length > 0 || documentHintEditable || documentHintEditing;
   const statusBadge = buildDocumentStatusBadgeConfig(t)[selectedDoc.status];
   const latestLifecycleAttempt = lifecycle?.attempts?.[0];
   const pipelineStageEvents =
@@ -538,6 +582,70 @@ export function DocumentsInspectorPanel({
 
     window.open(href, '_blank', 'noopener,noreferrer');
   };
+
+  const openDocumentHintEditor = () => {
+    if (!documentHintEditable) {
+      return;
+    }
+    setDocumentHintEditState({
+      documentId: selectedDoc.id,
+      draft: documentHint,
+      editing: true,
+      saving: false,
+    });
+  };
+
+  const cancelDocumentHintEdit = () => {
+    setDocumentHintEditState({
+      documentId: selectedDoc.id,
+      draft: documentHint,
+      editing: false,
+      saving: false,
+    });
+  };
+
+  const saveDocumentHint = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!documentHintEditable || documentHintSaving) {
+      return;
+    }
+
+    const nextDocumentHint = documentHintDraft.trim();
+    const normalizedDocumentHint = nextDocumentHint.length > 0 ? nextDocumentHint : null;
+    setDocumentHintEditState({
+      documentId: selectedDoc.id,
+      draft: documentHintDraft,
+      editing: true,
+      saving: true,
+    });
+    try {
+      const savedDocumentHint = await documentsApi.updateDocumentHint(
+        selectedDoc.id,
+        normalizedDocumentHint,
+      );
+      onDocumentHintUpdated?.(selectedDoc.id, savedDocumentHint);
+      setDocumentHintEditState({
+        documentId: selectedDoc.id,
+        draft: savedDocumentHint ?? '',
+        editing: false,
+        saving: false,
+      });
+      toast.success(t('documents.documentHintUpdated'));
+    } catch (error) {
+      toast.error(
+        formatErrorMessage
+          ? formatErrorMessage(error, t('documents.documentHintUpdateFailed'))
+          : t('documents.documentHintUpdateFailed'),
+      );
+    } finally {
+      setDocumentHintEditState((state) =>
+        state.documentId === selectedDoc.id
+          ? { ...state, saving: false }
+          : state,
+      );
+    }
+  };
+
   const editorActionLabel = editorActionReadOnly ? t('documents.viewDocument') : t('documents.edit');
   const editorActionIcon = editorActionReadOnly ? <Eye /> : <FilePenLine />;
   const sourceActionLabel =
@@ -665,27 +773,6 @@ export function DocumentsInspectorPanel({
                     },
                   ]
                 : []),
-              ...(documentHint
-                ? [
-                    {
-                      label: t('documents.documentHint'),
-                      value: documentHintIsUrl ? (
-                        <a
-                          className="text-primary underline-offset-2 hover:underline"
-                          href={documentHint}
-                          rel="noopener noreferrer"
-                          target="_blank"
-                          title={documentHint}
-                        >
-                          {documentHintDisplay}
-                        </a>
-                      ) : (
-                        documentHintDisplay
-                      ),
-                      title: documentHint,
-                    },
-                  ]
-                : []),
             ].map((item) => (
               <div key={item.label} className="min-w-0">
                 <div className="truncate leading-4 text-muted-foreground">{item.label}</div>
@@ -697,6 +784,109 @@ export function DocumentsInspectorPanel({
                 </div>
               </div>
             ))}
+            {showDocumentHintField && (
+              <div className="col-span-2 min-w-0">
+                <div className="flex min-w-0 items-center gap-1">
+                  <div className="truncate leading-4 text-muted-foreground">
+                    {t('documents.documentHint')}
+                  </div>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={t('documents.documentHintTooltip')}
+                      >
+                        <Info className="h-3.5 w-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent align="start" className="max-w-64">
+                      {t('documents.documentHintTooltip')}
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                {documentHintEditing ? (
+                  <form className="mt-1 flex min-w-0 items-center gap-1.5" onSubmit={saveDocumentHint}>
+                    <Input
+                      aria-label={t('documents.documentHint')}
+                      autoFocus
+                      className="h-8 min-w-0 flex-1 rounded-md px-2.5 font-mono text-xs"
+                      disabled={documentHintSaving}
+                      onChange={(event) =>
+                        setDocumentHintEditState({
+                          documentId: selectedDoc.id,
+                          draft: event.target.value,
+                          editing: true,
+                          saving: false,
+                        })
+                      }
+                      placeholder={t('documents.documentHintEditPlaceholder')}
+                      value={documentHintDraft}
+                    />
+                    <Button
+                      className="h-8 rounded-md px-2.5 text-xs"
+                      disabled={documentHintSaving}
+                      size="sm"
+                      type="submit"
+                    >
+                      {t('documents.documentHintEditSave')}
+                    </Button>
+                    <Button
+                      className="h-8 rounded-md px-2.5 text-xs"
+                      disabled={documentHintSaving}
+                      onClick={cancelDocumentHintEdit}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {t('documents.documentHintEditCancel')}
+                    </Button>
+                  </form>
+                ) : (
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                    {documentHintEditable ? (
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 truncate text-left font-mono text-xs font-semibold leading-4 text-foreground underline-offset-2 hover:text-primary hover:underline"
+                        onClick={openDocumentHintEditor}
+                        title={documentHint || t('documents.documentHintEditPlaceholder')}
+                      >
+                        {documentHint ? documentHintDisplay : EMPTY_VALUE}
+                      </button>
+                    ) : documentHintIsUrl ? (
+                      <a
+                        className="min-w-0 truncate font-mono text-xs font-semibold leading-4 text-primary underline-offset-2 hover:underline"
+                        href={documentHint}
+                        rel="noopener noreferrer"
+                        target="_blank"
+                        title={documentHint}
+                      >
+                        {documentHintDisplay}
+                      </a>
+                    ) : (
+                      <div
+                        className="min-w-0 truncate font-mono text-xs font-semibold leading-4 text-foreground"
+                        title={documentHint}
+                      >
+                        {documentHintDisplay}
+                      </div>
+                    )}
+                    {documentHintEditable && (
+                      <Button
+                        aria-label={t('documents.documentHintEditAria')}
+                        className="h-6 w-6 shrink-0 rounded-md"
+                        onClick={openDocumentHintEditor}
+                        size="icon"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

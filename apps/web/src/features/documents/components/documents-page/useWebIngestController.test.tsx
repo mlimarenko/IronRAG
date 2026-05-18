@@ -7,7 +7,7 @@ import type { CatalogLibraryResponse } from '@/shared/api';
 import { queries } from '@/shared/api';
 import type { Library } from '@/shared/types';
 
-import { extractWebIngestUrlFilter } from './documentsPageState';
+import { extractWebIngestPolicy } from './documentsPageState';
 import { useWebIngestController } from './useWebIngestController';
 
 const { adminApiMock, documentsApiMock, toastErrorMock } = vi.hoisted(() => ({
@@ -67,9 +67,13 @@ const initialLibrary: CatalogLibraryResponse = {
   },
   slug: 'docs',
   webIngestPolicy: {
-    urlFilter: {
-      mode: 'blocklist',
-      patterns: [],
+    crawlFilter: {
+      allowPatterns: [],
+      blockPatterns: [],
+    },
+    materializationFilter: {
+      allowPatterns: [],
+      blockPatterns: [],
     },
   },
 };
@@ -90,15 +94,15 @@ function Harness({
     initialData: initialLibrary,
     staleTime: Infinity,
   });
-  const loadedUrlFilter = extractWebIngestUrlFilter(libraryQuery.data);
+  const loadedWebIngestPolicy = extractWebIngestPolicy(libraryQuery.data);
   const controller = useWebIngestController({
     activeLibrary,
     errorMessage: (error, fallback) =>
       error instanceof Error ? error.message : fallback,
-    fetchLibraryWebIngestPolicy: async () => loadedUrlFilter,
+    fetchLibraryWebIngestPolicy: async () => loadedWebIngestPolicy,
     libraryPolicyData: libraryQuery.data,
     libraryPolicyLoading: false,
-    loadedUrlFilter,
+    loadedWebIngestPolicy,
     loadFirstPage,
     refreshWebRuns,
     t,
@@ -108,14 +112,13 @@ function Harness({
 
   return (
     <div>
-      <div data-testid="saved-mode">
-        {libraryQuery.data.webIngestPolicy?.urlFilter?.mode}
+      <div data-testid="saved-count">
+        {libraryQuery.data.webIngestPolicy?.crawlFilter?.allowPatterns?.length ?? 0}
       </div>
       <button
         onClick={() => {
           controller.setSeedUrl('docs.example.com');
-          controller.setUrlFilterMode('allowlist');
-          controller.setUrlFilterPatternsText('url_prefix:https://docs.example.com');
+          controller.setCrawlAllowPatternsText('url_prefix:https://docs.example.com');
         }}
       >
         Draft
@@ -180,7 +183,7 @@ describe('useWebIngestController optimistic policy save', () => {
 
     await renderHarness();
 
-    expect(container.querySelector('[data-testid="saved-mode"]')).toHaveTextContent('blocklist');
+    expect(container.querySelector('[data-testid="saved-count"]')).toHaveTextContent('0');
 
     const draftButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Draft'),
@@ -198,7 +201,7 @@ describe('useWebIngestController optimistic policy save', () => {
     });
     await flushUi();
 
-    expect(container.querySelector('[data-testid="saved-mode"]')).toHaveTextContent('allowlist');
+    expect(container.querySelector('[data-testid="saved-count"]')).toHaveTextContent('1');
 
     await act(async () => {
       rejectPolicy(new Error('policy unavailable'));
@@ -206,7 +209,7 @@ describe('useWebIngestController optimistic policy save', () => {
     await flushUi();
     await flushUi();
 
-    expect(container.querySelector('[data-testid="saved-mode"]')).toHaveTextContent('blocklist');
+    expect(container.querySelector('[data-testid="saved-count"]')).toHaveTextContent('0');
     expect(toastErrorMock).toHaveBeenCalledWith(
       expect.stringContaining('policy unavailable'),
     );

@@ -44,9 +44,8 @@ use crate::{
         web::{
             ingest::{
                 WebCandidateState, WebClassificationReason, WebIngestMode, WebIngestPattern,
-                WebIngestUrlFilter, WebIngestUrlFilterMode, WebRunFailureCode, WebRunState,
-                derive_terminal_run_state, now_if_terminal, validate_web_ingest_url_filter,
-                validate_web_run_settings,
+                WebIngestUrlFilter, WebRunFailureCode, WebRunState, derive_terminal_run_state,
+                now_if_terminal, validate_web_ingest_url_filter, validate_web_run_settings,
             },
             url_identity::{HostClassification, normalize_seed_url},
         },
@@ -76,7 +75,8 @@ pub struct CreateWebIngestRunCommand {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
-    pub url_filter: WebIngestUrlFilter,
+    pub crawl_filter: WebIngestUrlFilter,
+    pub materialization_filter: WebIngestUrlFilter,
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub idempotency_key: Option<String>,
@@ -306,18 +306,31 @@ impl WebIngestService {
             command.max_pages,
         )
         .map_err(ApiError::BadRequest)?;
-        let url_filter = validate_web_ingest_url_filter(command.url_filter, "urlFilter")
+        let crawl_filter = validate_web_ingest_url_filter(command.crawl_filter, "crawlFilter")
             .map_err(ApiError::BadRequest)?;
-        let url_patterns_json =
-            serde_json::to_value(&url_filter.patterns).map_err(|_| ApiError::Internal)?;
+        let materialization_filter =
+            validate_web_ingest_url_filter(command.materialization_filter, "materializationFilter")
+                .map_err(ApiError::BadRequest)?;
+        let crawl_allow_patterns_json =
+            serde_json::to_value(&crawl_filter.allow_patterns).map_err(|_| ApiError::Internal)?;
+        let crawl_block_patterns_json =
+            serde_json::to_value(&crawl_filter.block_patterns).map_err(|_| ApiError::Internal)?;
+        let materialization_allow_patterns_json =
+            serde_json::to_value(&materialization_filter.allow_patterns)
+                .map_err(|_| ApiError::Internal)?;
+        let materialization_block_patterns_json =
+            serde_json::to_value(&materialization_filter.block_patterns)
+                .map_err(|_| ApiError::Internal)?;
         let source_identity = web_run_source_identity(
             &normalized_seed_url,
             &validated.mode,
             &validated.boundary_policy,
             validated.max_depth,
             validated.max_pages,
-            url_filter.mode.as_str(),
-            &url_patterns_json,
+            &crawl_allow_patterns_json,
+            &crawl_block_patterns_json,
+            &materialization_allow_patterns_json,
+            &materialization_block_patterns_json,
         );
 
         let mutation = state
@@ -383,8 +396,10 @@ impl WebIngestService {
                 boundary_policy: &validated.boundary_policy,
                 max_depth: validated.max_depth,
                 max_pages: validated.max_pages,
-                url_filter_mode: url_filter.mode.as_str(),
-                url_patterns: url_patterns_json,
+                crawl_allow_patterns: crawl_allow_patterns_json,
+                crawl_block_patterns: crawl_block_patterns_json,
+                materialization_allow_patterns: materialization_allow_patterns_json,
+                materialization_block_patterns: materialization_block_patterns_json,
                 run_state: WebRunState::Accepted.as_str(),
                 requested_by_principal_id: command.requested_by_principal_id,
                 requested_at: None,
@@ -497,8 +512,14 @@ impl WebIngestService {
                     boundary_policy: row.boundary_policy,
                     max_depth: row.max_depth,
                     max_pages: row.max_pages,
-                    url_filter_mode: row.url_filter_mode,
-                    url_patterns: parse_run_url_patterns(row.url_patterns)?,
+                    crawl_filter: parse_run_url_filter(
+                        row.crawl_allow_patterns,
+                        row.crawl_block_patterns,
+                    )?,
+                    materialization_filter: parse_run_url_filter(
+                        row.materialization_allow_patterns,
+                        row.materialization_block_patterns,
+                    )?,
                     run_state: row.run_state,
                     seed_url: row.seed_url,
                     counts: counts.counts,
@@ -910,8 +931,11 @@ impl WebIngestService {
             boundary_policy: row.boundary_policy,
             max_depth: row.max_depth,
             max_pages: row.max_pages,
-            url_filter_mode: row.url_filter_mode,
-            url_patterns: parse_run_url_patterns(row.url_patterns)?,
+            crawl_filter: parse_run_url_filter(row.crawl_allow_patterns, row.crawl_block_patterns)?,
+            materialization_filter: parse_run_url_filter(
+                row.materialization_allow_patterns,
+                row.materialization_block_patterns,
+            )?,
             run_state: row.run_state,
             requested_by_principal_id: row.requested_by_principal_id,
             requested_at: row.requested_at,
@@ -1134,8 +1158,10 @@ fn web_run_source_identity(
     boundary_policy: &str,
     max_depth: i32,
     max_pages: i32,
-    url_filter_mode: &str,
-    url_patterns_json: &serde_json::Value,
+    crawl_allow_patterns_json: &serde_json::Value,
+    crawl_block_patterns_json: &serde_json::Value,
+    materialization_allow_patterns_json: &serde_json::Value,
+    materialization_block_patterns_json: &serde_json::Value,
 ) -> String {
     let payload = serde_json::json!({
         "normalizedSeedUrl": normalized_seed_url,
@@ -1143,27 +1169,33 @@ fn web_run_source_identity(
         "boundaryPolicy": boundary_policy,
         "maxDepth": max_depth,
         "maxPages": max_pages,
-        "urlFilter": {
-            "mode": url_filter_mode,
-            "patterns": url_patterns_json,
+        "crawlFilter": {
+            "allowPatterns": crawl_allow_patterns_json,
+            "blockPatterns": crawl_block_patterns_json,
+        },
+        "materializationFilter": {
+            "allowPatterns": materialization_allow_patterns_json,
+            "blockPatterns": materialization_block_patterns_json,
         },
     });
     let bytes = serde_json::to_vec(&payload).unwrap_or_default();
     format!("web_capture:sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
-pub(super) fn parse_run_url_patterns(
+pub(super) fn parse_run_filter_patterns(
     value: serde_json::Value,
 ) -> Result<Vec<WebIngestPattern>, ApiError> {
     serde_json::from_value(value).map_err(|_| ApiError::Internal)
 }
 
-pub(super) fn parse_run_url_filter_mode(value: &str) -> Result<WebIngestUrlFilterMode, ApiError> {
-    match value {
-        "blocklist" => Ok(WebIngestUrlFilterMode::Blocklist),
-        "allowlist" => Ok(WebIngestUrlFilterMode::Allowlist),
-        _ => Err(ApiError::Internal),
-    }
+pub(super) fn parse_run_url_filter(
+    allow_patterns: serde_json::Value,
+    block_patterns: serde_json::Value,
+) -> Result<WebIngestUrlFilter, ApiError> {
+    Ok(WebIngestUrlFilter {
+        allow_patterns: parse_run_filter_patterns(allow_patterns)?,
+        block_patterns: parse_run_filter_patterns(block_patterns)?,
+    })
 }
 
 fn map_web_page_row(row: WebDiscoveredPageRow) -> WebDiscoveredPage {

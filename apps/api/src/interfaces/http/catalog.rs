@@ -104,7 +104,8 @@ pub struct UpdateCatalogLibraryRequest {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateLibraryWebIngestPolicyRequest {
-    pub url_filter: crate::shared::web::ingest::WebIngestUrlFilter,
+    pub crawl_filter: crate::shared::web::ingest::WebIngestUrlFilter,
+    pub materialization_filter: crate::shared::web::ingest::WebIngestUrlFilter,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -663,7 +664,10 @@ pub async fn update_library_web_ingest_policy(
             &state,
             UpdateLibraryWebIngestPolicyCommand {
                 library_id,
-                web_ingest_policy: WebIngestPolicy { url_filter: payload.url_filter },
+                web_ingest_policy: WebIngestPolicy {
+                    crawl_filter: payload.crawl_filter,
+                    materialization_filter: payload.materialization_filter,
+                },
             },
         )
         .await?;

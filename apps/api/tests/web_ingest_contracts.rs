@@ -73,7 +73,7 @@ fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
     let request_schema = component_schema(&openapi, "CreateWebIngestRunRequest");
     assert_eq!(
         string_array_child(request_schema, "required"),
-        ["libraryId", "seedUrl", "mode", "urlFilter"],
+        ["libraryId", "seedUrl", "mode", "crawlFilter", "materializationFilter"],
         "CreateWebIngestRunRequest must keep canonical required fields",
     );
     assert_eq!(
@@ -178,11 +178,17 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
         "boundaryPolicy": "allow_external",
         "maxDepth": 4,
         "maxPages": 80,
-        "urlFilter": {
-            "mode": "allowlist",
-            "patterns": [
+        "crawlFilter": {
+            "allowPatterns": [
                 {"kind": "path_prefix", "value": "/docs"}
+            ],
+            "blockPatterns": [
+                {"kind": "path_prefix", "value": "/docs/archive"}
             ]
+        },
+        "materializationFilter": {
+            "allowPatterns": [],
+            "blockPatterns": []
         },
         "idempotencyKey": "crawl-1"
     }))
@@ -193,8 +199,8 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
     assert_eq!(submit_request.boundary_policy.as_deref(), Some("allow_external"));
     assert_eq!(submit_request.max_depth, Some(4));
     assert_eq!(submit_request.max_pages, Some(80));
-    assert_eq!(submit_request.url_filter.mode.as_str(), "allowlist");
-    assert_eq!(submit_request.url_filter.patterns.len(), 1);
+    assert_eq!(submit_request.crawl_filter.allow_patterns.len(), 1);
+    assert_eq!(submit_request.crawl_filter.block_patterns.len(), 1);
     assert_eq!(submit_request.idempotency_key.as_deref(), Some("crawl-1"));
 
     let run_id = Uuid::now_v7();
@@ -219,5 +225,47 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
         }))
         .is_err(),
         "legacy snake_case MCP request fields must be rejected"
+    );
+
+    let single_stage_filter_key = ["url", "Filter"].concat();
+    let mut single_stage_filter_request = json!({
+        "library": "default/docs",
+        "seedUrl": "https://example.com/docs",
+        "mode": "recursive_crawl",
+        "crawlFilter": {
+            "allowPatterns": [],
+            "blockPatterns": []
+        },
+        "materializationFilter": {
+            "allowPatterns": [],
+            "blockPatterns": []
+        }
+    });
+    single_stage_filter_request.as_object_mut().expect("request object").insert(
+        single_stage_filter_key,
+        json!({
+            "mode": "blocklist",
+            "patterns": []
+        }),
+    );
+    assert!(
+        serde_json::from_value::<McpSubmitWebIngestRunRequest>(single_stage_filter_request)
+            .is_err(),
+        "single-stage filter aliases must be rejected"
+    );
+
+    assert!(
+        serde_json::from_value::<McpSubmitWebIngestRunRequest>(json!({
+            "library": "default/docs",
+            "seedUrl": "https://example.com/docs",
+            "mode": "recursive_crawl",
+            "crawlFilter": {},
+            "materializationFilter": {
+                "allowPatterns": [],
+                "blockPatterns": []
+            }
+        }))
+        .is_err(),
+        "filter objects must require both allowPatterns and blockPatterns"
     );
 }

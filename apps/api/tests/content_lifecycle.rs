@@ -548,6 +548,7 @@ async fn canonical_content_lifecycle_single_page_web_ingest_materializes_only_th
 
     let result = async {
         let seed_url = server.url("/seed");
+        let web_policy = ironrag_backend::shared::web::ingest::default_web_ingest_policy();
         let run = fixture
             .state
             .canonical_services
@@ -562,8 +563,8 @@ async fn canonical_content_lifecycle_single_page_web_ingest_materializes_only_th
                     boundary_policy: None,
                     max_depth: None,
                     max_pages: None,
-                    url_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
-                        .url_filter,
+                    crawl_filter: web_policy.crawl_filter,
+                    materialization_filter: web_policy.materialization_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,
@@ -713,6 +714,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     request_surface: "rest".to_string(),
                     source_identity: None,
                     file_name: "replacement.txt".to_string(),
+                    document_hint: None,
                     mime_type: Some("text/plain".to_string()),
                     file_bytes:
                         b"Replacement content that must stay pending until ingest finishes."
@@ -758,6 +760,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     request_surface: "rest".to_string(),
                     source_identity: None,
                     file_name: "replacement.txt".to_string(),
+                    document_hint: None,
                     mime_type: Some("text/plain".to_string()),
                     file_bytes:
                         b"Replacement content that must stay pending until ingest finishes."

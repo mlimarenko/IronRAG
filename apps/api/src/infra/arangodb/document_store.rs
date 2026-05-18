@@ -341,6 +341,7 @@ impl ArangoDocumentStore {
                     revision_kind: @revision_kind,
                     storage_ref: @storage_ref,
                     source_uri: @source_uri,
+                    document_hint: @document_hint,
                     mime_type: @mime_type,
                     checksum: @checksum,
                     title: @title,
@@ -366,6 +367,7 @@ impl ArangoDocumentStore {
                     revision_kind: @revision_kind,
                     storage_ref: @storage_ref,
                     source_uri: @source_uri,
+                    document_hint: @document_hint,
                     mime_type: @mime_type,
                     checksum: @checksum,
                     title: @title,
@@ -395,6 +397,7 @@ impl ArangoDocumentStore {
                     "revision_kind": row.revision_kind,
                     "storage_ref": row.storage_ref,
                     "source_uri": row.source_uri,
+                    "document_hint": row.document_hint,
                     "mime_type": row.mime_type,
                     "checksum": row.checksum,
                     "title": row.title,
@@ -415,6 +418,32 @@ impl ArangoDocumentStore {
             .await
             .context("failed to upsert knowledge revision")?;
         decode_single_result(cursor)
+    }
+
+    pub async fn update_revision_document_hint(
+        &self,
+        revision_id: Uuid,
+        document_hint: Option<&str>,
+    ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR revision IN @@collection
+                 FILTER revision.revision_id == @revision_id
+                 LIMIT 1
+                 UPDATE revision WITH {
+                    document_hint: @document_hint
+                 } IN @@collection
+                 RETURN NEW",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_REVISION_COLLECTION,
+                    "revision_id": revision_id,
+                    "document_hint": document_hint,
+                }),
+            )
+            .await
+            .context("failed to update knowledge revision document hint")?;
+        decode_optional_single_result(cursor)
     }
 
     pub async fn get_revision(

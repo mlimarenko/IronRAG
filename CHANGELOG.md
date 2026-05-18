@@ -2,186 +2,258 @@
 
 ## Unreleased
 
+## 0.4.14 — 2026-05-18
+
+### Docker stack stability
+
+- Bundled Redis now runs as a bounded volatile cache in docker compose
+  and the Helm chart: AOF/RDB persistence is disabled, the default
+  `maxmemory` keeps allocator headroom below the container limit, and
+  eviction uses `volatile-lru`. This prevents persisted cache growth
+  from making the stack unhealthy after restart while keeping Postgres
+  and ArangoDB as the canonical data stores.
+
+### Web ingest URL filters
+
+- Web ingest URL selection now uses a canonical two-stage policy:
+  independent crawl and document-selection filters each expose allow and
+  block pattern lists. The previous single-stage URL filter shape was
+  removed from REST, MCP, run snapshots, persisted library policy,
+  generated clients, and the documents-page web ingest dialog.
+- Added migration 0013 for the new run snapshot columns and library policy
+  shape. Legacy blocklist patterns are preserved as both crawl and
+  document-selection blocks, while legacy allowlist patterns become
+  document-selection allows.
+- Recursive crawl settings are now capped at 100 levels and 10,000 pages.
+  Default crawl blocks were expanded for common documentation-site utility
+  URLs so recursive discovery spends its page budget on content pages
+  instead of login, attachment, history, metadata, and version surfaces.
+- Filter-only recursive runs now finish as partial completions with visible
+  excluded-page counts instead of being treated as system failures, so
+  operators can distinguish "nothing matched the URL policy" from crawl or
+  fetch errors.
+- The documents-page web ingest dialog now includes an inline URL checker
+  that evaluates a typed URL against both crawl and document-selection rules
+  before the operator starts a run.
+
+### Library backup restore
+
+- Fixed library backup restore from the admin UI: `.tar.zst` archives are
+  now sent as the raw request body instead of being JSON-serialized by
+  the generated client, restore into an existing selected library remaps
+  archive ownership and blob storage keys to that library, snapshot
+  graph restore treats context bundles as part of the canonical graph
+  snapshot while reporting and skipping dangling graph edges, and the
+  frontend nginx route now accepts large streaming snapshot imports.
+
+### document_hint citation surface — fixes + edit UX
+
+- `POST /v1/content/documents/{id}/replace` now accepts and persists the
+  optional `document_hint` multipart form field; the 0.4.13 release wired
+  it for `POST upload` only, so connectors that always go through the
+  replace path (any sweep of pre-existing documents) silently dropped
+  the hint.
+- The 0.4.13 release also missed plumbing `document_hint` through the
+  ArangoDB knowledge-revision store, so the API detail endpoint and the
+  MCP `grounded_answer` citation render returned `null` even when the
+  value was correctly persisted in Postgres. 0.4.14 wires the field end
+  to end across both stores; existing revisions surface `null` until the
+  next replace or operator edit attaches a hint.
+- New `PATCH /v1/content/documents/{id}` endpoint updates
+  `document_hint` on the active revision in place (no new revision, no
+  ingest pipeline retrigger). Lets operators edit the user-facing
+  citation label after the fact.
+- The documents inspector now exposes inline editing of `document_hint`
+  with an info-icon tooltip explaining the field's effect on MCP
+  citations.
+- The documents upload UI now collects the hint in a small confirmation
+  dialog after the file picker, with clearer copy explaining what the
+  hint does, why it matters, and that it is optional. The dialog states
+  that the same hint applies to every file in the batch, and falls back
+  to no hint when left empty.
+
+Includes migration 0013 for web ingest URL policy storage. The
+`document_hint` fixes reuse the existing 0012 schema.
+
 ## 0.4.13 — 2026-05-17
 
 ### Connectors: document_hint citation surface
 
 - New per-revision `document_hint` field surfaces a free-form
-  user-facing label (canonical browser URL or arbitrary text) to MCP
-  agents in `grounded_answer` citations and in the built-in answer
-  pipeline. Defaults to None; when unset the citation resolver falls
-  back to `source_uri` for web-ingested revisions, then to the
-  document title. The internal `source_uri` is no longer surfaced to
-  the agent (closes a class of citation-as-link XSS by removing
-  unsanitized `upload://` and arbitrary scheme leakage to LLM
-  context). Admin list/detail responses keep `source_uri` for
-  trace/audit.
+user-facing label (canonical browser URL or arbitrary text) to MCP
+agents in `grounded_answer` citations and in the built-in answer
+pipeline. Defaults to None; when unset the citation resolver falls
+back to `source_uri` for web-ingested revisions, then to the
+document title. The internal `source_uri` is no longer surfaced to
+the agent (closes a class of citation-as-link XSS by removing
+unsanitized `upload://` and arbitrary scheme leakage to LLM
+context). Admin list/detail responses keep `source_uri` for
+trace/audit.
 - New per-library `include_document_hint_in_mcp_answers` flag (default
-  ON). Admin → MCP tab exposes a per-library toggle for operators to
-  opt out of source citation in MCP/answer payloads without removing
-  the data itself.
+ON). Admin → MCP tab exposes a per-library toggle for operators to
+opt out of source citation in MCP/answer payloads without removing
+the data itself.
 - Connectors can now attach a `document_hint` per item; the
-  multipart upload form accepts an optional `document_hint` field
-  (≤1024 chars, free-form text).
+multipart upload form accepts an optional `document_hint` field
+(≤1024 chars, free-form text).
 - Documents inspector now shows the document hint (clickable when it
-  is a URL).
+is a URL).
 - Manual upload form gained an optional "Hint" input.
 - The new
-  [IronRAG.ConnectorTemplate 0.0.2](https://github.com/mlimarenko/IronRAG.ConnectorTemplate)
-  framework exposes `SourceItem.document_hint` and the
-  [BookStack connector 0.0.2](https://github.com/mlimarenko/IronRAG.BookStack)
-  fills it with the per-kind BookStack URL (page / attachment /
-  inline image).
+[IronRAG.ConnectorTemplate 0.0.2](https://github.com/mlimarenko/IronRAG.ConnectorTemplate)
+framework exposes `SourceItem.document_hint` and the
+[BookStack connector 0.0.2](https://github.com/mlimarenko/IronRAG.BookStack)
+fills it with the per-kind BookStack URL (page / attachment /
+inline image).
 
 ## 0.4.12 — 2026-05-17
 
 ### Connectors: external_key surfaced
 
 - `GET /v1/content/documents` now returns `externalKey` on every list
-  item. Source connectors can now look up "do I already own a document
-  for this external_key?" in a single paginated pass instead of
-  fetching each document's detail endpoint individually.
+item. Source connectors can now look up "do I already own a document
+for this external_key?" in a single paginated pass instead of
+fetching each document's detail endpoint individually.
 - The documents inspector panel now displays the external key for
-  connector-owned documents alongside the document id, so operators
-  can see which BookStack page (or other source item) backs each
-  IronRAG document.
+connector-owned documents alongside the document id, so operators
+can see which BookStack page (or other source item) backs each
+IronRAG document.
 - New companion projects:
   - [IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate)
-    — Python framework for writing custom source connectors.
+  — Python framework for writing custom source connectors.
   - [BookStack connector](https://github.com/mlimarenko/IronRAG.BookStack)
-    — production reference adapter (pages + attachments + inline images,
-    periodic poll + webhook intake), published as
-    `pipingspace/ironrag.bookstack` on Docker Hub.
+  — production reference adapter (pages + attachments + inline images,
+  periodic poll + webhook intake), published as
+  `pipingspace/ironrag.bookstack` on Docker Hub.
 
 ## 0.4.11 — 2026-05-15
 
 ### Startup: fixed clean-stack migration
 
 - Fixed the `0.4.10` clean-stack startup failure where migration `0010`
-  added the `paused` ingest queue enum value and used it in the same partial
-  index definition before PostgreSQL had committed the enum change.
+added the `paused` ingest queue enum value and used it in the same partial
+index definition before PostgreSQL had committed the enum change.
 
 ### AI providers: OpenRouter embeddings
 
 - OpenRouter now has first-class 3072-dimension embedding presets for
-  `embed_chunk` and `query_retrieve`, including the Qwen embedding model that
-  requires an explicit 3072-dimension request parameter, so fresh stacks can
-  bind compatible OpenRouter embeddings without waiting for credential-driven
-  model discovery.
+`embed_chunk` and `query_retrieve`, including the Qwen embedding model that
+requires an explicit 3072-dimension request parameter, so fresh stacks can
+bind compatible OpenRouter embeddings without waiting for credential-driven
+model discovery.
 - The OpenRouter provider capability table and multi-provider smoke profile now
-  mark embeddings as supported instead of falling back to another provider.
+mark embeddings as supported instead of falling back to another provider.
 - Arango vector rebuilds now use the active `embed_chunk` / `query_retrieve`
-  bindings of a source library as the dimension source of truth, recreate the
-  instance-wide chunk and entity vector indexes from freshly materialized
-  vectors, and rebuild all existing vector material before search resumes on
-  the selected embedding dimension.
+bindings of a source library as the dimension source of truth, recreate the
+instance-wide chunk and entity vector indexes from freshly materialized
+vectors, and rebuild all existing vector material before search resumes on
+the selected embedding dimension.
 - Vector rebuild, vector writes, and vector search now share a PostgreSQL
-  advisory lock across backend, worker, and CLI processes, so dimension
-  switches cannot race the ingest pipeline or live retrieval paths.
+advisory lock across backend, worker, and CLI processes, so dimension
+switches cannot race the ingest pipeline or live retrieval paths.
 - The public multi-provider smoke script now requires
-  `IRONRAG_ADMIN_PASSWORD` instead of carrying a built-in test password.
+`IRONRAG_ADMIN_PASSWORD` instead of carrying a built-in test password.
 
 ## 0.4.10 — 2026-05-15
 
 ### Ingest: document progress profiles
 
 - Document ingest progress now uses source-aware stage weights instead of
-  splitting the pipeline equally by stage count, so small text documents no
-  longer jump straight from early extraction to graph-stage percentages while
-  extraction-heavy files still show meaningful page/unit progress.
+splitting the pipeline equally by stage count, so small text documents no
+longer jump straight from early extraction to graph-stage percentages while
+extraction-heavy files still show meaningful page/unit progress.
 
 ### Administration: ingest queue observability
 
 - Added a global administration queue view for active ingest work across
-  workspaces and libraries, with running/queued counts, searchable job list,
-  document navigation, queued-job reordering, and operator cancellation.
+workspaces and libraries, with running/queued counts, searchable job list,
+document navigation, queued-job reordering, and operator cancellation.
 - Running jobs now open an inspector with progress, scope, heartbeat, failure
-  text, and the live ingest stage timeline so operators can see what a worker
-  is doing without leaving the admin console.
+text, and the live ingest stage timeline so operators can see what a worker
+is doing without leaving the admin console.
 - The ingest queue now follows the documents table interaction pattern with a
-  paginated list, persistent page-size control, and a fixed selected-job
-  inspector instead of a detached two-column card layout.
+paginated list, persistent page-size control, and a fixed selected-job
+inspector instead of a detached two-column card layout.
 - Queue rows now sort by the operator-visible rank, and administrators can
-  reorder queued or paused jobs, pause queued/running jobs, and resume paused
-  jobs once the current worker attempt has stopped.
+reorder queued or paused jobs, pause queued/running jobs, and resume paused
+jobs once the current worker attempt has stopped.
 
 ### Ingest: adaptive Docling throughput
 
 - Docling extraction concurrency now defaults to `auto`, resolving the
-  effective cgroup CPU and memory limits at worker startup and choosing a
-  bounded local Docling process count instead of relying on a fixed
-  one-process default.
+effective cgroup CPU and memory limits at worker startup and choosing a
+bounded local Docling process count instead of relying on a fixed
+one-process default.
 - Docker Compose now gives the worker a dedicated resource profile with a
-  6 CPU / 8 GiB limit and a 2 CPU / 2 GiB reservation, leaving API and
-  database service profiles unchanged.
+6 CPU / 8 GiB limit and a 2 CPU / 2 GiB reservation, leaving API and
+database service profiles unchanged.
 - Restarted or requeued large PDF jobs now sync active-stage progress from
-  durable page-range ingest units before waiting on the heavy-document slot,
-  so already extracted pages remain visible in progress immediately after
-  worker replacement or lease recovery.
+durable page-range ingest units before waiting on the heavy-document slot,
+so already extracted pages remain visible in progress immediately after
+worker replacement or lease recovery.
 
 ## 0.4.9 — 2026-05-14
 
 ### Assistant: chat transcript and runtime activity UX
 
 - Grounded-answer generation now sends prior user/assistant turns as real chat
-  messages and exposes runtime retrieval evidence as a synthetic tool-call plus
-  matching tool result, so provider debug payloads read like a normal agent
-  conversation instead of a flattened prompt block.
+messages and exposes runtime retrieval evidence as a synthetic tool-call plus
+matching tool result, so provider debug payloads read like a normal agent
+conversation instead of a flattened prompt block.
 - Query rewrite and coreference sharpening remain scoped to short follow-up
-  questions, while standalone questions still carry visible prior chat history
-  for answer continuity without rewriting the effective query.
+questions, while standalone questions still carry visible prior chat history
+for answer continuity without rewriting the effective query.
 - The in-chat runtime activity bubble now focuses on the current agent step,
-  the active tool name, and a single live elapsed timer with one processing
-  animation. Once the assistant answer starts streaming, the chat focuses on
-  the answer instead of leaving completed runtime cards below it.
+the active tool name, and a single live elapsed timer with one processing
+animation. Once the assistant answer starts streaming, the chat focuses on
+the answer instead of leaving completed runtime cards below it.
 - The assistant layout now uses a collapsible session rail, a composer-level
-  debug button, and a resizable right debug inspector for full context,
-  messages, tool calls, runtime stages, and evidence. The old top MCP toggle
-  and per-message debug popover were removed.
+debug button, and a resizable right debug inspector for full context,
+messages, tool calls, runtime stages, and evidence. The old top MCP toggle
+and per-message debug popover were removed.
 
 ## 0.4.8 — 2026-05-14
 
 ### Admin access: token cleanup panel
 
 - Revoked API tokens can now be deleted from the access inspector through a
-  dedicated `DELETE /v1/iam/tokens/{tokenPrincipalId}` endpoint; active tokens
-  must still be revoked first, and deletion is recorded in the audit log.
+dedicated `DELETE /v1/iam/tokens/{tokenPrincipalId}` endpoint; active tokens
+must still be revoked first, and deletion is recorded in the audit log.
 - The token inspector now stays pinned as the right-side panel while operators
-  scroll long token lists, matching the document table inspector behavior.
+scroll long token lists, matching the document table inspector behavior.
 
 ### UI state: persistent table controls
 
 - Document and admin tables now persist table-specific pagination size and sort
-  choices in browser `localStorage`, while explicit URL parameters on the
-  documents page still take precedence for shareable links.
+choices in browser `localStorage`, while explicit URL parameters on the
+documents page still take precedence for shareable links.
 
 ### Catalog deletion: async workspace and library cleanup
 
 - Workspace and library DELETE endpoints now return `202 Accepted` with a
-  canonical async operation id, while destructive storage/database cleanup runs
-  in the background. The shell closes delete dialogs immediately, removes the
-  catalog item optimistically, and polls the operation until it is terminal.
+canonical async operation id, while destructive storage/database cleanup runs
+in the background. The shell closes delete dialogs immediately, removes the
+catalog item optimistically, and polls the operation until it is terminal.
 - Catalog delete admission now reuses an already active delete operation for
-  the same workspace or library and enforces partial unique indexes so repeated
-  clicks/retries do not spawn competing cleanup workers.
+the same workspace or library and enforces partial unique indexes so repeated
+clicks/retries do not spawn competing cleanup workers.
 - Workspace billing cost summaries now have a covering workspace-scope index,
-  reducing the chance of large-workspace cost reads timing out before deletion.
+reducing the chance of large-workspace cost reads timing out before deletion.
 
 ## 0.4.7 — 2026-05-14
 
 ### Installer: fail fast on startup migration drift
 
 - `install.sh` now starts stateful services and the startup authority
-  before creating API/worker/frontend dependents, then watches the
-  startup container directly. This prevents Compose from sitting forever
-  on `service_completed_successfully` dependents when startup restarts.
-- The startup wait loop now reads the startup container from `docker compose
-  ps -a`, so a fast successful one-shot migration container is detected as
-  `Exited (0)` instead of being missed and waited on until timeout.
+before creating API/worker/frontend dependents, then watches the
+startup container directly. This prevents Compose from sitting forever
+on `service_completed_successfully` dependents when startup restarts.
+- The startup wait loop now reads the startup container from `docker compose ps -a`, so a fast successful one-shot migration container is detected as
+`Exited (0)` instead of being missed and waited on until timeout.
 - Backend images now include the canonical migration SQL files under
-  `/app/migrations`, so checksum-drift recovery can apply the exact
-  idempotent migration file from the running image before updating
-  `_sqlx_migrations.checksum`.
+`/app/migrations`, so checksum-drift recovery can apply the exact
+idempotent migration file from the running image before updating
+`_sqlx_migrations.checksum`.
 
 ### Ingest: restart-safe large documents and graph encoding
 

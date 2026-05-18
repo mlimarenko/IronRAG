@@ -6,13 +6,14 @@ import { toast } from "sonner";
 import {
   documentsApi,
   queries,
+  type DocumentListPageResponse,
   type DocumentListStatusFilter,
 } from "@/shared/api";
 import type { DocumentItem, Library, Workspace } from "@/shared/types";
 import { mapListItem } from "@/features/documents/model/documentAdapter";
 
 import {
-  extractWebIngestUrlFilter,
+  extractWebIngestPolicy,
   getErrorMessage,
   getFilteredTotal,
   LIST_POLL_INTERVAL_MS,
@@ -43,6 +44,17 @@ type UseDocumentsQueriesInput = {
   t: TFunction;
   updateSearchParamState: UpdateSearchParamState;
 };
+
+function isListContentDocumentsQueryKey(queryKey: readonly unknown[]): boolean {
+  const [params] = queryKey;
+  const candidate = params as { _id?: unknown; _infinite?: unknown } | null;
+  return (
+    !!candidate &&
+    typeof candidate === "object" &&
+    candidate._id === "listContentDocuments" &&
+    candidate._infinite !== true
+  );
+}
 
 export function useDocumentsQueries({
   activeLibrary,
@@ -150,8 +162,8 @@ export function useDocumentsQueries({
     enabled: !!activeLibraryId,
     staleTime: 60_000,
   });
-  const loadedUrlFilter = useMemo(
-    () => extractWebIngestUrlFilter(libraryPolicyQuery.data),
+  const loadedWebIngestPolicy = useMemo(
+    () => extractWebIngestPolicy(libraryPolicyQuery.data),
     [libraryPolicyQuery.data],
   );
   const libraryCostQuery = useQuery({
@@ -204,6 +216,33 @@ export function useDocumentsQueries({
     },
     [updateSearchParamState],
   );
+  const updateDocumentHintLocally = useCallback(
+    (documentId: string, documentHint: string | null) => {
+      const normalizedDocumentHint = documentHint?.trim() || undefined;
+      setSelectedDocSnapshot((snapshot) =>
+        snapshot?.id === documentId
+          ? { ...snapshot, documentHint: normalizedDocumentHint }
+          : snapshot,
+      );
+      queryClient.setQueriesData<DocumentListPageResponse>(
+        {
+          predicate: (query) => isListContentDocumentsQueryKey(query.queryKey),
+        },
+        (page) =>
+          page
+            ? {
+                ...page,
+                items: page.items.map((item) =>
+                  item.id === documentId
+                    ? { ...item, documentHint: normalizedDocumentHint ?? null }
+                    : item,
+                ),
+              }
+            : page,
+      );
+    },
+    [queryClient],
+  );
   const clearSelectedDoc = useCallback(() => {
     setSelectedDocSnapshot(null);
     updateSearchParamState({ documentId: null });
@@ -215,9 +254,9 @@ export function useDocumentsQueries({
         const result = await queryClient.fetchQuery({
           ...queries.getCatalogLibraryOptions({ path: { libraryId } }),
         });
-        return extractWebIngestUrlFilter(result);
+        return extractWebIngestPolicy(result);
       } catch (err) {
-        toast.error(errorMessage(err, t("documents.urlFilterLoadFailed")));
+        toast.error(errorMessage(err, t("documents.webIngestPolicyLoadFailed")));
         return null;
       }
     },
@@ -252,7 +291,7 @@ export function useDocumentsQueries({
     items,
     libraryCost: parseCost(libraryCostQuery.data?.totalCost) ?? 0,
     libraryPolicyQuery,
-    loadedUrlFilter,
+    loadedWebIngestPolicy,
     loadError: listQuery.error
       ? errorMessage(listQuery.error, t("documents.failedToLoad"))
       : null,
@@ -265,6 +304,7 @@ export function useDocumentsQueries({
     sortOrder,
     statusCounts,
     totalCount,
+    updateDocumentHintLocally,
     webRuns: webRunsQuery.data ?? [],
     webRunsRefreshing: webRunsQuery.isFetching,
     workspaceCost: parseCost(workspaceCostQuery.data?.totalCost) ?? 0,

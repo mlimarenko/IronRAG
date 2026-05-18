@@ -48,7 +48,6 @@ import type {
   AuditEventPageResponse,
   WebIngestPattern,
   WebIngestUrlFilter,
-  WebIngestUrlFilterMode,
 } from "./generated";
 
 type ListAuditEventsParams = NonNullable<ListAuditEventsData["query"]>;
@@ -64,7 +63,6 @@ export type {
   IngestQueueResponse,
   WebIngestPattern,
   WebIngestUrlFilter,
-  WebIngestUrlFilterMode,
 };
 
 type RecognitionPolicy = UpdateLibraryRecognitionPolicyRequest;

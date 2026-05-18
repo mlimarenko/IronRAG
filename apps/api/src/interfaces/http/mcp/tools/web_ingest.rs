@@ -22,7 +22,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Submit a web ingest run for one seed URL. Default to mode single_page so only the submitted page is processed unless recursive_crawl is explicitly requested.",
             input_schema: json!({
                 "type": "object",
-                "required": ["library", "seedUrl", "mode", "urlFilter"],
+                "required": ["library", "seedUrl", "mode", "crawlFilter", "materializationFilter"],
                 "properties": {
                     "library": {
                         "type": "string",
@@ -46,23 +46,76 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     "maxDepth": {
                         "type": "integer",
                         "minimum": 0,
+                        "maximum": 100,
                         "description": "Optional crawl depth. single_page forces depth 0; recursive_crawl defaults to 3."
                     },
                     "maxPages": {
                         "type": "integer",
                         "minimum": 1,
+                        "maximum": 10000,
                         "description": "Optional crawl budget."
                     },
-                    "urlFilter": {
+                    "crawlFilter": {
                         "type": "object",
-                        "required": ["mode", "patterns"],
-                        "description": "Complete URL filtering snapshot for this run. blocklist excludes matching URLs; allowlist processes only matching URLs.",
+                        "description": "URL rules used before fetching discovered pages. blockPatterns always exclude matches; allowPatterns, when non-empty, restrict the crawl frontier to matches.",
+                        "required": ["allowPatterns", "blockPatterns"],
                         "properties": {
-                            "mode": {
-                                "type": "string",
-                                "enum": ["blocklist", "allowlist"]
+                            "allowPatterns": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["kind", "value"],
+                                    "properties": {
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": ["url_prefix", "path_prefix", "glob"]
+                                        },
+                                        "value": {
+                                            "type": "string"
+                                        }
+                                    }
+                                }
                             },
-                            "patterns": {
+                            "blockPatterns": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["kind", "value"],
+                                    "properties": {
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": ["url_prefix", "path_prefix", "glob"]
+                                        },
+                                        "value": {
+                                            "type": "string"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "materializationFilter": {
+                        "type": "object",
+                        "description": "URL rules used after a page is fetched. Excluded pages can still be traversed in recursive crawl, but they are not materialized as documents.",
+                        "required": ["allowPatterns", "blockPatterns"],
+                        "properties": {
+                            "allowPatterns": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["kind", "value"],
+                                    "properties": {
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": ["url_prefix", "path_prefix", "glob"]
+                                        },
+                                        "value": {
+                                            "type": "string"
+                                        }
+                                    }
+                                }
+                            },
+                            "blockPatterns": {
                                 "type": "array",
                                 "items": {
                                     "type": "object",

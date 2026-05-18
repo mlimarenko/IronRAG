@@ -33,6 +33,7 @@ pub struct KnowledgeRevision {
     pub revision_number: i64,
     pub revision_state: String,
     pub source_uri: Option<String>,
+    pub document_hint: Option<String>,
     pub mime_type: String,
     pub checksum: String,
     pub title: Option<String>,

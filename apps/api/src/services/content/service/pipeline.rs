@@ -741,7 +741,7 @@ impl ContentService {
                         command.source_identity.as_deref(),
                         Some(&command.file_name),
                     )),
-                    document_hint: None,
+                    document_hint: command.document_hint,
                     storage_key: Some(storage_key),
                 }),
                 parent_async_operation_id: None,

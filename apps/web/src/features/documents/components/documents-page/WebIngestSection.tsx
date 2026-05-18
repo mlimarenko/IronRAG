@@ -32,11 +32,21 @@ export function WebIngestSection({ controller, t }: WebIngestSectionProps) {
             );
             controller.setMaxDepth(String(run.maxDepth ?? 3));
             controller.setMaxPages(String(run.maxPages ?? 100));
-            controller.setUrlFilterMode(
-              run.urlFilterMode === "allowlist" ? "allowlist" : "blocklist",
+            controller.setCrawlAllowPatternsText(
+              formatWebIngestPatterns(run.crawlFilter?.allowPatterns),
             );
-            controller.setUrlFilterPatternsText(
-              formatWebIngestPatterns(run.urlPatterns),
+            controller.setCrawlBlockPatternsText(
+              formatWebIngestPatterns(run.crawlFilter?.blockPatterns),
+            );
+            controller.setMaterializationAllowPatternsText(
+              formatWebIngestPatterns(
+                run.materializationFilter?.allowPatterns,
+              ),
+            );
+            controller.setMaterializationBlockPatternsText(
+              formatWebIngestPatterns(
+                run.materializationFilter?.blockPatterns,
+              ),
             );
             controller.setAddLinkOpen(true);
           }}

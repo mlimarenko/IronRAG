@@ -233,6 +233,12 @@ pub struct ReprocessDocumentRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchDocumentMetadataRequest {
+    pub document_hint: Option<String>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentDocumentDetailResponse {
@@ -424,6 +430,25 @@ pub(super) fn normalize_page_window(offset: Option<usize>, limit: Option<usize>)
 
 pub(super) fn paginate_items<T>(items: Vec<T>, offset: usize, limit: usize) -> Vec<T> {
     items.into_iter().skip(offset).take(limit).collect()
+}
+
+pub(crate) fn normalize_optional_text(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+pub(crate) fn normalize_optional_document_hint(
+    value: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value.and_then(normalize_optional_text) else {
+        return Ok(None);
+    };
+    if value.chars().count() > 1024 {
+        return Err(ApiError::BadRequest(
+            "document_hint must be at most 1024 characters".to_string(),
+        ));
+    }
+    Ok(Some(value))
 }
 
 // ============================================================================

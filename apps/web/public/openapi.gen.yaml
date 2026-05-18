@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.9
+  version: 0.4.14
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -1326,6 +1326,39 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContentMutationDetailResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized for the document
+        '404':
+          description: Document not found
+    patch:
+      tags:
+      - content
+      operationId: patchContentDocumentMetadata
+      parameters:
+      - name: documentId
+        in: path
+        description: Document identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchDocumentMetadataRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated content document detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentDocumentDetailResponse'
+        '400':
+          description: Patch payload is invalid
         '401':
           description: Caller is not authenticated
         '403':
@@ -2660,6 +2693,153 @@ paths:
               schema:
                 type: string
       security: []
+  /v1/ops/ingest-queue:
+    get:
+      tags:
+      - ops
+      operationId: listIngestQueue
+      parameters:
+      - name: workspaceId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: libraryId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Active ingest queue visible to the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized to read operations
+  /v1/ops/ingest-queue/jobs/{jobId}/cancel:
+    post:
+      tags:
+      - ops
+      operationId: cancelIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Active ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is already terminal
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/move:
+    post:
+      tags:
+      - ops
+      operationId: moveIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Queued or paused ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveIngestQueueJobRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is not queued/paused or direction is invalid
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/pause:
+    post:
+      tags:
+      - ops
+      operationId: pauseIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Queued or running ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is not queued or running
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/resume:
+    post:
+      tags:
+      - ops
+      operationId: resumeIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Paused ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job is not paused
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
   /v1/ops/libraries/{libraryId}:
     get:
       tags:
@@ -3267,6 +3447,7 @@ components:
       - access
       - mcp
       - operations
+      - queue
       - ai
       - pricing
       - settings
@@ -3750,6 +3931,10 @@ components:
       properties:
         blockKind:
           type: string
+        documentHint:
+          type:
+          - string
+          - 'null'
         documentId:
           type:
           - string
@@ -3786,10 +3971,6 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/AssistantContentSourceAccess'
-        sourceUri:
-          type:
-          - string
-          - 'null'
     AssistantRelationReference:
       type: object
       required:
@@ -4705,6 +4886,7 @@ components:
       - webIngestPolicy
       - recognitionPolicy
       - lifecycleState
+      - includeDocumentHintInMcpAnswers
       - ingestionReadiness
       properties:
         description:
@@ -4720,6 +4902,8 @@ components:
         id:
           type: string
           format: uuid
+        includeDocumentHintInMcpAnswers:
+          type: boolean
         ingestionReadiness:
           $ref: '#/components/schemas/CatalogLibraryIngestionReadinessResponse'
         lifecycleState:
@@ -4958,6 +5142,7 @@ components:
       - fileName
       - uploadedAt
       - documentState
+      - externalKey
       - status
       - readiness
       - retryable
@@ -4974,8 +5159,19 @@ components:
             render the column without a second roundtrip.
         costCurrencyCode:
           type: string
+        documentHint:
+          type:
+          - string
+          - 'null'
         documentState:
           type: string
+        externalKey:
+          type: string
+          description: |-
+            Canonical connector identity (`content_document.external_key`).
+            Connectors look this up via list to decide whether to upload or
+            replace; exposed so a paginated list pass is sufficient instead
+            of a per-document detail roundtrip.
         failureCode:
           type:
           - string
@@ -5263,6 +5459,10 @@ components:
           - string
           - 'null'
           format: uuid
+        document_hint:
+          type:
+          - string
+          - 'null'
         document_id:
           type: string
           format: uuid
@@ -5421,6 +5621,10 @@ components:
           type:
           - string
           - 'null'
+        documentHint:
+          type:
+          - string
+          - 'null'
         externalKey:
           type:
           - string
@@ -5550,6 +5754,10 @@ components:
           - string
           - 'null'
         contentSourceKind:
+          type:
+          - string
+          - 'null'
+        documentHint:
           type:
           - string
           - 'null'
@@ -5688,12 +5896,15 @@ components:
       - libraryId
       - seedUrl
       - mode
-      - urlFilter
+      - crawlFilter
+      - materializationFilter
       properties:
         boundaryPolicy:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/WebBoundaryPolicy'
+        crawlFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
         idempotencyKey:
           type:
           - string
@@ -5701,6 +5912,8 @@ components:
         libraryId:
           type: string
           format: uuid
+        materializationFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
         maxDepth:
           type:
           - integer
@@ -5715,8 +5928,6 @@ components:
           $ref: '#/components/schemas/WebIngestMode'
         seedUrl:
           type: string
-        urlFilter:
-          $ref: '#/components/schemas/WebIngestUrlFilter'
     CreateWorkspacePriceOverrideRequest:
       type: object
       required:
@@ -6877,6 +7088,135 @@ components:
           - $ref: '#/components/schemas/IngestAttempt'
         readiness:
           $ref: '#/components/schemas/IngestReadinessResponse'
+    IngestQueueItemResponse:
+      type: object
+      required:
+      - jobId
+      - workspaceId
+      - workspaceName
+      - libraryId
+      - libraryName
+      - documentName
+      - jobKind
+      - queueState
+      - queuedAt
+      - availableAt
+      properties:
+        attemptId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        attemptNumber:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        attemptState:
+          type:
+          - string
+          - 'null'
+        availableAt:
+          type: string
+          format: date-time
+        currentStage:
+          type:
+          - string
+          - 'null'
+        documentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        documentName:
+          type: string
+        failureCode:
+          type:
+          - string
+          - 'null'
+        failureMessage:
+          type:
+          - string
+          - 'null'
+        heartbeatAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        jobId:
+          type: string
+          format: uuid
+        jobKind:
+          type: string
+        libraryId:
+          type: string
+          format: uuid
+        libraryName:
+          type: string
+        progressPercent:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        queuePosition:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        queueState:
+          type: string
+        queuedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        workspaceId:
+          type: string
+          format: uuid
+        workspaceName:
+          type: string
+    IngestQueueMoveDirection:
+      type: string
+      enum:
+      - up
+      - down
+      - top
+      - bottom
+    IngestQueueResponse:
+      type: object
+      required:
+      - summary
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestQueueItemResponse'
+        summary:
+          $ref: '#/components/schemas/IngestQueueSummaryResponse'
+    IngestQueueSummaryResponse:
+      type: object
+      required:
+      - running
+      - queued
+      - paused
+      - total
+      properties:
+        paused:
+          type: integer
+          format: int64
+        queued:
+          type: integer
+          format: int64
+        running:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
     IngestReadinessResponse:
       type: object
       required:
@@ -8140,6 +8480,10 @@ components:
         created_at:
           type: string
           format: date-time
+        document_hint:
+          type:
+          - string
+          - 'null'
         document_id:
           type: string
           format: uuid
@@ -8789,6 +9133,13 @@ components:
           - string
           - 'null'
           format: uuid
+    MoveIngestQueueJobRequest:
+      type: object
+      required:
+      - direction
+      properties:
+        direction:
+          $ref: '#/components/schemas/IngestQueueMoveDirection'
     OperatorWarning:
       type: object
       required:
@@ -8988,6 +9339,13 @@ components:
       enum:
       - reject
       - replace
+    PatchDocumentMetadataRequest:
+      type: object
+      properties:
+        documentHint:
+          type:
+          - string
+          - 'null'
     PermissionKind:
       type: string
       enum:
@@ -10258,6 +10616,7 @@ components:
       - arangoDocsByStore
       - arangoEdgesByStore
       - blobsRestored
+      - skippedArangoEdgesByStore
       properties:
         arangoDocsByStore:
           type: object
@@ -10289,6 +10648,14 @@ components:
         overwriteMode:
           $ref: '#/components/schemas/OverwriteMode'
         postgresRowsByTable:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+            minimum: 0
+          propertyNames:
+            type: string
+        skippedArangoEdgesByStore:
           type: object
           additionalProperties:
             type: integer
@@ -10796,6 +11163,10 @@ components:
           type:
           - string
           - 'null'
+        includeDocumentHintInMcpAnswers:
+          type:
+          - boolean
+          - 'null'
         lifecycleState:
           type:
           - string
@@ -10815,9 +11186,12 @@ components:
     UpdateLibraryWebIngestPolicyRequest:
       type: object
       required:
-      - urlFilter
+      - crawlFilter
+      - materializationFilter
       properties:
-        urlFilter:
+        crawlFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
+        materializationFilter:
           $ref: '#/components/schemas/WebIngestUrlFilter'
     UpdateModelPresetRequest:
       type: object
@@ -11099,8 +11473,13 @@ components:
           type: string
     WebIngestPolicy:
       type: object
+      required:
+      - crawlFilter
+      - materializationFilter
       properties:
-        urlFilter:
+        crawlFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
+        materializationFilter:
           $ref: '#/components/schemas/WebIngestUrlFilter'
       additionalProperties: false
     WebIngestRun:
@@ -11116,8 +11495,8 @@ components:
       - boundaryPolicy
       - maxDepth
       - maxPages
-      - urlFilterMode
-      - urlPatterns
+      - crawlFilter
+      - materializationFilter
       - runState
       - requestedAt
       - counts
@@ -11141,6 +11520,8 @@ components:
           format: date-time
         counts:
           $ref: '#/components/schemas/WebRunCounts'
+        crawlFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
         failureCode:
           oneOf:
           - type: 'null'
@@ -11153,6 +11534,8 @@ components:
         libraryId:
           type: string
           format: uuid
+        materializationFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
         maxDepth:
           type: integer
           format: int32
@@ -11181,12 +11564,6 @@ components:
           type: string
         seedUrl:
           type: string
-        urlFilterMode:
-          type: string
-        urlPatterns:
-          type: array
-          items:
-            $ref: '#/components/schemas/WebIngestPattern'
         workspaceId:
           type: string
           format: uuid
@@ -11244,8 +11621,8 @@ components:
       - boundaryPolicy
       - maxDepth
       - maxPages
-      - urlFilterMode
-      - urlPatterns
+      - crawlFilter
+      - materializationFilter
       - runState
       - seedUrl
       - counts
@@ -11254,6 +11631,8 @@ components:
           type: string
         counts:
           $ref: '#/components/schemas/WebRunCounts'
+        crawlFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
         lastActivityAt:
           type:
           - string
@@ -11262,6 +11641,8 @@ components:
         libraryId:
           type: string
           format: uuid
+        materializationFilter:
+          $ref: '#/components/schemas/WebIngestUrlFilter'
         maxDepth:
           type: integer
           format: int32
@@ -11277,27 +11658,20 @@ components:
           $ref: '#/components/schemas/WebIngestRunState'
         seedUrl:
           type: string
-        urlFilterMode:
-          type: string
-        urlPatterns:
-          type: array
-          items:
-            $ref: '#/components/schemas/WebIngestPattern'
     WebIngestUrlFilter:
       type: object
+      required:
+      - allowPatterns
+      - blockPatterns
       properties:
-        mode:
-          $ref: '#/components/schemas/WebIngestUrlFilterMode'
-        patterns:
+        allowPatterns:
           type: array
           items:
             $ref: '#/components/schemas/WebIngestPattern'
-      additionalProperties: false
-    WebIngestUrlFilterMode:
-      type: string
-      enum:
-      - blocklist
-      - allowlist
+        blockPatterns:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebIngestPattern'
     WebPageProvenance:
       type: object
       properties:

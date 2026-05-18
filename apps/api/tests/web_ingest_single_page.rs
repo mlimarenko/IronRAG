@@ -230,6 +230,7 @@ impl WebIngestSinglePageFixture {
         &self,
         seed_url: String,
     ) -> Result<ironrag_backend::domains::ingest::WebIngestRun> {
+        let web_policy = ironrag_backend::shared::web::ingest::default_web_ingest_policy();
         self.state
             .canonical_services
             .web_ingest
@@ -243,8 +244,8 @@ impl WebIngestSinglePageFixture {
                     boundary_policy: None,
                     max_depth: None,
                     max_pages: None,
-                    url_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
-                        .url_filter,
+                    crawl_filter: web_policy.crawl_filter,
+                    materialization_filter: web_policy.materialization_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,

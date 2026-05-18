@@ -49,5 +49,4 @@ export {
 } from "./admin";
 export type {
   ListModelsParams,
-  WebIngestUrlFilterMode,
 } from "./admin";

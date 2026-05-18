@@ -214,10 +214,7 @@ dependencies:
       repository: redis
       tag: "8.6"
       pullPolicy: IfNotPresent
-    persistence:
-      enabled: false
-      size: 8Gi
-      storageClassName: ""
+    maxMemory: 512mb
     resources: *ironrag-resources-small
   arangodb:
     mode: bundled

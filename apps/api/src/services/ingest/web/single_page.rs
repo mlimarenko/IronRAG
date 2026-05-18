@@ -8,13 +8,10 @@ use super::{
     WebClassificationReason, WebDiscoveredPageRow, WebIngestRunRow, WebIngestService,
     WebRunFailure, WebRunFailureCode, WebRunState, derive_terminal_run_state, extraction_title,
     fallback_title_from_url, ingest_repository, map_web_run_counts_row, now_if_terminal,
-    parse_run_url_filter_mode, parse_run_url_patterns, resolved_web_mime_type,
-    source_file_name_from_url, telemetry,
+    parse_run_url_filter, resolved_web_mime_type, source_file_name_from_url, telemetry,
 };
 use crate::services::content::service::MaterializedWebCapture;
-use crate::shared::web::ingest::{
-    WebIngestUrlFilter, classify_web_materialization_filter_exclusion,
-};
+use crate::shared::web::ingest::classify_web_materialization_filter_exclusion;
 
 pub(super) async fn execute_single_page_run(
     service: &WebIngestService,
@@ -105,12 +102,12 @@ pub(super) async fn execute_single_page_run(
             .await;
         }
     };
-    let url_filter = WebIngestUrlFilter {
-        mode: parse_run_url_filter_mode(&processing_row.url_filter_mode)?,
-        patterns: parse_run_url_patterns(processing_row.url_patterns.clone())?,
-    };
+    let materialization_filter = parse_run_url_filter(
+        processing_row.materialization_allow_patterns.clone(),
+        processing_row.materialization_block_patterns.clone(),
+    )?;
     if let Some(filter_exclusion) =
-        classify_web_materialization_filter_exclusion(&resource.final_url, &url_filter)
+        classify_web_materialization_filter_exclusion(&resource.final_url, &materialization_filter)
     {
         let _ = ingest_repository::update_web_discovered_page(
             &state.persistence.postgres,
@@ -263,6 +260,12 @@ async fn complete_single_page_run(
     .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", processing_row.id))?;
 
     if let Some(async_operation_id) = completed_row.async_operation_id {
+        let status = match terminal_state {
+            WebRunState::Completed | WebRunState::CompletedPartial => "ready",
+            WebRunState::Canceled => "canceled",
+            WebRunState::Failed => "failed",
+            _ => "processing",
+        };
         let _ = state
             .canonical_services
             .ops
@@ -270,9 +273,38 @@ async fn complete_single_page_run(
                 state,
                 UpdateAsyncOperationCommand {
                     operation_id: async_operation_id,
-                    status: "ready".to_string(),
+                    status: status.to_string(),
                     completed_at,
                     failure_code: None,
+                },
+            )
+            .await?;
+    }
+
+    let mutation_state = match terminal_state {
+        WebRunState::Completed | WebRunState::CompletedPartial => "applied",
+        WebRunState::Canceled => "canceled",
+        WebRunState::Failed => "failed",
+        _ => "processing",
+    };
+    if matches!(
+        terminal_state,
+        WebRunState::Completed
+            | WebRunState::CompletedPartial
+            | WebRunState::Canceled
+            | WebRunState::Failed
+    ) {
+        let _ = state
+            .canonical_services
+            .content
+            .update_mutation(
+                state,
+                UpdateMutationCommand {
+                    mutation_id: completed_row.mutation_id,
+                    mutation_state: mutation_state.to_string(),
+                    completed_at,
+                    failure_code: None,
+                    conflict_code: None,
                 },
             )
             .await?;

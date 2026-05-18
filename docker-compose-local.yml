@@ -134,9 +134,9 @@ services:
       - --appendonly
       - "no"
       - --maxmemory
-      - "${IRONRAG_REDIS_MAXMEMORY:-768mb}"
+      - "${IRONRAG_REDIS_MAXMEMORY:-512mb}"
       - --maxmemory-policy
-      - allkeys-lru
+      - volatile-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

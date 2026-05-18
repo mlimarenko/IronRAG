@@ -23,10 +23,11 @@ use self::{
         CreateDocumentResponse, CreateMutationRequest, DocumentListCursor,
         DocumentListPageResponse, DocumentListSortKey, DocumentListSortOrder,
         DocumentListStatusCounts, EditDocumentRequest, ListDocumentsQuery, ListMutationsQuery,
-        PreparedDataQuery, PreparedSegmentsPageResponse, ReprocessDocumentRequest,
-        TechnicalFactsPageResponse, build_revision_metadata, decode_document_list_cursor,
-        encode_document_list_cursor, map_document_summary, map_mutation_admission,
-        normalize_page_window, paginate_items,
+        PatchDocumentMetadataRequest, PreparedDataQuery, PreparedSegmentsPageResponse,
+        ReprocessDocumentRequest, TechnicalFactsPageResponse, build_revision_metadata,
+        decode_document_list_cursor, encode_document_list_cursor, map_document_summary,
+        map_mutation_admission, normalize_optional_document_hint, normalize_page_window,
+        paginate_items,
     },
     web_runs::{
         cancel_web_ingest_run, create_web_ingest_run, get_web_ingest_run,
@@ -65,7 +66,10 @@ pub fn router() -> Router<AppState> {
         .route("/content/documents/batch-reprocess", post(batch_reprocess_documents))
         .route("/content/documents", get(list_documents).post(create_document))
         .route("/content/documents/upload", axum::routing::post(upload_document))
-        .route("/content/documents/{document_id}", get(get_document).delete(delete_document))
+        .route(
+            "/content/documents/{document_id}",
+            get(get_document).patch(patch_document_metadata).delete(delete_document),
+        )
         .route("/content/documents/{document_id}/source", get(download_document_source))
         .route("/content/documents/{document_id}/append", axum::routing::post(append_document))
         .route("/content/documents/{document_id}/edit", axum::routing::post(edit_document))
@@ -487,6 +491,59 @@ pub async fn get_document(
 
 #[tracing::instrument(
     level = "info",
+    name = "http.patch_document_metadata",
+    skip_all,
+    fields(document_id = %document_id)
+)]
+#[utoipa::path(
+    patch,
+    path = "/v1/content/documents/{documentId}",
+    tag = "content",
+    operation_id = "patchContentDocumentMetadata",
+    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    request_body = PatchDocumentMetadataRequest,
+    responses(
+        (status = 200, description = "Updated content document detail", body = ContentDocumentDetailResponse),
+        (status = 400, description = "Patch payload is invalid"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the document"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn patch_document_metadata(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(document_id): Path<Uuid>,
+    Json(payload): Json<PatchDocumentMetadataRequest>,
+) -> Result<Json<ContentDocumentDetailResponse>, ApiError> {
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_WRITE,
+    )
+    .await?;
+    let document_hint = normalize_optional_document_hint(payload.document_hint)?;
+    let summary = state
+        .canonical_services
+        .content
+        .update_active_revision_document_hint(&state, document_id, document_hint)
+        .await?;
+    let lifecycle = crate::services::content::document_accounting::load_document_lifecycle(
+        &state,
+        summary.document.workspace_id,
+        summary.document.library_id,
+        summary.document.id,
+    )
+    .await
+    .ok();
+    let mut response = map_document_summary(summary);
+    response.lifecycle = lifecycle;
+    Ok(Json(response))
+}
+
+#[tracing::instrument(
+    level = "info",
     name = "http.get_document_head",
     skip_all,
     fields(document_id = %document_id)
@@ -820,6 +877,7 @@ pub async fn replace_document(
                 request_surface: "rest".to_string(),
                 source_identity: None,
                 file_name: payload.file_name,
+                document_hint: payload.document_hint,
                 mime_type: payload.mime_type,
                 file_bytes: payload.file_bytes,
             },
@@ -1215,6 +1273,32 @@ mod tests {
             unreachable!("ensure_batch_document_id_limit must return bad_request on overflow");
         };
         assert!(message.contains("batch size exceeds maximum"));
+    }
+
+    #[test]
+    fn document_hint_patch_normalizes_empty_and_accepts_boundary_length() {
+        assert_eq!(types::normalize_optional_document_hint(None).unwrap(), None);
+        assert_eq!(types::normalize_optional_document_hint(Some("   ".to_string())).unwrap(), None);
+        assert_eq!(
+            types::normalize_optional_document_hint(Some("  source.pdf  ".to_string())).unwrap(),
+            Some("source.pdf".to_string())
+        );
+
+        let boundary = "a".repeat(1024);
+        assert_eq!(
+            types::normalize_optional_document_hint(Some(boundary.clone())).unwrap(),
+            Some(boundary)
+        );
+    }
+
+    #[test]
+    fn document_hint_patch_rejects_oversized_payload() {
+        let oversized = types::normalize_optional_document_hint(Some("a".repeat(1025)))
+            .expect_err("document_hint over 1024 characters must be rejected");
+        let ApiError::BadRequest(message) = oversized else {
+            unreachable!("document_hint length validation must return bad_request");
+        };
+        assert!(message.contains("at most 1024 characters"));
     }
 
     #[test]

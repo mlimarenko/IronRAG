@@ -61,6 +61,7 @@ pub struct SnapshotImportReportResponse {
     pub postgres_rows_by_table: BTreeMap<String, u64>,
     pub arango_docs_by_store: BTreeMap<String, u64>,
     pub arango_edges_by_store: BTreeMap<String, u64>,
+    pub skipped_arango_edges_by_store: BTreeMap<String, u64>,
     pub blobs_restored: u64,
 }
 
@@ -73,6 +74,10 @@ impl From<SnapshotImportReport> for SnapshotImportReportResponse {
             postgres_rows_by_table: report.postgres_rows_by_table.into_iter().collect(),
             arango_docs_by_store: report.arango_docs_by_collection.into_iter().collect(),
             arango_edges_by_store: report.arango_edges_by_collection.into_iter().collect(),
+            skipped_arango_edges_by_store: report
+                .skipped_arango_edges_by_collection
+                .into_iter()
+                .collect(),
             blobs_restored: report.blobs_restored,
         }
     }
@@ -175,6 +180,7 @@ pub async fn export_library_snapshot(
         (status = 200, description = "Snapshot import report (per-table row counts, blob count, applied overwrite mode)", body = SnapshotImportReportResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
         (status = 409, description = "Library already populated and overwrite=reject"),
     ),
 )]
@@ -185,11 +191,7 @@ pub async fn import_library_snapshot(
     Query(query): Query<ImportQuery>,
     body: Body,
 ) -> Result<Json<SnapshotImportReportResponse>, ApiError> {
-    match load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await {
-        Ok(_) => {}
-        Err(ApiError::NotFound(_)) if auth.is_system_admin => {}
-        Err(error) => return Err(error),
-    }
+    load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
 
     let overwrite = OverwriteMode::parse(query.overwrite.as_deref().unwrap_or(""))
         .map_err(|error| ApiError::BadRequest(format!("invalid overwrite: {error}")))?;

@@ -343,7 +343,8 @@ pub struct McpSubmitWebIngestRunRequest {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
-    pub url_filter: WebIngestUrlFilter,
+    pub crawl_filter: WebIngestUrlFilter,
+    pub materialization_filter: WebIngestUrlFilter,
     pub idempotency_key: Option<String>,
 }
 
@@ -719,9 +720,13 @@ mod tests {
             "boundaryPolicy": "same_host",
             "maxDepth": 0,
             "maxPages": 1,
-            "urlFilter": {
-                "mode": "blocklist",
-                "patterns": [{"kind": "path_prefix", "value": "/labels/viewlabel.action"}]
+            "crawlFilter": {
+                "blockPatterns": [{"kind": "path_prefix", "value": "/labels/viewlabel.action"}],
+                "allowPatterns": []
+            },
+            "materializationFilter": {
+                "allowPatterns": [{"kind": "path_prefix", "value": "/docs/"}],
+                "blockPatterns": []
             },
             "idempotencyKey": "web-seed-1"
         }))
@@ -733,7 +738,8 @@ mod tests {
         assert_eq!(request.boundary_policy.as_deref(), Some("same_host"));
         assert_eq!(request.max_depth, Some(0));
         assert_eq!(request.max_pages, Some(1));
-        assert_eq!(request.url_filter.patterns.len(), 1);
+        assert_eq!(request.crawl_filter.block_patterns.len(), 1);
+        assert_eq!(request.materialization_filter.allow_patterns.len(), 1);
         assert_eq!(request.idempotency_key.as_deref(), Some("web-seed-1"));
     }
 

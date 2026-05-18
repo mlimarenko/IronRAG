@@ -192,6 +192,7 @@ pub struct ReplaceInlineMutationCommand {
     pub request_surface: String,
     pub source_identity: Option<String>,
     pub file_name: String,
+    pub document_hint: Option<String>,
     pub mime_type: Option<String>,
     pub file_bytes: Vec<u8>,
 }

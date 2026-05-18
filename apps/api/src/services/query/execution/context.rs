@@ -10,7 +10,7 @@ use crate::{
     domains::query_ir::{QueryAct, QueryIR, SourceSliceDirection},
     infra::{
         arangodb::document_store::{KnowledgeDocumentRow, KnowledgeRevisionRow},
-        repositories::{catalog_repository, content_repository},
+        repositories::catalog_repository,
     },
     services::content::document_hint::resolve_document_hint,
     services::query::{
@@ -962,7 +962,7 @@ async fn load_retrieved_document_hint(
 ) -> Option<String> {
     let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
     let revision = state.arango_document_store.get_revision(revision_id).await.ok()??;
-    resolve_retrieved_document_hint(state, document, revision_id, Some(&revision)).await
+    resolve_retrieved_document_hint(state, document, Some(&revision)).await
 }
 
 async fn load_retrieved_document_preview_and_hint(
@@ -984,8 +984,7 @@ async fn load_retrieved_document_preview_and_hint(
         futures::future::join(revision_future, chunks_future).await;
 
     let revision = revision_result.ok().flatten();
-    let document_hint =
-        resolve_retrieved_document_hint(state, document, revision_id, revision.as_ref()).await;
+    let document_hint = resolve_retrieved_document_hint(state, document, revision.as_ref()).await;
 
     let chunks = chunks_result.ok().unwrap_or_default();
     let combined = chunks
@@ -1010,7 +1009,6 @@ async fn load_retrieved_document_preview_and_hint(
 async fn resolve_retrieved_document_hint(
     state: &AppState,
     document: &KnowledgeDocumentRow,
-    revision_id: Uuid,
     arango_revision: Option<&KnowledgeRevisionRow>,
 ) -> Option<String> {
     let library_setting =
@@ -1021,38 +1019,21 @@ async fn resolve_retrieved_document_hint(
             .map(|library| library.include_document_hint_in_mcp_answers)
             .unwrap_or(true);
 
-    let postgres_revision =
-        content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
-            .await
-            .ok()
-            .flatten();
-
     let document_title = document
         .title
         .as_deref()
-        .or_else(|| postgres_revision.as_ref().and_then(|revision| revision.title.as_deref()))
         .or_else(|| arango_revision.and_then(|revision| revision.title.as_deref()))
         .or(Some(document.external_key.as_str()));
 
-    let resolved = if let Some(revision) = postgres_revision.as_ref() {
+    let resolved = arango_revision.and_then(|revision| {
         resolve_document_hint(
-            &revision.content_source_kind,
+            &revision.revision_kind,
             revision.source_uri.as_deref(),
             revision.document_hint.as_deref(),
             document_title,
             library_setting,
         )
-    } else {
-        arango_revision.and_then(|revision| {
-            resolve_document_hint(
-                &revision.revision_kind,
-                revision.source_uri.as_deref(),
-                None,
-                document_title,
-                library_setting,
-            )
-        })
-    };
+    });
 
     resolved.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }

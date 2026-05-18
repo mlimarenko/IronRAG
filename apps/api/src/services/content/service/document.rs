@@ -91,6 +91,18 @@ fn resolve_document_display_name(
         .unwrap_or_else(|| external_key.to_string())
 }
 
+fn apply_document_hint_to_active_revision(
+    summary: &mut ContentDocumentSummary,
+    revision_id: Uuid,
+    document_hint: Option<String>,
+) {
+    if let Some(active_revision) =
+        summary.active_revision.as_mut().filter(|revision| revision.id == revision_id)
+    {
+        active_revision.document_hint = document_hint;
+    }
+}
+
 impl ContentService {
     pub async fn list_documents(
         &self,
@@ -336,14 +348,52 @@ impl ContentService {
         } else {
             (None, None)
         };
-        self.build_document_summary_from_knowledge(
-            state,
-            row,
-            content_head.as_ref(),
-            latest_mutation,
-            latest_job,
+        let summary = self
+            .build_document_summary_from_knowledge(
+                state,
+                row,
+                content_head.as_ref(),
+                latest_mutation,
+                latest_job,
+            )
+            .await?;
+        Ok(summary)
+    }
+
+    pub async fn update_active_revision_document_hint(
+        &self,
+        state: &AppState,
+        document_id: Uuid,
+        hint: Option<String>,
+    ) -> Result<ContentDocumentSummary, ApiError> {
+        let head = self.get_document_head(state, document_id).await?;
+        let revision_id =
+            head.as_ref().and_then(|row| row.readable_revision_id).ok_or_else(|| {
+                ApiError::unreadable_document("document has no readable revision".to_string())
+            })?;
+        let updated_revision = content_repository::update_revision_document_hint(
+            &state.persistence.postgres,
+            revision_id,
+            hint.as_deref(),
         )
         .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
+
+        state
+            .arango_document_store
+            .update_revision_document_hint(revision_id, updated_revision.document_hint.as_deref())
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
+
+        let mut summary = self.get_document(state, document_id).await?;
+        apply_document_hint_to_active_revision(
+            &mut summary,
+            updated_revision.id,
+            updated_revision.document_hint,
+        );
+        Ok(summary)
     }
 
     pub async fn get_document_by_external_key(
@@ -1821,8 +1871,14 @@ fn derive_document_list_progress_percent(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_document_list_entry, resolve_document_display_name};
+    use super::{
+        apply_document_hint_to_active_revision, build_document_list_entry,
+        resolve_document_display_name,
+    };
     use crate::{
+        domains::content::{
+            ContentDocument, ContentDocumentPipelineState, ContentDocumentSummary, ContentRevision,
+        },
         infra::arangodb::document_store::KnowledgeRevisionRow,
         infra::repositories::content_repository::ContentDocumentListRow,
     };
@@ -1892,6 +1948,7 @@ mod tests {
             revision_kind: "upload".to_string(),
             storage_ref: None,
             source_uri: None,
+            document_hint: None,
             mime_type: "text/markdown".to_string(),
             checksum: "checksum".to_string(),
             title: Some("Sample document".to_string()),
@@ -1908,6 +1965,65 @@ mod tests {
             superseded_by_revision_id: None,
             created_at: now,
         }
+    }
+
+    fn document_summary_with_active_revision(revision_id: Uuid) -> ContentDocumentSummary {
+        let now = Utc::now();
+        let document_id = Uuid::now_v7();
+        ContentDocumentSummary {
+            document: ContentDocument {
+                id: document_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                external_key: "docs/source.pdf".to_string(),
+                document_state: "active".to_string(),
+                created_at: now,
+            },
+            file_name: "source.pdf".to_string(),
+            head: None,
+            active_revision: Some(ContentRevision {
+                id: revision_id,
+                document_id,
+                workspace_id: Uuid::now_v7(),
+                library_id: Uuid::now_v7(),
+                revision_number: 1,
+                parent_revision_id: None,
+                content_source_kind: "upload".to_string(),
+                checksum: "checksum".to_string(),
+                mime_type: "application/pdf".to_string(),
+                byte_size: 128,
+                title: Some("source.pdf".to_string()),
+                language_code: None,
+                source_uri: Some("upload://source.pdf".to_string()),
+                document_hint: None,
+                storage_key: Some("content/source.pdf".to_string()),
+                created_by_principal_id: None,
+                created_at: now,
+            }),
+            source_access: None,
+            readiness: None,
+            readiness_summary: None,
+            prepared_revision: None,
+            web_page_provenance: None,
+            pipeline: ContentDocumentPipelineState { latest_mutation: None, latest_job: None },
+        }
+    }
+
+    #[test]
+    fn document_hint_patch_detail_roundtrip_uses_updated_active_revision_hint() {
+        let revision_id = Uuid::now_v7();
+        let mut summary = document_summary_with_active_revision(revision_id);
+
+        apply_document_hint_to_active_revision(
+            &mut summary,
+            revision_id,
+            Some("customer-contract.pdf".to_string()),
+        );
+
+        assert_eq!(
+            summary.active_revision.and_then(|revision| revision.document_hint),
+            Some("customer-contract.pdf".to_string())
+        );
     }
 
     #[test]

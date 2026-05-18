@@ -8,9 +8,7 @@ use std::time::Duration;
 use tokio::{sync::broadcast, time};
 
 use ironrag_backend::services::ingest::worker;
-use ironrag_backend::shared::web::ingest::{
-    WebIngestPattern, WebIngestUrlFilter, WebIngestUrlFilterMode,
-};
+use ironrag_backend::shared::web::ingest::{WebIngestPattern, WebIngestUrlFilter};
 
 use web_ingest_fixture::WebIngestFixture;
 
@@ -146,18 +144,19 @@ async fn recursive_crawl_allowlist_traverses_to_matching_urls() -> Result<()> {
 
     let result = async {
         let submitted_run = fixture
-            .submit_recursive_run_with_url_filter(
+            .submit_recursive_run_with_filters(
                 server.url("/recursive/seed"),
                 "same_host",
                 Some(2),
                 Some(20),
+                WebIngestUrlFilter::default(),
                 WebIngestUrlFilter {
-                    mode: WebIngestUrlFilterMode::Allowlist,
-                    patterns: vec![WebIngestPattern {
+                    allow_patterns: vec![WebIngestPattern {
                         kind: "path_prefix".to_string(),
                         value: "/recursive/depth-two".to_string(),
                         source: None,
                     }],
+                    block_patterns: Vec::new(),
                 },
             )
             .await?;

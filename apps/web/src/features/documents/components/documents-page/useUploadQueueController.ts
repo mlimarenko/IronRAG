@@ -29,6 +29,10 @@ type UploadQueueControllerInput = {
   t: TFunction;
 };
 
+type PendingUploadSelection = {
+  candidates: UploadCandidate[];
+};
+
 export function useUploadQueueController({
   activeLibrary,
   activateListPollGrace,
@@ -38,10 +42,13 @@ export function useUploadQueueController({
   t,
 }: UploadQueueControllerInput) {
   const [dragOver, setDragOver] = useState(false);
-  const [documentHint, setDocumentHint] = useState("");
+  const [uploadDialogHint, setUploadDialogHint] = useState("");
+  const [pendingUploadSelection, setPendingUploadSelection] =
+    useState<PendingUploadSelection | null>(null);
   const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
   const [duplicateConflict, setDuplicateConflict] = useState<{
     candidate: UploadCandidate;
+    documentHint: string;
     existingDocId: string;
     remaining: UploadCandidate[];
   } | null>(null);
@@ -49,7 +56,7 @@ export function useUploadQueueController({
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const doUploadFile = useCallback(
-    async (candidate: UploadCandidate) => {
+    async (candidate: UploadCandidate, documentHint: string) => {
       if (!activeLibrary) return;
       setUploadQueue((prev) => [...prev, { name: candidate.name, state: "uploading" }]);
       try {
@@ -77,7 +84,7 @@ export function useUploadQueueController({
         );
       }
     },
-    [activeLibrary, activateListPollGrace, documentHint, errorMessage, t],
+    [activeLibrary, activateListPollGrace, errorMessage, t],
   );
 
   const doReplaceFile = useCallback(
@@ -117,7 +124,7 @@ export function useUploadQueueController({
   }, [loadFirstPage, t]);
 
   const processUploadQueue = useCallback(
-    async (candidates: UploadCandidate[]) => {
+    async (candidates: UploadCandidate[], documentHint: string) => {
       let remaining = candidates;
       while (activeLibrary && remaining.length > 0) {
         const candidate = remaining[0];
@@ -129,10 +136,15 @@ export function useUploadQueueController({
             candidate.name.toLowerCase(),
         );
         if (existing) {
-          setDuplicateConflict({ candidate, existingDocId: existing.id, remaining: rest });
+          setDuplicateConflict({
+            candidate,
+            documentHint,
+            existingDocId: existing.id,
+            remaining: rest,
+          });
           return;
         }
-        await doUploadFile(candidate);
+        await doUploadFile(candidate, documentHint);
         remaining = rest;
       }
       await finalizeUpload();
@@ -141,15 +153,17 @@ export function useUploadQueueController({
   );
 
   const uploadFiles = useCallback(
-    async (files: File[]) => {
+    (files: File[]) => {
       if (!activeLibrary) return;
-      await processUploadQueue(buildUploadCandidates(files));
+      const candidates = buildUploadCandidates(files);
+      if (candidates.length === 0) return;
+      setPendingUploadSelection((current) => current ?? { candidates });
     },
-    [activeLibrary, processUploadQueue],
+    [activeLibrary],
   );
   const handleFileSelect = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
-      void uploadFiles(Array.from(event.target.files ?? []));
+      uploadFiles(Array.from(event.target.files ?? []));
       event.target.value = "";
     },
     [uploadFiles],
@@ -158,28 +172,42 @@ export function useUploadQueueController({
     (event: DragEvent) => {
       event.preventDefault();
       setDragOver(false);
-      void uploadFiles(Array.from(event.dataTransfer.files));
+      uploadFiles(Array.from(event.dataTransfer.files));
     },
     [uploadFiles],
   );
+  const cancelUploadDialog = useCallback(() => {
+    setPendingUploadSelection(null);
+    setUploadDialogHint("");
+  }, []);
+  const confirmUploadDialog = useCallback(async () => {
+    if (!pendingUploadSelection) return;
+    const { candidates } = pendingUploadSelection;
+    const documentHint = uploadDialogHint.trim();
+    setPendingUploadSelection(null);
+    setUploadDialogHint("");
+    await processUploadQueue(candidates, documentHint);
+  }, [pendingUploadSelection, processUploadQueue, uploadDialogHint]);
   const resolveDuplicate = useCallback(
     async (mode: "replace" | "add" | "skip") => {
       if (!duplicateConflict) return;
-      const { candidate, existingDocId, remaining } = duplicateConflict;
+      const { candidate, documentHint, existingDocId, remaining } =
+        duplicateConflict;
       setDuplicateConflict(null);
       if (mode === "replace") {
         await doReplaceFile(existingDocId, candidate.file, candidate.name);
       } else if (mode === "add") {
-        await doUploadFile(candidate);
+        await doUploadFile(candidate, documentHint);
       }
-      await processUploadQueue(remaining);
+      await processUploadQueue(remaining, documentHint);
     },
     [doReplaceFile, doUploadFile, duplicateConflict, processUploadQueue],
   );
 
   return {
+    cancelUploadDialog,
+    confirmUploadDialog,
     dragOver,
-    documentHint,
     duplicateConflict,
     fileInputRef,
     folderInputRef,
@@ -190,7 +218,10 @@ export function useUploadQueueController({
       [uploadQueue],
     ),
     resolveDuplicate,
-    setDocumentHint,
+    setUploadDialogHint,
+    uploadDialogFileCount: pendingUploadSelection?.candidates.length ?? 0,
+    uploadDialogHint,
+    uploadDialogOpen: Boolean(pendingUploadSelection),
     dropTargetProps: {
       onDragLeave: () => setDragOver(false),
       onDragOver: (event: DragEvent) => {

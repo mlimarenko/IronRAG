@@ -1,12 +1,32 @@
-import { act } from 'react';
+import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/shared/i18n';
 import type { DocumentLifecycleDetail } from '@/shared/api';
+import { TooltipProvider } from '@/shared/components/ui/tooltip';
 import type { DocumentItem } from '@/shared/types';
 
 import { DocumentsInspectorPanel } from './DocumentsInspectorPanel';
+
+const { toastErrorMock, toastSuccessMock, updateDocumentHintMock } = vi.hoisted(() => ({
+  toastErrorMock: vi.fn(),
+  toastSuccessMock: vi.fn(),
+  updateDocumentHintMock: vi.fn(),
+}));
+
+vi.mock('@/shared/api', () => ({
+  documentsApi: {
+    updateDocumentHint: updateDocumentHintMock,
+  },
+}));
+
+vi.mock('sonner', () => ({
+  toast: {
+    error: toastErrorMock,
+    success: toastSuccessMock,
+  },
+}));
 
 const noop = vi.fn();
 
@@ -28,11 +48,25 @@ function buildSelectedDoc(overrides: Partial<DocumentItem> = {}): DocumentItem {
   };
 }
 
+function setInputValue(input: HTMLInputElement, value: string) {
+  const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  valueSetter?.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function withTooltipProvider(element: ReactElement) {
+  return <TooltipProvider>{element}</TooltipProvider>;
+}
+
 describe('DocumentsInspectorPanel', () => {
   let container: HTMLDivElement;
   let root: Root | null;
 
   beforeEach(() => {
+    vi.clearAllMocks();
+    updateDocumentHintMock.mockImplementation(
+      async (_documentId: string, documentHint: string | null) => documentHint,
+    );
     container = document.createElement('div');
     document.body.appendChild(container);
     root = null;
@@ -49,20 +83,27 @@ describe('DocumentsInspectorPanel', () => {
 
   async function renderPanel(overrides?: {
     editorActionDisabledReason?: string | null;
+    documentHintEditable?: boolean;
     editorActionEnabled?: boolean;
     editorActionReadOnly?: boolean;
+    onDocumentHintUpdated?: (documentId: string, documentHint: string | null) => void;
     presentation?: 'sidebar' | 'drawer';
     selectedDoc?: DocumentItem;
   }) {
     await act(async () => {
       root = createRoot(container);
-      root.render(
+      root.render(withTooltipProvider(
         <DocumentsInspectorPanel
+          documentHintEditable={overrides?.documentHintEditable ?? true}
           editorActionDisabledReason={overrides?.editorActionDisabledReason ?? null}
           editorActionEnabled={overrides?.editorActionEnabled ?? true}
           editorActionReadOnly={overrides?.editorActionReadOnly ?? false}
+          formatErrorMessage={(error, fallback) =>
+            error instanceof Error ? `${fallback}: ${error.message}` : fallback
+          }
           lifecycle={null}
           locale="en"
+          onDocumentHintUpdated={overrides?.onDocumentHintUpdated}
           onOpenEditor={noop}
           onRetry={noop}
           presentation={overrides?.presentation}
@@ -73,7 +114,7 @@ describe('DocumentsInspectorPanel', () => {
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
-      );
+      ));
     });
   }
 
@@ -126,6 +167,95 @@ describe('DocumentsInspectorPanel', () => {
     expect(container.querySelector('[role="tooltip"]')?.textContent).toBe('View Document');
   });
 
+  it('updates the document hint from the inline editor', async () => {
+    const onDocumentHintUpdated = vi.fn();
+    await renderPanel({
+      onDocumentHintUpdated,
+      selectedDoc: buildSelectedDoc({ documentHint: 'https://example.test/source' }),
+    });
+
+    const infoButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.getAttribute('aria-label') === i18n.t('documents.documentHintTooltip'),
+    );
+    expect(infoButton).toBeTruthy();
+
+    const valueButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('https://example.test/source'),
+    );
+    expect(valueButton).toBeTruthy();
+
+    await act(async () => {
+      valueButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const input = container.querySelector<HTMLInputElement>(
+      `input[aria-label="${i18n.t('documents.documentHint')}"]`,
+    );
+    expect(input?.value).toBe('https://example.test/source');
+
+    await act(async () => {
+      if (input) setInputValue(input, '  Source label  ');
+    });
+
+    const saveButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(updateDocumentHintMock).toHaveBeenCalledWith('doc-1', 'Source label');
+    expect(onDocumentHintUpdated).toHaveBeenCalledWith('doc-1', 'Source label');
+    expect(toastSuccessMock).toHaveBeenCalledWith('Hint updated');
+  });
+
+  it('sends an empty document hint as null', async () => {
+    const onDocumentHintUpdated = vi.fn();
+    await renderPanel({
+      onDocumentHintUpdated,
+      selectedDoc: buildSelectedDoc({ documentHint: 'Existing hint' }),
+    });
+
+    const valueButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Existing hint'),
+    );
+    await act(async () => {
+      valueButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const input = container.querySelector<HTMLInputElement>(
+      `input[aria-label="${i18n.t('documents.documentHint')}"]`,
+    );
+    await act(async () => {
+      if (input) setInputValue(input, '   ');
+    });
+
+    const saveButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(updateDocumentHintMock).toHaveBeenCalledWith('doc-1', null);
+    expect(onDocumentHintUpdated).toHaveBeenCalledWith('doc-1', null);
+  });
+
+  it('keeps the document hint read-only when editing is not allowed', async () => {
+    await renderPanel({
+      documentHintEditable: false,
+      selectedDoc: buildSelectedDoc({ documentHint: 'https://example.test/source' }),
+    });
+
+    const link = container.querySelector<HTMLAnchorElement>('a[href="https://example.test/source"]');
+    const editHintButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.getAttribute('aria-label') === 'Edit hint',
+    );
+
+    expect(link).toBeTruthy();
+    expect(editHintButton).toBeUndefined();
+  });
+
   it('shows zero progress for processing documents before the backend reports a stage percentage', async () => {
     await renderPanel({
       selectedDoc: buildSelectedDoc({
@@ -154,7 +284,7 @@ describe('DocumentsInspectorPanel', () => {
   it('renders zero total lifecycle cost explicitly instead of a dash', async () => {
     await act(async () => {
       root = createRoot(container);
-      root.render(
+      root.render(withTooltipProvider(
         <DocumentsInspectorPanel
           editorActionDisabledReason={null}
           editorActionEnabled
@@ -201,7 +331,7 @@ describe('DocumentsInspectorPanel', () => {
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
-      );
+      ));
     });
 
     expect(container.textContent).toContain('$0.0000');
@@ -290,7 +420,7 @@ describe('DocumentsInspectorPanel', () => {
 
     await act(async () => {
       root = createRoot(container);
-      root.render(
+      root.render(withTooltipProvider(
         <DocumentsInspectorPanel
           editorActionDisabledReason={null}
           editorActionEnabled
@@ -306,7 +436,7 @@ describe('DocumentsInspectorPanel', () => {
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
-      );
+      ));
     });
 
     expect(container.querySelector('[data-testid="document-pipeline"]')).toBeTruthy();
@@ -405,7 +535,7 @@ describe('DocumentsInspectorPanel', () => {
 
     await act(async () => {
       root = createRoot(container);
-      root.render(
+      root.render(withTooltipProvider(
         <DocumentsInspectorPanel
           editorActionDisabledReason={null}
           editorActionEnabled
@@ -421,7 +551,7 @@ describe('DocumentsInspectorPanel', () => {
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
-      );
+      ));
     });
 
     const finalizingTab = container.querySelector('[data-testid="pipeline-stage-tab-finalizing"]');
@@ -525,7 +655,7 @@ describe('DocumentsInspectorPanel', () => {
 
     await act(async () => {
       root = createRoot(container);
-      root.render(
+      root.render(withTooltipProvider(
         <DocumentsInspectorPanel
           editorActionDisabledReason={null}
           editorActionEnabled
@@ -541,7 +671,7 @@ describe('DocumentsInspectorPanel', () => {
           t={i18n.t.bind(i18n)}
           updateSearchParamState={noop}
         />,
-      );
+      ));
     });
 
     const embedTab = container.querySelector('[data-testid="pipeline-stage-tab-embed_chunk"]');

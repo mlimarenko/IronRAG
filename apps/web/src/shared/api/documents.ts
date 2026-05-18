@@ -1,4 +1,5 @@
 import { Content } from "./generated";
+import { createClient, createConfig } from "./generated/client";
 import type {
   BatchCancelResponse,
   BatchDocumentOperationAcceptedResponse,
@@ -29,6 +30,8 @@ import type {
 import { ApiError, type ApiErrorBody, unwrap } from "./runtime";
 
 type ImportLibrarySnapshotOptions = Parameters<typeof Content.importLibrarySnapshot>[0];
+
+const rawBodyClient = createClient(createConfig({ bodySerializer: (body) => body }));
 
 export type DocumentListItem = ContentDocumentListItem;
 export type DocumentListPageResponse = GeneratedDocumentListPageResponse;
@@ -87,6 +90,16 @@ type WebIngestRunReceipt = GeneratedWebIngestRunReceipt;
 type DocumentUploadResponse = CreateDocumentResponse;
 type DocumentReprocessResponse = ContentMutationDetailResponse;
 type DocumentMutationResponse = ContentMutationDetailResponse;
+
+type UpdateDocumentHintRequest = {
+  documentHint: string | null;
+};
+
+type UpdateDocumentHintResponse = {
+  activeRevision?: {
+    documentHint?: string | null;
+  } | null;
+};
 
 interface DocumentUploadOptions {
   documentHint?: string;
@@ -161,6 +174,34 @@ export const documentsApi = {
     Content.deleteContentDocument({ path: { documentId } }).then((result) => {
       unwrap(result);
     }),
+  updateDocumentHint: async (
+    documentId: string,
+    documentHint: string | null,
+  ): Promise<string | null> => {
+    const body: UpdateDocumentHintRequest = { documentHint };
+    const response = await fetch(`/v1/content/documents/${encodeURIComponent(documentId)}`, {
+      body: JSON.stringify(body),
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      method: "PATCH",
+    });
+    if (!response.ok) {
+      throw new ApiError(response.status, await readApiErrorBody(response));
+    }
+    if (response.status === 204) {
+      return documentHint;
+    }
+
+    const text = await response.text();
+    if (!text) {
+      return documentHint;
+    }
+    const payload = JSON.parse(text) as UpdateDocumentHintResponse;
+    const savedDocumentHint = payload.activeRevision?.documentHint;
+    return typeof savedDocumentHint === "string" || savedDocumentHint === null
+      ? savedDocumentHint
+      : documentHint;
+  },
   reprocess: (documentId: string) =>
     Content.reprocessContentDocument({
       path: { documentId },
@@ -287,6 +328,20 @@ export type LibrarySnapshotOverwriteMode = OverwriteMode;
 
 type LibrarySnapshotImportReport = SnapshotImportReportResponse;
 
+async function readApiErrorBody(response: Response): Promise<ApiErrorBody> {
+  const text = await response.text();
+  if (!text) return { error: `API error ${response.status}` };
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === "object") {
+      return parsed as ApiErrorBody;
+    }
+  } catch {
+    // Fall through to a plain-text error body.
+  }
+  return { error: text };
+}
+
 /**
  * Canonical backup/restore API — tar.zst archive with optional family
  * selection. Export is triggered via plain navigation (no fetch, no Blob
@@ -340,9 +395,12 @@ export const librarySnapshotApi = {
     overwrite: LibrarySnapshotOverwriteMode,
   ): Promise<LibrarySnapshotImportReport> => {
     const request: ImportLibrarySnapshotOptions = {
-      path: { libraryId },
-      headers: { "Content-Type": "application/zstd" },
+      baseUrl: globalThis.location?.origin ?? "",
       body: file,
+      client: rawBodyClient,
+      credentials: "include",
+      headers: { "Content-Type": "application/zstd" },
+      path: { libraryId },
     };
     if (overwrite !== "reject") request.query = { overwrite };
 

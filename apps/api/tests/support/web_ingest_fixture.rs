@@ -242,13 +242,14 @@ impl WebIngestFixture {
     }
 
     #[allow(dead_code)]
-    pub async fn submit_recursive_run_with_url_filter(
+    pub async fn submit_recursive_run_with_filters(
         &self,
         seed_url: String,
         boundary_policy: &str,
         max_depth: Option<i32>,
         max_pages: Option<i32>,
-        url_filter: WebIngestUrlFilter,
+        crawl_filter: WebIngestUrlFilter,
+        materialization_filter: WebIngestUrlFilter,
     ) -> Result<WebIngestRun> {
         self.state
             .canonical_services
@@ -263,7 +264,8 @@ impl WebIngestFixture {
                     boundary_policy: Some(boundary_policy.to_string()),
                     max_depth,
                     max_pages,
-                    url_filter,
+                    crawl_filter,
+                    materialization_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,
@@ -294,8 +296,11 @@ impl WebIngestFixture {
                     boundary_policy,
                     max_depth,
                     max_pages,
-                    url_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
-                        .url_filter,
+                    crawl_filter: ironrag_backend::shared::web::ingest::default_web_ingest_policy()
+                        .crawl_filter,
+                    materialization_filter:
+                        ironrag_backend::shared::web::ingest::default_web_ingest_policy()
+                            .materialization_filter,
                     requested_by_principal_id: None,
                     request_surface: "test".to_string(),
                     idempotency_key: None,

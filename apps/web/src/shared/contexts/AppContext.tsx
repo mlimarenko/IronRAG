@@ -44,12 +44,14 @@ function libraryQueryReady(
 function mapSessionToState(session: SessionResolveResponse, locale: Locale) {
   let user: User | null = null;
   if (session.me) {
+    const viewer = session.shellBootstrap?.viewer;
     user = {
-      id: session.me.principal.id,
-      login: session.me.user?.login ?? session.me.principal.displayLabel,
-      displayName: session.me.user?.displayName ?? session.me.principal.displayLabel,
-      accessLabel: session.me.principal.displayLabel,
-      role: 'admin',
+      id: viewer?.principalId ?? session.me.principal.id,
+      login: viewer?.login ?? session.me.user?.login ?? session.me.principal.displayLabel,
+      displayName:
+        viewer?.displayName ?? session.me.user?.displayName ?? session.me.principal.displayLabel,
+      accessLabel: viewer?.accessLabel ?? session.me.principal.displayLabel,
+      role: viewer?.role ?? 'viewer',
     };
   }
 

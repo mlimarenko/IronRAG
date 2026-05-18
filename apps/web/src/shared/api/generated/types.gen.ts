@@ -172,6 +172,7 @@ export type AssistantPolicySummary = {
 
 export type AssistantPreparedSegmentReference = {
     blockKind: string;
+    documentHint?: string | null;
     documentId?: string | null;
     documentTitle?: string | null;
     executionId: string;
@@ -182,7 +183,6 @@ export type AssistantPreparedSegmentReference = {
     sectionPath: Array<string>;
     segmentId: string;
     sourceAccess?: null | AssistantContentSourceAccess;
-    sourceUri?: string | null;
 };
 
 export type AssistantRelationReference = {
@@ -625,13 +625,16 @@ export type ContentDocumentListItem = {
      * string to avoid IEEE-754 rounding in the browser. Always present
      * (zero when no billable execution landed) so the frontend can
      * render the column without a second roundtrip.
-    */
+     */
     cost: string;
     costCurrencyCode: string;
-    documentState: string;
     documentHint?: string | null;
+    documentState: string;
     /**
      * Canonical connector identity (`content_document.external_key`).
+     * Connectors look this up via list to decide whether to upload or
+     * replace; exposed so a paginated list pass is sufficient instead
+     * of a per-document detail roundtrip.
      */
     externalKey: string;
     failureCode?: string | null;
@@ -723,6 +726,7 @@ export type ContentRevision = {
     content_source_kind: string;
     created_at: string;
     created_by_principal_id?: string | null;
+    document_hint?: string | null;
     document_id: string;
     id: string;
     language_code?: string | null;
@@ -777,6 +781,7 @@ export type CreateDocumentRequest = {
     byteSize?: number | null;
     checksum?: string | null;
     contentSourceKind?: string | null;
+    documentHint?: string | null;
     externalKey?: string | null;
     idempotencyKey?: string | null;
     languageCode?: string | null;
@@ -818,6 +823,7 @@ export type CreateMutationRequest = {
     byteSize?: number | null;
     checksum?: string | null;
     contentSourceKind?: string | null;
+    documentHint?: string | null;
     documentId: string;
     idempotencyKey?: string | null;
     languageCode?: string | null;
@@ -867,13 +873,14 @@ export type CreateSubscriptionRequest = {
 
 export type CreateWebIngestRunRequest = {
     boundaryPolicy?: null | WebBoundaryPolicy;
+    crawlFilter: WebIngestUrlFilter;
     idempotencyKey?: string | null;
     libraryId: string;
+    materializationFilter: WebIngestUrlFilter;
     maxDepth?: number | null;
     maxPages?: number | null;
     mode: WebIngestMode;
     seedUrl: string;
-    urlFilter: WebIngestUrlFilter;
 };
 
 export type CreateWorkspacePriceOverrideRequest = {
@@ -1681,6 +1688,7 @@ export type KnowledgeRevisionRow = {
     byte_size: number;
     checksum: string;
     created_at: string;
+    document_hint?: string | null;
     document_id: string;
     graph_ready_at?: string | null;
     graph_state: string;
@@ -1789,7 +1797,6 @@ export type LibraryRecognitionPolicy = {
 export type LibrarySummary = {
     description?: string | null;
     id: string;
-    includeDocumentHintInMcpAnswers: boolean;
     ingestionReady: boolean;
     lifecycleState: string;
     missingBindingPurposes: Array<BootstrapBindingPurpose>;
@@ -1998,6 +2005,10 @@ export type OverallReadiness = 'ready' | 'degraded' | 'blocked';
  * Overwrite mode for restore.
  */
 export type OverwriteMode = 'reject' | 'replace';
+
+export type PatchDocumentMetadataRequest = {
+    documentHint?: string | null;
+};
 
 export type PermissionKind = 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read' | 'iam_admin';
 
@@ -2421,6 +2432,9 @@ export type SnapshotImportReportResponse = {
     postgresRowsByTable: {
         [key: string]: number;
     };
+    skippedArangoEdgesByStore: {
+        [key: string]: number;
+    };
 };
 
 export type StartupAuthorityState = 'succeeded' | 'pending' | 'not_required' | 'running';
@@ -2585,7 +2599,7 @@ export type UpdateCatalogLibraryRequest = {
     description?: string | null;
     displayName: string;
     extractionPrompt?: string | null;
-    includeDocumentHintInMcpAnswers?: boolean;
+    includeDocumentHintInMcpAnswers?: boolean | null;
     lifecycleState?: string | null;
     slug?: string | null;
 };
@@ -2595,7 +2609,8 @@ export type UpdateLibraryRecognitionPolicyRequest = {
 };
 
 export type UpdateLibraryWebIngestPolicyRequest = {
-    urlFilter: WebIngestUrlFilter;
+    crawlFilter: WebIngestUrlFilter;
+    materializationFilter: WebIngestUrlFilter;
 };
 
 export type UpdateModelPresetRequest = {
@@ -2690,7 +2705,8 @@ export type WebIngestPattern = {
 };
 
 export type WebIngestPolicy = {
-    urlFilter?: WebIngestUrlFilter;
+    crawlFilter: WebIngestUrlFilter;
+    materializationFilter: WebIngestUrlFilter;
 };
 
 export type WebIngestRun = {
@@ -2699,9 +2715,11 @@ export type WebIngestRun = {
     cancelRequestedAt?: string | null;
     completedAt?: string | null;
     counts: WebRunCounts;
+    crawlFilter: WebIngestUrlFilter;
     failureCode?: null | WebRunFailureCode;
     lastActivityAt?: string | null;
     libraryId: string;
+    materializationFilter: WebIngestUrlFilter;
     maxDepth: number;
     maxPages: number;
     mode: string;
@@ -2712,8 +2730,6 @@ export type WebIngestRun = {
     runId: string;
     runState: string;
     seedUrl: string;
-    urlFilterMode: string;
-    urlPatterns: Array<WebIngestPattern>;
     workspaceId: string;
 };
 
@@ -2733,24 +2749,22 @@ export type WebIngestRunState = 'accepted' | 'discovering' | 'processing' | 'com
 export type WebIngestRunSummary = {
     boundaryPolicy: string;
     counts: WebRunCounts;
+    crawlFilter: WebIngestUrlFilter;
     lastActivityAt?: string | null;
     libraryId: string;
+    materializationFilter: WebIngestUrlFilter;
     maxDepth: number;
     maxPages: number;
     mode: string;
     runId: string;
     runState: WebIngestRunState;
     seedUrl: string;
-    urlFilterMode: string;
-    urlPatterns: Array<WebIngestPattern>;
 };
 
 export type WebIngestUrlFilter = {
-    mode?: WebIngestUrlFilterMode;
-    patterns?: Array<WebIngestPattern>;
+    allowPatterns: Array<WebIngestPattern>;
+    blockPatterns: Array<WebIngestPattern>;
 };
-
-export type WebIngestUrlFilterMode = 'blocklist' | 'allowlist';
 
 export type WebPageProvenance = {
     candidateId?: string | null;
@@ -4219,6 +4233,46 @@ export type GetContentDocumentResponses = {
 };
 
 export type GetContentDocumentResponse = GetContentDocumentResponses[keyof GetContentDocumentResponses];
+
+export type PatchContentDocumentMetadataData = {
+    body: PatchDocumentMetadataRequest;
+    path: {
+        /**
+         * Document identifier
+         */
+        documentId: string;
+    };
+    query?: never;
+    url: '/v1/content/documents/{documentId}';
+};
+
+export type PatchContentDocumentMetadataErrors = {
+    /**
+     * Patch payload is invalid
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the document
+     */
+    403: unknown;
+    /**
+     * Document not found
+     */
+    404: unknown;
+};
+
+export type PatchContentDocumentMetadataResponses = {
+    /**
+     * Updated content document detail
+     */
+    200: ContentDocumentDetailResponse;
+};
+
+export type PatchContentDocumentMetadataResponse = PatchContentDocumentMetadataResponses[keyof PatchContentDocumentMetadataResponses];
 
 export type AppendContentDocumentData = {
     body: AppendDocumentBodyRequest;

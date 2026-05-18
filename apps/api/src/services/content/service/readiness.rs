@@ -136,6 +136,7 @@ mod tests {
             revision_kind: "upload".to_string(),
             storage_ref: None,
             source_uri: None,
+            document_hint: None,
             mime_type: "text/markdown".to_string(),
             checksum: "checksum".to_string(),
             title: Some("Sample document".to_string()),

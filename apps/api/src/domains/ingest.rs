@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::shared::web::ingest::{WebClassificationReason, WebIngestPattern, WebRunFailureCode};
+use crate::shared::web::ingest::{WebClassificationReason, WebIngestUrlFilter, WebRunFailureCode};
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IngestJob {
@@ -93,8 +93,8 @@ pub struct WebIngestRunSummary {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
-    pub url_filter_mode: String,
-    pub url_patterns: Vec<WebIngestPattern>,
+    pub crawl_filter: WebIngestUrlFilter,
+    pub materialization_filter: WebIngestUrlFilter,
     pub run_state: String,
     pub seed_url: String,
     pub counts: WebRunCounts,
@@ -115,8 +115,8 @@ pub struct WebIngestRun {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
-    pub url_filter_mode: String,
-    pub url_patterns: Vec<WebIngestPattern>,
+    pub crawl_filter: WebIngestUrlFilter,
+    pub materialization_filter: WebIngestUrlFilter,
     pub run_state: String,
     pub requested_by_principal_id: Option<Uuid>,
     pub requested_at: DateTime<Utc>,

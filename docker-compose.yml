@@ -123,7 +123,16 @@ services:
   redis:
     image: ${IRONRAG_REDIS_IMAGE:-redis:8.6}
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - "${IRONRAG_REDIS_MAXMEMORY:-512mb}"
+      - --maxmemory-policy
+      - volatile-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

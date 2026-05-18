@@ -237,6 +237,13 @@ pub struct WebIngestPattern {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct WebIngestUrlFilter {
+    pub allow_patterns: Vec<WebIngestPattern>,
+    pub block_patterns: Vec<WebIngestPattern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct WebIngestRunSummary {
     pub run_id: Uuid,
     pub library_id: Uuid,
@@ -244,8 +251,8 @@ pub struct WebIngestRunSummary {
     pub boundary_policy: String,
     pub max_depth: i32,
     pub max_pages: i32,
-    pub url_filter_mode: String,
-    pub url_patterns: Vec<WebIngestPattern>,
+    pub crawl_filter: WebIngestUrlFilter,
+    pub materialization_filter: WebIngestUrlFilter,
     pub run_state: WebIngestRunState,
     pub seed_url: String,
     pub counts: WebRunCounts,

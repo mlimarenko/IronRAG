@@ -1,0 +1,104 @@
+import { File as NodeFile } from "node:buffer";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { documentsApi, librarySnapshotApi } from "./documents";
+import { client } from "./generated/client.gen";
+
+describe("documentsApi", () => {
+  afterEach(() => {
+    client.setConfig({ baseUrl: "" });
+    vi.restoreAllMocks();
+  });
+
+  it("patches document hints with cookie session auth", async () => {
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({ input, init });
+        return new Response(null, { status: 204 });
+      });
+
+    const result = await documentsApi.updateDocumentHint("doc-1", null);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toBeNull();
+    expect(requests).toHaveLength(1);
+    const request = requests[0];
+    expect(String(request.input)).toBe("/v1/content/documents/doc-1");
+    expect(request.init?.method).toBe("PATCH");
+    expect(request.init?.credentials).toBe("include");
+    expect(request.init?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(request.init?.body).toBe(JSON.stringify({ documentHint: null }));
+  });
+
+  it("returns the normalized hint from the patch response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ activeRevision: { documentHint: "Server hint" } }), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+
+    await expect(documentsApi.updateDocumentHint("doc-1", " Client hint ")).resolves.toBe(
+      "Server hint",
+    );
+  });
+});
+
+describe("librarySnapshotApi", () => {
+  afterEach(() => {
+    client.setConfig({ baseUrl: "" });
+    vi.restoreAllMocks();
+  });
+
+  it("sends snapshot imports as the raw archive body", async () => {
+    client.setConfig({ baseUrl: "http://localhost" });
+    const payload = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x61, 0x72, 0x63];
+    const file = new NodeFile([new Uint8Array(payload)], "snapshot.tar.zst", {
+      type: "application/zstd",
+    }) as unknown as File;
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({ input, init });
+        return new Response(
+          JSON.stringify({
+            libraryId: "019e37a5-6295-7022-b0ec-cdc0bcd03715",
+            overwriteMode: "replace",
+            includeKinds: ["library_data", "blobs"],
+            postgresRowsByTable: {},
+            arangoDocsByStore: {},
+            arangoEdgesByStore: {},
+            skippedArangoEdgesByStore: {},
+            blobsRestored: 0,
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        );
+      });
+
+    await librarySnapshotApi.import(
+      "019e37a5-6295-7022-b0ec-cdc0bcd03715",
+      file,
+      "replace",
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requests).toHaveLength(1);
+    const request = requests[0];
+    const httpRequest = request.input as Request;
+    expect(typeof httpRequest.arrayBuffer).toBe("function");
+    expect(httpRequest.url).toContain(
+      "/v1/content/libraries/019e37a5-6295-7022-b0ec-cdc0bcd03715/snapshot?overwrite=replace",
+    );
+    expect(httpRequest.method).toBe("POST");
+    expect(httpRequest.credentials).toBe("include");
+    expect(httpRequest.headers.get("Content-Type")).toBe("application/zstd");
+    expect(Array.from(new Uint8Array(await httpRequest.arrayBuffer()))).toEqual(payload);
+  });
+});

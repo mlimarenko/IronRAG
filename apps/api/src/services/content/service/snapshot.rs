@@ -47,15 +47,15 @@ use crate::{
             KNOWLEDGE_BLOCK_CHUNK_EDGE, KNOWLEDGE_BUNDLE_CHUNK_EDGE, KNOWLEDGE_BUNDLE_ENTITY_EDGE,
             KNOWLEDGE_BUNDLE_EVIDENCE_EDGE, KNOWLEDGE_BUNDLE_RELATION_EDGE,
             KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-            KNOWLEDGE_DOCUMENT_COLLECTION, KNOWLEDGE_DOCUMENT_REVISION_EDGE,
-            KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_EVIDENCE_COLLECTION,
-            KNOWLEDGE_EVIDENCE_SOURCE_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
-            KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE, KNOWLEDGE_FACT_EVIDENCE_EDGE,
-            KNOWLEDGE_RELATION_COLLECTION, KNOWLEDGE_RELATION_OBJECT_EDGE,
-            KNOWLEDGE_RELATION_SUBJECT_EDGE, KNOWLEDGE_REVISION_BLOCK_EDGE,
-            KNOWLEDGE_REVISION_CHUNK_EDGE, KNOWLEDGE_REVISION_COLLECTION,
-            KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION, KNOWLEDGE_STRUCTURED_REVISION_COLLECTION,
-            KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
+            KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, KNOWLEDGE_DOCUMENT_COLLECTION,
+            KNOWLEDGE_DOCUMENT_REVISION_EDGE, KNOWLEDGE_ENTITY_COLLECTION,
+            KNOWLEDGE_EVIDENCE_COLLECTION, KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
+            KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
+            KNOWLEDGE_FACT_EVIDENCE_EDGE, KNOWLEDGE_RELATION_COLLECTION,
+            KNOWLEDGE_RELATION_OBJECT_EDGE, KNOWLEDGE_RELATION_SUBJECT_EDGE,
+            KNOWLEDGE_REVISION_BLOCK_EDGE, KNOWLEDGE_REVISION_CHUNK_EDGE,
+            KNOWLEDGE_REVISION_COLLECTION, KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
+            KNOWLEDGE_STRUCTURED_REVISION_COLLECTION, KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
         },
     },
     services::content::error::ContentServiceError,
@@ -166,11 +166,12 @@ pub enum OverwriteMode {
     /// Fail the request if the library already exists (default).
     #[default]
     Reject,
-    /// Delete all rows/documents/blobs under this library id, then
-    /// insert everything from the archive. Not atomic across Postgres,
-    /// Arango, and the blob store — a failed restore may leave the
-    /// library in a partially-cleared state, and the same archive must
-    /// be re-applied to converge.
+    /// Delete all owned content/runtime rows, graph documents, and blobs
+    /// under this library id, then insert everything from the archive
+    /// under the selected library identity. Not atomic across Postgres,
+    /// Arango, and the blob store — a failed restore may leave graph/blob
+    /// state partially refreshed, and the same archive must be re-applied
+    /// to converge.
     Replace,
 }
 
@@ -215,6 +216,7 @@ pub struct SnapshotImportReport {
     pub postgres_rows_by_table: Vec<(String, u64)>,
     pub arango_docs_by_collection: Vec<(String, u64)>,
     pub arango_edges_by_collection: Vec<(String, u64)>,
+    pub skipped_arango_edges_by_collection: Vec<(String, u64)>,
     pub blobs_restored: u64,
     pub overwrite_mode: OverwriteMode,
     pub include_kinds: Vec<IncludeKind>,
@@ -255,6 +257,7 @@ const ARANGO_DOC_COLLECTIONS: &[&str] = &[
     KNOWLEDGE_ENTITY_COLLECTION,
     KNOWLEDGE_RELATION_COLLECTION,
     KNOWLEDGE_EVIDENCE_COLLECTION,
+    KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
 ];
 
 const ARANGO_EDGE_COLLECTIONS: &[&str] = &[
@@ -277,20 +280,30 @@ const ARANGO_EDGE_COLLECTIONS: &[&str] = &[
 
 #[derive(Debug)]
 struct SnapshotRowScope {
-    library_id: Uuid,
-    workspace_id: Option<Uuid>,
+    source_library_id: Uuid,
+    target_library_id: Uuid,
+    source_workspace_id: Option<Uuid>,
+    target_workspace_id: Uuid,
     document_ids: HashSet<Uuid>,
     revision_ids: HashSet<Uuid>,
     mutation_ids: HashSet<Uuid>,
-    declared_blob_keys: HashSet<String>,
+    declared_blob_keys: HashSet<(String, String)>,
     arango_document_ids: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotArangoRowAction {
+    Import,
+    SkipDanglingEdge,
+}
+
 impl SnapshotRowScope {
-    fn new(library_id: Uuid) -> Self {
+    fn new(source_library_id: Uuid, target_library_id: Uuid, target_workspace_id: Uuid) -> Self {
         Self {
-            library_id,
-            workspace_id: None,
+            source_library_id,
+            target_library_id,
+            source_workspace_id: None,
+            target_workspace_id,
             document_ids: HashSet::new(),
             revision_ids: HashSet::new(),
             mutation_ids: HashSet::new(),
@@ -299,28 +312,31 @@ impl SnapshotRowScope {
         }
     }
 
-    fn validate_postgres_row(
+    fn normalize_postgres_row(
         &mut self,
         table: &str,
-        row: &serde_json::Value,
+        row: &mut serde_json::Value,
     ) -> anyhow::Result<()> {
         match table {
             "catalog_workspace" => {
                 let workspace_id = required_uuid_field(table, row, "id")?;
                 self.bind_workspace(table, workspace_id)?;
+                set_uuid_field(table, row, "id", self.target_workspace_id)?;
             }
             "catalog_library" => {
-                require_uuid_field_eq(table, row, "id", self.library_id)?;
+                require_uuid_field_eq(table, row, "id", self.source_library_id)?;
                 let workspace_id = required_uuid_field(table, row, "workspace_id")?;
                 self.bind_workspace(table, workspace_id)?;
+                set_uuid_field(table, row, "id", self.target_library_id)?;
+                set_uuid_field(table, row, "workspace_id", self.target_workspace_id)?;
             }
             "content_document" => {
-                self.validate_direct_library_workspace(table, row)?;
+                self.normalize_direct_library_workspace(table, row)?;
                 let document_id = required_uuid_field(table, row, "id")?;
                 self.document_ids.insert(document_id);
             }
             "content_revision" => {
-                self.validate_direct_library_workspace(table, row)?;
+                self.normalize_direct_library_workspace(table, row)?;
                 let document_id = required_uuid_field(table, row, "document_id")?;
                 if !self.document_ids.contains(&document_id) {
                     bail!(
@@ -330,8 +346,10 @@ impl SnapshotRowScope {
                 let revision_id = required_uuid_field(table, row, "id")?;
                 self.revision_ids.insert(revision_id);
                 if let Some(storage_key) = string_field(row, "storage_key") {
-                    self.validate_storage_key_prefix(table, storage_key)?;
-                    self.declared_blob_keys.insert(storage_key.to_string());
+                    let source_key = storage_key.to_string();
+                    let target_key = self.rewrite_storage_key(table, storage_key)?;
+                    set_string_field(table, row, "storage_key", &target_key)?;
+                    self.declared_blob_keys.insert((source_key, target_key));
                 }
             }
             "content_chunk" => {
@@ -343,7 +361,7 @@ impl SnapshotRowScope {
                 }
             }
             "content_mutation" => {
-                self.validate_direct_library_workspace(table, row)?;
+                self.normalize_direct_library_workspace(table, row)?;
                 let mutation_id = required_uuid_field(table, row, "id")?;
                 self.mutation_ids.insert(mutation_id);
             }
@@ -364,58 +382,82 @@ impl SnapshotRowScope {
                 )?;
             }
             "content_document_head" => {
-                self.validate_direct_library_workspace(table, row)?;
                 let document_id = required_uuid_field(table, row, "document_id")?;
                 if !self.document_ids.contains(&document_id) {
                     bail!(
                         "snapshot {table} row references document {document_id} outside target archive"
                     );
                 }
+                self.validate_optional_member(
+                    table,
+                    row,
+                    "active_revision_id",
+                    &self.revision_ids,
+                )?;
+                self.validate_optional_member(
+                    table,
+                    row,
+                    "readable_revision_id",
+                    &self.revision_ids,
+                )?;
+                self.validate_optional_member(
+                    table,
+                    row,
+                    "latest_mutation_id",
+                    &self.mutation_ids,
+                )?;
             }
             "runtime_graph_snapshot"
             | "runtime_graph_node"
             | "runtime_graph_edge"
             | "runtime_graph_evidence"
             | "runtime_graph_canonical_summary" => {
-                self.validate_direct_library_workspace(table, row)?;
+                self.normalize_direct_library_workspace(table, row)?;
             }
             other => bail!("snapshot import has no row-scope validator for table `{other}`"),
         }
         Ok(())
     }
 
-    fn validate_arango_row(
+    fn normalize_arango_row(
         &mut self,
         collection: &str,
-        row: &serde_json::Value,
-    ) -> anyhow::Result<()> {
+        row: &mut serde_json::Value,
+    ) -> anyhow::Result<SnapshotArangoRowAction> {
         if let Some(library_id) = optional_uuid_field(row, "library_id")
             .with_context(|| format!("parse {collection}.library_id"))?
         {
-            if library_id != self.library_id {
+            if library_id != self.source_library_id {
                 bail!(
                     "snapshot {collection} document belongs to library {library_id}, expected {}",
-                    self.library_id
+                    self.source_library_id
                 );
             }
+            set_uuid_field(collection, row, "library_id", self.target_library_id)?;
         } else {
             bail!("snapshot {collection} document missing library_id");
         }
         if row.get("workspace_id").is_some() {
             let workspace_id = required_uuid_field(collection, row, "workspace_id")?;
             self.bind_workspace(collection, workspace_id)?;
+            set_uuid_field(collection, row, "workspace_id", self.target_workspace_id)?;
         }
         if ARANGO_DOC_COLLECTIONS.contains(&collection) {
             self.arango_document_ids.insert(arango_document_id(collection, row)?);
+            Ok(SnapshotArangoRowAction::Import)
         } else if ARANGO_EDGE_COLLECTIONS.contains(&collection) {
-            self.validate_arango_edge_endpoint(collection, row, "_from")?;
-            self.validate_arango_edge_endpoint(collection, row, "_to")?;
+            let from_exists = self.validate_arango_edge_endpoint(collection, row, "_from")?;
+            let to_exists = self.validate_arango_edge_endpoint(collection, row, "_to")?;
+            Ok(if from_exists && to_exists {
+                SnapshotArangoRowAction::Import
+            } else {
+                SnapshotArangoRowAction::SkipDanglingEdge
+            })
         } else {
             bail!(
                 "snapshot import has no row-scope validator for arango collection `{collection}`"
             );
         }
-        Ok(())
     }
 
     fn validate_arango_edge_endpoint(
@@ -423,31 +465,37 @@ impl SnapshotRowScope {
         collection: &str,
         row: &serde_json::Value,
         field: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let endpoint = required_string_field(collection, row, field)?;
-        if !self.arango_document_ids.contains(endpoint) {
-            bail!("snapshot {collection} edge references {field} endpoint outside target archive");
+        let (endpoint_collection, endpoint_key) = endpoint.split_once('/').ok_or_else(|| {
+            anyhow!("snapshot {collection} edge has malformed {field} endpoint `{endpoint}`")
+        })?;
+        require_known_arango_doc_collection(endpoint_collection)?;
+        if endpoint_key.is_empty() || endpoint_key.contains('/') {
+            bail!("snapshot {collection} edge has malformed {field} endpoint `{endpoint}`");
         }
-        Ok(())
+        Ok(self.arango_document_ids.contains(endpoint))
     }
 
-    fn validate_blob_key(&self, storage_key: &str) -> anyhow::Result<()> {
-        self.validate_storage_key_prefix("blob", storage_key)?;
-        if !self.declared_blob_keys.contains(storage_key) {
+    fn normalize_blob_key(&self, storage_key: &str) -> anyhow::Result<String> {
+        let target_key = self.rewrite_storage_key("blob", storage_key)?;
+        if !self.declared_blob_keys.contains(&(storage_key.to_string(), target_key.clone())) {
             bail!("snapshot blob `{storage_key}` is not declared by a content_revision row");
         }
-        Ok(())
+        Ok(target_key)
     }
 
-    fn validate_direct_library_workspace(
+    fn normalize_direct_library_workspace(
         &mut self,
         table: &str,
-        row: &serde_json::Value,
+        row: &mut serde_json::Value,
     ) -> anyhow::Result<()> {
-        require_uuid_field_eq(table, row, "library_id", self.library_id)?;
+        require_uuid_field_eq(table, row, "library_id", self.source_library_id)?;
+        set_uuid_field(table, row, "library_id", self.target_library_id)?;
         if row.get("workspace_id").is_some() {
             let workspace_id = required_uuid_field(table, row, "workspace_id")?;
             self.bind_workspace(table, workspace_id)?;
+            set_uuid_field(table, row, "workspace_id", self.target_workspace_id)?;
         }
         Ok(())
     }
@@ -469,27 +517,29 @@ impl SnapshotRowScope {
     }
 
     fn bind_workspace(&mut self, source: &str, workspace_id: Uuid) -> anyhow::Result<()> {
-        match self.workspace_id {
+        match self.source_workspace_id {
             Some(current) if current != workspace_id => bail!(
                 "snapshot {source} row belongs to workspace {workspace_id}, expected {current}"
             ),
             Some(_) => Ok(()),
             None => {
-                self.workspace_id = Some(workspace_id);
+                self.source_workspace_id = Some(workspace_id);
                 Ok(())
             }
         }
     }
 
-    fn validate_storage_key_prefix(&self, source: &str, storage_key: &str) -> anyhow::Result<()> {
-        let workspace_id = self.workspace_id.ok_or_else(|| {
+    fn rewrite_storage_key(&self, source: &str, storage_key: &str) -> anyhow::Result<String> {
+        let source_workspace_id = self.source_workspace_id.ok_or_else(|| {
             anyhow!("snapshot {source} storage_key arrived before workspace scope")
         })?;
-        let expected_prefix = format!("content/{workspace_id}/{}/", self.library_id);
-        if !storage_key.starts_with(&expected_prefix) {
-            bail!("snapshot {source} storage_key is outside target library storage prefix");
-        }
-        Ok(())
+        let source_prefix = format!("content/{source_workspace_id}/{}/", self.source_library_id);
+        let Some(suffix) = storage_key.strip_prefix(&source_prefix) else {
+            bail!("snapshot {source} storage_key is outside snapshot library storage prefix");
+        };
+        let target_prefix =
+            format!("content/{}/{}/", self.target_workspace_id, self.target_library_id);
+        Ok(format!("{target_prefix}{suffix}"))
     }
 }
 
@@ -540,6 +590,27 @@ fn require_uuid_field_eq(
     if actual != expected {
         bail!("snapshot {table}.{field} is {actual}, expected {expected}");
     }
+    Ok(())
+}
+
+fn set_uuid_field(
+    table: &str,
+    row: &mut serde_json::Value,
+    field: &str,
+    value: Uuid,
+) -> anyhow::Result<()> {
+    set_string_field(table, row, field, &value.to_string())
+}
+
+fn set_string_field(
+    table: &str,
+    row: &mut serde_json::Value,
+    field: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let object =
+        row.as_object_mut().ok_or_else(|| anyhow!("snapshot {table} row is not an object"))?;
+    object.insert(field.to_string(), serde_json::Value::String(value.to_string()));
     Ok(())
 }
 
@@ -1228,6 +1299,7 @@ where
 /// table, small enough that a single statement's JSONB payload stays
 /// under a few MiB and any parser bug only wastes a small slice.
 const IMPORT_BATCH_ROWS: usize = 1000;
+const ARANGO_CLEAR_BATCH_ROWS: usize = 10_000;
 
 /// Restores a library from a tar.zst archive body. `body` is any
 /// `AsyncRead` — typically the request body stream. Rows are flushed
@@ -1266,6 +1338,7 @@ where
     let mut counts_pg: BTreeMap<String, u64> = BTreeMap::new();
     let mut counts_arango_doc: BTreeMap<String, u64> = BTreeMap::new();
     let mut counts_arango_edge: BTreeMap<String, u64> = BTreeMap::new();
+    let mut skipped_arango_edge: BTreeMap<String, u64> = BTreeMap::new();
 
     // Stage 1 — manifest must be the first tar entry. Any archive that
     // puts data ahead of it violates the snapshot protocol.
@@ -1285,12 +1358,6 @@ where
                     SNAPSHOT_SCHEMA_VERSION
                 );
             }
-            if parsed.library_id != library_id {
-                bail!(
-                    "snapshot library_id {} does not match target {library_id}",
-                    parsed.library_id
-                );
-            }
             let manifest_sections = SnapshotManifestSections::from_manifest(&parsed)?;
             report.include_kinds = parsed.include_kinds.clone();
             (parsed, manifest_sections)
@@ -1301,11 +1368,10 @@ where
         bail!("snapshot archive missing manifest.json");
     };
 
-    // Stage 2 — pre-check the target library and apply the overwrite
-    // policy BEFORE we start inserting. Replace-mode runs its own tx
-    // because deletes and inserts do not need to be atomic across
-    // phases; they only need to be individually correct so a retry can
-    // converge.
+    // Stage 2 — pre-check the target library and prepare external
+    // replace state BEFORE we start inserting. Postgres owned-state
+    // clearing happens inside the import transaction so a parse/import
+    // error cannot delete the selected library identity row.
     let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM catalog_library WHERE id = $1")
         .bind(library_id)
         .fetch_optional(&state.persistence.postgres)
@@ -1316,6 +1382,13 @@ where
     } else {
         None
     };
+    if exists.is_none() {
+        bail!(
+            "target library {library_id} does not exist; create/select a library before restoring a snapshot"
+        );
+    }
+    let target_workspace_id = existing_workspace_id
+        .ok_or_else(|| anyhow!("target library {library_id} has no workspace mapping"))?;
     match (exists.is_some(), overwrite) {
         (true, OverwriteMode::Reject) => {
             bail!(
@@ -1323,10 +1396,11 @@ where
             );
         }
         (true, OverwriteMode::Replace) => {
-            clear_library_footprint(state, library_id, existing_workspace_id).await?;
+            prepare_replace_library_footprint(state, library_id, existing_workspace_id).await?;
         }
         (false, _) => {}
     }
+    let replace_existing = exists.is_some() && overwrite == OverwriteMode::Replace;
 
     // Stage 3 — stream remaining entries and flush in batches. We keep
     // a single Postgres transaction alive for the whole restore so FKs
@@ -1338,12 +1412,15 @@ where
         .execute(&mut *tx)
         .await
         .context("disable FK checks for snapshot import")?;
+    if replace_existing {
+        clear_library_postgres_footprint(&mut tx, library_id).await?;
+    }
 
     let arango = state.arango_client.as_ref();
     let mut pg_batcher = PgBatcher::new();
     let mut arango_doc_batcher = ArangoBatcher::new(false);
     let mut arango_edge_batcher = ArangoBatcher::new(true);
-    let mut row_scope = SnapshotRowScope::new(library_id);
+    let mut row_scope = SnapshotRowScope::new(manifest.library_id, library_id, target_workspace_id);
 
     while let Some(entry) = entries.next().await {
         let mut entry = entry.context("read tar entry")?;
@@ -1373,8 +1450,8 @@ where
                 .with_context(|| format!("malformed postgres path `{path}`"))?;
             let table = manifest_sections.require_postgres_table(table_ref)?;
             pg_batcher.on_new_section(table, &mut tx).await?;
-            read_ndjson_entry_and(&mut entry, &mut |row| {
-                row_scope.validate_postgres_row(table, &row)?;
+            read_ndjson_entry_and(&mut entry, &mut |mut row| {
+                row_scope.normalize_postgres_row(table, &mut row)?;
                 *counts_pg.entry(table.to_string()).or_default() += 1;
                 pg_batcher.push(table, row);
                 Ok(())
@@ -1387,10 +1464,16 @@ where
                 .with_context(|| format!("malformed arango-edges path `{path}`"))?;
             let collection = manifest_sections.require_arango_edge_collection(collection_ref)?;
             arango_edge_batcher.on_new_section(collection, arango).await?;
-            read_ndjson_entry_and(&mut entry, &mut |row| {
-                row_scope.validate_arango_row(collection, &row)?;
-                *counts_arango_edge.entry(collection.to_string()).or_default() += 1;
-                arango_edge_batcher.push(collection, row);
+            read_ndjson_entry_and(&mut entry, &mut |mut row| {
+                match row_scope.normalize_arango_row(collection, &mut row)? {
+                    SnapshotArangoRowAction::Import => {
+                        *counts_arango_edge.entry(collection.to_string()).or_default() += 1;
+                        arango_edge_batcher.push(collection, row);
+                    }
+                    SnapshotArangoRowAction::SkipDanglingEdge => {
+                        *skipped_arango_edge.entry(collection.to_string()).or_default() += 1;
+                    }
+                }
                 Ok(())
             })
             .await?;
@@ -1400,8 +1483,8 @@ where
                 .with_context(|| format!("malformed arango path `{path}`"))?;
             let collection = manifest_sections.require_arango_doc_collection(collection_ref)?;
             arango_doc_batcher.on_new_section(collection, arango).await?;
-            read_ndjson_entry_and(&mut entry, &mut |row| {
-                row_scope.validate_arango_row(collection, &row)?;
+            read_ndjson_entry_and(&mut entry, &mut |mut row| {
+                row_scope.normalize_arango_row(collection, &mut row)?;
                 *counts_arango_doc.entry(collection.to_string()).or_default() += 1;
                 arango_doc_batcher.push(collection, row);
                 Ok(())
@@ -1414,8 +1497,8 @@ where
             }
             // Blobs are written as they arrive — they can be much larger
             // than a row so we never buffer them in a batcher.
-            let storage_key = blob_suffix.to_string();
-            row_scope.validate_blob_key(&storage_key)?;
+            let source_storage_key = blob_suffix.to_string();
+            let storage_key = row_scope.normalize_blob_key(&source_storage_key)?;
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).await.context("read blob entry")?;
             state
@@ -1435,10 +1518,19 @@ where
     tx.commit().await.context("commit snapshot tx")?;
     arango_doc_batcher.flush(arango).await?;
     arango_edge_batcher.flush(arango).await?;
+    for (collection, skipped) in &skipped_arango_edge {
+        tracing::warn!(
+            %library_id,
+            collection = %collection,
+            skipped,
+            "snapshot import skipped dangling arango edges",
+        );
+    }
 
     report.postgres_rows_by_table = counts_pg.into_iter().collect();
     report.arango_docs_by_collection = counts_arango_doc.into_iter().collect();
     report.arango_edges_by_collection = counts_arango_edge.into_iter().collect();
+    report.skipped_arango_edges_by_collection = skipped_arango_edge.into_iter().collect();
     Ok(report)
 }
 
@@ -1680,16 +1772,14 @@ fn trim_trailing_newline(line: &[u8]) -> &[u8] {
     &line[..end]
 }
 
-async fn clear_library_footprint(
+async fn prepare_replace_library_footprint(
     state: &AppState,
     library_id: Uuid,
     existing_workspace_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
-    let pool = &state.persistence.postgres;
-
     // Blob storage is keyed by the existing library workspace. Capture
-    // it before deleting catalog_library; afterwards the ownership row
-    // no longer exists.
+    // it before the restore writes replacement blobs under the same
+    // library identity.
     if let Some(workspace_id) = existing_workspace_id {
         let _ = state
             .content_storage
@@ -1698,15 +1788,13 @@ async fn clear_library_footprint(
             .context("stash library blobs before restore")?;
     }
 
-    // Postgres: delete in reverse FK order so children disappear before
-    // their parents. Run inside a single tx with FKs relaxed so that
-    // CASCADE rules and stale references do not block the wipe.
-    let mut tx = pool.begin().await.context("begin clear tx")?;
-    sqlx::query("SET LOCAL session_replication_role = 'replica'")
-        .execute(&mut *tx)
-        .await
-        .context("disable FK checks for clear")?;
+    clear_library_arango_footprint(state, library_id).await
+}
 
+async fn clear_library_postgres_footprint(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+) -> anyhow::Result<()> {
     // Tables to wipe for this library, in reverse dependency order.
     let mut reverse: Vec<&str> = Vec::new();
     for table in POSTGRES_RUNTIME_GRAPH_TABLES.iter().rev() {
@@ -1715,7 +1803,6 @@ async fn clear_library_footprint(
     for table in POSTGRES_CONTENT_TABLES.iter().rev() {
         reverse.push(*table);
     }
-    reverse.push("catalog_library");
     for table in reverse {
         let sql = match table {
             "content_chunk" => "DELETE FROM content_chunk c
@@ -1730,47 +1817,108 @@ async fn clear_library_footprint(
                  USING content_document d
                  WHERE d.id = h.document_id AND d.library_id = $1"
                 .to_string(),
-            "catalog_library" => "DELETE FROM catalog_library WHERE id = $1".to_string(),
             _ => format!("DELETE FROM {table} WHERE library_id = $1"),
         };
         sqlx::query(&sql)
             .bind(library_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .with_context(|| format!("clear pg table {table}"))?;
     }
-    tx.commit().await.context("commit clear tx")?;
+    Ok(())
+}
 
-    // Arango: delete matching docs and edges. No cross-collection tx.
+async fn clear_library_arango_footprint(state: &AppState, library_id: Uuid) -> anyhow::Result<()> {
     let arango = state.arango_client.as_ref();
-    for collection in ARANGO_EDGE_COLLECTIONS {
-        arango
-            .query_json_bulk(
-                "FOR edge IN @@collection
-                    FILTER edge.library_id == @library_id
-                    REMOVE edge IN @@collection",
-                serde_json::json!({
-                    "@collection": *collection,
-                    "library_id": library_id.to_string(),
-                }),
+    for edge_collection in ARANGO_EDGE_COLLECTIONS {
+        clear_arango_rows_by_library(arango, edge_collection, library_id)
+            .await
+            .with_context(|| format!("clear arango edge {edge_collection}"))?;
+        for vertex_collection in ARANGO_DOC_COLLECTIONS {
+            clear_arango_edges_by_vertex_library(
+                arango,
+                edge_collection,
+                vertex_collection,
+                library_id,
             )
             .await
-            .with_context(|| format!("clear arango edge {collection}"))?;
+            .with_context(|| {
+                format!("clear arango edge {edge_collection} endpoint {vertex_collection}")
+            })?;
+        }
     }
     for collection in ARANGO_DOC_COLLECTIONS {
-        arango
-            .query_json_bulk(
-                "FOR doc IN @@collection FILTER doc.library_id == @library_id REMOVE doc IN @@collection",
-                serde_json::json!({
-                    "@collection": *collection,
-                    "library_id": library_id.to_string(),
-                }),
-            )
+        clear_arango_rows_by_library(arango, collection, library_id)
             .await
             .with_context(|| format!("clear arango doc {collection}"))?;
     }
-
     Ok(())
+}
+
+async fn clear_arango_rows_by_library(
+    arango: &ArangoClient,
+    collection: &str,
+    library_id: Uuid,
+) -> anyhow::Result<()> {
+    loop {
+        let cursor = arango
+            .query_json_bulk(
+                "FOR row IN @@collection
+                    FILTER row.library_id == @library_id
+                    LIMIT @limit
+                    REMOVE row IN @@collection
+                    RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": collection,
+                    "library_id": library_id.to_string(),
+                    "limit": ARANGO_CLEAR_BATCH_ROWS,
+                }),
+            )
+            .await?;
+        if arango_cursor_result_len(&cursor)? < ARANGO_CLEAR_BATCH_ROWS {
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn clear_arango_edges_by_vertex_library(
+    arango: &ArangoClient,
+    edge_collection: &str,
+    vertex_collection: &str,
+    library_id: Uuid,
+) -> anyhow::Result<()> {
+    loop {
+        let cursor = arango
+            .query_json_bulk(
+                "FOR vertex IN @@vertex_collection
+                    FILTER vertex.library_id == @library_id
+                    FOR edge IN @@edge_collection
+                        FILTER edge._from == vertex._id OR edge._to == vertex._id
+                        LIMIT @limit
+                        REMOVE edge IN @@edge_collection
+                        RETURN OLD._key",
+                serde_json::json!({
+                    "@edge_collection": edge_collection,
+                    "@vertex_collection": vertex_collection,
+                    "library_id": library_id.to_string(),
+                    "limit": ARANGO_CLEAR_BATCH_ROWS,
+                }),
+            )
+            .await?;
+        if arango_cursor_result_len(&cursor)? < ARANGO_CLEAR_BATCH_ROWS {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn arango_cursor_result_len(cursor: &serde_json::Value) -> anyhow::Result<usize> {
+    Ok(cursor
+        .get("result")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?
+        .len())
 }
 
 async fn load_library_workspace(pool: &PgPool, library_id: Uuid) -> anyhow::Result<Option<Uuid>> {
@@ -1796,19 +1944,14 @@ async fn insert_pg_rows_bulk(
     }
     let table = require_known_snapshot_pg_table(table)?;
     let count = rows.len();
-    // Workspace-scope tables can legitimately pre-exist on the target
-    // stack (operator has already configured AI bindings, or a prior
-    // restore from the same source ran). The snapshot is additive for
-    // these — ON CONFLICT DO NOTHING keeps existing rows untouched.
-    let on_conflict = if workspace_scope_table_allows_existing_rows(table) {
-        " ON CONFLICT DO NOTHING"
-    } else {
-        ""
-    };
+    let payload = serde_json::Value::Array(rows);
+    if table == "catalog_library" {
+        delete_catalog_library_rows_before_insert(tx, &payload).await?;
+    }
+    let on_conflict = pg_insert_conflict_clause(table);
     let sql = format!(
         "INSERT INTO {table} SELECT * FROM jsonb_populate_recordset(null::{table}, $1){on_conflict}"
     );
-    let payload = serde_json::Value::Array(rows);
     sqlx::query(&sql)
         .bind(&payload)
         .execute(&mut **tx)
@@ -1817,12 +1960,31 @@ async fn insert_pg_rows_bulk(
     Ok(())
 }
 
-/// Tables whose rows may already exist on the target stack (workspace
-/// scope export). Collisions on their primary keys are not errors: an
-/// already-configured row wins over the imported one, so the operator's
-/// local tweaks survive a restore.
-fn workspace_scope_table_allows_existing_rows(table: &str) -> bool {
-    matches!(table, "catalog_workspace")
+fn pg_insert_conflict_clause(table: &str) -> &'static str {
+    match table {
+        // Workspace-scope rows can legitimately pre-exist on the target
+        // stack. The local workspace row remains the source of truth.
+        "catalog_workspace" => " ON CONFLICT DO NOTHING",
+        _ => "",
+    }
+}
+
+async fn delete_catalog_library_rows_before_insert(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "DELETE FROM catalog_library
+         WHERE id IN (
+             SELECT row.id
+             FROM jsonb_to_recordset($1) AS row(id uuid)
+         )",
+    )
+    .bind(payload)
+    .execute(&mut **tx)
+    .await
+    .context("replace catalog_library row before snapshot insert")?;
+    Ok(())
 }
 
 /// Bulk-insert an Arango batch (documents or edges) as a single AQL
@@ -1963,5 +2125,193 @@ mod tests {
         manifest.include_kinds = vec![IncludeKind::LibraryData];
 
         assert!(SnapshotManifestSections::from_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn catalog_library_import_does_not_carry_parallel_update_column_list() {
+        assert_eq!(pg_insert_conflict_clause("catalog_workspace"), " ON CONFLICT DO NOTHING");
+        assert_eq!(pg_insert_conflict_clause("catalog_library"), "");
+    }
+
+    #[test]
+    fn snapshot_row_scope_rewrites_existing_target_identity_and_blob_prefix() {
+        let source_workspace_id = Uuid::now_v7();
+        let source_library_id = Uuid::now_v7();
+        let target_workspace_id = Uuid::now_v7();
+        let target_library_id = Uuid::now_v7();
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mutation_id = Uuid::now_v7();
+        let source_storage_key =
+            format!("content/{source_workspace_id}/{source_library_id}/source.bin");
+        let target_storage_key =
+            format!("content/{target_workspace_id}/{target_library_id}/source.bin");
+        let mut scope =
+            SnapshotRowScope::new(source_library_id, target_library_id, target_workspace_id);
+
+        let mut library = serde_json::json!({
+            "id": source_library_id,
+            "workspace_id": source_workspace_id,
+            "slug": "alpha",
+            "display_name": "Alpha",
+        });
+        scope.normalize_postgres_row("catalog_library", &mut library).unwrap();
+        assert_eq!(
+            required_uuid_field("catalog_library", &library, "id").unwrap(),
+            target_library_id
+        );
+        assert_eq!(
+            required_uuid_field("catalog_library", &library, "workspace_id").unwrap(),
+            target_workspace_id
+        );
+
+        let mut document = serde_json::json!({
+            "id": document_id,
+            "library_id": source_library_id,
+            "workspace_id": source_workspace_id,
+        });
+        scope.normalize_postgres_row("content_document", &mut document).unwrap();
+        assert_eq!(
+            required_uuid_field("content_document", &document, "library_id").unwrap(),
+            target_library_id
+        );
+        assert_eq!(
+            required_uuid_field("content_document", &document, "workspace_id").unwrap(),
+            target_workspace_id
+        );
+
+        let mut revision = serde_json::json!({
+            "id": revision_id,
+            "document_id": document_id,
+            "library_id": source_library_id,
+            "workspace_id": source_workspace_id,
+            "storage_key": source_storage_key,
+        });
+        scope.normalize_postgres_row("content_revision", &mut revision).unwrap();
+        assert_eq!(string_field(&revision, "storage_key"), Some(target_storage_key.as_str()));
+        assert_eq!(scope.normalize_blob_key(&source_storage_key).unwrap(), target_storage_key);
+
+        let mut mutation = serde_json::json!({
+            "id": mutation_id,
+            "library_id": source_library_id,
+            "workspace_id": source_workspace_id,
+        });
+        scope.normalize_postgres_row("content_mutation", &mut mutation).unwrap();
+
+        let mut head = serde_json::json!({
+            "document_id": document_id,
+            "active_revision_id": revision_id,
+            "readable_revision_id": revision_id,
+            "latest_mutation_id": mutation_id,
+        });
+        scope.normalize_postgres_row("content_document_head", &mut head).unwrap();
+    }
+
+    #[test]
+    fn snapshot_row_scope_rewrites_arango_library_and_workspace_fields() {
+        let source_workspace_id = Uuid::now_v7();
+        let source_library_id = Uuid::now_v7();
+        let target_workspace_id = Uuid::now_v7();
+        let target_library_id = Uuid::now_v7();
+        let mut scope =
+            SnapshotRowScope::new(source_library_id, target_library_id, target_workspace_id);
+
+        let mut row = serde_json::json!({
+            "_key": "doc-1",
+            "library_id": source_library_id,
+            "workspace_id": source_workspace_id,
+        });
+        assert_eq!(
+            scope.normalize_arango_row(KNOWLEDGE_DOCUMENT_COLLECTION, &mut row).unwrap(),
+            SnapshotArangoRowAction::Import
+        );
+
+        assert_eq!(
+            required_uuid_field(KNOWLEDGE_DOCUMENT_COLLECTION, &row, "library_id").unwrap(),
+            target_library_id
+        );
+        assert_eq!(
+            required_uuid_field(KNOWLEDGE_DOCUMENT_COLLECTION, &row, "workspace_id").unwrap(),
+            target_workspace_id
+        );
+        assert!(scope.arango_document_ids.contains("knowledge_document/doc-1"));
+
+        let mut revision = serde_json::json!({
+            "_key": "rev-1",
+            "library_id": source_library_id,
+            "workspace_id": source_workspace_id,
+        });
+        assert_eq!(
+            scope.normalize_arango_row(KNOWLEDGE_REVISION_COLLECTION, &mut revision).unwrap(),
+            SnapshotArangoRowAction::Import
+        );
+
+        let mut edge = serde_json::json!({
+            "_from": "knowledge_document/doc-1",
+            "_to": "knowledge_revision/rev-1",
+            "library_id": source_library_id,
+        });
+        assert_eq!(
+            scope.normalize_arango_row(KNOWLEDGE_DOCUMENT_REVISION_EDGE, &mut edge).unwrap(),
+            SnapshotArangoRowAction::Import
+        );
+        assert_eq!(
+            required_uuid_field(KNOWLEDGE_DOCUMENT_REVISION_EDGE, &edge, "library_id").unwrap(),
+            target_library_id
+        );
+
+        let mut dangling_edge = serde_json::json!({
+            "_from": "knowledge_document/doc-1",
+            "_to": "knowledge_revision/missing",
+            "library_id": source_library_id,
+        });
+        assert_eq!(
+            scope
+                .normalize_arango_row(KNOWLEDGE_DOCUMENT_REVISION_EDGE, &mut dangling_edge)
+                .unwrap(),
+            SnapshotArangoRowAction::SkipDanglingEdge
+        );
+
+        let mut chunk = serde_json::json!({
+            "_key": "chunk-1",
+            "library_id": source_library_id,
+            "workspace_id": source_workspace_id,
+        });
+        assert_eq!(
+            scope.normalize_arango_row(KNOWLEDGE_CHUNK_COLLECTION, &mut chunk).unwrap(),
+            SnapshotArangoRowAction::Import
+        );
+
+        let mut missing_bundle_edge = serde_json::json!({
+            "_from": "knowledge_context_bundle/bundle-1",
+            "_to": "knowledge_chunk/chunk-1",
+            "library_id": source_library_id,
+        });
+        assert_eq!(
+            scope
+                .normalize_arango_row(KNOWLEDGE_BUNDLE_CHUNK_EDGE, &mut missing_bundle_edge)
+                .unwrap(),
+            SnapshotArangoRowAction::SkipDanglingEdge
+        );
+
+        let mut bundle = serde_json::json!({
+            "_key": "bundle-1",
+            "library_id": source_library_id,
+            "workspace_id": source_workspace_id,
+        });
+        assert_eq!(
+            scope.normalize_arango_row(KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, &mut bundle).unwrap(),
+            SnapshotArangoRowAction::Import
+        );
+
+        let mut bundle_edge = serde_json::json!({
+            "_from": "knowledge_context_bundle/bundle-1",
+            "_to": "knowledge_chunk/chunk-1",
+            "library_id": source_library_id,
+        });
+        assert_eq!(
+            scope.normalize_arango_row(KNOWLEDGE_BUNDLE_CHUNK_EDGE, &mut bundle_edge).unwrap(),
+            SnapshotArangoRowAction::Import
+        );
     }
 }

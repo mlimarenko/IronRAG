@@ -737,6 +737,40 @@ pub async fn update_revision_storage_key(
     .await
 }
 
+pub async fn update_revision_document_hint(
+    postgres: &PgPool,
+    revision_id: Uuid,
+    document_hint: Option<&str>,
+) -> Result<Option<ContentRevisionRow>, sqlx::Error> {
+    sqlx::query_as::<_, ContentRevisionRow>(
+        "update content_revision
+         set document_hint = $2
+         where id = $1
+         returning
+            id,
+            document_id,
+            workspace_id,
+            library_id,
+            revision_number,
+            parent_revision_id,
+            content_source_kind::text as content_source_kind,
+            checksum,
+            mime_type,
+            byte_size,
+            title,
+            language_code,
+            source_uri,
+            document_hint,
+            storage_key,
+            created_by_principal_id,
+            created_at",
+    )
+    .bind(revision_id)
+    .bind(document_hint)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn list_revisions_by_ids(
     postgres: &PgPool,
     revision_ids: &[Uuid],

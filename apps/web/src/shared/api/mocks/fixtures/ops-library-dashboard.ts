@@ -179,14 +179,14 @@ const DEFAULT_OPS_LIBRARY_DASHBOARD = {
       runId: "web-run-demo-1",
       runState: "processing",
       seedUrl: "https://docs.example.test/start",
-      urlFilterMode: "allowlist",
-      urlPatterns: [
-        {
-          kind: "host",
-          source: "manual",
-          value: "docs.example.test",
-        },
-      ],
+      crawlFilter: {
+        allowPatterns: [{ kind: "url_prefix", value: "https://docs.example.test/" }],
+        blockPatterns: [],
+      },
+      materializationFilter: {
+        allowPatterns: [],
+        blockPatterns: [],
+      },
     },
   ],
   warnings: [],

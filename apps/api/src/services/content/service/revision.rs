@@ -694,6 +694,7 @@ impl ContentService {
                     revision_kind: revision.content_source_kind.clone(),
                     storage_ref: revision.storage_key.clone(),
                     source_uri: revision.source_uri.clone(),
+                    document_hint: revision.document_hint.clone(),
                     mime_type: revision.mime_type.clone(),
                     checksum: revision.checksum.clone(),
                     byte_size: revision.byte_size,

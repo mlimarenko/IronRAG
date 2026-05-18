@@ -271,6 +271,7 @@ fn knowledge_revision_command(
         revision_kind: revision_kind.to_string(),
         storage_ref: Some(format!("memory://{revision_id}")),
         source_uri: Some(format!("memory://knowledge-lifecycle/{revision_id}")),
+        document_hint: None,
         mime_type: "text/plain".to_string(),
         checksum: format!("sha256:{revision_id}"),
         byte_size: i64::try_from(normalized_text.len()).unwrap_or(i64::MAX),

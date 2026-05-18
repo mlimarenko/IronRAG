@@ -36,6 +36,7 @@ import type { UpdateSearchParamState } from "./documentsPageState";
 type InspectorSectionProps = {
   activateListPollGrace: () => void;
   clearSelectedDoc: () => void;
+  documentHintEditable: boolean;
   errorMessage: (error: unknown, fallback: string) => string;
   fetchSelectedDetail: (documentId: string) => Promise<void>;
   inspectorLifecycle: DocumentLifecycleDetail | null;
@@ -45,12 +46,14 @@ type InspectorSectionProps = {
   selectDoc: (doc: DocumentItem) => void;
   selectionMode: boolean;
   t: TFunction;
+  updateDocumentHintLocally: (documentId: string, documentHint: string | null) => void;
   updateSearchParamState: UpdateSearchParamState;
 };
 
 export function InspectorSection({
   activateListPollGrace,
   clearSelectedDoc,
+  documentHintEditable,
   errorMessage,
   fetchSelectedDetail,
   inspectorLifecycle,
@@ -60,6 +63,7 @@ export function InspectorSection({
   selectDoc,
   selectionMode,
   t,
+  updateDocumentHintLocally,
   updateSearchParamState,
 }: InspectorSectionProps) {
   const isMobile = useIsMobile();
@@ -181,9 +185,11 @@ export function InspectorSection({
   const availability = editorAvailability(selectedDoc);
   const inspectorPanel = (
     <DocumentsInspectorPanel
+      documentHintEditable={documentHintEditable}
       editorActionDisabledReason={availability.reason}
       editorActionEnabled={availability.enabled}
       editorActionReadOnly={availability.readOnly}
+      formatErrorMessage={errorMessage}
       lifecycle={inspectorLifecycle}
       locale={locale}
       selectedDoc={selectedDoc}
@@ -192,6 +198,7 @@ export function InspectorSection({
       setReplaceFileOpen={setReplaceFileOpen}
       t={t}
       updateSearchParamState={updateSearchParamState}
+      onDocumentHintUpdated={updateDocumentHintLocally}
       onOpenEditor={() => void documentEditor.openEditor(selectedDoc)}
       onRetry={handleRetry}
       presentation={isMobile ? "drawer" : "sidebar"}

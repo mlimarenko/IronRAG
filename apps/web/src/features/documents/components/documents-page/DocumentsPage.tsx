@@ -23,7 +23,7 @@ import { useWebIngestController } from "./useWebIngestController";
 export function DocumentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { activeLibrary, activeWorkspace, locale } = useApp();
+  const { activeLibrary, activeWorkspace, locale, user } = useApp();
   const [tableState, setTableState] = useDocumentsTableState();
   const urlState = useDocumentsPageUrlState({ tableState, setTableState });
   const [activeTab, setActiveTab] = useState<DocumentsPageTab>("documents");
@@ -54,13 +54,14 @@ export function DocumentsPage() {
     fetchLibraryWebIngestPolicy: documents.fetchLibraryWebIngestPolicy,
     libraryPolicyData: documents.libraryPolicyQuery.data,
     libraryPolicyLoading: documents.libraryPolicyQuery.isLoading,
-    loadedUrlFilter: documents.loadedUrlFilter,
+    loadedWebIngestPolicy: documents.loadedWebIngestPolicy,
     loadFirstPage: documents.loadFirstPage,
     refreshWebRuns: documents.refreshWebRuns,
     t,
     webRuns: documents.webRuns,
     webRunsRefreshing: documents.webRunsRefreshing,
   });
+  const documentHintEditable = user?.role === "admin" || user?.role === "operator";
 
   if (!activeLibrary) return <NoLibraryState t={t} />;
 
@@ -69,14 +70,12 @@ export function DocumentsPage() {
       <DocumentsPageHeader
         activeLibraryName={activeLibrary.name}
         activeTab={activeTab} documentsCount={documents.totalCount ?? documents.items.length}
-        documentHint={uploadQueue.documentHint}
         fileInputRef={uploadQueue.fileInputRef} folderInputRef={uploadQueue.folderInputRef}
         handleFileSelect={uploadQueue.handleFileSelect}
         handleFolderSelect={uploadQueue.handleFolderSelect}
         onRefreshWebRuns={() => void webIngest.refreshWebRuns()}
         setActiveTab={setActiveTab} setAddLinkOpen={webIngest.setAddLinkOpen}
         setBoundaryPolicy={webIngest.setBoundaryPolicy} setCrawlMode={webIngest.setCrawlMode}
-        setDocumentHint={uploadQueue.setDocumentHint}
         setMaxDepth={webIngest.setMaxDepth} setMaxPages={webIngest.setMaxPages}
         setSeedUrl={webIngest.setSeedUrl} t={t}
         webRunsCount={webIngest.webRuns.length} webRunsRefreshing={webIngest.webRunsRefreshing}
@@ -114,10 +113,12 @@ export function DocumentsPage() {
         <InspectorSection
           activateListPollGrace={documents.activateListPollGrace}
           clearSelectedDoc={documents.clearSelectedDoc} errorMessage={documents.errorMessage}
+          documentHintEditable={documentHintEditable}
           fetchSelectedDetail={documents.fetchSelectedDetail}
           inspectorLifecycle={documents.inspectorLifecycle} loadFirstPage={documents.loadFirstPage}
           locale={locale} selectedDoc={documents.selectedDoc}
           selectionMode={selectionMode} selectDoc={documents.selectDoc} t={t}
+          updateDocumentHintLocally={documents.updateDocumentHintLocally}
           updateSearchParamState={urlState.updateSearchParamState}
         />
       </div>

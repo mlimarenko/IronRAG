@@ -941,16 +941,8 @@ fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSumm
         boundary_policy: summary.boundary_policy,
         max_depth: summary.max_depth,
         max_pages: summary.max_pages,
-        url_filter_mode: summary.url_filter_mode,
-        url_patterns: summary
-            .url_patterns
-            .into_iter()
-            .map(|pattern| ironrag_contracts::documents::WebIngestPattern {
-                kind: pattern.kind,
-                value: pattern.value,
-                source: pattern.source,
-            })
-            .collect(),
+        crawl_filter: map_contract_web_url_filter(summary.crawl_filter),
+        materialization_filter: map_contract_web_url_filter(summary.materialization_filter),
         run_state: map_web_run_state(&summary.run_state),
         seed_url: summary.seed_url,
         counts: WebRunCounts {
@@ -966,6 +958,25 @@ fn map_web_run_summary(summary: ingest::WebIngestRunSummary) -> WebIngestRunSumm
             canceled: saturating_i32_from_i64(summary.counts.canceled),
         },
         last_activity_at: summary.last_activity_at,
+    }
+}
+
+fn map_contract_web_url_filter(
+    filter: crate::shared::web::ingest::WebIngestUrlFilter,
+) -> ironrag_contracts::documents::WebIngestUrlFilter {
+    ironrag_contracts::documents::WebIngestUrlFilter {
+        allow_patterns: filter.allow_patterns.into_iter().map(map_contract_web_pattern).collect(),
+        block_patterns: filter.block_patterns.into_iter().map(map_contract_web_pattern).collect(),
+    }
+}
+
+fn map_contract_web_pattern(
+    pattern: crate::shared::web::ingest::WebIngestPattern,
+) -> ironrag_contracts::documents::WebIngestPattern {
+    ironrag_contracts::documents::WebIngestPattern {
+        kind: pattern.kind,
+        value: pattern.value,
+        source: pattern.source,
     }
 }
 

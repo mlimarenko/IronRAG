@@ -139,6 +139,7 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::content::create_document,
         crate::interfaces::http::content::upload_document,
         crate::interfaces::http::content::get_document,
+        crate::interfaces::http::content::patch_document_metadata,
         crate::interfaces::http::content::get_document_prepared_segments,
         crate::interfaces::http::content::get_document_technical_facts,
         crate::interfaces::http::content::delete_document,

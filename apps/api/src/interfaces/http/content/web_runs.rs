@@ -43,7 +43,8 @@ pub struct CreateWebIngestRunRequest {
     pub boundary_policy: Option<WebBoundaryPolicy>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
-    pub url_filter: WebIngestUrlFilter,
+    pub crawl_filter: WebIngestUrlFilter,
+    pub materialization_filter: WebIngestUrlFilter,
     pub idempotency_key: Option<String>,
 }
 
@@ -87,7 +88,8 @@ pub async fn create_web_ingest_run(
                     .map(|boundary_policy| boundary_policy.as_str().to_string()),
                 max_depth: request.max_depth,
                 max_pages: request.max_pages,
-                url_filter: request.url_filter,
+                crawl_filter: request.crawl_filter,
+                materialization_filter: request.materialization_filter,
                 requested_by_principal_id: Some(auth.principal_id),
                 request_surface: "rest".to_string(),
                 idempotency_key: request.idempotency_key,

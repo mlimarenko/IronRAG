@@ -1,22 +1,4 @@
 {{- if eq .Values.dependencies.redis.mode "bundled" }}
-{{- if .Values.dependencies.redis.persistence.enabled }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "ironrag.fullname" . }}-redis
-  labels:
-    {{- include "ironrag.labels" . | nindent 4 }}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: {{ .Values.dependencies.redis.persistence.size }}
-  {{- with .Values.dependencies.redis.persistence.storageClassName }}
-  storageClassName: {{ . }}
-  {{- end }}
----
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,13 +8,6 @@ metadata:
     app.kubernetes.io/component: redis
 spec:
   replicas: 1
-  {{- if .Values.dependencies.redis.persistence.enabled }}
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 0
-  {{- end }}
   selector:
     matchLabels:
       {{- include "ironrag.selectorLabels" . | nindent 6 }}
@@ -54,7 +29,16 @@ spec:
             runAsUser: 999
             runAsGroup: 999
             allowPrivilegeEscalation: false
-          args: ["redis-server", "--appendonly", "yes"]
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - {{ .Values.dependencies.redis.maxMemory | quote }}
+            - --maxmemory-policy
+            - volatile-lru
           ports:
             - containerPort: 6379
               name: tcp
@@ -68,19 +52,8 @@ spec:
               command: ["redis-cli", "ping"]
             initialDelaySeconds: 15
             periodSeconds: 20
-          {{- if .Values.dependencies.redis.persistence.enabled }}
-          volumeMounts:
-            - name: data
-              mountPath: /data
-          {{- end }}
           resources:
             {{- toYaml .Values.dependencies.redis.resources | nindent 12 }}
-      {{- if .Values.dependencies.redis.persistence.enabled }}
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: {{ include "ironrag.fullname" . }}-redis
-      {{- end }}
 ---
 apiVersion: v1
 kind: Service

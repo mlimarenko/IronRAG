@@ -10,31 +10,33 @@ import {
   type CatalogLibraryResponse,
   type WebBoundaryPolicy,
   type WebIngestMode,
-  type WebIngestPattern,
   type WebIngestRunListItem,
-  type WebIngestUrlFilterMode,
+  type WebIngestUrlFilter,
 } from "@/shared/api";
 import type { Library } from "@/shared/types";
 
 import {
+  buildWebIngestUrlFilter,
   formatWebIngestPatterns,
-  parseWebIngestPatternText,
 } from "@/features/documents/model/webIngestPatterns";
 
 import type {
-  WebIngestUrlFilterSnapshot,
+  WebIngestPolicyDraft,
+  WebIngestPolicySnapshot,
 } from "./documentsPageState";
+
+const DEFAULT_WEB_INGEST_MAX_PAGES = "100";
 
 type WebIngestControllerInput = {
   activeLibrary: Library | null;
   errorMessage: (error: unknown, fallback: string) => string;
   fetchLibraryWebIngestPolicy: (
     libraryId: string,
-  ) => Promise<WebIngestUrlFilterSnapshot | null>;
+  ) => Promise<WebIngestPolicySnapshot | null>;
   libraryPolicyData: CatalogLibraryResponse | undefined;
   libraryPolicyLoading: boolean;
   loadFirstPage: () => Promise<void>;
-  loadedUrlFilter: WebIngestUrlFilterSnapshot;
+  loadedWebIngestPolicy: WebIngestPolicySnapshot;
   refreshWebRuns: () => Promise<void>;
   t: TFunction;
   webRuns: WebIngestRunListItem[];
@@ -43,18 +45,45 @@ type WebIngestControllerInput = {
 
 type WebIngestPolicyVariables = {
   libraryId: string;
-  mode: WebIngestUrlFilterMode;
-  patterns: WebIngestPattern[];
+  crawlFilter: WebIngestUrlFilter;
+  materializationFilter: WebIngestUrlFilter;
 };
 
 type WebIngestPolicyContext = {
-  previousDraft: {
-    libraryId: string;
-    mode: WebIngestUrlFilterMode;
-    patternsText: string;
-  } | null;
+  previousDraft: WebIngestPolicyDraft | null;
   previousLibrary: CatalogLibraryResponse | undefined;
 };
+
+function draftFromPolicy(
+  libraryId: string,
+  policy: WebIngestPolicySnapshot,
+): WebIngestPolicyDraft {
+  return {
+    libraryId,
+    crawlAllowText: policy.crawlFilter.allowText,
+    crawlBlockText: policy.crawlFilter.blockText,
+    materializationAllowText: policy.materializationFilter.allowText,
+    materializationBlockText: policy.materializationFilter.blockText,
+  };
+}
+
+function draftFromFilters(
+  libraryId: string,
+  crawlFilter: WebIngestUrlFilter,
+  materializationFilter: WebIngestUrlFilter,
+): WebIngestPolicyDraft {
+  return {
+    libraryId,
+    crawlAllowText: formatWebIngestPatterns(crawlFilter.allowPatterns),
+    crawlBlockText: formatWebIngestPatterns(crawlFilter.blockPatterns),
+    materializationAllowText: formatWebIngestPatterns(
+      materializationFilter.allowPatterns,
+    ),
+    materializationBlockText: formatWebIngestPatterns(
+      materializationFilter.blockPatterns,
+    ),
+  };
+}
 
 export function useWebIngestController({
   activeLibrary,
@@ -62,7 +91,7 @@ export function useWebIngestController({
   fetchLibraryWebIngestPolicy,
   libraryPolicyData,
   libraryPolicyLoading,
-  loadedUrlFilter,
+  loadedWebIngestPolicy,
   loadFirstPage,
   refreshWebRuns,
   t,
@@ -78,55 +107,50 @@ export function useWebIngestController({
   const [boundaryPolicy, setBoundaryPolicy] =
     useState<WebBoundaryPolicy>("same_host");
   const [maxDepth, setMaxDepth] = useState("3");
-  const [maxPages, setMaxPages] = useState("100");
-  const [urlFilterDraft, setUrlFilterDraft] = useState<{
-    libraryId: string;
-    mode: WebIngestUrlFilterMode;
-    patternsText: string;
-  } | null>(null);
+  const [maxPages, setMaxPages] = useState(DEFAULT_WEB_INGEST_MAX_PAGES);
+  const [ruleTestUrl, setRuleTestUrl] = useState("");
+  const [webIngestPolicyDraft, setWebIngestPolicyDraft] =
+    useState<WebIngestPolicyDraft | null>(null);
   const [webIngestLoading, setWebIngestLoading] = useState(false);
-  const activeUrlFilterDraft =
-    urlFilterDraft?.libraryId === activeLibraryId ? urlFilterDraft : null;
-  const urlFilterMode = activeUrlFilterDraft?.mode ?? loadedUrlFilter.mode;
-  const urlFilterPatternsText =
-    activeUrlFilterDraft?.patternsText ?? loadedUrlFilter.text;
-  const urlFilterLoading =
+  const activePolicyDraft =
+    webIngestPolicyDraft?.libraryId === activeLibraryId
+      ? webIngestPolicyDraft
+      : null;
+  const webIngestPolicyLoading =
     libraryPolicyLoading && !!activeLibraryId && !libraryPolicyData;
+  const crawlAllowPatternsText =
+    activePolicyDraft?.crawlAllowText ??
+    loadedWebIngestPolicy.crawlFilter.allowText;
+  const crawlBlockPatternsText =
+    activePolicyDraft?.crawlBlockText ??
+    loadedWebIngestPolicy.crawlFilter.blockText;
+  const materializationAllowPatternsText =
+    activePolicyDraft?.materializationAllowText ??
+    loadedWebIngestPolicy.materializationFilter.allowText;
+  const materializationBlockPatternsText =
+    activePolicyDraft?.materializationBlockText ??
+    loadedWebIngestPolicy.materializationFilter.blockText;
 
-  const setUrlFilterMode = useCallback(
-    (mode: WebIngestUrlFilterMode) => {
+  const updatePolicyDraft = useCallback(
+    (patch: Partial<Omit<WebIngestPolicyDraft, "libraryId">>) => {
       if (!activeLibraryId) return;
-      setUrlFilterDraft((prev) => ({
-        libraryId: activeLibraryId,
-        mode,
-        patternsText:
+      setWebIngestPolicyDraft((prev) => {
+        const base =
           prev?.libraryId === activeLibraryId
-            ? prev.patternsText
-            : loadedUrlFilter.text,
-      }));
+            ? prev
+            : draftFromPolicy(activeLibraryId, loadedWebIngestPolicy);
+        return { ...base, ...patch };
+      });
     },
-    [activeLibraryId, loadedUrlFilter.text],
-  );
-  const setUrlFilterPatternsText = useCallback(
-    (patternsText: string) => {
-      if (!activeLibraryId) return;
-      setUrlFilterDraft((prev) => ({
-        libraryId: activeLibraryId,
-        mode:
-          prev?.libraryId === activeLibraryId
-            ? prev.mode
-            : loadedUrlFilter.mode,
-        patternsText,
-      }));
-    },
-    [activeLibraryId, loadedUrlFilter.mode],
+    [activeLibraryId, loadedWebIngestPolicy],
   );
   const resetCreateForm = useCallback(() => {
     setSeedUrl("");
     setCrawlMode("recursive_crawl");
     setBoundaryPolicy("same_host");
     setMaxDepth("3");
-    setMaxPages("30");
+    setMaxPages(DEFAULT_WEB_INGEST_MAX_PAGES);
+    setRuleTestUrl("");
   }, []);
   const openCreateDialog = useCallback(() => {
     resetCreateForm();
@@ -141,18 +165,19 @@ export function useWebIngestController({
   >({
     mutationKey: ["documents", "web-ingest-policy", activeLibraryId],
     scope: { id: `documents:web-ingest-policy:${activeLibraryId ?? "none"}` },
-    mutationFn: ({ libraryId, mode, patterns }) =>
+    mutationFn: ({ libraryId, crawlFilter, materializationFilter }) =>
       adminApi.updateWebIngestPolicy(libraryId, {
-        urlFilter: { mode, patterns },
+        crawlFilter,
+        materializationFilter,
       }),
-    onMutate: async ({ libraryId, mode, patterns }) => {
+    onMutate: async ({ libraryId, crawlFilter, materializationFilter }) => {
       const queryKey = queries.getCatalogLibraryOptions({
         path: { libraryId },
       }).queryKey;
       await queryClient.cancelQueries({ queryKey });
       const previousLibrary =
         queryClient.getQueryData<CatalogLibraryResponse>(queryKey);
-      const previousDraft = urlFilterDraft;
+      const previousDraft = webIngestPolicyDraft;
       queryClient.setQueryData<CatalogLibraryResponse | undefined>(
         queryKey,
         (current) =>
@@ -160,17 +185,15 @@ export function useWebIngestController({
             ? {
                 ...current,
                 webIngestPolicy: {
-                  ...current.webIngestPolicy,
-                  urlFilter: { mode, patterns },
+                  crawlFilter,
+                  materializationFilter,
                 },
               }
             : current,
       );
-      setUrlFilterDraft({
-        libraryId,
-        mode,
-        patternsText: formatWebIngestPatterns(patterns),
-      });
+      setWebIngestPolicyDraft(
+        draftFromFilters(libraryId, crawlFilter, materializationFilter),
+      );
       return { previousDraft, previousLibrary };
     },
     onSuccess: (updatedLibrary, { libraryId }) => {
@@ -185,7 +208,7 @@ export function useWebIngestController({
           queries.getCatalogLibraryOptions({ path: { libraryId } }).queryKey,
           context.previousLibrary,
         );
-        setUrlFilterDraft(context.previousDraft);
+        setWebIngestPolicyDraft(context.previousDraft);
       }
       toast.error(
         t("documents.mutations.webIngestPolicy.failed", {
@@ -218,43 +241,55 @@ export function useWebIngestController({
     let policyRollbackToastShown = false;
     try {
       const savedPolicy = libraryPolicyData
-        ? loadedUrlFilter
+        ? loadedWebIngestPolicy
         : await fetchLibraryWebIngestPolicy(activeLibrary.id);
       if (savedPolicy == null) return;
-      let nextMode = activeUrlFilterDraft ? urlFilterMode : savedPolicy.mode;
-      const nextText = activeUrlFilterDraft
-        ? urlFilterPatternsText
-        : savedPolicy.text;
-      const urlPatterns = parseWebIngestPatternText(nextText);
-      if (nextMode === "allowlist" && urlPatterns.length === 0) {
-        toast.error(t("documents.urlFilterAllowlistEmpty"));
-        return;
-      }
-      let normalizedText = formatWebIngestPatterns(urlPatterns);
-      if (nextMode !== savedPolicy.mode || normalizedText !== savedPolicy.text) {
+      const nextDraft = activePolicyDraft ?? draftFromPolicy(activeLibrary.id, savedPolicy);
+      const crawlFilter = buildWebIngestUrlFilter(
+        nextDraft.crawlAllowText,
+        nextDraft.crawlBlockText,
+      );
+      const materializationFilter = buildWebIngestUrlFilter(
+        nextDraft.materializationAllowText,
+        nextDraft.materializationBlockText,
+      );
+      const normalizedDraft = draftFromFilters(
+        activeLibrary.id,
+        crawlFilter,
+        materializationFilter,
+      );
+      const savedDraft = draftFromPolicy(activeLibrary.id, savedPolicy);
+      let effectiveCrawlFilter = crawlFilter;
+      let effectiveMaterializationFilter = materializationFilter;
+      if (
+        normalizedDraft.crawlAllowText !== savedDraft.crawlAllowText ||
+        normalizedDraft.crawlBlockText !== savedDraft.crawlBlockText ||
+        normalizedDraft.materializationAllowText !==
+          savedDraft.materializationAllowText ||
+        normalizedDraft.materializationBlockText !==
+          savedDraft.materializationBlockText
+      ) {
         const updatedLibrary = await saveWebIngestPolicy({
-            libraryId: activeLibrary.id,
-            mode: nextMode,
-            patterns: urlPatterns,
-          })
-          .catch((err: unknown) => {
-            policyRollbackToastShown = true;
-            throw err;
-          });
-        const updatedFilter = updatedLibrary.webIngestPolicy?.urlFilter ?? {
-          mode: nextMode,
-          patterns: urlPatterns,
-        };
-        nextMode = updatedFilter.mode ?? nextMode;
-        normalizedText = formatWebIngestPatterns(
-          updatedFilter.patterns ?? urlPatterns,
-        );
+          libraryId: activeLibrary.id,
+          crawlFilter,
+          materializationFilter,
+        }).catch((err: unknown) => {
+          policyRollbackToastShown = true;
+          throw err;
+        });
+        effectiveCrawlFilter =
+          updatedLibrary.webIngestPolicy?.crawlFilter ?? crawlFilter;
+        effectiveMaterializationFilter =
+          updatedLibrary.webIngestPolicy?.materializationFilter ??
+          materializationFilter;
       }
-      setUrlFilterDraft({
-        libraryId: activeLibrary.id,
-        mode: nextMode,
-        patternsText: normalizedText,
-      });
+      setWebIngestPolicyDraft(
+        draftFromFilters(
+          activeLibrary.id,
+          effectiveCrawlFilter,
+          effectiveMaterializationFilter,
+        ),
+      );
       await documentsApi.createWebIngestRun({
         libraryId: activeLibrary.id,
         seedUrl: url,
@@ -262,7 +297,8 @@ export function useWebIngestController({
         boundaryPolicy,
         maxDepth: Number.parseInt(maxDepth, 10),
         maxPages: Number.parseInt(maxPages, 10),
-        urlFilter: { mode: nextMode, patterns: urlPatterns },
+        crawlFilter: effectiveCrawlFilter,
+        materializationFilter: effectiveMaterializationFilter,
       });
       toast.success(t("documents.webIngestStarted"));
       setAddLinkOpen(false);
@@ -278,13 +314,13 @@ export function useWebIngestController({
     }
   }, [
     activeLibrary,
-    activeUrlFilterDraft,
+    activePolicyDraft,
     boundaryPolicy,
     crawlMode,
     errorMessage,
     fetchLibraryWebIngestPolicy,
     libraryPolicyData,
-    loadedUrlFilter,
+    loadedWebIngestPolicy,
     loadFirstPage,
     maxDepth,
     maxPages,
@@ -293,8 +329,6 @@ export function useWebIngestController({
     seedUrl,
     saveWebIngestPolicy,
     t,
-    urlFilterMode,
-    urlFilterPatternsText,
   ]);
 
   const cancelRun = useCallback(
@@ -315,25 +349,35 @@ export function useWebIngestController({
       addLinkOpen,
       boundaryPolicy,
       cancelRun,
+      crawlAllowPatternsText,
+      crawlBlockPatternsText,
       crawlMode,
+      materializationAllowPatternsText,
+      materializationBlockPatternsText,
       maxDepth,
       maxPages,
       openCreateDialog,
       refreshWebRuns,
+      ruleTestUrl,
       seedUrl,
       setAddLinkOpen,
       setBoundaryPolicy,
+      setCrawlAllowPatternsText: (value: string) =>
+        updatePolicyDraft({ crawlAllowText: value }),
+      setCrawlBlockPatternsText: (value: string) =>
+        updatePolicyDraft({ crawlBlockText: value }),
       setCrawlMode,
+      setMaterializationAllowPatternsText: (value: string) =>
+        updatePolicyDraft({ materializationAllowText: value }),
+      setMaterializationBlockPatternsText: (value: string) =>
+        updatePolicyDraft({ materializationBlockText: value }),
       setMaxDepth,
       setMaxPages,
+      setRuleTestUrl,
       setSeedUrl,
-      setUrlFilterMode,
-      setUrlFilterPatternsText,
       startWebIngest,
-      urlFilterLoading,
-      urlFilterMode,
-      urlFilterPatternsText,
       webIngestLoading,
+      webIngestPolicyLoading,
       webRuns,
       webRunsRefreshing,
     }),
@@ -341,19 +385,21 @@ export function useWebIngestController({
       addLinkOpen,
       boundaryPolicy,
       cancelRun,
+      crawlAllowPatternsText,
+      crawlBlockPatternsText,
       crawlMode,
+      materializationAllowPatternsText,
+      materializationBlockPatternsText,
       maxDepth,
       maxPages,
       openCreateDialog,
       refreshWebRuns,
+      ruleTestUrl,
       seedUrl,
-      setUrlFilterMode,
-      setUrlFilterPatternsText,
       startWebIngest,
-      urlFilterLoading,
-      urlFilterMode,
-      urlFilterPatternsText,
+      updatePolicyDraft,
       webIngestLoading,
+      webIngestPolicyLoading,
       webRuns,
       webRunsRefreshing,
     ],
