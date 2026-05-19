@@ -14,6 +14,8 @@ mod formatting;
 mod session;
 mod turn;
 
+pub(crate) use turn::ASSISTANT_AGENT_LOOP_DEADLINE_MS;
+
 #[cfg(test)]
 mod tests;
 
@@ -66,6 +68,7 @@ pub(crate) struct PreparedSegmentRevisionInfo {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExecutionPreparedReferenceContext {
     pub(crate) bundle_refs: Option<KnowledgeContextBundleReferenceSetRow>,
+    pub(crate) chunk_rows: Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>,
     pub(crate) fact_rank_refs: HashMap<Uuid, RankedBundleReference>,
     pub(crate) technical_fact_rows:
         Vec<crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow>,

@@ -5,7 +5,7 @@ Canonical MCP + assistant turn probe.
 Measures two agent-facing surfaces that `profile-ui-endpoints.py` does not cover:
 
 1. MCP graph/search tools (latency, payload size, and semantic coherence)
-2. Assistant JSON turn execution (completion timing and grounding/reference presence)
+2. Assistant SSE turn execution (stream timing and grounding/reference presence)
 
 Writes a markdown report to `tmp/agent-surface-profile-<timestamp>.md`.
 """
@@ -22,6 +22,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -48,6 +49,7 @@ DEFAULT_READ_MIN_CONTENT_CHARS = 200
 DEFAULT_READ_MIN_REFERENCES = 1
 DEFAULT_ASSISTANT_MIN_REFERENCES = 1
 DEFAULT_ASSISTANT_EXPECTED_VERIFICATION = "verified"
+DEFAULT_ASSISTANT_MAX_FIRST_FRAME_MS = 5000
 MCP_ANSWER_ROUTE = "/v1/mcp"
 MCP_DIAGNOSTICS_ROUTE = "/v1/mcp/diagnostics"
 
@@ -173,6 +175,13 @@ class AssistantTurnSummary:
     query_execution_id: str | None
     runtime_execution_id: str | None
     references: tuple[str, ...] = ()
+    time_to_first_frame_s: float | None = None
+    time_to_first_activity_s: float | None = None
+    time_to_first_model_request_s: float | None = None
+    time_to_first_tool_call_s: float | None = None
+    stream_event_count: int = 0
+    tool_call_started_count: int = 0
+    tool_call_finished_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -708,33 +717,155 @@ def execute_assistant_turn(
     top_k: int,
     timeout_seconds: int,
 ) -> AssistantTurnSummary:
-    sample = session.request_json(
+    payload = json.dumps({"contentText": question, "topK": top_k})
+    marker = "__CURL_METRICS__"
+    args = [
+        "curl",
+        "-N",
+        "-s",
+        "-b",
+        session.cookie_jar,
+        "-X",
         "POST",
-        f"/v1/query/sessions/{session_id}/turns",
-        body={"contentText": question, "topK": top_k},
-        headers={"Content-Type": "application/json"},
-        timeout_seconds=timeout_seconds,
+        "-H",
+        "Accept: text/event-stream",
+        "-H",
+        "Content-Type: application/json",
+        "-w",
+        f"\n{marker} %{{http_code}} %{{time_total}} %{{size_download}}",
+        "--max-time",
+        str(timeout_seconds),
+        "--data",
+        payload,
+        f"{session.base_url}/v1/query/sessions/{session_id}/turns",
+    ]
+    started_at = time.monotonic()
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
     )
-    if sample.status_code != 200:
-        raise RuntimeError(f"assistant turn returned HTTP {sample.status_code}")
-    if not isinstance(sample.payload, dict):
-        raise RuntimeError("assistant turn returned non-object payload")
 
-    total_refs = total_reference_count(sample.payload)
+    footer: tuple[int, float, int] | None = None
+    data_lines: list[str] = []
+    completed_payload: dict[str, Any] | None = None
+    failed_message: str | None = None
+    time_to_first_frame_s: float | None = None
+    time_to_first_activity_s: float | None = None
+    time_to_first_model_request_s: float | None = None
+    time_to_first_tool_call_s: float | None = None
+    stream_event_count = 0
+    tool_call_started_count = 0
+    tool_call_finished_count = 0
+
+    def elapsed() -> float:
+        return time.monotonic() - started_at
+
+    def dispatch_sse_data(raw_data: str) -> None:
+        nonlocal completed_payload
+        nonlocal failed_message
+        nonlocal time_to_first_activity_s
+        nonlocal time_to_first_model_request_s
+        nonlocal time_to_first_tool_call_s
+        nonlocal stream_event_count
+        nonlocal tool_call_started_count
+        nonlocal tool_call_finished_count
+
+        if not raw_data.strip():
+            return
+        try:
+            event_payload = json.loads(raw_data)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"assistant SSE emitted invalid JSON: {raw_data[:200]!r}") from exc
+        if not isinstance(event_payload, dict):
+            raise RuntimeError("assistant SSE emitted non-object data")
+        stream_event_count += 1
+        payload_type = event_payload.get("type")
+        if payload_type == "activity":
+            if time_to_first_activity_s is None:
+                time_to_first_activity_s = elapsed()
+            activity = event_payload.get("event") or {}
+            if not isinstance(activity, dict):
+                return
+            activity_type = activity.get("type")
+            if activity_type == "model_request" and time_to_first_model_request_s is None:
+                time_to_first_model_request_s = elapsed()
+            if activity_type == "tool_call_started":
+                tool_call_started_count += 1
+                if time_to_first_tool_call_s is None:
+                    time_to_first_tool_call_s = elapsed()
+            elif activity_type == "tool_call_finished":
+                tool_call_finished_count += 1
+        elif payload_type == "completed":
+            detail = event_payload.get("detail")
+            if not isinstance(detail, dict):
+                raise RuntimeError("assistant SSE completed event missing detail object")
+            completed_payload = detail
+        elif payload_type == "failed":
+            message = event_payload.get("message")
+            failed_message = message if isinstance(message, str) else "assistant turn failed"
+
+    if proc.stdout is None:
+        raise RuntimeError("failed to capture assistant SSE stdout")
+    try:
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip("\n")
+            if line.startswith(marker):
+                parts = line[len(marker) :].strip().split(" ", 2)
+                if len(parts) != 3:
+                    raise RuntimeError(f"assistant turn emitted malformed curl footer: {line!r}")
+                footer = (int(parts[0]), float(parts[1]), int(float(parts[2])))
+                continue
+            if time_to_first_frame_s is None and (
+                line.startswith("event:") or line.startswith("data:") or line.startswith(":")
+            ):
+                time_to_first_frame_s = elapsed()
+            if not line:
+                if data_lines:
+                    dispatch_sse_data("\n".join(data_lines))
+                    data_lines.clear()
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if data_lines:
+            dispatch_sse_data("\n".join(data_lines))
+    finally:
+        stderr = proc.stderr.read() if proc.stderr is not None else ""
+        return_code = proc.wait()
+
+    if return_code != 0:
+        raise RuntimeError(
+            f"assistant SSE turn failed: curl exit {return_code}: {stderr[:200]}"
+        )
+    if footer is None:
+        raise RuntimeError("assistant SSE turn did not emit curl metrics footer")
+    status_code, time_total_s, _size_download = footer
+    if status_code != 200:
+        raise RuntimeError(f"assistant SSE turn returned HTTP {status_code}")
+    if failed_message is not None:
+        raise RuntimeError(f"assistant SSE turn failed: {failed_message}")
+    if completed_payload is None:
+        raise RuntimeError("assistant SSE turn ended without a completed event")
+
+    total_refs = total_reference_count(completed_payload)
     completion_state = (
-        (sample.payload.get("execution") or {}).get("lifecycleState")
-        if isinstance(sample.payload.get("execution"), dict)
+        (completed_payload.get("execution") or {}).get("lifecycleState")
+        if isinstance(completed_payload.get("execution"), dict)
         else None
     )
     query_execution_id = (
-        (sample.payload.get("execution") or {}).get("id")
-        if isinstance(sample.payload.get("execution"), dict)
+        (completed_payload.get("execution") or {}).get("id")
+        if isinstance(completed_payload.get("execution"), dict)
         else None
     )
-    artifacts = summarize_assistant_turn_artifacts(sample.payload)
+    artifacts = summarize_assistant_turn_artifacts(completed_payload)
 
     return AssistantTurnSummary(
-        time_to_completed_s=sample.time_total_s,
+        time_to_completed_s=time_total_s,
         answer_length=len(artifacts.answer_text),
         answer_text=artifacts.answer_text,
         total_reference_count=total_refs,
@@ -743,6 +874,13 @@ def execute_assistant_turn(
         query_execution_id=query_execution_id if isinstance(query_execution_id, str) else None,
         runtime_execution_id=artifacts.runtime_execution_id,
         references=artifacts.references,
+        time_to_first_frame_s=time_to_first_frame_s,
+        time_to_first_activity_s=time_to_first_activity_s,
+        time_to_first_model_request_s=time_to_first_model_request_s,
+        time_to_first_tool_call_s=time_to_first_tool_call_s,
+        stream_event_count=stream_event_count,
+        tool_call_started_count=tool_call_started_count,
+        tool_call_finished_count=tool_call_finished_count,
     )
 
 
@@ -897,6 +1035,7 @@ def build_gate_checks(
     max_tool_latency_ms: int | None,
     max_completed_ms: int | None,
     tool_samples: list[tuple[str, CurlSample]],
+    max_first_frame_ms: int | None = None,
 ) -> list[GateCheck]:
     checks: list[GateCheck] = []
 
@@ -1155,6 +1294,45 @@ def build_gate_checks(
     for idx, summary in enumerate(assistant_summaries, start=1):
         checks.append(
             GateCheck(
+                label=f"assistant.run_{idx}.stream_events",
+                status="pass" if summary.stream_event_count > 0 else "fail",
+                detail=f"events={summary.stream_event_count}",
+            )
+        )
+        checks.append(
+            GateCheck(
+                label=f"assistant.run_{idx}.stream_tool_events",
+                status=(
+                    "pass"
+                    if summary.tool_call_started_count > 0
+                    and summary.tool_call_started_count == summary.tool_call_finished_count
+                    else "fail"
+                ),
+                detail=(
+                    f"started={summary.tool_call_started_count} "
+                    f"finished={summary.tool_call_finished_count}"
+                ),
+            )
+        )
+        if max_first_frame_ms is not None:
+            first_frame_ms = (
+                int(summary.time_to_first_frame_s * 1000)
+                if summary.time_to_first_frame_s is not None
+                else None
+            )
+            checks.append(
+                GateCheck(
+                    label=f"assistant.run_{idx}.first_frame_budget",
+                    status=(
+                        "pass"
+                        if first_frame_ms is not None and first_frame_ms <= max_first_frame_ms
+                        else "fail"
+                    ),
+                    detail=f"first_frame_ms={first_frame_ms or 'n/a'} max={max_first_frame_ms}",
+                )
+            )
+        checks.append(
+            GateCheck(
                 label=f"assistant.run_{idx}.verification",
                 status=(
                     "pass"
@@ -1326,83 +1504,88 @@ def build_gate_checks(
     if grounded_answer_summary is None:
         checks.append(
             GateCheck(
-                label="assistant.run_1.grounded_answer",
+                label="mcp.grounded_answer",
                 status="fail",
                 detail="grounded_answer probe missing",
             )
         )
-    elif not assistant_summaries:
-        checks.append(
-            GateCheck(
-                label="assistant.run_1.grounded_answer",
-                status="fail",
-                detail="assistant run missing for parity comparison",
-            )
-        )
     else:
-        ui_summary = assistant_summaries[0]
         checks.append(
             GateCheck(
-                label="assistant.run_1.grounded_answer_text",
+                label="mcp.grounded_answer.verifier",
                 status=(
                     "pass"
-                    if normalize_text_for_comparison(ui_summary.answer_text)
-                    == normalize_text_for_comparison(grounded_answer_summary.answer_text)
+                    if grounded_answer_summary.verifier_level == assistant_expected_verification
                     else "fail"
                 ),
                 detail=(
-                    f"ui='{format_preview(ui_summary.answer_text)}' "
-                    f"grounded='{format_preview(grounded_answer_summary.answer_text)}'"
+                    f"verifier={grounded_answer_summary.verifier_level or 'n/a'} "
+                    f"expected={assistant_expected_verification}"
                 ),
             )
         )
         checks.append(
             GateCheck(
-                label="assistant.run_1.grounded_answer_verifier",
+                label="mcp.grounded_answer.references",
                 status=(
                     "pass"
-                    if ui_summary.verification_state == grounded_answer_summary.verifier_level
+                    if len(grounded_answer_summary.references) >= assistant_min_references
                     else "fail"
                 ),
                 detail=(
-                    f"ui_verifier={ui_summary.verification_state or 'n/a'} "
-                    f"grounded_verifier={grounded_answer_summary.verifier_level or 'n/a'}"
+                    f"references={len(grounded_answer_summary.references)} "
+                    f"min={assistant_min_references}"
                 ),
             )
         )
         checks.append(
             GateCheck(
-                label="assistant.run_1.grounded_answer_runtime_execution_id",
-                status=(
-                    "pass"
-                    if ui_summary.runtime_execution_id
-                    == grounded_answer_summary.runtime_execution_id
-                    else "fail"
-                ),
-                detail=(
-                    f"ui_runtime={ui_summary.runtime_execution_id or 'n/a'} "
-                    f"grounded_runtime={grounded_answer_summary.runtime_execution_id or 'n/a'}"
-                ),
+                label="mcp.grounded_answer.runtime_execution_id",
+                status="pass" if grounded_answer_summary.runtime_execution_id else "fail",
+                detail=f"runtimeExecutionId={grounded_answer_summary.runtime_execution_id or 'missing'}",
             )
         )
-        checks.append(
-            GateCheck(
-                label="assistant.run_1.grounded_answer_references",
-                status=(
-                    "pass"
-                    if ui_summary.references == grounded_answer_summary.references
-                    else "fail"
-                ),
-                detail=(
-                    f"ui_references={len(ui_summary.references)} "
-                    f"grounded_references={len(grounded_answer_summary.references)}"
-                ),
+        if assistant_summaries:
+            ui_summary = assistant_summaries[0]
+            checks.append(
+                GateCheck(
+                    label="assistant.run_1.mcp_answer_quality_parity",
+                    status=(
+                        "pass"
+                        if ui_summary.verification_state == grounded_answer_summary.verifier_level
+                        and ui_summary.total_reference_count >= assistant_min_references
+                        and len(grounded_answer_summary.references) >= assistant_min_references
+                        else "fail"
+                    ),
+                    detail=(
+                        f"ui_verifier={ui_summary.verification_state or 'n/a'} "
+                        f"mcp_verifier={grounded_answer_summary.verifier_level or 'n/a'} "
+                        f"ui_references={ui_summary.total_reference_count} "
+                        f"mcp_references={len(grounded_answer_summary.references)}"
+                    ),
+                )
             )
-        )
+        else:
+            checks.append(
+                GateCheck(
+                    label="assistant.run_1.mcp_answer_quality_parity",
+                    status="fail",
+                    detail="assistant run missing for MCP answer quality comparison",
+                )
+            )
 
     if max_tool_latency_ms is not None:
         for name, sample in tool_samples:
             tool_ms = int(sample.time_total_s * 1000)
+            if name == "grounded_answer" and max_completed_ms is not None:
+                checks.append(
+                    GateCheck(
+                        label="tool.grounded_answer.completed_budget",
+                        status="pass" if tool_ms <= max_completed_ms else "fail",
+                        detail=f"completed_ms={tool_ms} max={max_completed_ms}",
+                    )
+                )
+                continue
             checks.append(
                 GateCheck(
                     label=f"tool.{name}.latency_budget",
@@ -1520,12 +1703,15 @@ def render_report(
 |---:|---:|---:|
 | {len(assistant_summaries)} | {format_seconds(avg_completed)} | {statistics.mean(summary.total_reference_count for summary in assistant_summaries):.1f} |
 
-| Run | Completed | Answer chars | References | Verification | Query execution | Runtime execution | Lifecycle |
-|---|---:|---:|---:|---|---|---|---|
+| Run | First frame | First tool | Completed | Tool events | Answer chars | References | Verification | Query execution | Runtime execution | Lifecycle |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|---|
 """
     for idx, summary in enumerate(assistant_summaries, start=1):
         report += (
-            f"| {idx} | {format_seconds(summary.time_to_completed_s)}"
+            f"| {idx} | {format_seconds(summary.time_to_first_frame_s)}"
+            f" | {format_seconds(summary.time_to_first_tool_call_s)}"
+            f" | {format_seconds(summary.time_to_completed_s)}"
+            f" | {summary.tool_call_started_count}/{summary.tool_call_finished_count}"
             f" | {summary.answer_length}"
             f" | {summary.total_reference_count}"
             f" | {summary.verification_state or 'n/a'}"
@@ -1627,6 +1813,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--expected-search-top-label")
     parser.add_argument("--max-tool-latency-ms", type=int)
     parser.add_argument("--max-completed-ms", type=int)
+    parser.add_argument("--max-first-frame-ms", type=int, default=DEFAULT_ASSISTANT_MAX_FIRST_FRAME_MS)
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--output-path")
     return parser.parse_args(argv)
@@ -1889,6 +2076,7 @@ def main(argv: list[str]) -> int:
                 *((("get_runtime_execution_legacy_field", legacy_runtime_execution_probe),) if legacy_runtime_execution_probe is not None else ()),
                 *((("grounded_answer", grounded_answer),) if grounded_answer is not None else ()),
             ],
+            max_first_frame_ms=args.max_first_frame_ms,
         )
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

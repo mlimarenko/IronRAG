@@ -94,7 +94,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "list_documents" => Some(McpToolDescriptor {
             name: "list_documents",
-            description: "List documents in a knowledge library. Use this ONLY for library inventory and meta questions (\"what documents do you have\", \"what is this library about\"). Never use it as the first step for ordinary content questions, setup questions, factual questions, or versioned change-summary questions — it returns only titles and status, not grounded body evidence. For those questions call `grounded_answer` first; use `search_documents` + `read_document` only when you need raw inspection after the grounded answer.",
+            description: "List documents in a knowledge library. Use this ONLY for library inventory and meta questions (\"what documents do you have\", \"what is this library about\"). Never use it as the proof step for ordinary content questions, setup questions, factual questions, or versioned change-summary questions — it returns only titles and status, not grounded body evidence. For those questions use `grounded_answer` or inspect source content with `search_documents` + `read_document`; for composite questions, use listing only to choose follow-up document reads, not as the final absence check.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

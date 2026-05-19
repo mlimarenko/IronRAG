@@ -92,8 +92,6 @@ pub const MCP_DIAGNOSTICS_TOOL_NAMES: &[&str] = &[
     "get_graph_topology",
     "list_relations",
     "get_communities",
-    // Canonical grounded-answer entry point — parity with the UI
-    // assistant: same pipeline, same citations, same verifier.
     "grounded_answer",
 ];
 
@@ -384,6 +382,8 @@ async fn capability_snapshot(
     path = "/v1/mcp/capabilities",
     tag = "automation",
     operation_id = "getMcpCapabilities",
+    summary = "List answer MCP capabilities for the caller.",
+    description = "Returns the answer-surface MCP tools visible to the authenticated principal. External MCP clients and the UI assistant setup flow can use this endpoint to discover whether the token can see workspaces, libraries, documents, graph tools, runtime tools, and `grounded_answer`. The response is authorization-scoped: workspace and library counts reflect only what the token can access, and the tool list omits tools disallowed for the token kind or policy.",
     responses(
         (status = 200, description = "MCP capability snapshot scoped to the caller's principal", body = crate::mcp_types::McpCapabilitySnapshot),
         (status = 401, description = "Caller is not authenticated"),
@@ -403,6 +403,8 @@ pub async fn get_answer_capabilities(
     path = "/v1/mcp/diagnostics/capabilities",
     tag = "automation",
     operation_id = "getMcpDiagnosticsCapabilities",
+    summary = "List diagnostics MCP capabilities for the caller.",
+    description = "Returns the diagnostics MCP tool surface visible to the authenticated principal. Use this before wiring operational agents that inspect runtime state, traces, or backend diagnostics rather than answering library-content questions. The diagnostics surface is separate from `/v1/mcp` so tokens can expose operational tools without expanding the normal answer surface.",
     responses(
         (status = 200, description = "Diagnostics MCP capability snapshot scoped to the caller's principal", body = crate::mcp_types::McpCapabilitySnapshot),
         (status = 401, description = "Caller is not authenticated"),
@@ -469,7 +471,9 @@ async fn get_capabilities_for_surface(
     path = "/v1/mcp",
     tag = "automation",
     operation_id = "postMcpRequest",
-    request_body(content = serde_json::Value, content_type = "application/json", description = "JSON-RPC 2.0 request envelope (method, params, id)"),
+    summary = "Execute answer-surface MCP JSON-RPC.",
+    description = "Main JSON-RPC endpoint for external MCP clients and other agent runtimes. It supports MCP initialization, tool listing, and tool invocation over the answer surface. Tools on this surface are read-oriented and designed for agentic question answering: catalog discovery, document search/read, graph inspection, runtime trace lookup, and `grounded_answer`. For user-facing answers, clients should let the agent choose tools from the listed schemas. Do not mechanically wrap every user message as a `grounded_answer` call; composite questions often need several document, graph, runtime, and grounded-answer probes before final synthesis.",
+    request_body(content = serde_json::Value, content_type = "application/json", description = "JSON-RPC 2.0 request envelope. Typical methods are initialize, tools/list, and tools/call with method-specific params."),
     responses(
         (status = 200, description = "JSON-RPC response for the MCP tool surface", body = serde_json::Value),
         (status = 401, description = "Caller is not authenticated"),
@@ -489,7 +493,9 @@ pub async fn handle_answer_jsonrpc(
     path = "/v1/mcp/diagnostics",
     tag = "automation",
     operation_id = "postMcpDiagnosticsRequest",
-    request_body(content = serde_json::Value, content_type = "application/json", description = "JSON-RPC 2.0 request envelope for the diagnostics MCP tool surface"),
+    summary = "Execute diagnostics MCP JSON-RPC.",
+    description = "JSON-RPC endpoint for operational MCP clients. This surface is intended for debugging and automation that needs runtime state or traces, not for ordinary library question answering. Use `/v1/mcp/diagnostics/capabilities` first to check which diagnostic tools the token may call. Keep this surface separate from answer agents when a token should not expose operational inspection tools to normal chat flows.",
+    request_body(content = serde_json::Value, content_type = "application/json", description = "JSON-RPC 2.0 request envelope for the diagnostics MCP tool surface."),
     responses(
         (status = 200, description = "JSON-RPC response for the diagnostics MCP tool surface", body = serde_json::Value),
         (status = 401, description = "Caller is not authenticated"),

@@ -346,6 +346,7 @@ mod tests {
         let descriptor = documents::descriptor("list_documents").expect("list_documents");
 
         assert!(descriptor.description.contains("versioned change-summary questions"));
-        assert!(descriptor.description.contains("call `grounded_answer` first"));
+        assert!(descriptor.description.contains("use `grounded_answer`"));
+        assert!(descriptor.description.contains("not as the final absence check"));
     }
 }

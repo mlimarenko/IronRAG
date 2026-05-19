@@ -91,6 +91,50 @@ pub async fn list_model_catalog(
     }
 }
 
+pub async fn get_provider_catalog_by_id(
+    postgres: &PgPool,
+    provider_catalog_id: Uuid,
+) -> Result<Option<AiProviderCatalogRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiProviderCatalogRow>(
+        "select
+            id,
+            provider_kind,
+            display_name,
+            api_style::text as api_style,
+            lifecycle_state::text as lifecycle_state,
+            default_base_url,
+            capability_flags_json
+         from ai_provider_catalog
+         where id = $1",
+    )
+    .bind(provider_catalog_id)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn get_model_catalog_by_id(
+    postgres: &PgPool,
+    model_catalog_id: Uuid,
+) -> Result<Option<AiModelCatalogRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiModelCatalogRow>(
+        "select
+            id,
+            provider_catalog_id,
+            model_name,
+            capability_kind::text as capability_kind,
+            modality_kind::text as modality_kind,
+            context_window,
+            max_output_tokens,
+            lifecycle_state::text as lifecycle_state,
+            metadata_json
+         from ai_model_catalog
+         where id = $1",
+    )
+    .bind(model_catalog_id)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn get_provider_catalog_by_kind(
     postgres: &PgPool,
     provider_kind: &str,

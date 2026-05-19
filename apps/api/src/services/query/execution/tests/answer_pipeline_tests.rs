@@ -201,15 +201,15 @@ Trailing note";
 
 #[test]
 fn assemble_answer_context_excludes_recent_documents_for_mcp_ui_parity() {
-    // Constitution §16 — same query + same library must return identical
-    // answers across UI and MCP channels. The answer prompt is a
-    // deterministic function of (query, retrieved evidence, stable
-    // library summary). Live ingest metadata (recent uploads,
-    // pipeline_state churn, mutating preview excerpts) MUST NOT enter
-    // this prompt — it would drift between back-to-back calls during
-    // active ingestion. Diagnostic recent-documents data is still
-    // surfaced to the UI via `RuntimeStructuredQueryLibrarySummary`,
-    // but it never reaches the LLM answer step.
+    // Constitution §16 — direct MCP `grounded_answer` calls and UI-agent
+    // `grounded_answer` tool calls must share the same deterministic
+    // prompt for the same query and evidence. Live ingest metadata
+    // (recent uploads, pipeline_state churn, mutating preview excerpts)
+    // MUST NOT enter this prompt — it would drift between back-to-back
+    // tool calls during active ingestion. Diagnostic recent-documents
+    // data is still surfaced to the UI via
+    // `RuntimeStructuredQueryLibrarySummary`, but it never reaches the
+    // LLM answer step.
     let summary = RuntimeQueryLibrarySummary {
         document_count: 12,
         graph_ready_count: 8,

@@ -14,10 +14,10 @@ apps/web/src/
 ├── lib/           Non-React utilities
 ├── pages/         Route shells and page-owned feature packages
 ├── test/          Cross-cutting UI audits
-└── types/         Canonical frontend domain types
+└── types/         Shared frontend domain types
 ```
 
-## Canonical frontend contracts
+## Frontend contracts
 
 - `api/*` talks to the backend and returns wire payloads or already-normalized DTOs.
 - `adapters/*` are the only place where Raw API envelopes become domain models.
@@ -47,7 +47,7 @@ apps/web/src/
 
 - Owns session list, active session, message history, pending-turn state, and debug context.
 - Uses `/v1/query/sessions/*` for session CRUD and turn execution.
-- Turn execution uses one canonical `POST /v1/query/sessions/{sessionId}/turns` request. The UI requests `text/event-stream` so activity, failure, and completion events can update the pending answer bubble while the completed answer remains the persisted session/execution record.
+- Turn execution uses one `POST /v1/query/sessions/{sessionId}/turns` request. The UI requests `text/event-stream` so activity, failure, and completion events can update the pending answer bubble while the completed answer remains the persisted session/execution record.
 - If the browser or proxy drops the stream after backend work has started, the client reloads the durable session result created after the request boundary instead of submitting another turn. Backend `failed` events remain terminal errors.
 - LLM context debug loads persisted execution snapshots, not process-local cache, so reloads and cached answer replays remain inspectable when a snapshot exists.
 

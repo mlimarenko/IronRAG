@@ -11,9 +11,9 @@ import { Composer } from './components/assistant-page/Composer';
 import { useAssistantSession } from './components/assistant-page/useAssistantSession';
 
 const SESSION_RAIL_ID = 'assistant-session-rail';
-const DEBUG_PANEL_DEFAULT_WIDTH = 380;
-const DEBUG_PANEL_MIN_WIDTH = 320;
-const DEBUG_PANEL_MAX_WIDTH = 720;
+const DEBUG_PANEL_DEFAULT_WIDTH = 560;
+const DEBUG_PANEL_MIN_WIDTH = 420;
+const DEBUG_PANEL_MAX_WIDTH = 960;
 
 function parseBoolean(raw: unknown): boolean {
   return raw === true;

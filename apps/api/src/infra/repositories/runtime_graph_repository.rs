@@ -98,6 +98,8 @@ const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_TOKENS: usize = 6;
 const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_TOKENS: usize = 20;
 const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_CHARS: usize = 128;
 const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_CHARS: usize = 220;
+const RUNTIME_GRAPH_ENTITY_SEARCH_TOKEN_CAP: usize = 8;
+const RUNTIME_GRAPH_ENTITY_SEARCH_TOKEN_MIN_CHARS: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphProjectionCountsRow {
@@ -482,6 +484,38 @@ pub async fn list_runtime_graph_nodes_by_ids_or_document_type(
     .bind(library_id)
     .bind(projection_version)
     .bind(admitted_ids)
+    .fetch_all(pool)
+    .await
+}
+
+/// Fetches runtime graph nodes by id for one projection version without
+/// re-evaluating the admitted-edge predicate. Use this only when the caller
+/// already proved the ids came from an admitted graph edge/entity query.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying graph nodes.
+pub async fn list_runtime_graph_nodes_by_ids(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    node_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "select id, library_id, canonical_key, label, node_type, aliases_json,
+            summary, metadata_json, support_count, projection_version, created_at, updated_at
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and id = any($3::uuid[])
+         order by label asc, created_at asc, id asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(node_ids)
     .fetch_all(pool)
     .await
 }
@@ -1481,6 +1515,10 @@ pub async fn search_runtime_graph_evidence_by_text(
     if search_queries.is_empty() && literal_queries.is_empty() {
         return Ok(Vec::new());
     }
+    let per_query_candidate_limit = runtime_graph_evidence_per_query_candidate_limit(
+        limit,
+        search_queries.len().saturating_add(literal_queries.len()),
+    );
 
     sqlx::query_as::<_, RuntimeGraphEvidenceRow>(
         "with requested_text(search_query, ordinal) as (
@@ -1553,7 +1591,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                     evidence.confidence_score desc nulls last,
                     evidence.created_at desc,
                     evidence.id desc
-                 limit $4
+                 limit $5
              ) as evidence
          ),
          literal_matched as (
@@ -1599,7 +1637,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                     evidence.confidence_score desc nulls last,
                     evidence.created_at desc,
                     evidence.id desc
-                 limit $4
+                 limit $5
              ) as evidence
          ),
          matched as (
@@ -1682,8 +1720,19 @@ pub async fn search_runtime_graph_evidence_by_text(
     .bind(search_queries)
     .bind(literal_queries)
     .bind(limit)
+    .bind(per_query_candidate_limit)
     .fetch_all(pool)
     .await
+}
+
+fn runtime_graph_evidence_per_query_candidate_limit(limit: i64, query_count: usize) -> i64 {
+    if limit <= 0 || query_count == 0 {
+        return 0;
+    }
+    if query_count <= 1 {
+        return limit;
+    }
+    limit.min(24)
 }
 
 fn runtime_graph_evidence_text_search_queries(query_texts: &[String]) -> Vec<String> {
@@ -2671,7 +2720,132 @@ pub async fn search_admitted_runtime_graph_entities_by_query_text(
         return Ok(Vec::new());
     }
 
-    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+    let search_terms = runtime_graph_entity_search_terms(&normalized_query);
+    let candidate_limit = limit.saturating_mul(6).min(1_000).max(limit);
+    let mut rows = sqlx::query_as::<_, RuntimeGraphNodeRow>(
+        "with search_terms(value) as (
+            select unnest($4::text[])
+         ),
+         matched_ids as (
+            select id, min(match_rank) as match_rank
+            from (
+                select id, 0::integer as match_rank
+                from (
+                    select n.id
+                    from runtime_graph_node n
+                    where n.library_id = $1
+                      and n.projection_version = $2
+                      and n.node_type <> 'document'
+                      and lower(n.label) = $3
+                    order by n.support_count desc, n.label asc, n.created_at asc, n.id asc
+                    limit $6
+                ) label_exact
+                union all
+                select id, 1::integer as match_rank
+                from (
+                    select n.id
+                    from runtime_graph_node n
+                    where n.library_id = $1
+                      and n.projection_version = $2
+                      and n.node_type <> 'document'
+                      and lower(n.aliases_json::text) like '%\"' || $3 || '\"%'
+                    order by n.support_count desc, n.label asc, n.created_at asc, n.id asc
+                    limit $6
+                ) alias_exact
+                union all
+                select id, 2::integer as match_rank
+                from (
+                    select n.id
+                    from runtime_graph_node n
+                    where n.library_id = $1
+                      and n.projection_version = $2
+                      and n.node_type <> 'document'
+                      and lower(n.label) like $3 || '%'
+                    order by n.support_count desc, n.label asc, n.created_at asc, n.id asc
+                    limit $6
+                ) label_prefix
+                union all
+                select id, 3::integer as match_rank
+                from (
+                    select n.id
+                    from runtime_graph_node n
+                    where n.library_id = $1
+                      and n.projection_version = $2
+                      and n.node_type <> 'document'
+                      and lower(n.aliases_json::text) like '%\"' || $3 || '%'
+                    order by n.support_count desc, n.label asc, n.created_at asc, n.id asc
+                    limit $6
+                ) alias_prefix
+                union all
+                select id, 4::integer as match_rank
+                from (
+                    select n.id
+                    from runtime_graph_node n
+                    where n.library_id = $1
+                      and n.projection_version = $2
+                      and n.node_type <> 'document'
+                      and lower(n.label) like '%' || $3 || '%'
+                    order by n.support_count desc, n.label asc, n.created_at asc, n.id asc
+                    limit $6
+                ) label_phrase
+                union all
+                select id, 5::integer as match_rank
+                from (
+                    select n.id
+                    from runtime_graph_node n
+                    where n.library_id = $1
+                      and n.projection_version = $2
+                      and n.node_type <> 'document'
+                      and lower(n.aliases_json::text) like '%' || $3 || '%'
+                    order by n.support_count desc, n.label asc, n.created_at asc, n.id asc
+                    limit $6
+                ) alias_phrase
+                union all
+                select id, 6::integer as match_rank
+                from (
+                    select n.id
+                    from runtime_graph_node n
+                    join search_terms term on lower(n.label) like '%' || term.value || '%'
+                    where n.library_id = $1
+                      and n.projection_version = $2
+                      and n.node_type <> 'document'
+                    order by n.support_count desc, n.label asc, n.created_at asc, n.id asc
+                    limit $6
+                ) label_terms
+            ) matches
+            group by id
+            order by min(match_rank) asc, id asc
+            limit $6
+         )
+         select
+            n.id, n.library_id, n.canonical_key, n.label, n.node_type,
+            n.aliases_json, n.summary, n.metadata_json, n.support_count,
+            n.projection_version, n.created_at, n.updated_at
+         from matched_ids matched
+         join runtime_graph_node n on n.id = matched.id
+         order by
+            matched.match_rank asc,
+            n.support_count desc,
+            n.label asc,
+            n.created_at asc
+         limit $5",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(&normalized_query)
+    .bind(&search_terms)
+    .bind(limit)
+    .bind(candidate_limit)
+    .fetch_all(pool)
+    .await?;
+
+    let remaining_limit = limit.saturating_sub(rows.len() as i64);
+    if remaining_limit <= 0 {
+        return Ok(rows);
+    }
+
+    let matched_node_ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+    let mut summary_rows = sqlx::query_as::<_, RuntimeGraphNodeRow>(
         "select
             n.id, n.library_id, n.canonical_key, n.label, n.node_type,
             n.aliases_json, n.summary, n.metadata_json, n.support_count,
@@ -2680,63 +2854,47 @@ pub async fn search_admitted_runtime_graph_entities_by_query_text(
          where n.library_id = $1
            and n.projection_version = $2
            and n.node_type <> 'document'
+           and not (n.id = any($5::uuid[]))
            and (
-                lower(n.label) like '%' || $3 || '%'
-                or coalesce(lower(n.summary), '') like '%' || $3 || '%'
+                coalesce(lower(n.summary), '') like '%' || $3 || '%'
                 or exists (
                     select 1
-                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
-                    where lower(alias.value) like '%' || $3 || '%'
-                )
-                or exists (
-                    select 1
-                    from unnest(string_to_array($3, ' ')) as word
-                    where length(word) > 2
-                      and (
-                            lower(n.label) like '%' || word || '%'
-                            or coalesce(lower(n.summary), '') like '%' || word || '%'
-                            or exists (
-                                select 1
-                                from jsonb_array_elements_text(n.aliases_json) as alias(value)
-                                where lower(alias.value) like '%' || word || '%'
-                            )
-                      )
+                    from unnest($4::text[]) as term(value)
+                    where coalesce(lower(n.summary), '') like '%' || term.value || '%'
                 )
            )
          order by
             case
-                when lower(n.label) = $3 then 0
-                when exists (
-                    select 1
-                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
-                    where lower(alias.value) = $3
-                ) then 1
-                when lower(n.label) like $3 || '%' then 2
-                when exists (
-                    select 1
-                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
-                    where lower(alias.value) like $3 || '%'
-                ) then 3
-                when lower(n.label) like '%' || $3 || '%' then 4
-                when exists (
-                    select 1
-                    from jsonb_array_elements_text(n.aliases_json) as alias(value)
-                    where lower(alias.value) like '%' || $3 || '%'
-                ) then 5
-                when coalesce(lower(n.summary), '') like '%' || $3 || '%' then 6
-                else 7
+                when coalesce(lower(n.summary), '') like '%' || $3 || '%' then 0
+                else 1
             end asc,
             n.support_count desc,
             n.label asc,
             n.created_at asc
-         limit $4",
+         limit $6",
     )
     .bind(library_id)
     .bind(projection_version)
-    .bind(normalized_query)
-    .bind(limit)
+    .bind(&normalized_query)
+    .bind(&search_terms)
+    .bind(&matched_node_ids)
+    .bind(remaining_limit)
     .fetch_all(pool)
-    .await
+    .await?;
+
+    rows.append(&mut summary_rows);
+    Ok(rows)
+}
+
+fn runtime_graph_entity_search_terms(query_text: &str) -> Vec<String> {
+    normalized_alnum_token_sequence_by(
+        query_text,
+        |token| {
+            token.chars().any(char::is_numeric)
+                || token.chars().count() >= RUNTIME_GRAPH_ENTITY_SEARCH_TOKEN_MIN_CHARS
+        },
+        Some(RUNTIME_GRAPH_ENTITY_SEARCH_TOKEN_CAP),
+    )
 }
 
 fn admitted_runtime_graph_counts_query() -> String {
@@ -2777,8 +2935,10 @@ fn admitted_runtime_graph_counts_query() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP,
-        runtime_graph_evidence_literal_search_queries, runtime_graph_evidence_text_search_queries,
+        RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP, runtime_graph_entity_search_terms,
+        runtime_graph_evidence_literal_search_queries,
+        runtime_graph_evidence_per_query_candidate_limit,
+        runtime_graph_evidence_text_search_queries,
         runtime_graph_evidence_text_search_token_prefix, runtime_graph_evidence_text_search_tokens,
     };
 
@@ -2799,6 +2959,24 @@ mod tests {
                 "12".to_string(),
                 "port".to_string(),
                 "9407".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn entity_search_terms_keep_structural_needles_without_language_lists() {
+        let terms =
+            runtime_graph_entity_search_terms("Alpha/report://needle?fontSize=12 alpha alpha 80");
+
+        assert_eq!(
+            terms,
+            vec![
+                "alpha".to_string(),
+                "report".to_string(),
+                "needle".to_string(),
+                "fontsize".to_string(),
+                "12".to_string(),
+                "80".to_string(),
             ],
         );
     }
@@ -2856,6 +3034,14 @@ mod tests {
         ]);
 
         assert_eq!(queries, vec!["alpha module".to_string()]);
+    }
+
+    #[test]
+    fn graph_evidence_text_search_bounds_per_query_candidates_under_fanout() {
+        assert_eq!(runtime_graph_evidence_per_query_candidate_limit(72, 0), 0);
+        assert_eq!(runtime_graph_evidence_per_query_candidate_limit(72, 1), 72);
+        assert_eq!(runtime_graph_evidence_per_query_candidate_limit(72, 2), 24);
+        assert_eq!(runtime_graph_evidence_per_query_candidate_limit(12, 4), 12);
     }
 
     #[test]

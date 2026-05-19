@@ -1,15 +1,13 @@
-//! `grounded_answer` — canonical MCP tool that gives every MCP agent
-//! exactly the same grounded answer the IronRAG operator UI assistant
-//! produces for the same library and question.
+//! `grounded_answer` - canonical MCP answer tool that runs IronRAG's
+//! grounded-answer pipeline for one library question.
 //!
 //! The implementation is deliberately a thin translator over the
 //! canonical query service (`state.canonical_services.query`). The
 //! handler creates an ephemeral conversation, delegates to
-//! `execute_turn` — the same entry point the UI uses — and reshapes the
-//! result into the MCP tool-call payload. No parallel retrieval,
-//! ranking, or answer-generation logic lives here — MCP is not a
-//! degraded lane; it returns the same answer the UI assistant
-//! returns for the same library and question.
+//! `execute_grounded_answer_turn`, and reshapes the result into the MCP tool-call
+//! payload. The web UI assistant calls this through the in-process MCP
+//! dispatcher when its model chooses `grounded_answer`; external clients
+//! call the same tool contract through JSON-RPC.
 //!
 //! Phase 1 scope:
 //!   - input: `library`, `query`, optional `conversationTurns`,
@@ -42,7 +40,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     }
     Some(McpToolDescriptor {
         name: "grounded_answer",
-        description: "Ask a natural-language question against one library and get a grounded answer — the SAME pipeline the IronRAG UI assistant uses (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. The tool text is the human-readable reply. Structured output includes `executionDetail` with the same chunk, prepared-segment, technical-fact, entity, relation, verifier, runtime, request, and response fields the UI assistant receives, plus top-level `runtimeExecutionId`, `executionId`, and `conversationId` shortcuts for trace lookups.",
+        description: "Ask a natural-language question against one library and get a grounded answer from IronRAG's canonical answer pipeline (query planning, hybrid retrieval, graph-aware context, answer generation, verifier). Prefer this over `search_documents` + `read_document` for ordinary one-step content questions where the user expects an answer, not a hit list. For composite questions that require comparing documents, correlating graph structure with source text, or validating several relationships, first split the task into focused probes with document and graph tools; then call `grounded_answer` only for a concise unresolved subquestion instead of forwarding the whole broad request unchanged. The tool text is the human-readable reply. Structured output includes `executionDetail` with chunk, prepared-segment, technical-fact, entity, relation, verifier, runtime, request, and response fields, plus top-level `runtimeExecutionId`, `executionId`, and `conversationId` shortcuts for trace lookups.",
         input_schema: json!({
             "type": "object",
             "required": ["library", "query"],
@@ -53,7 +51,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 },
                 "query": {
                     "type": "string",
-                    "description": "Natural-language question in the user's language. The internal QueryCompiler turns it into a typed QueryIR (act, scope, target_types) before retrieval — no keyword pre-processing is required on the client side."
+                    "description": "Natural-language question in the user's language. IronRAG's QueryCompiler turns it into a typed QueryIR (act, scope, target_types) before retrieval — no keyword pre-processing is required on the client side."
                 },
                 "conversationTurns": {
                     "type": "array",
@@ -129,13 +127,12 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
         Err(error) => return tool_error_result(error),
     };
 
-    // Ephemeral conversation: the canonical `execute_turn` API is
-    // conversation-scoped because the UI tracks history and the LLM
-    // loop consumes the last N turns for coreference resolution. For a
-    // stateless MCP tool call we create a single conversation, run one
-    // turn on it, and return. The conversation row is left in place so
-    // operators can audit the turn alongside UI-originated turns —
-    // phase 2 may add a retention policy if this becomes noisy.
+    // Ephemeral conversation: `execute_grounded_answer_turn` is
+    // conversation-scoped because the grounded-answer pipeline consumes
+    // recent turns for coreference resolution. For a stateless MCP tool
+    // call we create a single conversation, run one turn on it, and
+    // return. The conversation row is left in place so operators can
+    // audit the turn alongside UI-originated turns.
     let conversation = match context
         .state
         .canonical_services
@@ -146,8 +143,8 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                 workspace_id: library.workspace_id,
                 library_id: library.id,
                 created_by_principal_id: Some(context.auth.principal_id),
-                title: Some(conversation_title(&parsed.query)),
-                request_surface: "mcp".to_string(),
+                title: Some(conversation_title(context.surface_kind.as_str(), &parsed.query)),
+                request_surface: context.surface_kind.as_str().to_string(),
             },
         )
         .await
@@ -160,7 +157,7 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
         .state
         .canonical_services
         .query
-        .execute_turn(
+        .execute_grounded_answer_turn(
             context.state,
             ExecuteConversationTurnCommand {
                 conversation_id: conversation.id,
@@ -186,7 +183,7 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
             context.state,
             AppendQueryExecutionAuditCommand {
                 actor_principal_id: context.auth.principal_id,
-                surface_kind: "mcp".to_string(),
+                surface_kind: context.surface_kind.as_str().to_string(),
                 request_id: Some(context.request_id.to_string()),
                 query_session_id: outcome.conversation.id,
                 query_execution_id: outcome.execution.id,
@@ -214,18 +211,16 @@ pub(crate) fn resolve_grounded_answer_top_k(requested_top_k: Option<usize>) -> u
     resolve_top_k(requested_top_k)
 }
 
-fn conversation_title(query: &str) -> String {
-    // Keep ephemeral MCP conversations visually distinct from
-    // UI-originated ones so operators auditing query history can tell
-    // them apart at a glance. The UI derives its title from the first
-    // user message; we prepend a transport marker so mixed sessions
-    // don't look suspicious.
+fn conversation_title(surface_kind: &str, query: &str) -> String {
+    // Keep tool-created conversations visually distinct from ordinary
+    // user sessions while preserving the real request surface.
     const MAX_LEN: usize = 96;
+    let prefix = format!("[{}]", surface_kind.to_ascii_uppercase());
     let trimmed: String = query.trim().chars().take(MAX_LEN).collect();
     if trimmed.is_empty() {
-        "[MCP] grounded_answer".to_string()
+        format!("{prefix} grounded_answer")
     } else {
-        format!("[MCP] {trimmed}")
+        format!("{prefix} {trimmed}")
     }
 }
 
@@ -312,6 +307,12 @@ mod tests {
             resolve_grounded_answer_top_k(Some(6)),
             crate::interfaces::http::query::resolve_query_turn_top_k(Some(6))
         );
+    }
+
+    #[test]
+    fn conversation_title_preserves_actual_surface() {
+        assert_eq!(conversation_title("mcp", "  Lookup adapters  "), "[MCP] Lookup adapters");
+        assert_eq!(conversation_title("ui", ""), "[UI] grounded_answer");
     }
 
     #[test]

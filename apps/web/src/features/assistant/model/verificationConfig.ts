@@ -12,7 +12,7 @@ type VerificationBadgeConfig = {
  * Static lookup table for verification badge styling. Lives outside the
  * page component so that React does not rebuild it every render and so
  * both the inline-in-thread badge and the evidence panel pull from the
- * same canonical source of truth.
+ * same source of truth.
  */
 export const VERIFICATION_CONFIG: Record<VerificationState, VerificationBadgeConfig> = {
   passed: {

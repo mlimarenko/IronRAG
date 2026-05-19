@@ -61,6 +61,7 @@ pub struct RuntimeTaskRequest<TTask: RuntimeTask> {
     pub contract_name: &'static str,
     pub contract_version: &'static str,
     pub runtime_overrides: Option<RuntimeOverrideBudget>,
+    pub surface_kind_override: Option<RuntimeSurfaceKind>,
     _task: PhantomData<TTask>,
 }
 
@@ -74,6 +75,7 @@ impl<TTask: RuntimeTask> RuntimeTaskRequest<TTask> {
             contract_name: TTask::CONTRACT_NAME,
             contract_version: TTask::CONTRACT_VERSION,
             runtime_overrides: None,
+            surface_kind_override: None,
             _task: PhantomData,
         }
     }
@@ -82,6 +84,13 @@ impl<TTask: RuntimeTask> RuntimeTaskRequest<TTask> {
     #[allow(clippy::missing_const_for_fn)]
     pub fn with_overrides(mut self, runtime_overrides: RuntimeOverrideBudget) -> Self {
         self.runtime_overrides = Some(runtime_overrides);
+        self
+    }
+
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn with_surface_kind(mut self, surface_kind: RuntimeSurfaceKind) -> Self {
+        self.surface_kind_override = Some(surface_kind);
         self
     }
 }

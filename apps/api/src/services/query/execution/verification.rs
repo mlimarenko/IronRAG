@@ -13,6 +13,8 @@ use crate::{
 
 use super::types::{CanonicalAnswerEvidence, RuntimeAnswerVerification, RuntimeMatchedChunk};
 
+const VERIFICATION_LITERAL_COLOCATION_MAX_NORMALIZED_SPAN: usize = 2_048;
+
 pub(crate) fn verify_answer_against_canonical_evidence(
     _question: &str,
     answer: &str,
@@ -49,6 +51,7 @@ pub(crate) fn verify_answer_against_canonical_evidence(
 
     let (inline_literals, fenced_line_literals) = extract_answer_literals(answer);
     let mut normalized_corpus = build_verification_corpus(evidence, chunks, assistant_grounding);
+    let normalized_grounding_corpus = normalized_corpus.clone();
     // Library summary, document file names, document titles and other prompt
     // metadata are part of what the LLM saw — include the whole rendered
     // prompt context so file-name backticks like `customers.csv` are not
@@ -64,7 +67,11 @@ pub(crate) fn verify_answer_against_canonical_evidence(
         if normalized_literal.is_empty() {
             continue;
         }
-        if !literal_is_supported_by_canonical_corpus(literal, &normalized_corpus) {
+        if !literal_is_supported_by_canonical_corpus(
+            literal,
+            &normalized_corpus,
+            &normalized_grounding_corpus,
+        ) {
             unsupported_literals.push(literal.clone());
             warnings.push(QueryVerificationWarning {
                 code: "unsupported_literal".to_string(),
@@ -76,12 +83,7 @@ pub(crate) fn verify_answer_against_canonical_evidence(
     }
     let has_unsupported_literals =
         warnings.iter().any(|warning| warning.code == "unsupported_literal");
-    let has_any_backticked_literals =
-        !inline_literals.is_empty() || !fenced_line_literals.is_empty();
-    let has_grounded_backticked_literals = has_any_backticked_literals && !has_unsupported_literals;
-    let should_check_conflicting_evidence =
-        intent_profile.exact_literal_technical && !has_grounded_backticked_literals;
-    let conflicting_groups = if should_check_conflicting_evidence {
+    let conflicting_groups = if intent_profile.exact_literal_technical {
         collect_conflicting_fact_groups(&evidence.technical_facts)
     } else {
         HashMap::new()
@@ -253,16 +255,36 @@ fn build_verification_corpus(
     for fragment in &assistant_grounding.verification_corpus {
         corpus.push(normalize_verification_literal(fragment));
     }
+    for reference in &assistant_grounding.document_references {
+        corpus.push(normalize_verification_literal(&reference.document_title));
+        corpus.push(normalize_verification_literal(&reference.excerpt));
+    }
     corpus.retain(|value| !value.is_empty());
     corpus
 }
 
-fn literal_is_supported_by_canonical_corpus(literal: &str, corpus: &[String]) -> bool {
+fn literal_is_supported_by_canonical_corpus(
+    literal: &str,
+    corpus: &[String],
+    grounding_corpus: &[String],
+) -> bool {
     let normalized_literal = normalize_verification_literal(literal);
     if normalized_literal.is_empty() {
         return true;
     }
     if corpus.iter().any(|candidate| candidate.contains(&normalized_literal)) {
+        return true;
+    }
+    if decorated_version_literal_is_supported_by_corpus(literal, grounding_corpus) {
+        return true;
+    }
+    if code_assignment_literal_is_supported_by_corpus(literal, grounding_corpus) {
+        return true;
+    }
+    if slash_alternative_literal_is_supported_by_corpus(literal, grounding_corpus) {
+        return true;
+    }
+    if structural_literal_is_supported_by_corpus(literal, grounding_corpus) {
         return true;
     }
     let Some((method, path)) = split_http_literal(literal) else {
@@ -272,8 +294,376 @@ fn literal_is_supported_by_canonical_corpus(literal: &str, corpus: &[String]) ->
     let normalized_path = normalize_verification_literal(path);
     !normalized_method.is_empty()
         && !normalized_path.is_empty()
-        && corpus.iter().any(|candidate| candidate.contains(&normalized_method))
-        && corpus.iter().any(|candidate| candidate.contains(&normalized_path))
+        && grounding_corpus.iter().any(|candidate| {
+            candidate_contains_components_within_span(
+                candidate,
+                &[normalized_method.clone(), normalized_path.clone()],
+            )
+        })
+}
+
+fn decorated_version_literal_is_supported_by_corpus(literal: &str, corpus: &[String]) -> bool {
+    let normalized_literal = normalize_verification_literal(literal);
+    let version_tokens = extract_numeric_version_tokens(literal);
+    if version_tokens.is_empty() {
+        return false;
+    }
+    let literal_without_versions = version_tokens
+        .iter()
+        .fold(normalized_literal.clone(), |accumulator, version| accumulator.replace(version, ""));
+    if literal_without_versions.chars().filter(|ch| ch.is_alphanumeric()).count() > 32 {
+        return false;
+    }
+    corpus
+        .iter()
+        .any(|candidate| candidate_contains_components_within_span(candidate, &version_tokens))
+}
+
+fn extract_numeric_version_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut start: Option<usize> = None;
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch.is_ascii_digit() || ch == '.' {
+            start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start_index) = start.take() {
+            push_version_token(&chars[start_index..index], &mut tokens);
+        }
+    }
+    if let Some(start_index) = start {
+        push_version_token(&chars[start_index..], &mut tokens);
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn push_version_token(chars: &[char], tokens: &mut Vec<String>) {
+    let token = chars.iter().collect::<String>().trim_matches('.').to_string();
+    if token.is_empty() {
+        return;
+    }
+    let parts = token.split('.').collect::<Vec<_>>();
+    let has_version_shape = (2..=3).contains(&parts.len())
+        && parts.iter().all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()));
+    if has_version_shape {
+        tokens.push(token);
+    }
+}
+
+fn code_assignment_literal_is_supported_by_corpus(literal: &str, corpus: &[String]) -> bool {
+    let Some((left, right)) = literal.split_once('=') else {
+        return false;
+    };
+    let left = left.trim();
+    let right = right.trim();
+    if !is_specific_code_identifier(left) {
+        return false;
+    }
+    let normalized_left = normalize_verification_literal(left);
+    let normalized_right = normalize_verification_literal(right);
+    let components = vec![normalized_left, normalized_right];
+    components.iter().all(|component| !component.is_empty())
+        && corpus
+            .iter()
+            .any(|candidate| candidate_contains_components_within_span(candidate, &components))
+}
+
+fn is_specific_code_identifier(value: &str) -> bool {
+    let trimmed = value
+        .trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '[' | ']'));
+    if trimmed.len() < 3 || !trimmed.chars().any(|ch| ch.is_alphabetic()) {
+        return false;
+    }
+    let has_code_separator = trimmed.chars().any(|ch| matches!(ch, '_' | '-' | '.'));
+    let has_lowercase = trimmed.chars().any(|ch| ch.is_lowercase());
+    let has_uppercase = trimmed.chars().any(|ch| ch.is_uppercase());
+    let has_embedded_digit = trimmed.chars().any(|ch| ch.is_ascii_digit())
+        && trimmed.chars().any(|ch| ch.is_alphabetic());
+    has_code_separator || (has_lowercase && has_uppercase) || has_embedded_digit
+}
+
+fn slash_alternative_literal_is_supported_by_corpus(literal: &str, corpus: &[String]) -> bool {
+    if !literal.contains('/') {
+        return false;
+    }
+    let alternatives = expand_slash_literal_alternatives(literal);
+    if alternatives.len() < 2 {
+        return false;
+    }
+    corpus
+        .iter()
+        .any(|candidate| candidate_contains_components_within_span(candidate, &alternatives))
+}
+
+fn expand_slash_literal_alternatives(literal: &str) -> Vec<String> {
+    let parts = literal
+        .split('/')
+        .map(|part| {
+            part.trim_matches(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(ch, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']')
+            })
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let Some(first) = parts.first().copied() else {
+        return Vec::new();
+    };
+    let prefix = shared_prefix_for_slash_tail(first);
+    let mut alternatives = Vec::with_capacity(parts.len());
+    for (index, part) in parts.iter().enumerate() {
+        let candidate = if index == 0 || part.chars().any(|ch| matches!(ch, '.' | '_' | '-' | ':'))
+        {
+            (*part).to_string()
+        } else if let Some(prefix) = prefix {
+            format!("{prefix}{part}")
+        } else {
+            (*part).to_string()
+        };
+        let normalized = normalize_verification_literal(&candidate);
+        if !normalized.is_empty() {
+            alternatives.push(normalized);
+        }
+    }
+    alternatives.sort();
+    alternatives.dedup();
+    alternatives
+}
+
+fn shared_prefix_for_slash_tail(first: &str) -> Option<&str> {
+    let delimiter_index = first
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| matches!(ch, '.' | '_' | '-' | ':'))
+        .map(|(index, ch)| index + ch.len_utf8())?;
+    (delimiter_index < first.len()).then(|| &first[..delimiter_index])
+}
+
+#[derive(Debug, Default)]
+struct StructuralLiteralComponents {
+    has_marker: bool,
+    has_placeholder_or_ellipsis: bool,
+    has_non_placeholder_bracket: bool,
+    components: Vec<String>,
+}
+
+fn structural_literal_is_supported_by_corpus(literal: &str, corpus: &[String]) -> bool {
+    let mut parsed = parse_structural_literal_components(literal);
+    if !parsed.has_marker {
+        return false;
+    }
+    parsed.components.sort();
+    parsed.components.dedup();
+    if parsed.components.is_empty() {
+        return false;
+    }
+
+    let component_shape_supported = parsed.has_non_placeholder_bracket
+        || parsed.components.len() >= 2
+        || (parsed.has_placeholder_or_ellipsis && parsed.components.len() == 1);
+    component_shape_supported
+        && corpus.iter().any(|candidate| {
+            structural_components_match_candidate_within_span(&parsed.components, candidate)
+        })
+}
+
+fn parse_structural_literal_components(literal: &str) -> StructuralLiteralComponents {
+    let mut parsed = StructuralLiteralComponents::default();
+    let mut scrubbed = String::new();
+    let chars: Vec<char> = literal.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '['
+            && let Some(end) = chars[index + 1..].iter().position(|candidate| *candidate == ']')
+        {
+            let end_index = index + 1 + end;
+            let content: String = chars[index + 1..end_index].iter().collect();
+            parsed.has_marker = true;
+            if is_placeholder_bracket_content(&content) {
+                parsed.has_placeholder_or_ellipsis = true;
+                scrubbed.push(' ');
+            } else {
+                parsed.has_non_placeholder_bracket = true;
+                scrubbed.push(' ');
+                scrubbed.extend(chars[index..=end_index].iter());
+                scrubbed.push(' ');
+            }
+            index = end_index + 1;
+            continue;
+        }
+        if ch == '<'
+            && let Some(end) = chars[index + 1..].iter().position(|candidate| *candidate == '>')
+        {
+            let end_index = index + 1 + end;
+            let content: String = chars[index + 1..end_index].iter().collect();
+            if is_placeholder_angle_content(&content) {
+                parsed.has_marker = true;
+                parsed.has_placeholder_or_ellipsis = true;
+                scrubbed.push(' ');
+                index = end_index + 1;
+                continue;
+            }
+        }
+        if ch == '…' {
+            parsed.has_marker = true;
+            parsed.has_placeholder_or_ellipsis = true;
+            scrubbed.push(' ');
+            index += 1;
+            continue;
+        }
+        if ch == '.'
+            && index + 2 < chars.len()
+            && chars[index + 1] == '.'
+            && chars[index + 2] == '.'
+        {
+            parsed.has_marker = true;
+            parsed.has_placeholder_or_ellipsis = true;
+            scrubbed.push(' ');
+            index += 3;
+            continue;
+        }
+        scrubbed.push(ch);
+        index += 1;
+    }
+
+    parsed.components = scrubbed
+        .split(is_structural_component_separator)
+        .map(|component| {
+            component
+                .trim_matches(|ch: char| {
+                    ch.is_whitespace()
+                        || matches!(ch, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '{' | '}')
+                })
+                .to_string()
+        })
+        .filter(|component| !component.is_empty())
+        .map(|component| normalize_verification_literal(&component))
+        .filter(|component| !component.is_empty())
+        .collect();
+    parsed
+}
+
+fn is_placeholder_bracket_content(content: &str) -> bool {
+    let trimmed = content.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().all(|ch| {
+            ch.is_ascii_uppercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-' | ' ')
+        })
+        && trimmed.chars().any(|ch| ch.is_ascii_uppercase())
+}
+
+fn is_placeholder_angle_content(content: &str) -> bool {
+    let trimmed = content.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 40
+        && trimmed.chars().any(|ch| ch.is_alphabetic())
+        && trimmed.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | ' '))
+}
+
+fn is_structural_component_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '=' | ':' | ',' | ';')
+}
+
+fn structural_components_match_candidate_within_span(
+    components: &[String],
+    candidate: &str,
+) -> bool {
+    let normalized_components = components
+        .iter()
+        .filter_map(|component| {
+            if candidate.contains(component) {
+                Some(component.clone())
+            } else {
+                component
+                    .strip_prefix('[')
+                    .and_then(|value| value.strip_suffix(']'))
+                    .filter(|inner| !inner.is_empty() && candidate.contains(*inner))
+                    .map(ToOwned::to_owned)
+            }
+        })
+        .collect::<Vec<_>>();
+    normalized_components.len() == components.len()
+        && candidate_contains_components_within_span(candidate, &normalized_components)
+}
+
+fn candidate_contains_components_within_span(candidate: &str, components: &[String]) -> bool {
+    if components.is_empty() {
+        return false;
+    }
+    let mut ranges_by_component = Vec::<Vec<(usize, usize)>>::with_capacity(components.len());
+    for component in components {
+        if component.is_empty() {
+            return false;
+        }
+        let ranges = find_component_ranges(candidate, component, 32);
+        if ranges.is_empty() {
+            return false;
+        }
+        ranges_by_component.push(ranges);
+    }
+    let anchor_index = ranges_by_component
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, ranges)| ranges.len())
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    for &(anchor_start, anchor_end) in &ranges_by_component[anchor_index] {
+        let mut min_start = anchor_start;
+        let mut max_end = anchor_end;
+        let mut matched = true;
+        for (index, ranges) in ranges_by_component.iter().enumerate() {
+            if index == anchor_index {
+                continue;
+            }
+            let Some((next_start, next_end)) = ranges
+                .iter()
+                .copied()
+                .filter(|(start, end)| {
+                    max_end.max(*end).saturating_sub(min_start.min(*start))
+                        <= VERIFICATION_LITERAL_COLOCATION_MAX_NORMALIZED_SPAN
+                })
+                .min_by_key(|(start, end)| max_end.max(*end).saturating_sub(min_start.min(*start)))
+            else {
+                matched = false;
+                break;
+            };
+            min_start = min_start.min(next_start);
+            max_end = max_end.max(next_end);
+        }
+        if matched
+            && max_end.saturating_sub(min_start)
+                <= VERIFICATION_LITERAL_COLOCATION_MAX_NORMALIZED_SPAN
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_component_ranges(
+    candidate: &str,
+    component: &str,
+    max_ranges: usize,
+) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    while cursor <= candidate.len() {
+        let Some(relative) = candidate[cursor..].find(component) else {
+            break;
+        };
+        let start = cursor + relative;
+        let end = start + component.len();
+        ranges.push((start, end));
+        if ranges.len() >= max_ranges {
+            break;
+        }
+        cursor = start.saturating_add(component.len().max(1));
+    }
+    ranges
 }
 
 fn normalize_verification_literal(value: &str) -> String {

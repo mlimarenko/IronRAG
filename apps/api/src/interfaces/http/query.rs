@@ -9,11 +9,11 @@ use axum::{
     routing::get,
 };
 use chrono::Utc;
-use futures::stream;
+use futures::{FutureExt as _, stream};
 use ironrag_contracts;
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, time::Duration};
-use tokio::sync::mpsc::UnboundedSender;
+use std::{convert::Infallible, panic::AssertUnwindSafe, time::Duration};
+use tokio::sync::mpsc::Sender;
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
@@ -41,7 +41,13 @@ use crate::{
     services::{
         iam::audit::{AppendAuditEventCommand, AppendQueryExecutionAuditCommand},
         mcp::access::library_catalog_ref,
-        query::service::{CreateConversationCommand, ExecuteConversationTurnCommand},
+        query::{
+            agent_loop::AgentLoopActivityEvent,
+            service::{
+                ASSISTANT_AGENT_LOOP_DEADLINE_MS, CreateConversationCommand,
+                ExecuteConversationTurnCommand,
+            },
+        },
     },
 };
 
@@ -86,7 +92,15 @@ struct AssistantActivityEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_name: Option<&'static str>,
+    provider_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_final_answer: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     elapsed_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,9 +111,11 @@ struct AssistantActivityEvent {
     result_preview: Option<String>,
 }
 
-const ASSISTANT_TURN_STREAM_DEADLINE_MS: u64 = 240_000;
 const ASSISTANT_TURN_ACTIVITY_INTERVAL: Duration = Duration::from_secs(5);
-const ASSISTANT_TURN_ACTIVITY_TOOL: &str = "grounded_answer";
+const ASSISTANT_TURN_STREAM_BUFFER: usize = 512;
+const ASSISTANT_TURN_TERMINAL_EVENT_RESERVE: usize = 8;
+const ASSISTANT_ACTIVITY_DRAIN_GRACE: Duration = Duration::from_millis(250);
+const ASSISTANT_PANIC_FAILURE_SEND_GRACE: Duration = Duration::from_secs(1);
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -122,19 +138,20 @@ pub struct AssistantSystemPromptQuery {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSystemPromptResponse {
     /// Raw template with the `{LIBRARY_REF}` placeholder. This is what
-    /// external MCP clients (Claude Desktop, Codex, Cursor, Continue.dev,
-    /// …) should paste into their own system prompt when attaching
-    /// IronRAG's MCP server, so every agent — in-app or external — shares
-    /// the same grounding discipline.
+    /// transport-agnostic external MCP clients should paste into their
+    /// own system prompt when attaching IronRAG's MCP server. Documented
+    /// clients include Claude Desktop, Claude Code, Cursor, Codex, VS Code
+    /// with Continue/Cline/Roo, Zed, and Hermes, so every agent — in-app
+    /// or external — shares the same grounding discipline.
     template: String,
-    /// Template rendered with the canonical `<workspace>/<library>` ref
+    /// Template rendered with the `<workspace>/<library>` ref
     /// of the requested `libraryId`, when one was passed. Same text the
     /// public MCP clients should use for that library.
     rendered: Option<String>,
     library_id: Option<Uuid>,
 }
 
-/// Publish the canonical MCP assistant system prompt.
+/// Publish the MCP assistant system prompt.
 ///
 /// This is the single source of truth for external MCP clients and the
 /// admin UI's "MCP client setup" card, which serves the same text
@@ -155,9 +172,11 @@ pub struct AssistantSystemPromptResponse {
     path = "/v1/query/assistant/system-prompt",
     tag = "query",
     operation_id = "getAssistantSystemPrompt",
+    summary = "Get the recommended MCP assistant system prompt.",
+    description = "Returns the prompt text that should be installed in external MCP clients and in the built-in UI assistant setup flow. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, and avoid forwarding the raw latest user message as a hidden grounded-answer query. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.",
     params(AssistantSystemPromptQuery),
     responses(
-        (status = 200, description = "Canonical assistant system prompt template plus the version rendered for the active library", body = AssistantSystemPromptResponse),
+        (status = 200, description = "Assistant system prompt template plus the version rendered for the active library", body = AssistantSystemPromptResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the requested library"),
     ),
@@ -201,6 +220,8 @@ pub async fn get_assistant_system_prompt(
     path = "/v1/query/sessions",
     tag = "query",
     operation_id = "listQuerySessions",
+    summary = "List assistant sessions for one library.",
+    description = "Returns the chat sessions visible to the caller for the requested library. The web UI uses this endpoint to populate the assistant sidebar and restore recent conversations. Clients must provide `libraryId`; authorization is checked against the library before any session metadata is returned.",
     params(ListSessionsQuery),
     responses(
         (status = 200, description = "Query sessions visible to the caller", body = [ironrag_contracts::assistant::AssistantSessionListItem]),
@@ -232,7 +253,9 @@ pub async fn list_sessions(
     path = "/v1/query/sessions",
     tag = "query",
     operation_id = "createQuerySession",
-    request_body = CreateSessionRequest,
+    summary = "Create an assistant session.",
+    description = "Creates a persistent assistant conversation scoped to one library. The session stores the user and assistant turns, execution ids, verifier state, citations, runtime traces, and debug snapshots produced by later turns. `workspaceId` is optional for normal callers because the backend derives it from `libraryId`; when supplied it must match the target library.",
+    request_body(content = CreateSessionRequest, description = "Target library, optional workspace assertion, and optional display title for the new assistant session."),
     responses(
         (status = 200, description = "Newly created query conversation", body = QueryConversation),
         (status = 400, description = "Invalid request"),
@@ -310,6 +333,8 @@ pub async fn create_session(
     path = "/v1/query/sessions/{sessionId}",
     tag = "query",
     operation_id = "getQuerySession",
+    summary = "Load one assistant session with turns.",
+    description = "Returns the hydrated conversation used by the UI chat pane: session metadata, user turns, assistant turns, execution identifiers, citations, and verification state. Use this after selecting a session from the list or after a page reload to reconstruct the visible conversation.",
     params(("sessionId" = uuid::Uuid, Path, description = "Query session identifier")),
     responses(
         (status = 200, description = "Hydrated assistant conversation with turns", body = ironrag_contracts::assistant::AssistantHydratedConversation),
@@ -339,8 +364,10 @@ pub async fn get_session(
     path = "/v1/query/sessions/{sessionId}/turns",
     tag = "query",
     operation_id = "createQuerySessionTurn",
+    summary = "Run one UI assistant turn.",
+    description = "Executes one user message through the same MCP-style tool loop used to simulate an external agent in the web UI. The model receives the available answer-surface tool schemas, chooses one or more tool calls, may run independent calls in parallel, reads the tool results, and then writes the final answer. For normal JSON clients the endpoint returns the completed `AssistantExecutionDetail`. When the request `Accept` header includes `text/event-stream`, the same endpoint streams `assistant_turn` SSE events: model requests, model responses, tool-call start/finish activity, periodic working heartbeats, and finally a terminal `completed` or `failed` event.",
     params(("sessionId" = uuid::Uuid, Path, description = "Query session identifier")),
-    request_body = CreateSessionTurnRequest,
+    request_body(content = CreateSessionTurnRequest, description = "User message plus optional retrieval/debug controls for a new assistant turn."),
     responses(
         (status = 200, description = "Turn execution result with grounded answer + evidence references", body = ironrag_contracts::assistant::AssistantExecutionDetail),
         (status = 401, description = "Caller is not authenticated"),
@@ -367,7 +394,7 @@ pub async fn create_session_turn(
         let stream = create_session_turn_event_stream(auth, state, session_id, payload).await?;
         return Ok(stream.into_response());
     }
-    let outcome = execute_ui_session_turn(&state, &auth, session_id, payload).await?;
+    let outcome = execute_ui_session_turn(&state, &auth, session_id, payload, None).await?;
     append_query_execution_audit(state.clone(), auth.principal_id, "ui", &outcome).await;
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
     Ok(Json(map_turn_execution_response(outcome)).into_response())
@@ -386,127 +413,177 @@ async fn create_session_turn_event_stream(
     payload: CreateSessionTurnRequest,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<AssistantTurnStreamEvent>();
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<AssistantTurnStreamEvent>(ASSISTANT_TURN_STREAM_BUFFER);
     let state_for_task = state.clone();
     let auth_for_task = auth.clone();
 
     tokio::spawn(async move {
-        send_assistant_activity(
-            &sender,
-            AssistantActivityEvent {
-                event_type: "started",
-                deadline_ms: Some(ASSISTANT_TURN_STREAM_DEADLINE_MS),
-                iteration: None,
-                tool_name: None,
-                elapsed_ms: None,
-                is_error: None,
-                child_execution_id: None,
-                result_preview: None,
-            },
-        );
-        send_assistant_activity(
-            &sender,
-            AssistantActivityEvent {
-                event_type: "tool_call_started",
-                deadline_ms: None,
-                iteration: Some(1),
-                tool_name: Some(ASSISTANT_TURN_ACTIVITY_TOOL),
-                elapsed_ms: None,
-                is_error: None,
-                child_execution_id: None,
-                result_preview: None,
-            },
-        );
+        let panic_sender = sender.clone();
+        let producer = async move {
+            send_assistant_activity(
+                &sender,
+                AssistantActivityEvent {
+                    event_type: "started",
+                    deadline_ms: Some(ASSISTANT_AGENT_LOOP_DEADLINE_MS),
+                    iteration: None,
+                    provider_kind: None,
+                    model_name: None,
+                    tool_call_count: None,
+                    has_final_answer: None,
+                    tool_name: None,
+                    elapsed_ms: None,
+                    is_error: None,
+                    child_execution_id: None,
+                    result_preview: None,
+                },
+            );
 
-        let progress_started_at = Instant::now();
-        let progress_sender = sender.clone();
-        let progress_task = tokio::spawn(async move {
-            loop {
-                sleep(ASSISTANT_TURN_ACTIVITY_INTERVAL).await;
-                send_assistant_activity(
-                    &progress_sender,
-                    AssistantActivityEvent {
-                        event_type: "tool_call_progress",
-                        deadline_ms: None,
-                        iteration: Some(1),
-                        tool_name: Some(ASSISTANT_TURN_ACTIVITY_TOOL),
-                        elapsed_ms: Some(progress_started_at.elapsed().as_millis() as u64),
-                        is_error: None,
-                        child_execution_id: None,
-                        result_preview: None,
-                    },
-                );
-            }
-        });
+            let (agent_activity_tx, mut agent_activity_rx) =
+                tokio::sync::mpsc::channel::<AgentLoopActivityEvent>(256);
+            let agent_activity_sender = sender.clone();
+            let mut agent_activity_task = tokio::spawn(async move {
+                while let Some(event) = agent_activity_rx.recv().await {
+                    send_assistant_activity(&agent_activity_sender, map_agent_loop_activity(event));
+                }
+            });
 
-        let result =
-            execute_ui_session_turn(&state_for_task, &auth_for_task, session_id, payload).await;
-        progress_task.abort();
+            let progress_started_at = Instant::now();
+            let progress_sender = sender.clone();
+            let progress_task = tokio::spawn(async move {
+                loop {
+                    sleep(ASSISTANT_TURN_ACTIVITY_INTERVAL).await;
+                    send_assistant_activity(
+                        &progress_sender,
+                        AssistantActivityEvent {
+                            event_type: "working",
+                            deadline_ms: None,
+                            iteration: None,
+                            provider_kind: None,
+                            model_name: None,
+                            tool_call_count: None,
+                            has_final_answer: None,
+                            tool_name: None,
+                            elapsed_ms: Some(progress_started_at.elapsed().as_millis() as u64),
+                            is_error: None,
+                            child_execution_id: None,
+                            result_preview: None,
+                        },
+                    );
+                }
+            });
 
-        match result {
-            Ok(outcome) => {
-                send_assistant_activity(
-                    &sender,
-                    AssistantActivityEvent {
-                        event_type: "tool_call_finished",
-                        deadline_ms: None,
-                        iteration: Some(1),
-                        tool_name: Some(ASSISTANT_TURN_ACTIVITY_TOOL),
-                        elapsed_ms: Some(progress_started_at.elapsed().as_millis() as u64),
-                        is_error: Some(false),
-                        child_execution_id: Some(outcome.execution.id),
-                        result_preview: Some(format!(
-                            "verification={}",
-                            verification_state_stream_label(&outcome.verification_state)
-                        )),
-                    },
-                );
-                append_query_execution_audit(
-                    state_for_task.clone(),
-                    auth_for_task.principal_id,
-                    "ui",
-                    &outcome,
-                )
-                .await;
-                send_assistant_activity(
-                    &sender,
-                    AssistantActivityEvent {
-                        event_type: "persisting",
-                        deadline_ms: None,
-                        iteration: None,
-                        tool_name: None,
-                        elapsed_ms: None,
-                        is_error: None,
-                        child_execution_id: None,
-                        result_preview: None,
-                    },
-                );
-                send_turn_stream_event(
-                    &sender,
-                    AssistantTurnStreamEvent::Completed {
-                        detail: map_turn_execution_response(outcome),
-                    },
-                );
+            let result = execute_ui_session_turn(
+                &state_for_task,
+                &auth_for_task,
+                session_id,
+                payload,
+                Some(agent_activity_tx),
+            )
+            .await;
+            progress_task.abort();
+            if tokio::time::timeout(ASSISTANT_ACTIVITY_DRAIN_GRACE, &mut agent_activity_task)
+                .await
+                .is_err()
+            {
+                agent_activity_task.abort();
             }
-            Err(error) => {
-                send_assistant_activity(
-                    &sender,
-                    AssistantActivityEvent {
-                        event_type: "tool_call_finished",
-                        deadline_ms: None,
-                        iteration: Some(1),
-                        tool_name: Some(ASSISTANT_TURN_ACTIVITY_TOOL),
-                        elapsed_ms: Some(progress_started_at.elapsed().as_millis() as u64),
-                        is_error: Some(true),
-                        child_execution_id: None,
-                        result_preview: Some(error.to_string()),
-                    },
-                );
-                send_turn_stream_event(
-                    &sender,
-                    AssistantTurnStreamEvent::Failed { message: error.to_string() },
-                );
+
+            match result {
+                Ok(outcome) => {
+                    send_assistant_activity(
+                        &sender,
+                        AssistantActivityEvent {
+                            event_type: "model_response",
+                            deadline_ms: None,
+                            iteration: None,
+                            provider_kind: None,
+                            model_name: None,
+                            tool_call_count: None,
+                            has_final_answer: Some(true),
+                            tool_name: None,
+                            elapsed_ms: Some(progress_started_at.elapsed().as_millis() as u64),
+                            is_error: Some(false),
+                            child_execution_id: Some(outcome.execution.id),
+                            result_preview: Some(format!(
+                                "verification={}",
+                                verification_state_stream_label(&outcome.verification_state)
+                            )),
+                        },
+                    );
+                    append_query_execution_audit(
+                        state_for_task.clone(),
+                        auth_for_task.principal_id,
+                        "ui",
+                        &outcome,
+                    )
+                    .await;
+                    send_assistant_activity(
+                        &sender,
+                        AssistantActivityEvent {
+                            event_type: "persisting",
+                            deadline_ms: None,
+                            iteration: None,
+                            provider_kind: None,
+                            model_name: None,
+                            tool_call_count: None,
+                            has_final_answer: None,
+                            tool_name: None,
+                            elapsed_ms: None,
+                            is_error: None,
+                            child_execution_id: None,
+                            result_preview: None,
+                        },
+                    );
+                    send_required_turn_stream_event(
+                        &sender,
+                        AssistantTurnStreamEvent::Completed {
+                            detail: map_turn_execution_response(outcome),
+                        },
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    send_assistant_activity(
+                        &sender,
+                        AssistantActivityEvent {
+                            event_type: "model_response",
+                            deadline_ms: None,
+                            iteration: None,
+                            provider_kind: None,
+                            model_name: None,
+                            tool_call_count: None,
+                            has_final_answer: Some(false),
+                            tool_name: None,
+                            elapsed_ms: Some(progress_started_at.elapsed().as_millis() as u64),
+                            is_error: Some(true),
+                            child_execution_id: None,
+                            result_preview: Some(error.to_string()),
+                        },
+                    );
+                    send_required_turn_stream_event(
+                        &sender,
+                        AssistantTurnStreamEvent::Failed { message: error.to_string() },
+                    )
+                    .await;
+                }
             }
+        };
+        if let Err(panic) = AssertUnwindSafe(producer).catch_unwind().await {
+            tracing::error!(
+                panic = %panic_payload_message(panic.as_ref()),
+                "assistant turn stream producer panicked"
+            );
+            let _ = tokio::time::timeout(
+                ASSISTANT_PANIC_FAILURE_SEND_GRACE,
+                send_required_turn_stream_event(
+                    &panic_sender,
+                    AssistantTurnStreamEvent::Failed {
+                        message: "assistant turn stream failed unexpectedly".to_string(),
+                    },
+                ),
+            )
+            .await;
         }
     });
 
@@ -535,13 +612,15 @@ async fn execute_ui_session_turn(
     auth: &AuthContext,
     session_id: Uuid,
     payload: CreateSessionTurnRequest,
+    agent_activity_tx: Option<tokio::sync::mpsc::Sender<AgentLoopActivityEvent>>,
 ) -> Result<crate::services::query::service::QueryTurnExecutionResult, ApiError> {
     let _ = load_query_session_and_authorize(auth, state, session_id, POLICY_QUERY_RUN).await?;
     state
         .canonical_services
         .query
-        .execute_turn(
+        .execute_assistant_agent_turn(
             state,
+            auth,
             ExecuteConversationTurnCommand {
                 conversation_id: session_id,
                 author_principal_id: Some(auth.principal_id),
@@ -551,22 +630,114 @@ async fn execute_ui_session_turn(
                 top_k: resolve_query_turn_top_k(payload.top_k),
                 include_debug: payload.include_debug.unwrap_or(false),
             },
+            agent_activity_tx,
         )
         .await
 }
 
-fn send_turn_stream_event(
-    sender: &UnboundedSender<AssistantTurnStreamEvent>,
+async fn send_required_turn_stream_event(
+    sender: &Sender<AssistantTurnStreamEvent>,
     event: AssistantTurnStreamEvent,
 ) {
-    let _ = sender.send(event);
+    let _ = sender.send(event).await;
 }
 
 fn send_assistant_activity(
-    sender: &UnboundedSender<AssistantTurnStreamEvent>,
+    sender: &Sender<AssistantTurnStreamEvent>,
     event: AssistantActivityEvent,
 ) {
-    send_turn_stream_event(sender, AssistantTurnStreamEvent::Activity { event });
+    if sender.capacity() <= ASSISTANT_TURN_TERMINAL_EVENT_RESERVE {
+        return;
+    }
+    let _ = sender.try_send(AssistantTurnStreamEvent::Activity { event });
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
+}
+
+fn map_agent_loop_activity(event: AgentLoopActivityEvent) -> AssistantActivityEvent {
+    match event {
+        AgentLoopActivityEvent::ModelRequest { iteration, provider_kind, model_name } => {
+            AssistantActivityEvent {
+                event_type: "model_request",
+                deadline_ms: None,
+                iteration: Some(iteration),
+                provider_kind: Some(provider_kind),
+                model_name: Some(model_name),
+                tool_call_count: None,
+                has_final_answer: None,
+                tool_name: None,
+                elapsed_ms: None,
+                is_error: None,
+                child_execution_id: None,
+                result_preview: None,
+            }
+        }
+        AgentLoopActivityEvent::ModelResponse {
+            iteration,
+            provider_kind,
+            model_name,
+            tool_call_count,
+            has_final_answer,
+        } => AssistantActivityEvent {
+            event_type: "model_response",
+            deadline_ms: None,
+            iteration: Some(iteration),
+            provider_kind: Some(provider_kind),
+            model_name: Some(model_name),
+            tool_call_count: Some(tool_call_count),
+            has_final_answer: Some(has_final_answer),
+            tool_name: None,
+            elapsed_ms: None,
+            is_error: None,
+            child_execution_id: None,
+            result_preview: None,
+        },
+        AgentLoopActivityEvent::ToolCallStarted { iteration, tool_name } => {
+            AssistantActivityEvent {
+                event_type: "tool_call_started",
+                deadline_ms: None,
+                iteration: Some(iteration),
+                provider_kind: None,
+                model_name: None,
+                tool_call_count: None,
+                has_final_answer: None,
+                tool_name: Some(tool_name),
+                elapsed_ms: None,
+                is_error: None,
+                child_execution_id: None,
+                result_preview: None,
+            }
+        }
+        AgentLoopActivityEvent::ToolCallFinished {
+            iteration,
+            tool_name,
+            elapsed_ms,
+            is_error,
+            child_execution_id,
+            result_preview,
+        } => AssistantActivityEvent {
+            event_type: "tool_call_finished",
+            deadline_ms: None,
+            iteration: Some(iteration),
+            provider_kind: None,
+            model_name: None,
+            tool_call_count: None,
+            has_final_answer: None,
+            tool_name: Some(tool_name),
+            elapsed_ms: Some(elapsed_ms),
+            is_error: Some(is_error),
+            child_execution_id,
+            result_preview,
+        },
+    }
 }
 
 const fn verification_state_stream_label(state: &QueryVerificationState) -> &'static str {
@@ -600,6 +771,8 @@ pub(crate) fn resolve_query_turn_top_k(requested_top_k: Option<usize>) -> usize 
     path = "/v1/query/executions/{executionId}",
     tag = "query",
     operation_id = "getQueryExecution",
+    summary = "Inspect one assistant execution.",
+    description = "Loads the persisted execution detail for a completed or failed assistant turn. This is the main trace endpoint for the debug inspector and external operators: it includes request/response turns, citations, selected chunks, prepared segments, graph references, verifier verdict, runtime stage summary, policy decisions, and child tool executions when the turn used the agent loop.",
     params(("executionId" = uuid::Uuid, Path, description = "Query execution identifier")),
     responses(
         (status = 200, description = "Assistant execution detail with retrieval/answer/verification stages", body = ironrag_contracts::assistant::AssistantExecutionDetail),
@@ -638,6 +811,8 @@ pub async fn get_execution(
     path = "/v1/query/executions/{executionId}/llm-context",
     tag = "query",
     operation_id = "getQueryExecutionLlmContext",
+    summary = "Inspect captured LLM context for one execution.",
+    description = "Returns the durable model transcript captured for an assistant execution: system messages, prior conversation messages, tool definitions, tool-call arguments, tool results, final model responses, token usage, and stop reasons. The UI debug inspector uses this endpoint to show the full prompt/tool context that produced an answer. The endpoint is intended for debugging and audit, not for user-facing answer rendering.",
     params(("executionId" = uuid::Uuid, Path, description = "Query execution identifier")),
     responses(
         (status = 200, description = "Durable LLM request/response capture for the execution", body = crate::services::query::llm_context_debug::LlmContextSnapshot),
@@ -1051,5 +1226,67 @@ async fn append_query_execution_audit(
         .await
     {
         tracing::warn!(stage = "audit", error = %error, "audit append failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn activity_event() -> AssistantActivityEvent {
+        AssistantActivityEvent {
+            event_type: "working",
+            deadline_ms: None,
+            iteration: None,
+            provider_kind: None,
+            model_name: None,
+            tool_call_count: None,
+            has_final_answer: None,
+            tool_name: None,
+            elapsed_ms: None,
+            is_error: None,
+            child_execution_id: None,
+            result_preview: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_activity_stream_reserves_terminal_capacity() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<AssistantTurnStreamEvent>(
+            ASSISTANT_TURN_TERMINAL_EVENT_RESERVE + 2,
+        );
+
+        for _ in 0..100 {
+            send_assistant_activity(&sender, activity_event());
+        }
+
+        assert_eq!(sender.capacity(), ASSISTANT_TURN_TERMINAL_EVENT_RESERVE);
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            send_required_turn_stream_event(
+                &sender,
+                AssistantTurnStreamEvent::Failed { message: "panic".to_string() },
+            ),
+        )
+        .await
+        .expect("terminal event should not wait behind activity backlog");
+
+        let mut saw_failure = false;
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(50), receiver.recv()).await
+        {
+            if matches!(event, AssistantTurnStreamEvent::Failed { .. }) {
+                saw_failure = true;
+                break;
+            }
+        }
+        assert!(saw_failure);
+    }
+
+    #[test]
+    fn panic_payload_message_accepts_dyn_any_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+
+        assert_eq!(panic_payload_message(payload.as_ref()), "boom");
     }
 }

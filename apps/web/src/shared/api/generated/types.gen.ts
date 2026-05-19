@@ -51,7 +51,7 @@ export type AgentLoopMetadata = {
 /**
  * Reason the tool-use loop stopped iterating.
  */
-export type AgentStopReason = 'final_answer' | 'iteration_cap' | 'deadline' | 'tool_error';
+export type AgentStopReason = 'final_answer' | 'iteration_cap' | 'deadline' | 'tool_error' | 'provider_error';
 
 export type AiBindingAssignmentResponse = {
     bindingPurpose: AiBindingPurpose;
@@ -227,17 +227,18 @@ export type AssistantSessionListItem = {
 export type AssistantSystemPromptResponse = {
     libraryId?: string | null;
     /**
-     * Template rendered with the canonical `<workspace>/<library>` ref
+     * Template rendered with the `<workspace>/<library>` ref
      * of the requested `libraryId`, when one was passed. Same text the
      * public MCP clients should use for that library.
      */
     rendered?: string | null;
     /**
      * Raw template with the `{LIBRARY_REF}` placeholder. This is what
-     * external MCP clients (Claude Desktop, Codex, Cursor, Continue.dev,
-     * …) should paste into their own system prompt when attaching
-     * IronRAG's MCP server, so every agent — in-app or external — shares
-     * the same grounding discipline.
+     * transport-agnostic external MCP clients should paste into their
+     * own system prompt when attaching IronRAG's MCP server. Documented
+     * clients include Claude Desktop, Claude Code, Cursor, Codex, VS Code
+     * with Continue/Cline/Roo, Zed, and Hermes, so every agent — in-app
+     * or external — shares the same grounding discipline.
      */
     template: string;
 };
@@ -1838,9 +1839,10 @@ export type LlmContextSnapshot = {
 export type LlmIterationDebug = {
     /**
      * Runtime execution IDs spawned by tool calls in this iteration.
-     * Populated when a tool call (e.g. `grounded_answer`) recursed into
-     * `execute_turn` and produced its own `LlmContextSnapshot`. Empty
-     * for all single-shot grounded-answer iterations.
+     * Populated on tool-use turns when a tool such as
+     * `grounded_answer` creates its own query execution and debug
+     * snapshot. Empty on iterations whose tools do not spawn child
+     * query executions and on single-shot grounded-answer turns.
      */
     childRuntimeExecutionIds?: Array<string>;
     iteration: number;
@@ -2197,6 +2199,7 @@ export type ResponseToolCallDebug = {
     id: string;
     isError: boolean;
     name: string;
+    resultJson?: unknown;
     resultText?: string | null;
 };
 
@@ -4669,6 +4672,10 @@ export type ImportLibrarySnapshotErrors = {
      */
     403: unknown;
     /**
+     * Library not found
+     */
+    404: unknown;
+    /**
      * Library already populated and overwrite=reject
      */
     409: unknown;
@@ -5845,7 +5852,7 @@ export type GetKnowledgeLibrarySummaryResponse = GetKnowledgeLibrarySummaryRespo
 
 export type PostMcpRequestData = {
     /**
-     * JSON-RPC 2.0 request envelope (method, params, id)
+     * JSON-RPC 2.0 request envelope. Typical methods are initialize, tools/list, and tools/call with method-specific params.
      */
     body: unknown;
     path?: never;
@@ -5892,7 +5899,7 @@ export type GetMcpCapabilitiesResponse = GetMcpCapabilitiesResponses[keyof GetMc
 
 export type PostMcpDiagnosticsRequestData = {
     /**
-     * JSON-RPC 2.0 request envelope for the diagnostics MCP tool surface
+     * JSON-RPC 2.0 request envelope for the diagnostics MCP tool surface.
      */
     body: unknown;
     path?: never;
@@ -6273,7 +6280,7 @@ export type GetAssistantSystemPromptErrors = {
 
 export type GetAssistantSystemPromptResponses = {
     /**
-     * Canonical assistant system prompt template plus the version rendered for the active library
+     * Assistant system prompt template plus the version rendered for the active library
      */
     200: AssistantSystemPromptResponse;
 };
@@ -6386,6 +6393,9 @@ export type ListQuerySessionsResponses = {
 export type ListQuerySessionsResponse = ListQuerySessionsResponses[keyof ListQuerySessionsResponses];
 
 export type CreateQuerySessionData = {
+    /**
+     * Target library, optional workspace assertion, and optional display title for the new assistant session.
+     */
     body: CreateSessionRequest;
     path?: never;
     query?: never;
@@ -6453,6 +6463,9 @@ export type GetQuerySessionResponses = {
 export type GetQuerySessionResponse = GetQuerySessionResponses[keyof GetQuerySessionResponses];
 
 export type CreateQuerySessionTurnData = {
+    /**
+     * User message plus optional retrieval/debug controls for a new assistant turn.
+     */
     body: CreateSessionTurnRequest;
     path: {
         /**

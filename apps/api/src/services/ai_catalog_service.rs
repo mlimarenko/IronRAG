@@ -1089,21 +1089,9 @@ impl AiCatalogService {
             self.get_provider_credential(state, binding.provider_credential_id).await?;
         let model_preset = self.get_model_preset(state, binding.model_preset_id).await?;
         let binding_purpose = parse_binding_purpose(&binding.binding_purpose)?;
-        let providers = self.list_provider_catalog(state).await?;
-        let models = self.list_model_catalog(state, None).await?;
-        let provider = providers
-            .into_iter()
-            .find(|entry| entry.id == provider_credential.provider_catalog_id)
-            .ok_or_else(|| {
-                ApiError::resource_not_found(
-                    "provider_catalog",
-                    provider_credential.provider_catalog_id,
-                )
-            })?;
-        let model =
-            models.into_iter().find(|entry| entry.id == model_preset.model_catalog_id).ok_or_else(
-                || ApiError::resource_not_found("model_catalog", model_preset.model_catalog_id),
-            )?;
+        let provider =
+            self.get_provider_catalog(state, provider_credential.provider_catalog_id).await?;
+        let model = self.get_model_catalog(state, model_preset.model_catalog_id).await?;
         if model.provider_catalog_id != provider.id {
             return Err(ApiError::BadRequest(
                 "binding links a provider credential to a model from another provider".to_string(),
@@ -1167,21 +1155,9 @@ impl AiCatalogService {
             ));
         }
 
-        let providers = self.list_provider_catalog(state).await?;
-        let models = self.list_model_catalog(state, None).await?;
-        let provider = providers
-            .into_iter()
-            .find(|entry| entry.id == provider_credential.provider_catalog_id)
-            .ok_or_else(|| {
-                ApiError::resource_not_found(
-                    "provider_catalog",
-                    provider_credential.provider_catalog_id,
-                )
-            })?;
-        let model =
-            models.into_iter().find(|entry| entry.id == model_preset.model_catalog_id).ok_or_else(
-                || ApiError::resource_not_found("model_catalog", model_preset.model_catalog_id),
-            )?;
+        let provider =
+            self.get_provider_catalog(state, provider_credential.provider_catalog_id).await?;
+        let model = self.get_model_catalog(state, model_preset.model_catalog_id).await?;
 
         if model.provider_catalog_id != provider.id {
             return Err(ApiError::BadRequest(

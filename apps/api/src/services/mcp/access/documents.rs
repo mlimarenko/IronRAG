@@ -118,6 +118,31 @@ pub async fn search_documents(
             .into_iter()
             .map(|row| (row.chunk_id, row))
             .collect::<std::collections::HashMap<_, _>>();
+        let chunk_document_ids = chunk_map
+            .values()
+            .map(|chunk| chunk.document_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let chunk_revision_ids = chunk_map
+            .values()
+            .map(|chunk| chunk.revision_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let (document_rows, revision_rows) = tokio::try_join!(
+            state.arango_document_store.list_documents_by_ids(&chunk_document_ids),
+            state.arango_document_store.list_revisions_by_ids(&chunk_revision_ids),
+        )
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        let document_map = document_rows
+            .into_iter()
+            .map(|row| (row.document_id, row))
+            .collect::<std::collections::HashMap<_, _>>();
+        let revision_map = revision_rows
+            .into_iter()
+            .map(|row| (row.revision_id, row))
+            .collect::<std::collections::HashMap<_, _>>();
         let mut document_accumulators =
             std::collections::HashMap::<Uuid, McpDocumentAccumulator>::new();
 
@@ -136,26 +161,15 @@ pub async fn search_documents(
             // Search index can hold stale chunks whose parent document
             // has been tombstoned (crashed ingest, manual cleanup); skip
             // them rather than failing the call.
-            let Some(document) = state
-                .arango_document_store
-                .get_document(chunk.document_id)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-            else {
+            let Some(document) = document_map.get(&chunk.document_id) else {
                 continue;
             };
-            let Some(revision) = state
-                .arango_document_store
-                .get_revision(chunk.revision_id)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-            else {
+            let Some(revision) = revision_map.get(&chunk.revision_id) else {
                 continue;
             };
-            let accumulator =
-                document_accumulators.entry(document.document_id).or_insert_with(|| {
-                    McpDocumentAccumulator::from_knowledge(&document, &revision, hit)
-                });
+            let accumulator = document_accumulators
+                .entry(document.document_id)
+                .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision, hit));
             accumulator.bump_score(hit.score);
             accumulator.merge_chunk_span_anchor(chunk.span_start, hit.score);
             accumulator.merge_chunk_reference(
@@ -174,27 +188,17 @@ pub async fn search_documents(
             // Same drift-tolerance as the lexical branch above: skip
             // hits pointing at tombstoned / missing documents and
             // revisions instead of failing the whole search.
-            let Some(document) = state
-                .arango_document_store
-                .get_document(chunk.document_id)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-            else {
+            let Some(document) = document_map.get(&chunk.document_id) else {
                 continue;
             };
-            let Some(revision) = state
-                .arango_document_store
-                .get_revision(chunk.revision_id)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-            else {
+            let Some(revision) = revision_map.get(&chunk.revision_id) else {
                 continue;
             };
             let accumulator =
                 document_accumulators.entry(document.document_id).or_insert_with(|| {
                     McpDocumentAccumulator::from_knowledge(
-                        &document,
-                        &revision,
+                        document,
+                        revision,
                         &crate::infra::arangodb::search_store::KnowledgeChunkSearchRow {
                             chunk_id: chunk.chunk_id,
                             workspace_id: chunk.workspace_id,
@@ -692,7 +696,7 @@ pub(crate) async fn resolve_document_state(
         .get_document(document_id)
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+        .ok_or_else(|| ApiError::NotFound("document not found".to_string()))?;
     let library = catalog_repository::get_library_by_id(
         &state.persistence.postgres,
         knowledge_document.library_id,
@@ -1031,32 +1035,11 @@ pub(crate) async fn load_knowledge_chunks_by_ids(
     if chunk_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut rows = Vec::with_capacity(chunk_ids.len());
-    for chunk_id in chunk_ids {
-        let cursor = state
-            .arango_document_store
-            .client()
-            .query_json(
-                "FOR chunk IN @@collection
-                 FILTER chunk.chunk_id == @chunk_id
-                 LIMIT 1
-                 RETURN chunk",
-                serde_json::json!({
-                    "@collection": crate::infra::arangodb::collections::KNOWLEDGE_CHUNK_COLLECTION,
-                    "chunk_id": chunk_id,
-                }),
-            )
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
-        let mut decoded: Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow> =
-            serde_json::from_value(result)
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        if let Some(row) = decoded.pop() {
-            rows.push(row);
-        }
-    }
-    Ok(rows)
+    state
+        .arango_document_store
+        .list_chunks_by_ids(chunk_ids)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))
 }
 
 pub(crate) async fn collect_revision_grounding_references(

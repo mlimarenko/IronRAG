@@ -1565,7 +1565,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
             .await
             .context("failed to load context bundle by query execution")?
             .ok_or_else(|| anyhow!("context bundle not found for query execution"))?;
-        assert_eq!(persisted_bundle.bundle_id, execution.id);
+        assert_eq!(persisted_bundle.bundle_id, bundle.bundle_id);
         assert_eq!(persisted_bundle.bundle_state, "ready");
 
         let reference_set = fixture
@@ -1610,7 +1610,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
             .await
             .context("failed to list retrieval traces by query execution")?;
         assert_eq!(traces.len(), 1);
-        assert_eq!(traces[0].bundle_id, execution.id);
+        assert_eq!(traces[0].bundle_id, bundle.bundle_id);
         assert_eq!(traces[0].query_execution_id, Some(execution.id));
         assert_eq!(traces[0].trace_state, "ready");
         assert_eq!(traces[0].retrieval_strategy, "chunk_lexical_first");
@@ -1943,7 +1943,7 @@ async fn execution_detail_surfaces_multihop_graph_and_multi_document_fact_suppor
 
         let detail = fixture
             .create_execution_detail_with_canonical_evidence(
-                "If the agent needs the WSDL inventory api and the rewards accounts list, what URLs does it require?",
+                "If the agent needs the WSDL inventory service and the REST accounts list, what URLs does it require?",
                 "verified",
                 json!([]),
                 vec![inventory_chunk_id, rest_chunk_id],

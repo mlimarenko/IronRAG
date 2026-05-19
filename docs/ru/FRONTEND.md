@@ -14,10 +14,10 @@ apps/web/src/
 ├── lib/           Утилиты без React
 ├── pages/         Route shells и page-owned feature packages
 ├── test/          Сквозные UI-аудиты
-└── types/         Канонические frontend domain types
+└── types/         Общие frontend domain types
 ```
 
-## Канонические frontend-контракты
+## Frontend-контракты
 
 - `api/*` ходит в backend и возвращает wire payload либо уже нормализованный DTO.
 - `adapters/*` — единственная зона, где Raw API envelope превращается в domain model.
@@ -47,7 +47,7 @@ apps/web/src/
 
 - Владеет списком сессий, активной сессией, историей сообщений, pending-turn state и debug context.
 - Использует `/v1/query/sessions/*` для session CRUD и turn execution.
-- Turn execution использует один canonical `POST /v1/query/sessions/{sessionId}/turns` request. UI запрашивает `text/event-stream`, чтобы activity, failure и completion events обновляли pending answer bubble, а completed answer оставался persisted session/execution record.
+- Turn execution использует один `POST /v1/query/sessions/{sessionId}/turns` request. UI запрашивает `text/event-stream`, чтобы activity, failure и completion events обновляли pending answer bubble, а completed answer оставался persisted session/execution record.
 - Если browser или proxy роняет stream после старта backend work, client перечитывает durable session result, созданный после request boundary, вместо повторной отправки turn. Backend `failed` events остаются terminal errors.
 - LLM context debug загружает persisted execution snapshots, а не process-local cache, поэтому reload и cached answer replay остаются inspectable при наличии snapshot.
 

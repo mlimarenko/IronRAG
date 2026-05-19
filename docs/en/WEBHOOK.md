@@ -54,7 +54,7 @@ CRUD endpoints:
 - `DELETE /v1/webhooks/subscriptions/{id}`
 - `GET    /v1/webhooks/subscriptions/{id}/attempts`
 
-## Canonical events
+## Event catalog
 
 ### `revision.ready`
 

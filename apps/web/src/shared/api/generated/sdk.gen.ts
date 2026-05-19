@@ -19,6 +19,11 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
 };
 
 export class Admin {
+    /**
+     * Get admin surface.
+     *
+     * Returns the admin shell aggregate. The admin UI uses this endpoint to load configuration, readiness, IAM, and model-catalog state with fewer round trips. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getAdminSurface<ThrowOnError extends boolean = false>(options?: Options<GetAdminSurfaceData, ThrowOnError>) {
         return (options?.client ?? client).get<GetAdminSurfaceResponses, GetAdminSurfaceErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -29,6 +34,11 @@ export class Admin {
 }
 
 export class Ai {
+    /**
+     * List ai library bindings.
+     *
+     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listAiLibraryBindings<ThrowOnError extends boolean = false>(options?: Options<ListAiLibraryBindingsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListAiLibraryBindingsResponses, ListAiLibraryBindingsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -37,6 +47,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Create ai library binding.
+     *
+     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<CreateAiLibraryBindingData, ThrowOnError>) {
         return (options.client ?? client).post<CreateAiLibraryBindingResponses, CreateAiLibraryBindingErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -49,6 +64,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Delete ai library binding.
+     *
+     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
     public static deleteAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<DeleteAiLibraryBindingData, ThrowOnError>) {
         return (options.client ?? client).delete<DeleteAiLibraryBindingResponses, DeleteAiLibraryBindingErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -57,6 +77,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Update ai library binding.
+     *
+     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<UpdateAiLibraryBindingData, ThrowOnError>) {
         return (options.client ?? client).put<UpdateAiLibraryBindingResponses, UpdateAiLibraryBindingErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -69,6 +94,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Validate ai library binding.
+     *
+     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static validateAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<ValidateAiLibraryBindingData, ThrowOnError>) {
         return (options.client ?? client).post<ValidateAiLibraryBindingResponses, ValidateAiLibraryBindingErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -77,6 +107,11 @@ export class Ai {
         });
     }
 
+    /**
+     * List ai credentials.
+     *
+     * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listAiCredentials<ThrowOnError extends boolean = false>(options?: Options<ListAiCredentialsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListAiCredentialsResponses, ListAiCredentialsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -85,6 +120,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Create ai credential.
+     *
+     * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createAiCredential<ThrowOnError extends boolean = false>(options: Options<CreateAiCredentialData, ThrowOnError>) {
         return (options.client ?? client).post<CreateAiCredentialResponses, CreateAiCredentialErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -97,6 +137,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Update ai credential.
+     *
+     * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateAiCredential<ThrowOnError extends boolean = false>(options: Options<UpdateAiCredentialData, ThrowOnError>) {
         return (options.client ?? client).put<UpdateAiCredentialResponses, UpdateAiCredentialErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -109,6 +154,11 @@ export class Ai {
         });
     }
 
+    /**
+     * List ai model presets.
+     *
+     * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listAiModelPresets<ThrowOnError extends boolean = false>(options?: Options<ListAiModelPresetsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListAiModelPresetsResponses, ListAiModelPresetsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -117,6 +167,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Create ai model preset.
+     *
+     * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createAiModelPreset<ThrowOnError extends boolean = false>(options: Options<CreateAiModelPresetData, ThrowOnError>) {
         return (options.client ?? client).post<CreateAiModelPresetResponses, CreateAiModelPresetErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -129,6 +184,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Update ai model preset.
+     *
+     * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateAiModelPreset<ThrowOnError extends boolean = false>(options: Options<UpdateAiModelPresetData, ThrowOnError>) {
         return (options.client ?? client).put<UpdateAiModelPresetResponses, UpdateAiModelPresetErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -141,6 +201,11 @@ export class Ai {
         });
     }
 
+    /**
+     * List ai models.
+     *
+     * Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listAiModels<ThrowOnError extends boolean = false>(options?: Options<ListAiModelsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListAiModelsResponses, ListAiModelsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -149,6 +214,11 @@ export class Ai {
         });
     }
 
+    /**
+     * List ai prices.
+     *
+     * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listAiPrices<ThrowOnError extends boolean = false>(options?: Options<ListAiPricesData, ThrowOnError>) {
         return (options?.client ?? client).get<ListAiPricesResponses, ListAiPricesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -157,6 +227,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Create ai price override.
+     *
+     * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createAiPriceOverride<ThrowOnError extends boolean = false>(options: Options<CreateAiPriceOverrideData, ThrowOnError>) {
         return (options.client ?? client).post<CreateAiPriceOverrideResponses, CreateAiPriceOverrideErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -169,6 +244,11 @@ export class Ai {
         });
     }
 
+    /**
+     * Update ai price override.
+     *
+     * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateAiPriceOverride<ThrowOnError extends boolean = false>(options: Options<UpdateAiPriceOverrideData, ThrowOnError>) {
         return (options.client ?? client).put<UpdateAiPriceOverrideResponses, UpdateAiPriceOverrideErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -181,6 +261,11 @@ export class Ai {
         });
     }
 
+    /**
+     * List ai providers.
+     *
+     * Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listAiProviders<ThrowOnError extends boolean = false>(options?: Options<ListAiProvidersData, ThrowOnError>) {
         return (options?.client ?? client).get<ListAiProvidersResponses, ListAiProvidersErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -191,6 +276,11 @@ export class Ai {
 }
 
 export class Audit {
+    /**
+     * List audit events.
+     *
+     * Reads immutable audit events. Security and operations teams use this endpoint to inspect who performed sensitive actions and which resources were affected. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listAuditEvents<ThrowOnError extends boolean = false>(options?: Options<ListAuditEventsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListAuditEventsResponses, ListAuditEventsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -201,6 +291,11 @@ export class Audit {
 }
 
 export class Billing {
+    /**
+     * Get billing execution cost.
+     *
+     * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getBillingExecutionCost<ThrowOnError extends boolean = false>(options: Options<GetBillingExecutionCostData, ThrowOnError>) {
         return (options.client ?? client).get<GetBillingExecutionCostResponses, GetBillingExecutionCostErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -209,6 +304,11 @@ export class Billing {
         });
     }
 
+    /**
+     * List billing charges.
+     *
+     * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listBillingCharges<ThrowOnError extends boolean = false>(options: Options<ListBillingChargesData, ThrowOnError>) {
         return (options.client ?? client).get<ListBillingChargesResponses, ListBillingChargesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -217,6 +317,11 @@ export class Billing {
         });
     }
 
+    /**
+     * List billing provider calls.
+     *
+     * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listBillingProviderCalls<ThrowOnError extends boolean = false>(options: Options<ListBillingProviderCallsData, ThrowOnError>) {
         return (options.client ?? client).get<ListBillingProviderCallsResponses, ListBillingProviderCallsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -225,6 +330,11 @@ export class Billing {
         });
     }
 
+    /**
+     * Get library cost summary.
+     *
+     * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getLibraryCostSummary<ThrowOnError extends boolean = false>(options: Options<GetLibraryCostSummaryData, ThrowOnError>) {
         return (options.client ?? client).get<GetLibraryCostSummaryResponses, GetLibraryCostSummaryErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -233,6 +343,11 @@ export class Billing {
         });
     }
 
+    /**
+     * List billing library document costs.
+     *
+     * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listBillingLibraryDocumentCosts<ThrowOnError extends boolean = false>(options: Options<ListBillingLibraryDocumentCostsData, ThrowOnError>) {
         return (options.client ?? client).get<ListBillingLibraryDocumentCostsResponses, ListBillingLibraryDocumentCostsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -241,6 +356,11 @@ export class Billing {
         });
     }
 
+    /**
+     * Get workspace cost summary.
+     *
+     * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getWorkspaceCostSummary<ThrowOnError extends boolean = false>(options: Options<GetWorkspaceCostSummaryData, ThrowOnError>) {
         return (options.client ?? client).get<GetWorkspaceCostSummaryResponses, GetWorkspaceCostSummaryErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -251,6 +371,11 @@ export class Billing {
 }
 
 export class Catalog {
+    /**
+     * Get catalog library.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getCatalogLibrary<ThrowOnError extends boolean = false>(options: Options<GetCatalogLibraryData, ThrowOnError>) {
         return (options.client ?? client).get<GetCatalogLibraryResponses, GetCatalogLibraryErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -259,6 +384,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Update catalog library.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateCatalogLibrary<ThrowOnError extends boolean = false>(options: Options<UpdateCatalogLibraryData, ThrowOnError>) {
         return (options.client ?? client).put<UpdateCatalogLibraryResponses, UpdateCatalogLibraryErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -271,6 +401,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Update catalog library recognition policy.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateCatalogLibraryRecognitionPolicy<ThrowOnError extends boolean = false>(options: Options<UpdateCatalogLibraryRecognitionPolicyData, ThrowOnError>) {
         return (options.client ?? client).put<UpdateCatalogLibraryRecognitionPolicyResponses, UpdateCatalogLibraryRecognitionPolicyErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -283,6 +418,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Update catalog library web ingest policy.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateCatalogLibraryWebIngestPolicy<ThrowOnError extends boolean = false>(options: Options<UpdateCatalogLibraryWebIngestPolicyData, ThrowOnError>) {
         return (options.client ?? client).put<UpdateCatalogLibraryWebIngestPolicyResponses, UpdateCatalogLibraryWebIngestPolicyErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -295,6 +435,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * List catalog workspaces.
+     *
+     * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listCatalogWorkspaces<ThrowOnError extends boolean = false>(options?: Options<ListCatalogWorkspacesData, ThrowOnError>) {
         return (options?.client ?? client).get<ListCatalogWorkspacesResponses, ListCatalogWorkspacesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -303,6 +448,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Create catalog workspace.
+     *
+     * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createCatalogWorkspace<ThrowOnError extends boolean = false>(options: Options<CreateCatalogWorkspaceData, ThrowOnError>) {
         return (options.client ?? client).post<CreateCatalogWorkspaceResponses, CreateCatalogWorkspaceErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -315,6 +465,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Delete catalog workspace.
+     *
+     * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
     public static deleteCatalogWorkspace<ThrowOnError extends boolean = false>(options: Options<DeleteCatalogWorkspaceData, ThrowOnError>) {
         return (options.client ?? client).delete<DeleteCatalogWorkspaceResponses, DeleteCatalogWorkspaceErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -323,6 +478,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Get catalog workspace.
+     *
+     * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getCatalogWorkspace<ThrowOnError extends boolean = false>(options: Options<GetCatalogWorkspaceData, ThrowOnError>) {
         return (options.client ?? client).get<GetCatalogWorkspaceResponses, GetCatalogWorkspaceErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -331,6 +491,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * List catalog libraries.
+     *
+     * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listCatalogLibraries<ThrowOnError extends boolean = false>(options: Options<ListCatalogLibrariesData, ThrowOnError>) {
         return (options.client ?? client).get<ListCatalogLibrariesResponses, ListCatalogLibrariesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -339,6 +504,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Create catalog library.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createCatalogLibrary<ThrowOnError extends boolean = false>(options: Options<CreateCatalogLibraryData, ThrowOnError>) {
         return (options.client ?? client).post<CreateCatalogLibraryResponses, CreateCatalogLibraryErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -351,6 +521,11 @@ export class Catalog {
         });
     }
 
+    /**
+     * Delete catalog library.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
     public static deleteCatalogLibrary<ThrowOnError extends boolean = false>(options: Options<DeleteCatalogLibraryData, ThrowOnError>) {
         return (options.client ?? client).delete<DeleteCatalogLibraryResponses, DeleteCatalogLibraryErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -361,6 +536,11 @@ export class Catalog {
 }
 
 export class Content {
+    /**
+     * List chunks.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listChunks<ThrowOnError extends boolean = false>(options?: Options<ListChunksData, ThrowOnError>) {
         return (options?.client ?? client).get<ListChunksResponses, ListChunksErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -385,6 +565,11 @@ export class Content {
         });
     }
 
+    /**
+     * Create content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createContentDocument<ThrowOnError extends boolean = false>(options: Options<CreateContentDocumentData, ThrowOnError>) {
         return (options.client ?? client).post<CreateContentDocumentResponses, CreateContentDocumentErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -397,6 +582,11 @@ export class Content {
         });
     }
 
+    /**
+     * Batch cancel content documents.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it from bulk-action UI flows; the response describes accepted items and any per-item admission failures.
+     */
     public static batchCancelContentDocuments<ThrowOnError extends boolean = false>(options: Options<BatchCancelContentDocumentsData, ThrowOnError>) {
         return (options.client ?? client).post<BatchCancelContentDocumentsResponses, BatchCancelContentDocumentsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -409,6 +599,11 @@ export class Content {
         });
     }
 
+    /**
+     * Batch delete content documents.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it from bulk-action UI flows; the response describes accepted items and any per-item admission failures.
+     */
     public static batchDeleteContentDocuments<ThrowOnError extends boolean = false>(options: Options<BatchDeleteContentDocumentsData, ThrowOnError>) {
         return (options.client ?? client).post<BatchDeleteContentDocumentsResponses, BatchDeleteContentDocumentsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -446,6 +641,11 @@ export class Content {
         });
     }
 
+    /**
+     * Upload content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for multipart or direct document uploads; ingestion continues asynchronously after the document record is accepted.
+     */
     public static uploadContentDocument<ThrowOnError extends boolean = false>(options?: Options<UploadContentDocumentData, ThrowOnError>) {
         return (options?.client ?? client).post<UploadContentDocumentResponses, UploadContentDocumentErrors, ThrowOnError>({
             ...formDataBodySerializer,
@@ -459,6 +659,11 @@ export class Content {
         });
     }
 
+    /**
+     * Delete content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
     public static deleteContentDocument<ThrowOnError extends boolean = false>(options: Options<DeleteContentDocumentData, ThrowOnError>) {
         return (options.client ?? client).delete<DeleteContentDocumentResponses, DeleteContentDocumentErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -467,6 +672,11 @@ export class Content {
         });
     }
 
+    /**
+     * Get content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getContentDocument<ThrowOnError extends boolean = false>(options: Options<GetContentDocumentData, ThrowOnError>) {
         return (options.client ?? client).get<GetContentDocumentResponses, GetContentDocumentErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -475,6 +685,11 @@ export class Content {
         });
     }
 
+    /**
+     * Patch content document metadata.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static patchContentDocumentMetadata<ThrowOnError extends boolean = false>(options: Options<PatchContentDocumentMetadataData, ThrowOnError>) {
         return (options.client ?? client).patch<PatchContentDocumentMetadataResponses, PatchContentDocumentMetadataErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -487,6 +702,11 @@ export class Content {
         });
     }
 
+    /**
+     * Append content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static appendContentDocument<ThrowOnError extends boolean = false>(options: Options<AppendContentDocumentData, ThrowOnError>) {
         return (options.client ?? client).post<AppendContentDocumentResponses, AppendContentDocumentErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -499,6 +719,11 @@ export class Content {
         });
     }
 
+    /**
+     * Edit content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static editContentDocument<ThrowOnError extends boolean = false>(options: Options<EditContentDocumentData, ThrowOnError>) {
         return (options.client ?? client).post<EditContentDocumentResponses, EditContentDocumentErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -511,6 +736,11 @@ export class Content {
         });
     }
 
+    /**
+     * Get content document head.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getContentDocumentHead<ThrowOnError extends boolean = false>(options: Options<GetContentDocumentHeadData, ThrowOnError>) {
         return (options.client ?? client).get<GetContentDocumentHeadResponses, GetContentDocumentHeadErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -519,6 +749,11 @@ export class Content {
         });
     }
 
+    /**
+     * List content prepared segments.
+     *
+     * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listContentPreparedSegments<ThrowOnError extends boolean = false>(options: Options<ListContentPreparedSegmentsData, ThrowOnError>) {
         return (options.client ?? client).get<ListContentPreparedSegmentsResponses, ListContentPreparedSegmentsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -527,6 +762,11 @@ export class Content {
         });
     }
 
+    /**
+     * Replace content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static replaceContentDocument<ThrowOnError extends boolean = false>(options: Options<ReplaceContentDocumentData, ThrowOnError>) {
         return (options.client ?? client).post<ReplaceContentDocumentResponses, ReplaceContentDocumentErrors, ThrowOnError>({
             ...formDataBodySerializer,
@@ -540,6 +780,11 @@ export class Content {
         });
     }
 
+    /**
+     * Reprocess content document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static reprocessContentDocument<ThrowOnError extends boolean = false>(options: Options<ReprocessContentDocumentData, ThrowOnError>) {
         return (options.client ?? client).post<ReprocessContentDocumentResponses, ReprocessContentDocumentErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -552,6 +797,11 @@ export class Content {
         });
     }
 
+    /**
+     * List content revisions.
+     *
+     * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listContentRevisions<ThrowOnError extends boolean = false>(options: Options<ListContentRevisionsData, ThrowOnError>) {
         return (options.client ?? client).get<ListContentRevisionsResponses, ListContentRevisionsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -560,6 +810,11 @@ export class Content {
         });
     }
 
+    /**
+     * Get content document source.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the UI or an integration needs the original stored source file rather than extracted text or derived metadata.
+     */
     public static getContentDocumentSource<ThrowOnError extends boolean = false>(options: Options<GetContentDocumentSourceData, ThrowOnError>) {
         return (options.client ?? client).get<GetContentDocumentSourceResponses, GetContentDocumentSourceErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -568,6 +823,11 @@ export class Content {
         });
     }
 
+    /**
+     * List content technical facts.
+     *
+     * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listContentTechnicalFacts<ThrowOnError extends boolean = false>(options: Options<ListContentTechnicalFactsData, ThrowOnError>) {
         return (options.client ?? client).get<ListContentTechnicalFactsResponses, ListContentTechnicalFactsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -578,6 +838,8 @@ export class Content {
 
     /**
      * Streams a library snapshot as `application/zstd` (tar.zst).
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to export a portable library archive for backup, migration, or offline inspection.
      */
     public static exportLibrarySnapshot<ThrowOnError extends boolean = false>(options: Options<ExportLibrarySnapshotData, ThrowOnError>) {
         return (options.client ?? client).get<ExportLibrarySnapshotResponses, ExportLibrarySnapshotErrors, ThrowOnError>({
@@ -589,6 +851,8 @@ export class Content {
 
     /**
      * Restores a library from a tar.zst snapshot body.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to import a previously exported library archive into the selected library scope.
      */
     public static importLibrarySnapshot<ThrowOnError extends boolean = false>(options: Options<ImportLibrarySnapshotData, ThrowOnError>) {
         return (options.client ?? client).post<ImportLibrarySnapshotResponses, ImportLibrarySnapshotErrors, ThrowOnError>({
@@ -602,6 +866,11 @@ export class Content {
         });
     }
 
+    /**
+     * List content mutations.
+     *
+     * Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listContentMutations<ThrowOnError extends boolean = false>(options?: Options<ListContentMutationsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListContentMutationsResponses, ListContentMutationsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -610,6 +879,11 @@ export class Content {
         });
     }
 
+    /**
+     * Create content mutation.
+     *
+     * Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createContentMutation<ThrowOnError extends boolean = false>(options: Options<CreateContentMutationData, ThrowOnError>) {
         return (options.client ?? client).post<CreateContentMutationResponses, CreateContentMutationErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -622,6 +896,11 @@ export class Content {
         });
     }
 
+    /**
+     * Get content mutation.
+     *
+     * Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getContentMutation<ThrowOnError extends boolean = false>(options: Options<GetContentMutationData, ThrowOnError>) {
         return (options.client ?? client).get<GetContentMutationResponses, GetContentMutationErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -630,6 +909,11 @@ export class Content {
         });
     }
 
+    /**
+     * List content web ingest runs.
+     *
+     * Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listContentWebIngestRuns<ThrowOnError extends boolean = false>(options?: Options<ListContentWebIngestRunsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListContentWebIngestRunsResponses, ListContentWebIngestRunsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -638,6 +922,11 @@ export class Content {
         });
     }
 
+    /**
+     * Create content web ingest run.
+     *
+     * Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createContentWebIngestRun<ThrowOnError extends boolean = false>(options: Options<CreateContentWebIngestRunData, ThrowOnError>) {
         return (options.client ?? client).post<CreateContentWebIngestRunResponses, CreateContentWebIngestRunErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -650,6 +939,11 @@ export class Content {
         });
     }
 
+    /**
+     * Get content web ingest run.
+     *
+     * Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getContentWebIngestRun<ThrowOnError extends boolean = false>(options: Options<GetContentWebIngestRunData, ThrowOnError>) {
         return (options.client ?? client).get<GetContentWebIngestRunResponses, GetContentWebIngestRunErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -658,6 +952,11 @@ export class Content {
         });
     }
 
+    /**
+     * Cancel content web ingest run.
+     *
+     * Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static cancelContentWebIngestRun<ThrowOnError extends boolean = false>(options: Options<CancelContentWebIngestRunData, ThrowOnError>) {
         return (options.client ?? client).post<CancelContentWebIngestRunResponses, CancelContentWebIngestRunErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -666,6 +965,11 @@ export class Content {
         });
     }
 
+    /**
+     * List content web ingest run pages.
+     *
+     * Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listContentWebIngestRunPages<ThrowOnError extends boolean = false>(options: Options<ListContentWebIngestRunPagesData, ThrowOnError>) {
         return (options.client ?? client).get<ListContentWebIngestRunPagesResponses, ListContentWebIngestRunPagesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -676,28 +980,58 @@ export class Content {
 }
 
 export class System {
+    /**
+     * Check backend liveness.
+     *
+     * Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it for cheap liveness checks; it does not prove that downstream stores or AI bindings are ready.
+     */
     public static getHealth<ThrowOnError extends boolean = false>(options?: Options<GetHealthData, ThrowOnError>) {
         return (options?.client ?? client).get<GetHealthResponses, unknown, ThrowOnError>({ url: '/v1/health', ...options });
     }
 
+    /**
+     * Download the OpenAPI contract.
+     *
+     * Returns the generated OpenAPI 3.1 contract served by the running backend. Swagger UI and API clients use it as the HTTP contract source. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getOpenApiContract<ThrowOnError extends boolean = false>(options?: Options<GetOpenApiContractData, ThrowOnError>) {
         return (options?.client ?? client).get<GetOpenApiContractResponses, unknown, ThrowOnError>({ url: '/v1/openapi/ironrag.openapi.yaml', ...options });
     }
 
+    /**
+     * Check backend readiness.
+     *
+     * Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it from load balancers, deploy checks, and UI startup gates; it reports whether dependencies and required bootstrap state are usable.
+     */
     public static getReadiness<ThrowOnError extends boolean = false>(options?: Options<GetReadinessData, ThrowOnError>) {
         return (options?.client ?? client).get<GetReadinessResponses, GetReadinessErrors, ThrowOnError>({ url: '/v1/ready', ...options });
     }
 
+    /**
+     * Get running service version.
+     *
+     * Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getVersion<ThrowOnError extends boolean = false>(options?: Options<GetVersionData, ThrowOnError>) {
         return (options?.client ?? client).get<GetVersionResponses, unknown, ThrowOnError>({ url: '/v1/version', ...options });
     }
 
+    /**
+     * Check for an available release update.
+     *
+     * Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getReleaseUpdate<ThrowOnError extends boolean = false>(options?: Options<GetReleaseUpdateData, ThrowOnError>) {
         return (options?.client ?? client).get<GetReleaseUpdateResponses, unknown, ThrowOnError>({ url: '/v1/version/update', ...options });
     }
 }
 
 export class Iam {
+    /**
+     * Post bootstrap setup.
+     *
+     * Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static postBootstrapSetup<ThrowOnError extends boolean = false>(options: Options<PostBootstrapSetupData, ThrowOnError>) {
         return (options.client ?? client).post<PostBootstrapSetupResponses, PostBootstrapSetupErrors, ThrowOnError>({
             url: '/v1/iam/bootstrap/setup',
@@ -709,10 +1043,20 @@ export class Iam {
         });
     }
 
+    /**
+     * Get bootstrap status.
+     *
+     * Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getBootstrapStatus<ThrowOnError extends boolean = false>(options?: Options<GetBootstrapStatusData, ThrowOnError>) {
         return (options?.client ?? client).get<GetBootstrapStatusResponses, unknown, ThrowOnError>({ url: '/v1/iam/bootstrap/status', ...options });
     }
 
+    /**
+     * List iam grants.
+     *
+     * Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listIamGrants<ThrowOnError extends boolean = false>(options?: Options<ListIamGrantsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListIamGrantsResponses, ListIamGrantsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -721,6 +1065,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Create iam grant.
+     *
+     * Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createIamGrant<ThrowOnError extends boolean = false>(options: Options<CreateIamGrantData, ThrowOnError>) {
         return (options.client ?? client).post<CreateIamGrantResponses, CreateIamGrantErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -733,6 +1082,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Revoke iam grant.
+     *
+     * Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
     public static revokeIamGrant<ThrowOnError extends boolean = false>(options: Options<RevokeIamGrantData, ThrowOnError>) {
         return (options.client ?? client).delete<RevokeIamGrantResponses, RevokeIamGrantErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -741,6 +1095,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Get iam me.
+     *
+     * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getIamMe<ThrowOnError extends boolean = false>(options?: Options<GetIamMeData, ThrowOnError>) {
         return (options?.client ?? client).get<GetIamMeResponses, GetIamMeErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -749,6 +1108,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Get iam session.
+     *
+     * Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getIamSession<ThrowOnError extends boolean = false>(options?: Options<GetIamSessionData, ThrowOnError>) {
         return (options?.client ?? client).get<GetIamSessionResponses, GetIamSessionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -757,6 +1121,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Login iam session.
+     *
+     * Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static loginIamSession<ThrowOnError extends boolean = false>(options: Options<LoginIamSessionData, ThrowOnError>) {
         return (options.client ?? client).post<LoginIamSessionResponses, LoginIamSessionErrors, ThrowOnError>({
             url: '/v1/iam/session/login',
@@ -768,6 +1137,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Logout iam session.
+     *
+     * Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static logoutIamSession<ThrowOnError extends boolean = false>(options?: Options<LogoutIamSessionData, ThrowOnError>) {
         return (options?.client ?? client).post<LogoutIamSessionResponses, LogoutIamSessionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -776,10 +1150,20 @@ export class Iam {
         });
     }
 
+    /**
+     * Resolve iam session.
+     *
+     * Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Use the documented parameters and request body schema to call it from the web UI, automation, or service integrations.
+     */
     public static resolveIamSession<ThrowOnError extends boolean = false>(options?: Options<ResolveIamSessionData, ThrowOnError>) {
         return (options?.client ?? client).get<ResolveIamSessionResponses, unknown, ThrowOnError>({ url: '/v1/iam/session/resolve', ...options });
     }
 
+    /**
+     * List iam tokens.
+     *
+     * Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listIamTokens<ThrowOnError extends boolean = false>(options?: Options<ListIamTokensData, ThrowOnError>) {
         return (options?.client ?? client).get<ListIamTokensResponses, ListIamTokensErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -788,6 +1172,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Mint iam token.
+     *
+     * Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static mintIamToken<ThrowOnError extends boolean = false>(options: Options<MintIamTokenData, ThrowOnError>) {
         return (options.client ?? client).post<MintIamTokenResponses, MintIamTokenErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -800,6 +1189,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Delete iam token.
+     *
+     * Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
     public static deleteIamToken<ThrowOnError extends boolean = false>(options: Options<DeleteIamTokenData, ThrowOnError>) {
         return (options.client ?? client).delete<DeleteIamTokenResponses, DeleteIamTokenErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -808,6 +1202,11 @@ export class Iam {
         });
     }
 
+    /**
+     * Revoke iam token.
+     *
+     * Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static revokeIamToken<ThrowOnError extends boolean = false>(options: Options<RevokeIamTokenData, ThrowOnError>) {
         return (options.client ?? client).post<RevokeIamTokenResponses, RevokeIamTokenErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -818,6 +1217,11 @@ export class Iam {
 }
 
 export class Ingest {
+    /**
+     * Get ingest attempt.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getIngestAttempt<ThrowOnError extends boolean = false>(options: Options<GetIngestAttemptData, ThrowOnError>) {
         return (options.client ?? client).get<GetIngestAttemptResponses, GetIngestAttemptErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -826,6 +1230,11 @@ export class Ingest {
         });
     }
 
+    /**
+     * List ingest stage events.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listIngestStageEvents<ThrowOnError extends boolean = false>(options: Options<ListIngestStageEventsData, ThrowOnError>) {
         return (options.client ?? client).get<ListIngestStageEventsResponses, ListIngestStageEventsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -834,6 +1243,11 @@ export class Ingest {
         });
     }
 
+    /**
+     * List ingest jobs.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listIngestJobs<ThrowOnError extends boolean = false>(options?: Options<ListIngestJobsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListIngestJobsResponses, ListIngestJobsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -842,6 +1256,11 @@ export class Ingest {
         });
     }
 
+    /**
+     * Get ingest job.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getIngestJob<ThrowOnError extends boolean = false>(options: Options<GetIngestJobData, ThrowOnError>) {
         return (options.client ?? client).get<GetIngestJobResponses, GetIngestJobErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -852,6 +1271,11 @@ export class Ingest {
 }
 
 export class Knowledge {
+    /**
+     * Get knowledge context bundle.
+     *
+     * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getKnowledgeContextBundle<ThrowOnError extends boolean = false>(options: Options<GetKnowledgeContextBundleData, ThrowOnError>) {
         return (options.client ?? client).get<GetKnowledgeContextBundleResponses, GetKnowledgeContextBundleErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -860,6 +1284,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * List knowledge context bundles.
+     *
+     * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listKnowledgeContextBundles<ThrowOnError extends boolean = false>(options: Options<ListKnowledgeContextBundlesData, ThrowOnError>) {
         return (options.client ?? client).get<ListKnowledgeContextBundlesResponses, ListKnowledgeContextBundlesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -868,6 +1297,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * List knowledge documents.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listKnowledgeDocuments<ThrowOnError extends boolean = false>(options: Options<ListKnowledgeDocumentsData, ThrowOnError>) {
         return (options.client ?? client).get<ListKnowledgeDocumentsResponses, ListKnowledgeDocumentsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -876,6 +1310,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * Get knowledge document.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getKnowledgeDocument<ThrowOnError extends boolean = false>(options: Options<GetKnowledgeDocumentData, ThrowOnError>) {
         return (options.client ?? client).get<GetKnowledgeDocumentResponses, GetKnowledgeDocumentErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -884,6 +1323,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * Get knowledge entity.
+     *
+     * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getKnowledgeEntity<ThrowOnError extends boolean = false>(options: Options<GetKnowledgeEntityData, ThrowOnError>) {
         return (options.client ?? client).get<GetKnowledgeEntityResponses, GetKnowledgeEntityErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -892,6 +1336,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * List knowledge library generations.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listKnowledgeLibraryGenerations<ThrowOnError extends boolean = false>(options: Options<ListKnowledgeLibraryGenerationsData, ThrowOnError>) {
         return (options.client ?? client).get<ListKnowledgeLibraryGenerationsResponses, ListKnowledgeLibraryGenerationsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -900,6 +1349,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * Get knowledge graph workbench.
+     *
+     * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getKnowledgeGraphWorkbench<ThrowOnError extends boolean = false>(options: Options<GetKnowledgeGraphWorkbenchData, ThrowOnError>) {
         return (options.client ?? client).get<GetKnowledgeGraphWorkbenchResponses, GetKnowledgeGraphWorkbenchErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -908,6 +1362,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * Get knowledge relation.
+     *
+     * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getKnowledgeRelation<ThrowOnError extends boolean = false>(options: Options<GetKnowledgeRelationData, ThrowOnError>) {
         return (options.client ?? client).get<GetKnowledgeRelationResponses, GetKnowledgeRelationErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -916,6 +1375,11 @@ export class Knowledge {
         });
     }
 
+    /**
+     * Get knowledge library summary.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getKnowledgeLibrarySummary<ThrowOnError extends boolean = false>(options: Options<GetKnowledgeLibrarySummaryData, ThrowOnError>) {
         return (options.client ?? client).get<GetKnowledgeLibrarySummaryResponses, GetKnowledgeLibrarySummaryErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -926,6 +1390,11 @@ export class Knowledge {
 }
 
 export class Search {
+    /**
+     * Search knowledge documents.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.
+     */
     public static searchKnowledgeDocuments<ThrowOnError extends boolean = false>(options: Options<SearchKnowledgeDocumentsData, ThrowOnError>) {
         return (options.client ?? client).get<SearchKnowledgeDocumentsResponses, SearchKnowledgeDocumentsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -934,6 +1403,11 @@ export class Search {
         });
     }
 
+    /**
+     * Search documents.
+     *
+     * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.
+     */
     public static searchDocuments<ThrowOnError extends boolean = false>(options: Options<SearchDocumentsData, ThrowOnError>) {
         return (options.client ?? client).get<SearchDocumentsResponses, SearchDocumentsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -944,6 +1418,11 @@ export class Search {
 }
 
 export class Automation {
+    /**
+     * Execute answer-surface MCP JSON-RPC.
+     *
+     * Main JSON-RPC endpoint for external MCP clients and other agent runtimes. It supports MCP initialization, tool listing, and tool invocation over the answer surface. Tools on this surface are read-oriented and designed for agentic question answering: catalog discovery, document search/read, graph inspection, runtime trace lookup, and `grounded_answer`. For user-facing answers, clients should let the agent choose tools from the listed schemas. Do not mechanically wrap every user message as a `grounded_answer` call; composite questions often need several document, graph, runtime, and grounded-answer probes before final synthesis.
+     */
     public static postMcpRequest<ThrowOnError extends boolean = false>(options: Options<PostMcpRequestData, ThrowOnError>) {
         return (options.client ?? client).post<PostMcpRequestResponses, PostMcpRequestErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -956,6 +1435,11 @@ export class Automation {
         });
     }
 
+    /**
+     * List answer MCP capabilities for the caller.
+     *
+     * Returns the answer-surface MCP tools visible to the authenticated principal. External MCP clients and the UI assistant setup flow can use this endpoint to discover whether the token can see workspaces, libraries, documents, graph tools, runtime tools, and `grounded_answer`. The response is authorization-scoped: workspace and library counts reflect only what the token can access, and the tool list omits tools disallowed for the token kind or policy.
+     */
     public static getMcpCapabilities<ThrowOnError extends boolean = false>(options?: Options<GetMcpCapabilitiesData, ThrowOnError>) {
         return (options?.client ?? client).get<GetMcpCapabilitiesResponses, GetMcpCapabilitiesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -964,6 +1448,11 @@ export class Automation {
         });
     }
 
+    /**
+     * Execute diagnostics MCP JSON-RPC.
+     *
+     * JSON-RPC endpoint for operational MCP clients. This surface is intended for debugging and automation that needs runtime state or traces, not for ordinary library question answering. Use `/v1/mcp/diagnostics/capabilities` first to check which diagnostic tools the token may call. Keep this surface separate from answer agents when a token should not expose operational inspection tools to normal chat flows.
+     */
     public static postMcpDiagnosticsRequest<ThrowOnError extends boolean = false>(options: Options<PostMcpDiagnosticsRequestData, ThrowOnError>) {
         return (options.client ?? client).post<PostMcpDiagnosticsRequestResponses, PostMcpDiagnosticsRequestErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -976,6 +1465,11 @@ export class Automation {
         });
     }
 
+    /**
+     * List diagnostics MCP capabilities for the caller.
+     *
+     * Returns the diagnostics MCP tool surface visible to the authenticated principal. Use this before wiring operational agents that inspect runtime state, traces, or backend diagnostics rather than answering library-content questions. The diagnostics surface is separate from `/v1/mcp` so tokens can expose operational tools without expanding the normal answer surface.
+     */
     public static getMcpDiagnosticsCapabilities<ThrowOnError extends boolean = false>(options?: Options<GetMcpDiagnosticsCapabilitiesData, ThrowOnError>) {
         return (options?.client ?? client).get<GetMcpDiagnosticsCapabilitiesResponses, GetMcpDiagnosticsCapabilitiesErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -986,6 +1480,11 @@ export class Automation {
 }
 
 export class Ops {
+    /**
+     * List ingest queue.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listIngestQueue<ThrowOnError extends boolean = false>(options?: Options<ListIngestQueueData, ThrowOnError>) {
         return (options?.client ?? client).get<ListIngestQueueResponses, ListIngestQueueErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -994,6 +1493,11 @@ export class Ops {
         });
     }
 
+    /**
+     * Cancel ingest queue job.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static cancelIngestQueueJob<ThrowOnError extends boolean = false>(options: Options<CancelIngestQueueJobData, ThrowOnError>) {
         return (options.client ?? client).post<CancelIngestQueueJobResponses, CancelIngestQueueJobErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1002,6 +1506,11 @@ export class Ops {
         });
     }
 
+    /**
+     * Move ingest queue job.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static moveIngestQueueJob<ThrowOnError extends boolean = false>(options: Options<MoveIngestQueueJobData, ThrowOnError>) {
         return (options.client ?? client).post<MoveIngestQueueJobResponses, MoveIngestQueueJobErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1014,6 +1523,11 @@ export class Ops {
         });
     }
 
+    /**
+     * Pause ingest queue job.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static pauseIngestQueueJob<ThrowOnError extends boolean = false>(options: Options<PauseIngestQueueJobData, ThrowOnError>) {
         return (options.client ?? client).post<PauseIngestQueueJobResponses, PauseIngestQueueJobErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1022,6 +1536,11 @@ export class Ops {
         });
     }
 
+    /**
+     * Resume ingest queue job.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static resumeIngestQueueJob<ThrowOnError extends boolean = false>(options: Options<ResumeIngestQueueJobData, ThrowOnError>) {
         return (options.client ?? client).post<ResumeIngestQueueJobResponses, ResumeIngestQueueJobErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1030,6 +1549,11 @@ export class Ops {
         });
     }
 
+    /**
+     * Get library state.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getLibraryState<ThrowOnError extends boolean = false>(options: Options<GetLibraryStateData, ThrowOnError>) {
         return (options.client ?? client).get<GetLibraryStateResponses, GetLibraryStateErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1038,6 +1562,11 @@ export class Ops {
         });
     }
 
+    /**
+     * Get library dashboard.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to hydrate dashboards with one server-computed view instead of issuing many smaller requests.
+     */
     public static getLibraryDashboard<ThrowOnError extends boolean = false>(options: Options<GetLibraryDashboardData, ThrowOnError>) {
         return (options.client ?? client).get<GetLibraryDashboardResponses, GetLibraryDashboardErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1046,6 +1575,11 @@ export class Ops {
         });
     }
 
+    /**
+     * Get async operation.
+     *
+     * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getAsyncOperation<ThrowOnError extends boolean = false>(options: Options<GetAsyncOperationData, ThrowOnError>) {
         return (options.client ?? client).get<GetAsyncOperationResponses, GetAsyncOperationErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1057,16 +1591,9 @@ export class Ops {
 
 export class Query {
     /**
-     * Publish the canonical MCP assistant system prompt.
+     * Get the recommended MCP assistant system prompt.
      *
-     * This is the single source of truth for external MCP clients and the
-     * admin UI's "MCP client setup" card, which serves the same text
-     * verbatim for operators to copy into their own agents.
-     *
-     * Any drift between MCP client setup surfaces would silently change
-     * grounding behavior per client, so the text lives in
-     * `services::query::assistant_prompt` and every consumer reads from
-     * there.
+     * Returns the prompt text that should be installed in external MCP clients and in the built-in UI assistant setup flow. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, and avoid forwarding the raw latest user message as a hidden grounded-answer query. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
      */
     public static getAssistantSystemPrompt<ThrowOnError extends boolean = false>(options?: Options<GetAssistantSystemPromptData, ThrowOnError>) {
         return (options?.client ?? client).get<GetAssistantSystemPromptResponses, GetAssistantSystemPromptErrors, ThrowOnError>({
@@ -1076,6 +1603,11 @@ export class Query {
         });
     }
 
+    /**
+     * Inspect one assistant execution.
+     *
+     * Loads the persisted execution detail for a completed or failed assistant turn. This is the main trace endpoint for the debug inspector and external operators: it includes request/response turns, citations, selected chunks, prepared segments, graph references, verifier verdict, runtime stage summary, policy decisions, and child tool executions when the turn used the agent loop.
+     */
     public static getQueryExecution<ThrowOnError extends boolean = false>(options: Options<GetQueryExecutionData, ThrowOnError>) {
         return (options.client ?? client).get<GetQueryExecutionResponses, GetQueryExecutionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1085,8 +1617,9 @@ export class Query {
     }
 
     /**
-     * Returns the raw LLM request/response chain that was sent to the
-     * provider for this assistant execution.
+     * Inspect captured LLM context for one execution.
+     *
+     * Returns the durable model transcript captured for an assistant execution: system messages, prior conversation messages, tool definitions, tool-call arguments, tool results, final model responses, token usage, and stop reasons. The UI debug inspector uses this endpoint to show the full prompt/tool context that produced an answer. The endpoint is intended for debugging and audit, not for user-facing answer rendering.
      */
     public static getQueryExecutionLlmContext<ThrowOnError extends boolean = false>(options: Options<GetQueryExecutionLlmContextData, ThrowOnError>) {
         return (options.client ?? client).get<GetQueryExecutionLlmContextResponses, GetQueryExecutionLlmContextErrors, ThrowOnError>({
@@ -1096,6 +1629,11 @@ export class Query {
         });
     }
 
+    /**
+     * List assistant sessions for one library.
+     *
+     * Returns the chat sessions visible to the caller for the requested library. The web UI uses this endpoint to populate the assistant sidebar and restore recent conversations. Clients must provide `libraryId`; authorization is checked against the library before any session metadata is returned.
+     */
     public static listQuerySessions<ThrowOnError extends boolean = false>(options?: Options<ListQuerySessionsData, ThrowOnError>) {
         return (options?.client ?? client).get<ListQuerySessionsResponses, ListQuerySessionsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1104,6 +1642,11 @@ export class Query {
         });
     }
 
+    /**
+     * Create an assistant session.
+     *
+     * Creates a persistent assistant conversation scoped to one library. The session stores the user and assistant turns, execution ids, verifier state, citations, runtime traces, and debug snapshots produced by later turns. `workspaceId` is optional for normal callers because the backend derives it from `libraryId`; when supplied it must match the target library.
+     */
     public static createQuerySession<ThrowOnError extends boolean = false>(options: Options<CreateQuerySessionData, ThrowOnError>) {
         return (options.client ?? client).post<CreateQuerySessionResponses, CreateQuerySessionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1116,6 +1659,11 @@ export class Query {
         });
     }
 
+    /**
+     * Load one assistant session with turns.
+     *
+     * Returns the hydrated conversation used by the UI chat pane: session metadata, user turns, assistant turns, execution identifiers, citations, and verification state. Use this after selecting a session from the list or after a page reload to reconstruct the visible conversation.
+     */
     public static getQuerySession<ThrowOnError extends boolean = false>(options: Options<GetQuerySessionData, ThrowOnError>) {
         return (options.client ?? client).get<GetQuerySessionResponses, GetQuerySessionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1124,6 +1672,11 @@ export class Query {
         });
     }
 
+    /**
+     * Run one UI assistant turn.
+     *
+     * Executes one user message through the same MCP-style tool loop used to simulate an external agent in the web UI. The model receives the available answer-surface tool schemas, chooses one or more tool calls, may run independent calls in parallel, reads the tool results, and then writes the final answer. For normal JSON clients the endpoint returns the completed `AssistantExecutionDetail`. When the request `Accept` header includes `text/event-stream`, the same endpoint streams `assistant_turn` SSE events: model requests, model responses, tool-call start/finish activity, periodic working heartbeats, and finally a terminal `completed` or `failed` event.
+     */
     public static createQuerySessionTurn<ThrowOnError extends boolean = false>(options: Options<CreateQuerySessionTurnData, ThrowOnError>) {
         return (options.client ?? client).post<CreateQuerySessionTurnResponses, CreateQuerySessionTurnErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1138,6 +1691,11 @@ export class Query {
 }
 
 export class Runtime {
+    /**
+     * Get runtime execution.
+     *
+     * Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getRuntimeExecution<ThrowOnError extends boolean = false>(options: Options<GetRuntimeExecutionData, ThrowOnError>) {
         return (options.client ?? client).get<GetRuntimeExecutionResponses, GetRuntimeExecutionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1146,6 +1704,11 @@ export class Runtime {
         });
     }
 
+    /**
+     * Get runtime execution trace.
+     *
+     * Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getRuntimeExecutionTrace<ThrowOnError extends boolean = false>(options: Options<GetRuntimeExecutionTraceData, ThrowOnError>) {
         return (options.client ?? client).get<GetRuntimeExecutionTraceResponses, GetRuntimeExecutionTraceErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1156,6 +1719,11 @@ export class Runtime {
 }
 
 export class Webhooks {
+    /**
+     * List webhook subscriptions.
+     *
+     * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listWebhookSubscriptions<ThrowOnError extends boolean = false>(options: Options<ListWebhookSubscriptionsData, ThrowOnError>) {
         return (options.client ?? client).get<ListWebhookSubscriptionsResponses, ListWebhookSubscriptionsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1164,6 +1732,11 @@ export class Webhooks {
         });
     }
 
+    /**
+     * Create webhook subscription.
+     *
+     * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
     public static createWebhookSubscription<ThrowOnError extends boolean = false>(options: Options<CreateWebhookSubscriptionData, ThrowOnError>) {
         return (options.client ?? client).post<CreateWebhookSubscriptionResponses, CreateWebhookSubscriptionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1176,6 +1749,11 @@ export class Webhooks {
         });
     }
 
+    /**
+     * Delete webhook subscription.
+     *
+     * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
     public static deleteWebhookSubscription<ThrowOnError extends boolean = false>(options: Options<DeleteWebhookSubscriptionData, ThrowOnError>) {
         return (options.client ?? client).delete<DeleteWebhookSubscriptionResponses, DeleteWebhookSubscriptionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1184,6 +1762,11 @@ export class Webhooks {
         });
     }
 
+    /**
+     * Get webhook subscription.
+     *
+     * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
     public static getWebhookSubscription<ThrowOnError extends boolean = false>(options: Options<GetWebhookSubscriptionData, ThrowOnError>) {
         return (options.client ?? client).get<GetWebhookSubscriptionResponses, GetWebhookSubscriptionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1192,6 +1775,11 @@ export class Webhooks {
         });
     }
 
+    /**
+     * Update webhook subscription.
+     *
+     * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
     public static updateWebhookSubscription<ThrowOnError extends boolean = false>(options: Options<UpdateWebhookSubscriptionData, ThrowOnError>) {
         return (options.client ?? client).patch<UpdateWebhookSubscriptionResponses, UpdateWebhookSubscriptionErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
@@ -1204,6 +1792,11 @@ export class Webhooks {
         });
     }
 
+    /**
+     * List webhook delivery attempts.
+     *
+     * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
     public static listWebhookDeliveryAttempts<ThrowOnError extends boolean = false>(options: Options<ListWebhookDeliveryAttemptsData, ThrowOnError>) {
         return (options.client ?? client).get<ListWebhookDeliveryAttemptsResponses, ListWebhookDeliveryAttemptsErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],

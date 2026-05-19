@@ -35,8 +35,6 @@ function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
       return t('assistant.activity.toolStarted', {
         tool: event.tool_name ?? t('assistant.activity.toolUnknown'),
       });
-    case 'tool_call_progress':
-      return t('assistant.activity.toolProgress');
     case 'tool_call_finished':
       return event.is_error
         ? t('assistant.activity.toolFailed', {
@@ -45,8 +43,8 @@ function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
         : t('assistant.activity.toolFinished', {
             tool: event.tool_name ?? t('assistant.activity.toolUnknown'),
           });
-    case 'final_synthesis_started':
-      return t('assistant.activity.finalSynthesis');
+    case 'working':
+      return t('assistant.activity.working');
     case 'persisting':
       return t('assistant.activity.persisting');
     default:
@@ -55,7 +53,7 @@ function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
 }
 
 function activityHeadline(event: AssistantAgentActivityEvent | undefined, t: TFunction): string {
-  if (event?.type === 'tool_call_started' || event?.type === 'tool_call_progress') {
+  if (event?.type === 'tool_call_started') {
     return t('assistant.activity.toolRunningTitle');
   }
   return eventLabel(event ?? { type: 'started' }, t);
@@ -67,7 +65,7 @@ function activityStatus(
   t: TFunction,
 ): string {
   if (
-    (event?.type === 'tool_call_started' || event?.type === 'tool_call_progress') &&
+    event?.type === 'tool_call_started' &&
     event.tool_name
   ) {
     return event.tool_name;
@@ -148,6 +146,27 @@ function PendingAssistantActivity({
 }
 
 const markdownComponents = {
+  a: ({
+    children,
+    className,
+    href,
+    node: _node,
+    ...props
+  }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => (
+    <a
+      {...props}
+      href={href}
+      target={href ? '_blank' : undefined}
+      rel="noopener noreferrer"
+      className={[
+        'break-words font-semibold text-primary underline decoration-primary/40 underline-offset-2 transition-colors',
+        'hover:decoration-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+        className,
+      ].filter(Boolean).join(' ')}
+    >
+      {children}
+    </a>
+  ),
   code: ({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) => {
     const isInline = !className;
     return isInline ? (

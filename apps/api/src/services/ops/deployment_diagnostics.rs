@@ -1,9 +1,15 @@
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::Row;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     app::state::AppState,
@@ -116,8 +122,48 @@ impl WorkerRuntimeState {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct DeploymentDiagnosticsService;
+const READINESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_secs(1);
+const READINESS_SNAPSHOT_MAX_STALE: Duration = Duration::from_secs(5);
+const STARTUP_AUTHORITY_STABLE_CACHE_TTL: Duration = Duration::from_secs(30);
+const STARTUP_AUTHORITY_TRANSIENT_CACHE_TTL: Duration = Duration::from_secs(1);
+
+#[derive(Clone)]
+pub struct DeploymentDiagnosticsService {
+    readiness_cache: Arc<RwLock<Option<CachedReadinessSnapshot>>>,
+    readiness_cold_start_lock: Arc<Mutex<()>>,
+    readiness_refresh_in_flight: Arc<AtomicBool>,
+    startup_authority_cache: Arc<RwLock<Option<CachedStartupAuthorityStatus>>>,
+    startup_authority_refresh_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Clone)]
+struct CachedReadinessSnapshot {
+    checked_at: Instant,
+    ready: bool,
+    snapshot: DeploymentReadinessSnapshot,
+}
+
+#[derive(Clone)]
+struct CachedStartupAuthorityStatus {
+    checked_at: Instant,
+    status: StartupAuthorityStatus,
+}
+
+struct ReadinessRefreshGuard {
+    in_flight: Arc<AtomicBool>,
+}
+
+impl Drop for ReadinessRefreshGuard {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
+impl Default for DeploymentDiagnosticsService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -177,11 +223,77 @@ pub struct DeploymentReadinessSnapshot {
 
 impl DeploymentDiagnosticsService {
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self {
+            readiness_cache: Arc::new(RwLock::new(None)),
+            readiness_cold_start_lock: Arc::new(Mutex::new(())),
+            readiness_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+            startup_authority_cache: Arc::new(RwLock::new(None)),
+            startup_authority_refresh_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub async fn readiness_snapshot(
+        &self,
+        state: &AppState,
+    ) -> (bool, DeploymentReadinessSnapshot) {
+        if let Some(cached) = self.cached_readiness_snapshot().await {
+            let cached_age = cached.checked_at.elapsed();
+            if cached_age > READINESS_SNAPSHOT_MAX_STALE {
+                return self.refresh_readiness_snapshot_synchronously(state).await;
+            }
+            if cached_age > READINESS_SNAPSHOT_CACHE_TTL {
+                self.refresh_readiness_snapshot_in_background(state.clone());
+            }
+            return (cached.ready, cached.snapshot);
+        }
+
+        self.refresh_readiness_snapshot_synchronously(state).await
+    }
+
+    async fn refresh_readiness_snapshot_synchronously(
+        &self,
+        state: &AppState,
+    ) -> (bool, DeploymentReadinessSnapshot) {
+        let _cold_start = self.readiness_cold_start_lock.lock().await;
+        if let Some(cached) = self.cached_readiness_snapshot().await {
+            if cached.checked_at.elapsed() > READINESS_SNAPSHOT_MAX_STALE {
+                let (ready, snapshot) = self.compute_readiness_snapshot(state).await;
+                self.store_readiness_snapshot(ready, snapshot.clone()).await;
+                return (ready, snapshot);
+            }
+            return (cached.ready, cached.snapshot);
+        }
+
+        let (ready, snapshot) = self.compute_readiness_snapshot(state).await;
+        self.store_readiness_snapshot(ready, snapshot.clone()).await;
+        (ready, snapshot)
+    }
+
+    async fn cached_readiness_snapshot(&self) -> Option<CachedReadinessSnapshot> {
+        self.readiness_cache.read().await.clone()
+    }
+
+    fn refresh_readiness_snapshot_in_background(&self, state: AppState) {
+        if self.readiness_refresh_in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let service = self.clone();
+        let guard = ReadinessRefreshGuard { in_flight: self.readiness_refresh_in_flight.clone() };
+        tokio::spawn(async move {
+            let _guard = guard;
+            let (ready, snapshot) = service.compute_readiness_snapshot(&state).await;
+            service.store_readiness_snapshot(ready, snapshot).await;
+        });
+    }
+
+    async fn store_readiness_snapshot(&self, ready: bool, snapshot: DeploymentReadinessSnapshot) {
+        let mut cache = self.readiness_cache.write().await;
+        *cache = Some(CachedReadinessSnapshot { checked_at: Instant::now(), ready, snapshot });
+    }
+
+    async fn compute_readiness_snapshot(
         &self,
         state: &AppState,
     ) -> (bool, DeploymentReadinessSnapshot) {
@@ -195,7 +307,7 @@ impl DeploymentDiagnosticsService {
         let postgres_status = dependency_status(
             state.settings.dependency_mode(DependencyKind::Postgres),
             sqlx::query("select 1")
-                .fetch_one(&state.persistence.postgres)
+                .fetch_one(&state.persistence.heartbeat_postgres)
                 .await
                 .map(|row| row.get::<i32, _>(0) == 1)
                 .unwrap_or(false),
@@ -333,18 +445,45 @@ impl DeploymentDiagnosticsService {
     }
 
     async fn startup_authority_status(&self, state: &AppState) -> StartupAuthorityStatus {
+        if let Some(cached) = self.cached_startup_authority_status().await {
+            return cached;
+        }
+
+        let _refresh = self.startup_authority_refresh_lock.lock().await;
+        if let Some(cached) = self.cached_startup_authority_status().await {
+            return cached;
+        }
+
+        let status = self.compute_startup_authority_status(state).await;
+        let mut cache = self.startup_authority_cache.write().await;
+        *cache = Some(CachedStartupAuthorityStatus {
+            checked_at: Instant::now(),
+            status: status.clone(),
+        });
+        status
+    }
+
+    async fn cached_startup_authority_status(&self) -> Option<StartupAuthorityStatus> {
+        let cached = self.startup_authority_cache.read().await;
+        let cached = cached.as_ref()?;
+        let ttl = startup_authority_status_cache_ttl(cached.status.state);
+        if cached.checked_at.elapsed() <= ttl { Some(cached.status.clone()) } else { None }
+    }
+
+    async fn compute_startup_authority_status(&self, state: &AppState) -> StartupAuthorityStatus {
         let mode = state
             .settings
             .startup_authority_mode_kind()
             .unwrap_or(StartupAuthorityMode::NotRequired);
-        if !canonical_baseline_present(&state.persistence.postgres).await.unwrap_or(false) {
+        let control_plane_postgres = &state.persistence.heartbeat_postgres;
+        if !canonical_baseline_present(control_plane_postgres).await.unwrap_or(false) {
             return StartupAuthorityStatus {
                 mode: mode.as_str().to_string(),
                 state: StartupAuthorityState::Pending,
                 message: Some("postgres baseline has not been initialized yet".to_string()),
             };
         }
-        if let Err(error) = validate_postgres_migration_state(&state.persistence.postgres).await {
+        if let Err(error) = validate_postgres_migration_state(control_plane_postgres).await {
             return StartupAuthorityStatus {
                 mode: mode.as_str().to_string(),
                 state: StartupAuthorityState::Pending,
@@ -378,6 +517,17 @@ impl DeploymentDiagnosticsService {
                 state: StartupAuthorityState::Pending,
                 message: Some(error.to_string()),
             },
+        }
+    }
+}
+
+const fn startup_authority_status_cache_ttl(state: StartupAuthorityState) -> Duration {
+    match state {
+        StartupAuthorityState::Succeeded | StartupAuthorityState::NotRequired => {
+            STARTUP_AUTHORITY_STABLE_CACHE_TTL
+        }
+        StartupAuthorityState::Pending | StartupAuthorityState::Running => {
+            STARTUP_AUTHORITY_TRANSIENT_CACHE_TTL
         }
     }
 }

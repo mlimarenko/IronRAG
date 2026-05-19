@@ -526,12 +526,12 @@ class AgentSurfaceProfileTests(unittest.TestCase):
         )
 
         by_label = {check.label: check for check in checks}
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_text"].status, "pass")
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_verifier"].status, "pass")
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_runtime_execution_id"].status, "pass")
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_references"].status, "pass")
+        self.assertEqual(by_label["mcp.grounded_answer.verifier"].status, "pass")
+        self.assertEqual(by_label["mcp.grounded_answer.references"].status, "pass")
+        self.assertEqual(by_label["mcp.grounded_answer.runtime_execution_id"].status, "pass")
+        self.assertEqual(by_label["assistant.run_1.mcp_answer_quality_parity"].status, "pass")
 
-    def test_gate_checks_fail_when_grounded_answer_is_off_parity(self) -> None:
+    def test_gate_checks_fail_when_grounded_answer_quality_is_degraded(self) -> None:
         checks = MODULE.build_gate_checks(
             entity_search_summary=MODULE.EntitySearchSummary(
                 hit_count=1,
@@ -638,10 +638,10 @@ class AgentSurfaceProfileTests(unittest.TestCase):
         )
 
         by_label = {check.label: check for check in checks}
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_text"].status, "fail")
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_verifier"].status, "fail")
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_runtime_execution_id"].status, "fail")
-        self.assertEqual(by_label["assistant.run_1.grounded_answer_references"].status, "fail")
+        self.assertEqual(by_label["mcp.grounded_answer.verifier"].status, "fail")
+        self.assertEqual(by_label["mcp.grounded_answer.references"].status, "pass")
+        self.assertEqual(by_label["mcp.grounded_answer.runtime_execution_id"].status, "pass")
+        self.assertEqual(by_label["assistant.run_1.mcp_answer_quality_parity"].status, "fail")
 
     def test_runtime_and_community_summaries_capture_canonical_fields(self) -> None:
         communities = MODULE.summarize_communities(

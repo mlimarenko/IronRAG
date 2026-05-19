@@ -22,7 +22,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             description: "Submit a web ingest run for one seed URL. Default to mode single_page so only the submitted page is processed unless recursive_crawl is explicitly requested.",
             input_schema: json!({
                 "type": "object",
-                "required": ["library", "seedUrl", "mode", "crawlFilter", "materializationFilter"],
+                "required": ["library", "seedUrl", "mode"],
                 "properties": {
                     "library": {
                         "type": "string",

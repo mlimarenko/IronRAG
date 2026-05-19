@@ -64,6 +64,7 @@ const GRAPH_EVIDENCE_CONTEXT_SCORE_TOKEN_MIN_CHARS: usize = 4;
 const GRAPH_EVIDENCE_CONTEXT_EVIDENCE_FIELD_WEIGHT: usize = 4;
 const GRAPH_EVIDENCE_CONTEXT_TARGET_FIELD_WEIGHT: usize = 2;
 const GRAPH_EVIDENCE_CONTEXT_SOURCE_FIELD_WEIGHT: usize = 1;
+const MAX_GRAPH_EVIDENCE_DB_TEXT_QUERIES: usize = 5;
 
 pub(crate) async fn load_graph_index(
     state: &AppState,
@@ -474,6 +475,7 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
             stage = "retrieval.graph_evidence",
             graph_target_count = ranked_evidence.graph_target_count,
             text_query_count = ranked_evidence.text_query_count,
+            text_query_executed_count = ranked_evidence.text_query_executed_count,
             text_evidence_count = ranked_evidence.text_evidence_count,
             target_evidence_count = ranked_evidence.target_evidence_count,
             ranked_evidence_count = ranked_evidence.rows.len(),
@@ -496,6 +498,7 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
         stage = "retrieval.graph_evidence",
         graph_target_count = ranked_evidence.graph_target_count,
         text_query_count = ranked_evidence.text_query_count,
+        text_query_executed_count = ranked_evidence.text_query_executed_count,
         text_evidence_count = ranked_evidence.text_evidence_count,
         target_evidence_count = ranked_evidence.target_evidence_count,
         ranked_evidence_count = ranked_evidence.rows.len(),
@@ -525,6 +528,7 @@ struct RankedGraphEvidenceRows {
     rows: Vec<repositories::RuntimeGraphEvidenceRow>,
     graph_target_count: usize,
     text_query_count: usize,
+    text_query_executed_count: usize,
     text_evidence_count: usize,
     target_evidence_count: usize,
 }
@@ -550,11 +554,12 @@ async fn load_ranked_graph_evidence_rows_for_query(
     let query_ir_focus_queries = query_ir.map(query_ir_lexical_focus_queries).unwrap_or_default();
     let text_queries =
         build_graph_evidence_text_queries(question, plan, &query_ir_focus_queries, query_ir);
+    let db_text_queries = graph_evidence_db_text_queries(&text_queries);
 
     let text_evidence = repositories::search_runtime_graph_evidence_by_text(
         &state.persistence.postgres,
         library_id,
-        &text_queries,
+        &db_text_queries,
         graph_evidence_context_fetch_cap() as i64,
     )
     .await
@@ -603,6 +608,7 @@ async fn load_ranked_graph_evidence_rows_for_query(
         rows,
         graph_target_count: targets.len(),
         text_query_count: text_queries.len(),
+        text_query_executed_count: db_text_queries.len(),
         text_evidence_count: text_evidence.len(),
         target_evidence_count: target_evidence.len(),
     })
@@ -2129,9 +2135,16 @@ pub(crate) fn build_graph_evidence_text_queries(
         queries.push(normalized);
     };
 
+    // Graph evidence text lookup is backed by Postgres full-text/trigram
+    // indexes over the activated evidence table. Keep the first compiler
+    // focus spans ahead of the broad prose question, but keep the raw
+    // question inside the bounded DB-facing budget as the canonical recall
+    // fallback when the compiler produced narrow focus spans.
+    for focus in query_ir_focus_queries.iter().take(3) {
+        push_query(focus.clone(), &mut queries);
+    }
     push_query(question.trim().to_string(), &mut queries);
-
-    for focus in query_ir_focus_queries {
+    for focus in query_ir_focus_queries.iter().skip(3) {
         push_query(focus.clone(), &mut queries);
     }
 
@@ -2151,8 +2164,11 @@ pub(crate) fn build_graph_evidence_text_queries(
     if plan.keywords.len() > 1 {
         push_query(plan.keywords.join(" "), &mut queries);
     }
-
     queries
+}
+
+pub(crate) fn graph_evidence_db_text_queries(text_queries: &[String]) -> Vec<String> {
+    text_queries.iter().take(MAX_GRAPH_EVIDENCE_DB_TEXT_QUERIES).cloned().collect()
 }
 
 pub(crate) fn query_ir_lexical_focus_queries(query_ir: &QueryIR) -> Vec<String> {

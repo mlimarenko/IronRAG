@@ -54,7 +54,7 @@ CRUD-эндпоинты:
 - `DELETE /v1/webhooks/subscriptions/{id}`
 - `GET    /v1/webhooks/subscriptions/{id}/attempts`
 
-## Канонические события
+## События
 
 ### `revision.ready`
 

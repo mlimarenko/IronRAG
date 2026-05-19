@@ -472,7 +472,7 @@ impl RuntimeExecutor {
                 owner_kind: request.execution_owner.owner_kind,
                 owner_id: request.execution_owner.owner_id,
                 task_kind: spec.task_kind,
-                surface_kind: spec.surface_kind,
+                surface_kind: request.surface_kind_override.unwrap_or(spec.surface_kind),
                 contract_name: request.contract_name.to_string(),
                 contract_version: request.contract_version.to_string(),
                 lifecycle_state,

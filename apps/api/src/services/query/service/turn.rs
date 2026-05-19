@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use chrono::Utc;
+use tokio::sync::mpsc::Sender;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -24,20 +25,48 @@ use crate::{
     domains::{
         agent_runtime::{
             RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState,
-            RuntimeTaskKind,
+            RuntimeSurfaceKind, RuntimeTaskKind,
         },
         ai::AiBindingPurpose,
     },
-    infra::repositories::{
-        ai_repository, query_repository, query_result_cache_repository, runtime_repository,
+    infra::{
+        arangodb::{
+            collections::{
+                KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
+                KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_EVIDENCE_COLLECTION,
+                KNOWLEDGE_RELATION_COLLECTION,
+            },
+            context_store::{
+                KnowledgeBundleChunkEdgeRow, KnowledgeBundleChunkReferenceRow,
+                KnowledgeBundleEntityEdgeRow, KnowledgeBundleEntityReferenceRow,
+                KnowledgeBundleEvidenceEdgeRow, KnowledgeBundleEvidenceReferenceRow,
+                KnowledgeBundleRelationEdgeRow, KnowledgeBundleRelationReferenceRow,
+                KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow,
+            },
+        },
+        repositories::{
+            ai_repository, catalog_repository, query_repository, query_result_cache_repository,
+            runtime_repository,
+        },
     },
-    interfaces::http::router_support::ApiError,
+    interfaces::http::{auth::AuthContext, router_support::ApiError},
     services::{
         ingest::runtime::bounded_runtime_overrides,
+        mcp::access::library_catalog_ref,
         ops::billing::{CaptureExecutionBillingCommand, CaptureQueryExecutionBillingCommand},
         ops::service::CreateAsyncOperationCommand,
         query::{
-            execution::{RuntimeAnswerQueryResult, generate_answer_query, prepare_answer_query},
+            agent_loop::{
+                AgentLoopActivityEvent, AgentTurnFailure, McpToolAgentTurnInput,
+                run_mcp_tool_agent_turn,
+            },
+            assistant_grounding::AssistantGroundingEvidence,
+            execution::{
+                CanonicalAnswerEvidence, RuntimeAnswerQueryResult, generate_answer_query,
+                persist_query_verification, prepare_answer_query,
+                verify_answer_against_canonical_evidence,
+            },
+            planner::QueryIntentProfile,
             result_cache,
         },
     },
@@ -64,6 +93,8 @@ use super::{
 };
 
 const REFERENCE_CONTEXT_HYDRATION_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const ASSISTANT_AGENT_LOOP_DEADLINE_MS: u64 = 180_000;
+pub(crate) const ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS: u64 = 35_000;
 
 #[derive(Debug, Clone)]
 struct QueryResultCacheContext {
@@ -75,15 +106,609 @@ struct QueryResultCacheContext {
 }
 
 impl QueryService {
-    pub async fn execute_turn(
+    pub async fn execute_grounded_answer_turn(
         &self,
         state: &AppState,
         command: ExecuteConversationTurnCommand,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
-        self.execute_turn_canonical(state, command).await
+        self.execute_grounded_answer_pipeline(state, command).await
     }
 
-    async fn execute_turn_canonical(
+    pub async fn execute_assistant_agent_turn(
+        &self,
+        state: &AppState,
+        auth: &AuthContext,
+        command: ExecuteConversationTurnCommand,
+        activity_tx: Option<Sender<AgentLoopActivityEvent>>,
+    ) -> Result<QueryTurnExecutionResult, ApiError> {
+        let turn_started_at = std::time::Instant::now();
+        let mut conversation = query_repository::get_conversation_by_id(
+            &state.persistence.postgres,
+            command.conversation_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("conversation", command.conversation_id))?;
+        if conversation.conversation_state != QueryConversationState::Active {
+            return Err(ApiError::Conflict(format!(
+                "conversation {} is not active",
+                conversation.id
+            )));
+        }
+        let library =
+            state.canonical_services.catalog.get_library(state, conversation.library_id).await?;
+        if library.workspace_id != conversation.workspace_id {
+            return Err(ApiError::Conflict(format!(
+                "conversation {} has library {} outside workspace {}",
+                conversation.id, library.id, conversation.workspace_id
+            )));
+        }
+        if library.lifecycle_state != CatalogLifecycleState::Active {
+            return Err(ApiError::Conflict(format!("library {} is not active", library.id)));
+        }
+
+        let content_text = normalize_required_text(&command.content_text, "contentText")?;
+        let request_turn = query_repository::create_turn(
+            &state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: conversation.id,
+                turn_kind: "user",
+                author_principal_id: command.author_principal_id,
+                content_text: &content_text,
+                execution_id: None,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+
+        if let Some(derived_title) = derive_conversation_title(&content_text) {
+            if should_refresh_conversation_title(conversation.title.as_deref(), &derived_title) {
+                conversation = query_repository::update_conversation_title(
+                    &state.persistence.postgres,
+                    conversation.id,
+                    &derived_title,
+                )
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            }
+        }
+        let conversation_turns = query_repository::list_turns_by_conversation(
+            &state.persistence.postgres,
+            conversation.id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let conversation_context = if command.external_prior_turns.is_empty() {
+            build_conversation_runtime_context(&conversation_turns, request_turn.id)
+        } else {
+            build_conversation_runtime_context_with_external_history(
+                &conversation_turns,
+                request_turn.id,
+                &command.external_prior_turns,
+            )
+        };
+
+        let binding_id = ai_repository::get_effective_binding_assignment_by_purpose(
+            &state.persistence.postgres,
+            conversation.library_id,
+            AiBindingPurpose::QueryAnswer.as_str(),
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .map(|binding| binding.id);
+        let top_k = resolve_top_k(Some(command.top_k));
+
+        let workspace = catalog_repository::get_workspace_by_id(
+            &state.persistence.postgres,
+            library.workspace_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("workspace", library.workspace_id))?;
+        let library_ref = library_catalog_ref(&workspace.slug, &library.slug);
+
+        let execution_id = Uuid::now_v7();
+        let execution_context_bundle_id = Uuid::now_v7();
+        let mut runtime_session = seed_query_runtime_session(
+            state,
+            execution_id,
+            &conversation_context,
+            command.surface_kind,
+        )
+        .await?;
+        let runtime_execution_id = runtime_session.execution.id;
+        let execution = query_repository::create_execution(
+            &state.persistence.postgres,
+            &query_repository::NewQueryExecution {
+                execution_id,
+                context_bundle_id: execution_context_bundle_id,
+                workspace_id: conversation.workspace_id,
+                library_id: conversation.library_id,
+                conversation_id: conversation.id,
+                request_turn_id: Some(request_turn.id),
+                response_turn_id: None,
+                binding_id,
+                runtime_execution_id,
+                query_text: &content_text,
+                failure_code: None,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let agent_request_id = execution.id.to_string();
+        let async_operation = state
+            .canonical_services
+            .ops
+            .create_async_operation(
+                state,
+                CreateAsyncOperationCommand {
+                    workspace_id: conversation.workspace_id,
+                    library_id: Some(conversation.library_id),
+                    operation_kind: "query_execution".to_string(),
+                    surface_kind: command.surface_kind.as_str().to_string(),
+                    requested_by_principal_id: command.author_principal_id,
+                    status: "accepted".to_string(),
+                    subject_kind: "query_execution".to_string(),
+                    subject_id: Some(execution.id),
+                    parent_async_operation_id: None,
+                    completed_at: None,
+                    failure_code: None,
+                },
+            )
+            .await?;
+        let async_operation = state
+            .canonical_services
+            .ops
+            .update_async_operation(
+                state,
+                crate::services::ops::service::UpdateAsyncOperationCommand {
+                    operation_id: async_operation.id,
+                    status: "processing".to_string(),
+                    completed_at: None,
+                    failure_code: None,
+                },
+            )
+            .await?;
+
+        let outcome: RuntimeTerminalOutcome<QueryAnswerTaskSuccess, QueryAnswerTaskFailure> =
+            if let Err(failure) = begin_query_runtime_stage(
+                state.agent_runtime.executor(),
+                &mut runtime_session,
+                RuntimeStageKind::Answer,
+            )
+            .await
+            {
+                record_query_runtime_stage(
+                    state.agent_runtime.executor(),
+                    &mut runtime_session,
+                    RuntimeStageKind::Answer,
+                    RuntimeStageState::Failed,
+                    false,
+                    Some(&failure),
+                    None,
+                );
+                make_query_terminal_failure_outcome(failure.clone())
+            } else {
+                let answer_started = Utc::now();
+                match run_mcp_tool_agent_turn(McpToolAgentTurnInput {
+                    state,
+                    auth,
+                    library_id: library.id,
+                    library_ref: &library_ref,
+                    user_question: &content_text,
+                    conversation_history: &conversation_context.prompt_history_messages,
+                    request_id: &agent_request_id,
+                    grounded_answer_top_k: top_k,
+                    iteration_cap: ui_agent_iteration_cap(),
+                    max_parallel_actions: usize::from(QueryAnswerTask::spec().max_parallel_actions),
+                    deadline: Duration::from_millis(ASSISTANT_AGENT_LOOP_DEADLINE_MS),
+                    soft_final_answer_deadline: Some(Duration::from_millis(
+                        ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS,
+                    )),
+                    activity_tx: activity_tx.clone(),
+                })
+                .await
+                {
+                    Ok(agent_result) => {
+                        record_query_runtime_stage(
+                            state.agent_runtime.executor(),
+                            &mut runtime_session,
+                            RuntimeStageKind::Answer,
+                            RuntimeStageState::Completed,
+                            false,
+                            None,
+                            Some(answer_started),
+                        );
+                        if let Err(error) =
+                            crate::services::query::llm_context_debug::upsert_snapshot(
+                                &state.persistence.postgres,
+                                &crate::services::query::llm_context_debug::LlmContextSnapshot {
+                                    execution_id: execution.id,
+                                    library_id: library.id,
+                                    question: content_text.clone(),
+                                    iterations: agent_result.debug_iterations.clone(),
+                                    total_iterations: agent_result.debug_iterations.len(),
+                                    final_answer: Some(agent_result.answer.clone()),
+                                    captured_at: Utc::now(),
+                                    query_ir: None,
+                                    agent_loop: agent_result.agent_loop.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            warn!(
+                                error = %error,
+                                execution_id = %execution.id,
+                                "failed to persist UI agent LLM context snapshot"
+                            );
+                        }
+
+                        let verification_outcome = if let Err(failure) = begin_query_runtime_stage(
+                            state.agent_runtime.executor(),
+                            &mut runtime_session,
+                            RuntimeStageKind::Verify,
+                        )
+                        .await
+                        {
+                            record_query_runtime_stage(
+                                state.agent_runtime.executor(),
+                                &mut runtime_session,
+                                RuntimeStageKind::Verify,
+                                RuntimeStageState::Failed,
+                                false,
+                                Some(&failure),
+                                None,
+                            );
+                            Some(make_query_terminal_failure_outcome(failure.clone()))
+                        } else {
+                            let verify_started = Utc::now();
+                            let mut verify_failure = None;
+                            let child_query_execution_ids =
+                                agent_result.child_query_execution_ids.clone();
+                            let has_verifiable_tool_evidence = agent_has_verifiable_tool_evidence(
+                                &child_query_execution_ids,
+                                &agent_result.assistant_grounding,
+                            );
+                            let tool_loop_called_any_tool = agent_result
+                                .agent_loop
+                                .as_ref()
+                                .is_some_and(|metadata| metadata.tool_call_count > 0);
+                            if !has_verifiable_tool_evidence {
+                                let (verification_state, verification_warnings) =
+                                    if tool_loop_called_any_tool {
+                                        (
+                                            QueryVerificationState::InsufficientEvidence,
+                                            no_verifiable_tool_evidence_warnings(),
+                                        )
+                                    } else {
+                                        (
+                                            QueryVerificationState::InsufficientEvidence,
+                                            no_agent_tool_evidence_warnings(),
+                                        )
+                                    };
+                                if let Err(error) = ensure_agent_tool_context_bundle(
+                                    state,
+                                    &execution,
+                                    execution_context_bundle_id,
+                                    &agent_result.assistant_grounding,
+                                    verification_state,
+                                    verification_warnings,
+                                )
+                                .await
+                                {
+                                    verify_failure = Some(make_query_answer_failure(
+                                        "query_agent_verify_failed",
+                                        format!(
+                                            "failed to mark UI agent answer as unverifiable: {error}"
+                                        ),
+                                    ));
+                                }
+                            } else if !child_query_execution_ids.is_empty() {
+                                match materialize_agent_grounding_from_child_execution(
+                                    state,
+                                    &execution,
+                                    execution_context_bundle_id,
+                                    &child_query_execution_ids,
+                                )
+                                .await
+                                {
+                                    Ok(Some(source_execution_id)) => {
+                                        tracing::info!(
+                                            execution_id = %execution.id,
+                                            source_execution_id = %source_execution_id,
+                                            "attached child grounded-answer evidence to UI agent execution"
+                                        );
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        verify_failure = Some(make_query_answer_failure(
+                                            "query_agent_grounding_failed",
+                                            format!(
+                                                "failed to attach MCP tool evidence to UI agent execution: {error}"
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                            if verify_failure.is_none()
+                                && has_verifiable_tool_evidence
+                                && let Err(error) = verify_agent_answer_against_tool_evidence(
+                                    state,
+                                    &execution,
+                                    execution_context_bundle_id,
+                                    &agent_result.answer,
+                                    &agent_result.assistant_grounding,
+                                )
+                                .await
+                            {
+                                verify_failure = Some(make_query_answer_failure(
+                                    "query_agent_verify_failed",
+                                    format!(
+                                        "failed to verify UI agent answer against MCP tool evidence: {error}"
+                                    ),
+                                ));
+                            }
+                            if let Some(failure) = verify_failure {
+                                record_query_runtime_stage(
+                                    state.agent_runtime.executor(),
+                                    &mut runtime_session,
+                                    RuntimeStageKind::Verify,
+                                    RuntimeStageState::Failed,
+                                    false,
+                                    Some(&failure),
+                                    Some(verify_started),
+                                );
+                                Some(make_query_terminal_failure_outcome(failure))
+                            } else {
+                                record_query_runtime_stage(
+                                    state.agent_runtime.executor(),
+                                    &mut runtime_session,
+                                    RuntimeStageKind::Verify,
+                                    RuntimeStageState::Completed,
+                                    false,
+                                    None,
+                                    Some(verify_started),
+                                );
+                                None
+                            }
+                        };
+
+                        if let Some(outcome) = verification_outcome {
+                            outcome
+                        } else if let Err(failure) = begin_query_runtime_stage(
+                            state.agent_runtime.executor(),
+                            &mut runtime_session,
+                            RuntimeStageKind::Persist,
+                        )
+                        .await
+                        {
+                            record_query_runtime_stage(
+                                state.agent_runtime.executor(),
+                                &mut runtime_session,
+                                RuntimeStageKind::Persist,
+                                RuntimeStageState::Failed,
+                                true,
+                                Some(&failure),
+                                None,
+                            );
+                            make_query_terminal_failure_outcome(failure.clone())
+                        } else {
+                            let persist_started = Utc::now();
+                            match persist_agent_answer(
+                                state,
+                                conversation.id,
+                                execution.id,
+                                request_turn.id,
+                                &agent_result.answer,
+                            )
+                            .await
+                            {
+                                Ok(answer_text) => {
+                                    record_query_runtime_stage(
+                                        state.agent_runtime.executor(),
+                                        &mut runtime_session,
+                                        RuntimeStageKind::Persist,
+                                        RuntimeStageState::Completed,
+                                        true,
+                                        None,
+                                        Some(persist_started),
+                                    );
+                                    RuntimeTerminalOutcome::Completed {
+                                        success: QueryAnswerTaskSuccess {
+                                            answer_text,
+                                            provider: agent_result.provider,
+                                            usage_json: agent_result.usage_json,
+                                        },
+                                    }
+                                }
+                                Err(failure) => {
+                                    record_query_runtime_stage(
+                                        state.agent_runtime.executor(),
+                                        &mut runtime_session,
+                                        RuntimeStageKind::Persist,
+                                        RuntimeStageState::Failed,
+                                        true,
+                                        Some(&failure),
+                                        Some(persist_started),
+                                    );
+                                    make_query_terminal_failure_outcome(failure)
+                                }
+                            }
+                        }
+                    }
+                    Err(agent_failure) => {
+                        persist_failed_agent_debug_snapshot(
+                            state,
+                            execution.id,
+                            library.id,
+                            &content_text,
+                            &agent_failure,
+                        )
+                        .await;
+                        let failure = make_query_answer_failure(
+                            "query_agent_loop_failed",
+                            agent_failure.to_string(),
+                        );
+                        record_query_runtime_stage(
+                            state.agent_runtime.executor(),
+                            &mut runtime_session,
+                            RuntimeStageKind::Answer,
+                            RuntimeStageState::Failed,
+                            false,
+                            Some(&failure),
+                            Some(answer_started),
+                        );
+                        make_query_terminal_failure_outcome(failure)
+                    }
+                }
+            };
+
+        let runtime_result = state
+            .agent_runtime
+            .executor()
+            .finalize_session::<QueryAnswerTask>(runtime_session, outcome)
+            .await;
+        runtime_persistence::persist_runtime_result(
+            &state.persistence.postgres,
+            &runtime_result.execution,
+            &runtime_result.trace,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+
+        let terminal_execution = match &runtime_result.outcome {
+            RuntimeTerminalOutcome::Completed { .. } | RuntimeTerminalOutcome::Recovered { .. } => {
+                query_repository::get_execution_by_id(&state.persistence.postgres, execution.id)
+                    .await
+                    .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                    .ok_or_else(|| ApiError::resource_not_found("query_execution", execution.id))?
+            }
+            RuntimeTerminalOutcome::Failed { .. } | RuntimeTerminalOutcome::Canceled { .. } => {
+                query_repository::update_execution(
+                    &state.persistence.postgres,
+                    execution.id,
+                    &query_repository::UpdateQueryExecution {
+                        request_turn_id: Some(request_turn.id),
+                        response_turn_id: None,
+                        failure_code: runtime_result.execution.failure_code.as_deref(),
+                        completed_at: runtime_result.execution.completed_at,
+                    },
+                )
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                .ok_or_else(|| ApiError::resource_not_found("query_execution", execution.id))?
+            }
+        };
+
+        match &runtime_result.outcome {
+            RuntimeTerminalOutcome::Completed { success }
+            | RuntimeTerminalOutcome::Recovered { success, .. } => {
+                if let Err(error) = state
+                    .canonical_services
+                    .ops
+                    .update_async_operation(
+                        state,
+                        crate::services::ops::service::UpdateAsyncOperationCommand {
+                            operation_id: async_operation.id,
+                            status: "ready".to_string(),
+                            completed_at: runtime_result.execution.completed_at,
+                            failure_code: None,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(stage = "query", error = %error, "ops update_async_operation failed");
+                }
+                if let Err(error) = state
+                    .canonical_services
+                    .billing
+                    .capture_query_execution(
+                        state,
+                        CaptureQueryExecutionBillingCommand {
+                            workspace_id: conversation.workspace_id,
+                            library_id: conversation.library_id,
+                            execution_id: terminal_execution.id,
+                            runtime_execution_id: runtime_result.execution.id,
+                            binding_id: terminal_execution.binding_id,
+                            provider_kind: success.provider.provider_kind.as_str().to_string(),
+                            model_name: success.provider.model_name.clone(),
+                            call_kind: "query_agent".to_string(),
+                            usage_json: success.usage_json.clone(),
+                        },
+                    )
+                    .await
+                {
+                    warn!(error = %error, execution_id = %terminal_execution.id, "UI agent query billing capture failed");
+                }
+            }
+            RuntimeTerminalOutcome::Failed { summary, .. }
+            | RuntimeTerminalOutcome::Canceled { summary, .. } => {
+                if let Err(error) = state
+                    .canonical_services
+                    .ops
+                    .update_async_operation(
+                        state,
+                        crate::services::ops::service::UpdateAsyncOperationCommand {
+                            operation_id: async_operation.id,
+                            status: query_async_operation_status(&runtime_result.outcome)
+                                .to_string(),
+                            completed_at: runtime_result.execution.completed_at,
+                            failure_code: Some(summary.code.clone()),
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(stage = "query", error = %error, "ops update_async_operation failed");
+                }
+                append_query_runtime_policy_audit(
+                    state,
+                    command.author_principal_id,
+                    &conversation,
+                    terminal_execution.id,
+                    &runtime_result,
+                )
+                .await;
+                return Err(map_query_execution_error_message(
+                    state,
+                    &terminal_execution.id,
+                    &terminal_execution.query_text,
+                    summary.summary_redacted.clone().unwrap_or_else(|| summary.code.clone()),
+                ));
+            }
+        }
+
+        let detail = self.get_execution(state, terminal_execution.id).await?;
+        let request_turn = detail.request_turn.ok_or(ApiError::Internal)?;
+        let total_ms = turn_started_at.elapsed().as_millis() as u64;
+        tracing::info!(
+            total_ms,
+            execution_id = %terminal_execution.id,
+            library_id = %terminal_execution.library_id,
+            conversation_id = %terminal_execution.conversation_id,
+            turn_count = terminal_execution.turn_count,
+            stage_summary_count = detail.runtime_stage_summaries.len(),
+            "query.agent_turn.completed"
+        );
+
+        Ok(QueryTurnExecutionResult {
+            conversation: map_conversation_row(conversation),
+            request_turn,
+            response_turn: detail.response_turn,
+            execution: detail.execution,
+            runtime_summary: detail.runtime_summary,
+            runtime_stage_summaries: detail.runtime_stage_summaries,
+            context_bundle_id: execution_context_bundle_id,
+            chunk_references: detail.chunk_references,
+            prepared_segment_references: detail.prepared_segment_references,
+            technical_fact_references: detail.technical_fact_references,
+            graph_node_references: detail.graph_node_references,
+            graph_edge_references: detail.graph_edge_references,
+            verification_state: detail.verification_state,
+            verification_warnings: detail.verification_warnings,
+        })
+    }
+
+    async fn execute_grounded_answer_pipeline(
         &self,
         state: &AppState,
         command: ExecuteConversationTurnCommand,
@@ -222,7 +847,7 @@ impl QueryService {
                             warn!(
                                 cache_key = %cache_context_ref.cache_key,
                                 wait_ms = wait_started.elapsed().as_millis() as u64,
-                                "query result cache fill wait timed out before canonical execution completed"
+                                "query result cache fill wait timed out before source execution completed"
                             );
                             return Err(ApiError::Conflict(
                                 "query answer is still being prepared".to_string(),
@@ -258,9 +883,13 @@ impl QueryService {
 
         let execution_id = Uuid::now_v7();
         let execution_context_bundle_id = Uuid::now_v7();
-        let mut runtime_session =
-            seed_query_runtime_session(state, execution_id, &conversation_context).await?;
-        runtime_session.execution.surface_kind = command.surface_kind;
+        let mut runtime_session = seed_query_runtime_session(
+            state,
+            execution_id,
+            &conversation_context,
+            command.surface_kind,
+        )
+        .await?;
         let runtime_execution_id = runtime_session.execution.id;
         let execution = query_repository::create_execution(
             &state.persistence.postgres,
@@ -329,7 +958,7 @@ impl QueryService {
             )
             .await
             {
-                // policy-deny before stage work started, zero-duration record is canonical
+                // policy-deny before stage work started; the zero-duration record is expected
                 record_query_runtime_stage(
                     state.agent_runtime.executor(),
                     &mut runtime_session,
@@ -495,7 +1124,7 @@ impl QueryService {
                 )
                 .await
                 {
-                    // policy-deny before stage work started, zero-duration record is canonical
+                    // policy-deny before stage work started; the zero-duration record is expected
                     record_query_runtime_stage(
                         state.agent_runtime.executor(),
                         &mut runtime_session,
@@ -543,7 +1172,7 @@ impl QueryService {
                             )
                             .await
                             {
-                                // policy-deny before stage work started, zero-duration record is canonical
+                                // policy-deny before stage work started; the zero-duration record is expected
                                 record_query_runtime_stage(
                                     state.agent_runtime.executor(),
                                     &mut runtime_session,
@@ -599,7 +1228,7 @@ impl QueryService {
                                         )
                                         .await
                                         {
-                                            // policy-deny before stage work started, zero-duration record is canonical
+                                            // policy-deny before stage work started; the zero-duration record is expected
                                             record_query_runtime_stage(
                                                 state.agent_runtime.executor(),
                                                 &mut runtime_session,
@@ -845,7 +1474,7 @@ impl QueryService {
                     )
                     .await
                 {
-                    warn!(error = %error, execution_id = %terminal_execution.id, "canonical query billing capture failed");
+                    warn!(error = %error, execution_id = %terminal_execution.id, "query billing capture failed");
                 }
                 if let Some(embed_usage) = &query_embedding_usage {
                     if let Err(error) = state
@@ -916,7 +1545,7 @@ impl QueryService {
                     )
                     .await
                 {
-                    warn!(error = %error, execution_id = %terminal_execution.id, "canonical query billing capture failed");
+                    warn!(error = %error, execution_id = %terminal_execution.id, "query billing capture failed");
                 }
                 if let Some(embed_usage) = &query_embedding_usage {
                     if let Err(error) = state
@@ -1197,7 +1826,7 @@ impl QueryService {
             conversation_id = %conversation.id,
             request_turn_id = %request_turn.id,
             response_turn_id = %response_turn.id,
-            "query result replayed from canonical source execution"
+            "query result replayed from source execution"
         );
 
         Ok(Some(QueryTurnExecutionResult {
@@ -1341,33 +1970,16 @@ impl QueryService {
             &prepared_reference_context.technical_fact_rows,
             &prepared_reference_context.fact_rank_refs,
         );
-        let mut verification_state = prepared_reference_context
+        let verification_state = prepared_reference_context
             .bundle_refs
             .as_ref()
             .map_or(QueryVerificationState::NotRun, |bundle| {
                 parse_query_verification_state(&bundle.bundle.verification_state)
             });
-        let mut verification_warnings =
+        let verification_warnings =
             prepared_reference_context.bundle_refs.as_ref().map_or_else(Vec::new, |bundle| {
                 parse_query_verification_warnings(&bundle.bundle.verification_warnings)
             });
-        if verification_state == QueryVerificationState::Verified
-            && chunk_references.is_empty()
-            && prepared_segment_references.is_empty()
-            && technical_fact_references.is_empty()
-            && graph_node_references.is_empty()
-            && graph_edge_references.is_empty()
-        {
-            verification_state = QueryVerificationState::InsufficientEvidence;
-            verification_warnings.push(QueryVerificationWarning {
-                code: "no_grounding_references".to_string(),
-                message: "Verified answers must include at least one grounding reference."
-                    .to_string(),
-                related_segment_id: None,
-                related_fact_id: None,
-            });
-        }
-
         Ok(QueryExecutionDetail {
             execution: map_execution_row(execution.clone()),
             runtime_summary: map_execution_runtime_summary(&execution, &runtime_policy_rows),
@@ -1632,10 +2244,558 @@ fn query_detail_has_grounding_references(detail: &QueryExecutionDetail) -> bool 
         || !detail.graph_edge_references.is_empty()
 }
 
+fn context_reference_set_grounding_count(
+    reference_set: &KnowledgeContextBundleReferenceSetRow,
+) -> usize {
+    reference_set.chunk_references.len()
+        + reference_set.entity_references.len()
+        + reference_set.relation_references.len()
+        + reference_set.evidence_references.len()
+        + reference_set.bundle.selected_fact_ids.len()
+}
+
+async fn materialize_agent_grounding_from_child_execution(
+    state: &AppState,
+    parent_execution: &query_repository::QueryExecutionRow,
+    parent_context_bundle_id: Uuid,
+    child_query_execution_ids: &[Uuid],
+) -> anyhow::Result<Option<Uuid>> {
+    let mut primary_reference_set: Option<KnowledgeContextBundleReferenceSetRow> = None;
+    let mut grounding_sources = Vec::new();
+    let mut chunk_references = HashMap::new();
+    let mut entity_references = HashMap::new();
+    let mut relation_references = HashMap::new();
+    let mut evidence_references = HashMap::new();
+    let mut selected_fact_ids = Vec::new();
+    let mut primary_reference_score = 0usize;
+
+    // Prefer the strongest grounded child as the parent bundle template.
+    // Iterating newest-first keeps ties on the latest refine attempt without
+    // letting a weaker retry replace richer verified grounding.
+    for child_execution_id in child_query_execution_ids.iter().rev().copied() {
+        if child_execution_id == parent_execution.id {
+            continue;
+        }
+        let Some(child_execution) =
+            query_repository::get_execution_by_id(&state.persistence.postgres, child_execution_id)
+                .await?
+        else {
+            continue;
+        };
+        if child_execution.workspace_id != parent_execution.workspace_id
+            || child_execution.library_id != parent_execution.library_id
+        {
+            continue;
+        }
+        let Some(reference_set) = state
+            .arango_context_store
+            .get_bundle_reference_set_by_query_execution(child_execution_id)
+            .await?
+        else {
+            continue;
+        };
+        if !context_reference_set_has_grounding(&reference_set) {
+            continue;
+        }
+
+        let reference_score = context_reference_set_grounding_count(&reference_set);
+        if primary_reference_set.is_none() || reference_score > primary_reference_score {
+            primary_reference_score = reference_score;
+            primary_reference_set = Some(reference_set.clone());
+        }
+
+        grounding_sources.push((child_execution.id, child_execution.runtime_execution_id));
+        for fact_id in &reference_set.bundle.selected_fact_ids {
+            if !selected_fact_ids.contains(fact_id) {
+                selected_fact_ids.push(*fact_id);
+            }
+        }
+        for reference in &reference_set.chunk_references {
+            merge_chunk_reference(&mut chunk_references, reference.clone());
+        }
+        for reference in &reference_set.entity_references {
+            merge_entity_reference(&mut entity_references, reference.clone());
+        }
+        for reference in &reference_set.relation_references {
+            merge_relation_reference(&mut relation_references, reference.clone());
+        }
+        for reference in &reference_set.evidence_references {
+            merge_evidence_reference(&mut evidence_references, reference.clone());
+        }
+    }
+
+    let Some(reference_set) = primary_reference_set else {
+        return Ok(None);
+    };
+
+    let now = Utc::now();
+    let mut bundle = reference_set.bundle.clone();
+    bundle.key = parent_context_bundle_id.to_string();
+    bundle.arango_id = None;
+    bundle.arango_rev = None;
+    bundle.bundle_id = parent_context_bundle_id;
+    bundle.workspace_id = parent_execution.workspace_id;
+    bundle.library_id = parent_execution.library_id;
+    bundle.query_execution_id = Some(parent_execution.id);
+    bundle.selected_fact_ids = selected_fact_ids;
+    bundle.assembly_diagnostics =
+        agent_grounding_assembly_diagnostics(&bundle.assembly_diagnostics, &grounding_sources);
+    bundle.created_at = now;
+    bundle.updated_at = now;
+
+    let mut chunk_references = chunk_references.into_values().collect::<Vec<_>>();
+    let mut entity_references = entity_references.into_values().collect::<Vec<_>>();
+    let mut relation_references = relation_references.into_values().collect::<Vec<_>>();
+    let mut evidence_references = evidence_references.into_values().collect::<Vec<_>>();
+    sort_chunk_references(&mut chunk_references);
+    sort_entity_references(&mut entity_references);
+    sort_relation_references(&mut relation_references);
+    sort_evidence_references(&mut evidence_references);
+
+    state.arango_context_store.upsert_bundle(&bundle).await?;
+    state
+        .arango_context_store
+        .replace_bundle_chunk_edges(
+            parent_context_bundle_id,
+            parent_execution.library_id,
+            &clone_chunk_reference_edges(parent_context_bundle_id, &chunk_references, now),
+        )
+        .await?;
+    state
+        .arango_context_store
+        .replace_bundle_entity_edges(
+            parent_context_bundle_id,
+            parent_execution.library_id,
+            &clone_entity_reference_edges(parent_context_bundle_id, &entity_references, now),
+        )
+        .await?;
+    state
+        .arango_context_store
+        .replace_bundle_relation_edges(
+            parent_context_bundle_id,
+            parent_execution.library_id,
+            &clone_relation_reference_edges(parent_context_bundle_id, &relation_references, now),
+        )
+        .await?;
+    state
+        .arango_context_store
+        .replace_bundle_evidence_edges(
+            parent_context_bundle_id,
+            parent_execution.library_id,
+            &clone_evidence_reference_edges(parent_context_bundle_id, &evidence_references, now),
+        )
+        .await?;
+
+    let chunk_refs = chunk_references
+        .iter()
+        .map(|reference| query_repository::NewQueryChunkReference {
+            chunk_id: reference.chunk_id,
+            rank: reference.rank,
+            score: reference.score,
+        })
+        .collect::<Vec<_>>();
+    query_repository::append_chunk_references(
+        &state.persistence.postgres,
+        parent_execution.id,
+        &chunk_refs,
+    )
+    .await?;
+
+    Ok(grounding_sources.first().map(|(execution_id, _)| *execution_id))
+}
+
+async fn verify_agent_answer_against_tool_evidence(
+    state: &AppState,
+    execution: &query_repository::QueryExecutionRow,
+    context_bundle_id: Uuid,
+    answer_text: &str,
+    assistant_grounding: &AssistantGroundingEvidence,
+) -> anyhow::Result<()> {
+    ensure_agent_tool_context_bundle(
+        state,
+        execution,
+        context_bundle_id,
+        assistant_grounding,
+        QueryVerificationState::NotRun,
+        serde_json::json!([]),
+    )
+    .await?;
+    let reference_context =
+        load_execution_prepared_reference_context(state, execution.id).await.map_err(|error| {
+            anyhow::anyhow!("failed to hydrate UI agent verifier evidence: {error}")
+        })?;
+    let canonical_evidence = CanonicalAnswerEvidence {
+        bundle: reference_context.bundle_refs.as_ref().map(|refs| refs.bundle.clone()),
+        chunk_rows: reference_context.chunk_rows,
+        structured_blocks: reference_context.structured_block_rows,
+        technical_facts: reference_context.technical_fact_rows,
+    };
+    let prompt_context = assistant_grounding.verification_corpus.join("\n\n");
+    let verification = verify_answer_against_canonical_evidence(
+        &execution.query_text,
+        answer_text,
+        &QueryIntentProfile::default(),
+        &canonical_evidence,
+        &[],
+        &prompt_context,
+        assistant_grounding,
+    );
+    persist_query_verification(
+        state,
+        execution.id,
+        &verification,
+        &canonical_evidence,
+        assistant_grounding,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_agent_tool_context_bundle(
+    state: &AppState,
+    execution: &query_repository::QueryExecutionRow,
+    context_bundle_id: Uuid,
+    assistant_grounding: &AssistantGroundingEvidence,
+    verification_state: QueryVerificationState,
+    verification_warnings: serde_json::Value,
+) -> anyhow::Result<()> {
+    if state.arango_context_store.get_bundle_by_query_execution(execution.id).await?.is_some() {
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let bundle = KnowledgeContextBundleRow {
+        key: context_bundle_id.to_string(),
+        arango_id: None,
+        arango_rev: None,
+        bundle_id: context_bundle_id,
+        workspace_id: execution.workspace_id,
+        library_id: execution.library_id,
+        query_execution_id: Some(execution.id),
+        bundle_state: "ready".to_string(),
+        bundle_strategy: "agent_tool_evidence".to_string(),
+        requested_mode: super::runtime_mode_label(CANONICAL_QUERY_MODE).to_string(),
+        resolved_mode: super::runtime_mode_label(CANONICAL_QUERY_MODE).to_string(),
+        selected_fact_ids: Vec::new(),
+        verification_state: verification_state_storage_label(verification_state).to_string(),
+        verification_warnings,
+        freshness_snapshot: serde_json::json!({}),
+        candidate_summary: serde_json::json!({
+            "finalAssistantDocumentReferences": assistant_grounding.document_references.len(),
+            "finalToolEvidenceFragments": assistant_grounding.verification_corpus.len(),
+        }),
+        assembly_diagnostics: serde_json::json!({
+            "queryExecutionId": execution.id,
+            "bundleId": context_bundle_id,
+            "toolEvidenceFragmentCount": assistant_grounding.verification_corpus.len(),
+        }),
+        created_at: now,
+        updated_at: now,
+    };
+    state.arango_context_store.upsert_bundle(&bundle).await?;
+    Ok(())
+}
+
+fn verification_state_storage_label(state: QueryVerificationState) -> &'static str {
+    match state {
+        QueryVerificationState::NotRun => "not_run",
+        QueryVerificationState::Verified => "verified",
+        QueryVerificationState::PartiallySupported => "partially_supported",
+        QueryVerificationState::Conflicting => "conflicting",
+        QueryVerificationState::InsufficientEvidence => "insufficient_evidence",
+        QueryVerificationState::Failed => "failed",
+    }
+}
+
+fn no_verifiable_tool_evidence_warnings() -> serde_json::Value {
+    serde_json::to_value([QueryVerificationWarning {
+        code: "no_verifiable_tool_evidence".to_string(),
+        message: "The UI agent used MCP tools, but none returned evidence that can verify the final answer.".to_string(),
+        related_segment_id: None,
+        related_fact_id: None,
+    }])
+    .unwrap_or_else(|_| serde_json::json!([]))
+}
+
+fn no_agent_tool_evidence_warnings() -> serde_json::Value {
+    serde_json::to_value([QueryVerificationWarning {
+        code: "no_agent_tool_evidence".to_string(),
+        message:
+            "The UI agent produced a final answer before collecting verifier-grade MCP evidence."
+                .to_string(),
+        related_segment_id: None,
+        related_fact_id: None,
+    }])
+    .unwrap_or_else(|_| serde_json::json!([]))
+}
+
+fn context_reference_set_has_grounding(
+    reference_set: &KnowledgeContextBundleReferenceSetRow,
+) -> bool {
+    !reference_set.chunk_references.is_empty()
+        || !reference_set.entity_references.is_empty()
+        || !reference_set.relation_references.is_empty()
+        || !reference_set.evidence_references.is_empty()
+        || !reference_set.bundle.selected_fact_ids.is_empty()
+}
+
+fn agent_has_verifiable_tool_evidence(
+    child_query_execution_ids: &[Uuid],
+    assistant_grounding: &AssistantGroundingEvidence,
+) -> bool {
+    !child_query_execution_ids.is_empty()
+        || assistant_grounding
+            .document_references
+            .iter()
+            .any(|reference| !reference.excerpt.trim().is_empty())
+        || assistant_grounding
+            .verification_corpus
+            .iter()
+            .any(|fragment| verification_fragment_is_verifier_grade_tool_evidence(fragment))
+}
+
+fn verification_fragment_is_verifier_grade_tool_evidence(fragment: &str) -> bool {
+    let Some(tool_name) = fragment
+        .strip_prefix("[MCP tool result: ")
+        .and_then(|tail| tail.split_once(']').map(|(tool_name, _)| tool_name))
+    else {
+        return false;
+    };
+    match tool_name {
+        "grounded_answer" | "read_document" => true,
+        "search_documents" => {
+            fragment.contains("\"excerpt\"")
+                || fragment.contains("\"chunkReferences\"")
+                || fragment.contains("\"technicalFactReferences\"")
+                || fragment.contains("\"evidenceReferences\"")
+        }
+        "search_entities"
+        | "get_graph_topology"
+        | "list_relations"
+        | "get_communities"
+        | "get_runtime_execution"
+        | "get_runtime_execution_trace" => true,
+        _ => false,
+    }
+}
+
+fn ui_agent_iteration_cap() -> usize {
+    usize::from(QueryAnswerTask::spec().max_turns).saturating_add(1)
+}
+
+fn agent_grounding_assembly_diagnostics(
+    source: &serde_json::Value,
+    child_executions: &[(Uuid, Uuid)],
+) -> serde_json::Value {
+    let mut diagnostics = source.clone();
+    let marker = serde_json::json!(
+        child_executions
+            .iter()
+            .map(|(execution_id, runtime_execution_id)| {
+                serde_json::json!({
+                    "sourceExecutionId": execution_id,
+                    "sourceRuntimeExecutionId": runtime_execution_id
+                })
+            })
+            .collect::<Vec<_>>()
+    );
+    match diagnostics.as_object_mut() {
+        Some(object) => {
+            object.insert("uiAgentGroundingSources".to_string(), marker);
+            diagnostics
+        }
+        None => serde_json::json!({
+            "source": diagnostics,
+            "uiAgentGroundingSources": marker
+        }),
+    }
+}
+
+fn should_replace_reference(current_rank: i32, current_score: f64, rank: i32, score: f64) -> bool {
+    rank < current_rank || (rank == current_rank && score > current_score)
+}
+
+fn merge_chunk_reference(
+    references: &mut HashMap<Uuid, KnowledgeBundleChunkReferenceRow>,
+    reference: KnowledgeBundleChunkReferenceRow,
+) {
+    let replace = references.get(&reference.chunk_id).is_none_or(|current| {
+        should_replace_reference(current.rank, current.score, reference.rank, reference.score)
+    });
+    if replace {
+        references.insert(reference.chunk_id, reference);
+    }
+}
+
+fn merge_entity_reference(
+    references: &mut HashMap<Uuid, KnowledgeBundleEntityReferenceRow>,
+    reference: KnowledgeBundleEntityReferenceRow,
+) {
+    let replace = references.get(&reference.entity_id).is_none_or(|current| {
+        should_replace_reference(current.rank, current.score, reference.rank, reference.score)
+    });
+    if replace {
+        references.insert(reference.entity_id, reference);
+    }
+}
+
+fn merge_relation_reference(
+    references: &mut HashMap<Uuid, KnowledgeBundleRelationReferenceRow>,
+    reference: KnowledgeBundleRelationReferenceRow,
+) {
+    let replace = references.get(&reference.relation_id).is_none_or(|current| {
+        should_replace_reference(current.rank, current.score, reference.rank, reference.score)
+    });
+    if replace {
+        references.insert(reference.relation_id, reference);
+    }
+}
+
+fn merge_evidence_reference(
+    references: &mut HashMap<Uuid, KnowledgeBundleEvidenceReferenceRow>,
+    reference: KnowledgeBundleEvidenceReferenceRow,
+) {
+    let replace = references.get(&reference.evidence_id).is_none_or(|current| {
+        should_replace_reference(current.rank, current.score, reference.rank, reference.score)
+    });
+    if replace {
+        references.insert(reference.evidence_id, reference);
+    }
+}
+
+fn sort_chunk_references(references: &mut [KnowledgeBundleChunkReferenceRow]) {
+    references.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+}
+
+fn sort_entity_references(references: &mut [KnowledgeBundleEntityReferenceRow]) {
+    references.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+    });
+}
+
+fn sort_relation_references(references: &mut [KnowledgeBundleRelationReferenceRow]) {
+    references.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.relation_id.cmp(&right.relation_id))
+    });
+}
+
+fn sort_evidence_references(references: &mut [KnowledgeBundleEvidenceReferenceRow]) {
+    references.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.evidence_id.cmp(&right.evidence_id))
+    });
+}
+
+fn clone_chunk_reference_edges(
+    bundle_id: Uuid,
+    references: &[KnowledgeBundleChunkReferenceRow],
+    created_at: chrono::DateTime<Utc>,
+) -> Vec<KnowledgeBundleChunkEdgeRow> {
+    references
+        .iter()
+        .map(|reference| KnowledgeBundleChunkEdgeRow {
+            key: format!("{bundle_id}:{}", reference.chunk_id),
+            arango_id: None,
+            arango_rev: None,
+            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
+            to: format!("{KNOWLEDGE_CHUNK_COLLECTION}/{}", reference.chunk_id),
+            bundle_id,
+            chunk_id: reference.chunk_id,
+            rank: reference.rank,
+            score: reference.score,
+            inclusion_reason: reference.inclusion_reason.clone(),
+            created_at,
+        })
+        .collect()
+}
+
+fn clone_entity_reference_edges(
+    bundle_id: Uuid,
+    references: &[KnowledgeBundleEntityReferenceRow],
+    created_at: chrono::DateTime<Utc>,
+) -> Vec<KnowledgeBundleEntityEdgeRow> {
+    references
+        .iter()
+        .map(|reference| KnowledgeBundleEntityEdgeRow {
+            key: format!("{bundle_id}:{}", reference.entity_id),
+            arango_id: None,
+            arango_rev: None,
+            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
+            to: format!("{KNOWLEDGE_ENTITY_COLLECTION}/{}", reference.entity_id),
+            bundle_id,
+            entity_id: reference.entity_id,
+            rank: reference.rank,
+            score: reference.score,
+            inclusion_reason: reference.inclusion_reason.clone(),
+            created_at,
+        })
+        .collect()
+}
+
+fn clone_relation_reference_edges(
+    bundle_id: Uuid,
+    references: &[KnowledgeBundleRelationReferenceRow],
+    created_at: chrono::DateTime<Utc>,
+) -> Vec<KnowledgeBundleRelationEdgeRow> {
+    references
+        .iter()
+        .map(|reference| KnowledgeBundleRelationEdgeRow {
+            key: format!("{bundle_id}:{}", reference.relation_id),
+            arango_id: None,
+            arango_rev: None,
+            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
+            to: format!("{KNOWLEDGE_RELATION_COLLECTION}/{}", reference.relation_id),
+            bundle_id,
+            relation_id: reference.relation_id,
+            rank: reference.rank,
+            score: reference.score,
+            inclusion_reason: reference.inclusion_reason.clone(),
+            created_at,
+        })
+        .collect()
+}
+
+fn clone_evidence_reference_edges(
+    bundle_id: Uuid,
+    references: &[KnowledgeBundleEvidenceReferenceRow],
+    created_at: chrono::DateTime<Utc>,
+) -> Vec<KnowledgeBundleEvidenceEdgeRow> {
+    references
+        .iter()
+        .map(|reference| KnowledgeBundleEvidenceEdgeRow {
+            key: format!("{bundle_id}:{}", reference.evidence_id),
+            arango_id: None,
+            arango_rev: None,
+            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
+            to: format!("{KNOWLEDGE_EVIDENCE_COLLECTION}/{}", reference.evidence_id),
+            bundle_id,
+            evidence_id: reference.evidence_id,
+            rank: reference.rank,
+            score: reference.score,
+            inclusion_reason: reference.inclusion_reason.clone(),
+            created_at,
+        })
+        .collect()
+}
+
 async fn seed_query_runtime_session(
     state: &AppState,
     query_execution_id: Uuid,
     conversation_context: &ConversationRuntimeContext,
+    surface_kind: RuntimeSurfaceKind,
 ) -> Result<RuntimeExecutionSession, ApiError> {
     let task_spec = QueryAnswerTask::spec();
     let runtime_overrides = bounded_runtime_overrides(state, &task_spec);
@@ -1648,6 +2808,7 @@ async fn seed_query_runtime_session(
         },
         RuntimeExecutionOwner::query_execution(query_execution_id),
     )
+    .with_surface_kind(surface_kind)
     .with_budget_limits(runtime_overrides.max_turns, runtime_overrides.max_parallel_actions)
     .build();
 
@@ -1656,6 +2817,89 @@ async fn seed_query_runtime_session(
         .seed_and_persist_session(&state.persistence.postgres, &request)
         .await
         .map_err(map_runtime_execution_error)
+}
+
+async fn persist_agent_answer(
+    state: &AppState,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    request_turn_id: Uuid,
+    answer_text: &str,
+) -> Result<String, QueryAnswerTaskFailure> {
+    let response_turn = query_repository::create_turn(
+        &state.persistence.postgres,
+        &query_repository::NewQueryTurn {
+            conversation_id,
+            turn_kind: "assistant",
+            author_principal_id: None,
+            content_text: answer_text,
+            execution_id: Some(execution_id),
+        },
+    )
+    .await
+    .map_err(|error| {
+        make_query_answer_failure(
+            "query_persist_failed",
+            format!("failed to persist assistant response turn: {error}"),
+        )
+    })?;
+
+    match query_repository::update_execution(
+        &state.persistence.postgres,
+        execution_id,
+        &query_repository::UpdateQueryExecution {
+            request_turn_id: Some(request_turn_id),
+            response_turn_id: Some(response_turn.id),
+            failure_code: None,
+            completed_at: Some(Utc::now()),
+        },
+    )
+    .await
+    {
+        Ok(Some(_)) => Ok(answer_text.to_string()),
+        Ok(None) => Err(make_query_answer_failure(
+            "query_execution_not_found",
+            format!("query execution {execution_id} not found during persist"),
+        )),
+        Err(error) => Err(make_query_answer_failure(
+            "query_persist_failed",
+            format!("failed to update query execution after assistant response: {error}"),
+        )),
+    }
+}
+
+async fn persist_failed_agent_debug_snapshot(
+    state: &AppState,
+    execution_id: Uuid,
+    library_id: Uuid,
+    question: &str,
+    failure: &AgentTurnFailure,
+) {
+    if failure.debug_iterations.is_empty() && failure.agent_loop.is_none() {
+        return;
+    }
+    if let Err(error) = crate::services::query::llm_context_debug::upsert_snapshot(
+        &state.persistence.postgres,
+        &crate::services::query::llm_context_debug::LlmContextSnapshot {
+            execution_id,
+            library_id,
+            question: question.to_string(),
+            iterations: failure.debug_iterations.clone(),
+            total_iterations: failure.debug_iterations.len(),
+            final_answer: None,
+            captured_at: Utc::now(),
+            query_ir: None,
+            agent_loop: failure.agent_loop.clone(),
+        },
+    )
+    .await
+    {
+        warn!(
+            error = %error,
+            execution_id = %execution_id,
+            "failed to persist failed UI agent LLM context snapshot"
+        );
+    }
 }
 
 fn map_runtime_execution_error(error: RuntimeExecutionError) -> ApiError {
@@ -1870,7 +3114,15 @@ fn truncate_failure_code(message: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::is_query_vector_source_mismatch;
+    use uuid::Uuid;
+
+    use crate::services::query::assistant_grounding::AssistantGroundingEvidence;
+
+    use super::{
+        ASSISTANT_AGENT_LOOP_DEADLINE_MS, ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS,
+        agent_has_verifiable_tool_evidence, is_query_vector_source_mismatch,
+        no_agent_tool_evidence_warnings, ui_agent_iteration_cap,
+    };
 
     #[test]
     fn classifies_runtime_vector_source_mismatch() {
@@ -1884,6 +3136,65 @@ mod tests {
         assert!(!is_query_vector_source_mismatch(
             "query retrieval provider is healthy and ready for embeddings"
         ));
+    }
+
+    #[test]
+    fn ui_agent_no_tool_answer_has_no_verifiable_tool_evidence() {
+        let grounding = AssistantGroundingEvidence::default();
+
+        assert!(!agent_has_verifiable_tool_evidence(&[], &grounding));
+    }
+
+    #[test]
+    fn ui_agent_no_tool_answer_warning_is_insufficient_evidence_signal() {
+        let warnings = no_agent_tool_evidence_warnings();
+
+        assert_eq!(warnings[0]["code"], "no_agent_tool_evidence");
+    }
+
+    #[test]
+    fn ui_agent_child_execution_is_verifiable_tool_evidence() {
+        let grounding = AssistantGroundingEvidence::default();
+        let child_query_execution_ids = [Uuid::nil()];
+
+        assert!(agent_has_verifiable_tool_evidence(&child_query_execution_ids, &grounding));
+    }
+
+    #[test]
+    fn ui_agent_verification_corpus_is_verifiable_tool_evidence() {
+        let grounding = AssistantGroundingEvidence {
+            verification_corpus: vec![
+                "[MCP tool result: read_document]\ncontent:\nThe supported claim.".to_string(),
+            ],
+            document_references: Vec::new(),
+        };
+
+        assert!(agent_has_verifiable_tool_evidence(&[], &grounding));
+    }
+
+    #[test]
+    fn ui_agent_title_only_search_result_is_not_verifier_grade_evidence() {
+        let grounding = AssistantGroundingEvidence {
+            verification_corpus: vec![
+                "[MCP tool result: search_documents]\nstructuredContent:\n{\"hits\":[{\"documentTitle\":\"Alpha Guide\"}]}".to_string(),
+            ],
+            document_references: Vec::new(),
+        };
+
+        assert!(!agent_has_verifiable_tool_evidence(&[], &grounding));
+    }
+
+    #[test]
+    fn ui_agent_deadline_budget_covers_runtime_turns() {
+        let iteration_cap = ui_agent_iteration_cap();
+
+        assert!(ASSISTANT_AGENT_LOOP_DEADLINE_MS / iteration_cap as u64 >= 30_000);
+    }
+
+    #[test]
+    fn ui_agent_soft_tool_collection_target_leaves_synthesis_budget() {
+        assert!(ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS < ASSISTANT_AGENT_LOOP_DEADLINE_MS);
+        assert!(ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS <= 45_000);
     }
 }
 

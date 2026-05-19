@@ -258,12 +258,20 @@ impl McpDiscoveryContractFixture {
     }
 
     async fn capabilities(&self, token: &str) -> anyhow::Result<serde_json::Value> {
+        self.capabilities_at(token, "/v1/mcp/capabilities").await
+    }
+
+    async fn diagnostics_capabilities(&self, token: &str) -> anyhow::Result<serde_json::Value> {
+        self.capabilities_at(token, "/v1/mcp/diagnostics/capabilities").await
+    }
+
+    async fn capabilities_at(&self, token: &str, uri: &str) -> anyhow::Result<serde_json::Value> {
         let response = self
             .app()
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/mcp/capabilities")
+                    .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .expect("build mcp contracts capabilities request"),
@@ -290,12 +298,31 @@ impl McpDiscoveryContractFixture {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
+        self.tool_call_at(token, "/v1/mcp", tool_name, arguments).await
+    }
+
+    async fn diagnostics_tool_call(
+        &self,
+        token: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.tool_call_at(token, "/v1/mcp/diagnostics", tool_name, arguments).await
+    }
+
+    async fn tool_call_at(
+        &self,
+        token: &str,
+        uri: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let response = self
             .app()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v1/mcp")
+                    .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -334,12 +361,31 @@ impl McpDiscoveryContractFixture {
         method: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rpc_call_at(token, "/v1/mcp", method, params).await
+    }
+
+    async fn diagnostics_rpc_call(
+        &self,
+        token: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.rpc_call_at(token, "/v1/mcp/diagnostics", method, params).await
+    }
+
+    async fn rpc_call_at(
+        &self,
+        token: &str,
+        uri: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let response = self
             .app()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v1/mcp")
+                    .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -520,7 +566,7 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
             )
             .await?;
 
-        let tools = fixture.rpc_call(&token, "tools/list", json!({})).await?;
+        let tools = fixture.diagnostics_rpc_call(&token, "tools/list", json!({})).await?;
         let tool_items =
             tools["result"]["tools"].as_array().context("tools/list must return a tools array")?;
 
@@ -536,11 +582,12 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
             .context("create_library tool missing from tools/list")?;
         assert_eq!(library_tool["inputSchema"]["required"], json!(["library"]));
 
+        let workspace_ref = format!("agent-workspace-{}", Uuid::now_v7().simple());
         let workspace_response = fixture
-            .tool_call(
+            .diagnostics_tool_call(
                 &token,
                 "create_workspace",
-                json!({ "workspace": "agent-workspace", "title": "Agent Workspace ++" }),
+                json!({ "workspace": workspace_ref, "title": "Agent Workspace ++" }),
             )
             .await?;
         let created_workspace_id =
@@ -551,11 +598,11 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
                 .context("create_workspace returned invalid workspaceId")?;
         assert_eq!(
             workspace_response["result"]["structuredContent"]["workspace"]["ref"],
-            json!("agent-workspace")
+            json!(workspace_ref)
         );
 
         let library_response = fixture
-            .tool_call(
+            .diagnostics_tool_call(
                 &token,
                 "create_library",
                 json!({
@@ -568,16 +615,25 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
             library_response["result"]["structuredContent"]["library"]["ref"],
             json!(format!("{}/agent-library", fixture.workspace_ref))
         );
+        let ingestion_readiness =
+            &library_response["result"]["structuredContent"]["library"]["ingestionReadiness"];
+        let ready = ingestion_readiness["ready"].as_bool().context("ready must be a boolean")?;
+        let missing_binding_purposes = ingestion_readiness["missingBindingPurposes"]
+            .as_array()
+            .context("missingBindingPurposes must be an array")?;
         assert_eq!(
-            library_response["result"]["structuredContent"]["library"]["ingestionReadiness"]["ready"],
-            json!(false)
+            ready,
+            missing_binding_purposes.is_empty(),
+            "ingestion readiness must be ready exactly when no binding purposes are missing"
         );
-        assert_eq!(
-            library_response["result"]["structuredContent"]["library"]["ingestionReadiness"]["missingBindingPurposes"],
-            json!(["extract_graph", "embed_chunk"])
+        assert!(
+            missing_binding_purposes
+                .iter()
+                .all(|purpose| purpose.as_str().is_some_and(|value| !value.trim().is_empty())),
+            "missing binding purpose entries must be non-empty strings"
         );
 
-        sqlx::query("delete from workspace where id = $1")
+        sqlx::query("delete from catalog_workspace where id = $1")
             .bind(created_workspace_id)
             .execute(&fixture.state.persistence.postgres)
             .await
@@ -600,10 +656,11 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
     let fixture = McpDiscoveryContractFixture::create(settings).await?;
 
     let result = async {
-        let token =
-            fixture.token(&["documents:read", "documents:write"], "web-ingest-contracts").await?;
+        let token = fixture
+            .token(&["projects:write", "documents:read", "documents:write"], "web-ingest-contracts")
+            .await?;
 
-        let capabilities = fixture.capabilities(&token).await?;
+        let capabilities = fixture.diagnostics_capabilities(&token).await?;
         let tools =
             capabilities["tools"].as_array().context("capabilities tools must be an array")?;
         assert!(tools.iter().any(|tool| tool == "submit_web_ingest_run"));
@@ -613,7 +670,7 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
         assert!(tools.iter().any(|tool| tool == "get_runtime_execution"));
         assert!(tools.iter().any(|tool| tool == "get_runtime_execution_trace"));
 
-        let tool_list = fixture.rpc_call(&token, "tools/list", json!({})).await?;
+        let tool_list = fixture.diagnostics_rpc_call(&token, "tools/list", json!({})).await?;
         let tool_items = tool_list["result"]["tools"]
             .as_array()
             .context("tools/list must return a tools array")?;

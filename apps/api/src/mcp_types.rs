@@ -13,7 +13,9 @@ use crate::domains::{
     ai::AiBindingPurpose,
     recognition::LibraryRecognitionPolicy,
 };
-use crate::shared::web::ingest::{WebIngestPolicy, WebIngestUrlFilter};
+use crate::shared::web::ingest::{
+    WebIngestPolicy, WebIngestUrlFilter, default_web_ingest_crawl_filter,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -343,7 +345,9 @@ pub struct McpSubmitWebIngestRunRequest {
     pub boundary_policy: Option<String>,
     pub max_depth: Option<i32>,
     pub max_pages: Option<i32>,
+    #[serde(default = "default_web_ingest_crawl_filter")]
     pub crawl_filter: WebIngestUrlFilter,
+    #[serde(default)]
     pub materialization_filter: WebIngestUrlFilter,
     pub idempotency_key: Option<String>,
 }
@@ -741,6 +745,20 @@ mod tests {
         assert_eq!(request.crawl_filter.block_patterns.len(), 1);
         assert_eq!(request.materialization_filter.allow_patterns.len(), 1);
         assert_eq!(request.idempotency_key.as_deref(), Some("web-seed-1"));
+    }
+
+    #[test]
+    fn submit_web_ingest_run_request_defaults_optional_filters() {
+        let request: McpSubmitWebIngestRunRequest = serde_json::from_value(json!({
+            "library": "default/demo",
+            "seedUrl": "https://example.com/docs",
+            "mode": "single_page"
+        }))
+        .expect("request should deserialize");
+
+        assert!(!request.crawl_filter.block_patterns.is_empty());
+        assert!(request.materialization_filter.allow_patterns.is_empty());
+        assert!(request.materialization_filter.block_patterns.is_empty());
     }
 
     #[test]

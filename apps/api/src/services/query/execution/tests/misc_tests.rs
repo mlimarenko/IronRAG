@@ -173,7 +173,7 @@ fn query_ir_focus_queries_ignore_spurious_literals_for_focused_document_answers(
 }
 
 #[test]
-fn build_graph_evidence_text_queries_keeps_raw_question_recall_anchor() {
+fn build_graph_evidence_text_queries_prioritize_focused_queries_before_raw_question() {
     let plan = RuntimeQueryPlan {
         requested_mode: RuntimeQueryMode::Hybrid,
         planned_mode: RuntimeQueryMode::Hybrid,
@@ -216,9 +216,63 @@ fn build_graph_evidence_text_queries_keeps_raw_question_recall_anchor() {
     let queries =
         build_graph_evidence_text_queries(question, &plan, &focus_queries, Some(&query_ir));
 
-    assert_eq!(queries.first().map(String::as_str), Some(question));
-    assert_eq!(queries.get(1).map(String::as_str), Some("Alpha endpoint 9407"));
+    assert_eq!(queries.first().map(String::as_str), Some("Alpha endpoint 9407"));
     assert!(queries.contains(&"configure alpha 9407 endpoint".to_string()));
+    let raw_position = queries.iter().position(|query| query == question);
+    let focus_position = queries.iter().position(|query| query == "Alpha endpoint 9407");
+    assert!(
+        match raw_position.zip(focus_position) {
+            Some((raw, focus)) => raw > focus,
+            None => true,
+        },
+        "raw question should not outrank focused graph evidence probes: {queries:?}"
+    );
+}
+
+#[test]
+fn build_graph_evidence_text_queries_use_raw_question_when_no_focus_is_available() {
+    let plan = RuntimeQueryPlan {
+        requested_mode: RuntimeQueryMode::Hybrid,
+        planned_mode: RuntimeQueryMode::Hybrid,
+        intent_profile: QueryIntentProfile::default(),
+        keywords: Vec::new(),
+        high_level_keywords: Vec::new(),
+        low_level_keywords: Vec::new(),
+        entity_keywords: Vec::new(),
+        concept_keywords: Vec::new(),
+        top_k: 8,
+        context_budget_chars: 22_000,
+        hyde_recommended: false,
+    };
+    let question = "Which document explains the fallback bootstrap sequence?";
+    let queries = build_graph_evidence_text_queries(question, &plan, &[], None);
+
+    assert_eq!(queries, vec![question.to_string()]);
+}
+
+#[test]
+fn graph_evidence_db_text_queries_keep_bounded_focused_probe_set() {
+    let queries = vec![
+        "Alpha endpoint 9407".to_string(),
+        "Beta source field".to_string(),
+        "Gamma retry marker".to_string(),
+        "Delta queue state".to_string(),
+        "Epsilon config path".to_string(),
+        "Zeta broad fallback".to_string(),
+    ];
+
+    let db_queries = graph_evidence_db_text_queries(&queries);
+
+    assert_eq!(
+        db_queries,
+        vec![
+            "Alpha endpoint 9407".to_string(),
+            "Beta source field".to_string(),
+            "Gamma retry marker".to_string(),
+            "Delta queue state".to_string(),
+            "Epsilon config path".to_string(),
+        ]
+    );
 }
 
 #[test]

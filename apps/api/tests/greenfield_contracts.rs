@@ -353,6 +353,30 @@ fn actual_contract_exposes_canonical_session_and_admin_support_routes() {
 }
 
 #[test]
+fn actual_contract_assistant_prompt_documents_transport_agnostic_mcp_clients() {
+    let contract = load_openapi_contract_text();
+    let prompt_schema = contract
+        .split("AssistantSystemPromptResponse:")
+        .nth(1)
+        .and_then(|section| section.split("AssistantTechnicalFactReference:").next())
+        .expect("assistant system prompt schema present");
+
+    for required in [
+        "transport-agnostic",
+        "Claude Desktop",
+        "Claude Code",
+        "Cursor",
+        "Codex",
+        "VS Code",
+        "Continue/Cline/Roo",
+        "Zed",
+        "Hermes",
+    ] {
+        assert!(prompt_schema.contains(required), "missing `{required}` in prompt schema");
+    }
+}
+
+#[test]
 fn actual_contract_exposes_canonical_content_and_processing_routes() {
     let contract = load_openapi_contract_text();
 

@@ -1,6 +1,109 @@
 # Changelog
 
-## Unreleased
+## 0.4.15 — 2026-05-19
+
+### Assistant MCP agent loop
+
+- The web UI assistant now runs as a regular MCP-client-style agent over
+  the answer tool surface. It sees the same tool schemas that
+  external MCP clients see, decides which tools to call, formulates tool
+  arguments, can run independent calls in parallel, reads tool results,
+  and only then writes the final answer. `grounded_answer` remains the
+  high-level grounded-answer tool instead of being auto-invoked with the
+  raw UI message.
+- UI turns now persist parent agent executions separately from child
+  tool executions: the parent stays on the UI surface, while child and
+  direct grounded-answer executions use the MCP surface and expose their
+  own trace ids.
+- Tool-backed answers that used MCP tools but received no verifier-grade
+  evidence now store `insufficient_evidence` with a
+  `no_verifiable_tool_evidence` warning. Direct no-tool assistant answers
+  now also fail closed as `insufficient_evidence` with a
+  `no_agent_tool_evidence` warning instead of looking verifier-clean.
+- Assistant SSE activity now reports real model/tool events through a
+  bounded, panic-safe stream. Diagnostic activity no longer backpressures
+  agent/tool execution, while terminal completion and failure events are
+  still delivered through the required stream path.
+- UI assistant turns no longer auto-forward the raw UI message into
+  `grounded_answer` as a hidden collection step. The model now sees the
+  complete read-only MCP answer surface on its first iteration, chooses
+  the needed tools and arguments itself, and can run independent tool
+  calls in parallel before final synthesis.
+- Composite UI turns now use a structural distinct-tool floor only after
+  the agent has already mixed evidence categories such as document,
+  graph, runtime, and answer tools. This keeps multi-part questions in a
+  real MCP exploration loop while avoiding unnecessary latency for
+  simple questions and minimal-permission tokens.
+- Verifier input for UI-agent turns now accepts citable content returned
+  by document search/read, graph, and runtime-inspection MCP tools, while
+  catalog and inventory listings remain non-grounding metadata. This
+  prevents correctly explored composite turns from being marked
+  unverifiable only because they did not finish through `grounded_answer`.
+- High-fanout UI-agent read tools now receive bounded default/capped
+  `limit` arguments from the parent turn budget, so a model cannot
+  silently expand graph and search fanout while probing several tools in
+  parallel.
+- UI-agent tool calls are now scoped to the active session library before
+  dispatch. Missing library arguments are filled from the session, while
+  model-authored cross-library arguments fail loudly instead of being
+  silently rewritten into an unrelated answer.
+- UI assistant turns now switch from tool collection to final synthesis
+  once a soft evidence budget is reached and enough MCP results have
+  been collected. Complex questions can still use multi-step,
+  multi-tool MCP exploration, while long-running turns no longer spend
+  the full hard deadline on redundant follow-up tool calls.
+- Runtime binding resolution and graph-evidence retrieval now avoid
+  broad catalog scans and unbounded graph probes on every turn. Focused
+  query-plan probes run first, while the raw user question remains in the
+  bounded graph evidence budget as a fallback signal.
+- Graph-evidence text lookup now bounds per-query candidate fanout
+  before dedupe/final ranking, reducing Postgres work when several
+  independent agents probe the same large library concurrently.
+- UI-agent `grounded_answer` child calls now inherit the parent turn's
+  resolved `topK` ceiling instead of silently expanding to the broader
+  MCP default, keeping focused subquestions from inflating retrieval
+  work under concurrent agent traffic.
+- Verified `grounded_answer` tool results now short-circuit the UI agent
+  only when that call is the sole tool call in the iteration. If the
+  model asks for several tools in parallel, the grounded answer becomes
+  context for the next synthesis pass instead of discarding the other
+  MCP results.
+- Verifier fallback matching is stricter for exact technical claims:
+  split fragments no longer validate HTTP route pairs, code assignments,
+  slash alternatives, decorated versions, or structural literals unless
+  the evidence is co-located in one source fragment. Conflict fact groups
+  are still evaluated even when some exact literals are grounded, and
+  document titles and excerpts are accepted as citation evidence without
+  treating a bare source URL as proof for unrelated answer text.
+- Added idempotent graph read-path indexes for concurrent agent and MCP
+  exploration in a single SQLx migration. The migration creates the
+  `pg_trgm` extension when needed and builds indexes inside SQLx's normal
+  migration transaction, so populated installations should apply it during
+  a maintenance window with a role that can create extensions.
+
+### Operational readiness
+
+- Readiness checks now use cached, coalesced control-plane snapshots and
+  the dedicated heartbeat Postgres pool. Concurrent assistant traffic no
+  longer makes `/v1/ready` synchronously repeat expensive bootstrap
+  diagnostics on every poll. Cached readiness can be briefly stale while
+  a background refresh is in flight, with a bounded synchronous refresh
+  fallback if the cached snapshot ages out.
+
+### Assistant debug inspector
+
+- Redesigned the assistant debug inspector around timeline, MCP calls,
+  request context, and raw JSON views. Operators can inspect each tool
+  call's arguments, result text, full MCP response, model messages,
+  final answer, token usage, and child runtime traces across desktop and
+  mobile layouts.
+- Updated MCP/UI parity docs so the release contract is based on shared
+  schemas, dispatcher behavior, payloads, traceability, and guardrails
+  across UI assistants and external MCP clients.
+- Expanded OpenAPI summaries and descriptions for every HTTP operation
+  so Swagger explains each method's purpose, usage pattern, request
+  shape, streaming/debug behavior where relevant, and agent/MCP
+  tool-loop contract.
 
 ## 0.4.14 — 2026-05-18
 
@@ -11,11 +114,11 @@
   `maxmemory` keeps allocator headroom below the container limit, and
   eviction uses `volatile-lru`. This prevents persisted cache growth
   from making the stack unhealthy after restart while keeping Postgres
-  and ArangoDB as the canonical data stores.
+  and ArangoDB as the durable data stores.
 
 ### Web ingest URL filters
 
-- Web ingest URL selection now uses a canonical two-stage policy:
+- Web ingest URL selection now uses a two-stage policy:
   independent crawl and document-selection filters each expose allow and
   block pattern lists. The previous single-stage URL filter shape was
   removed from REST, MCP, run snapshots, persisted library policy,
@@ -42,7 +145,7 @@
   now sent as the raw request body instead of being JSON-serialized by
   the generated client, restore into an existing selected library remaps
   archive ownership and blob storage keys to that library, snapshot
-  graph restore treats context bundles as part of the canonical graph
+  graph restore treats context bundles as part of the graph
   snapshot while reporting and skipping dangling graph edges, and the
   frontend nginx route now accepts large streaming snapshot imports.
 
@@ -80,7 +183,7 @@ Includes migration 0013 for web ingest URL policy storage. The
 ### Connectors: document_hint citation surface
 
 - New per-revision `document_hint` field surfaces a free-form
-user-facing label (canonical browser URL or arbitrary text) to MCP
+user-facing label (browser URL or arbitrary text) to MCP
 agents in `grounded_answer` citations and in the built-in answer
 pipeline. Defaults to None; when unset the citation resolver falls
 back to `source_uri` for web-ingested revisions, then to the
@@ -231,7 +334,7 @@ documents page still take precedence for shareable links.
 ### Catalog deletion: async workspace and library cleanup
 
 - Workspace and library DELETE endpoints now return `202 Accepted` with a
-canonical async operation id, while destructive storage/database cleanup runs
+stable async operation id, while destructive storage/database cleanup runs
 in the background. The shell closes delete dialogs immediately, removes the
 catalog item optimistically, and polls the operation until it is terminal.
 - Catalog delete admission now reuses an already active delete operation for
@@ -250,7 +353,7 @@ startup container directly. This prevents Compose from sitting forever
 on `service_completed_successfully` dependents when startup restarts.
 - The startup wait loop now reads the startup container from `docker compose ps -a`, so a fast successful one-shot migration container is detected as
 `Exited (0)` instead of being missed and waited on until timeout.
-- Backend images now include the canonical migration SQL files under
+- Backend images now include the migration SQL files under
 `/app/migrations`, so checksum-drift recovery can apply the exact
 idempotent migration file from the running image before updating
 `_sqlx_migrations.checksum`.
@@ -327,20 +430,20 @@ main reading surface.
 stage rows that include retry/failure spend instead of mixing them with
 only the last successful attempt total.
 
-### Assistant: canonical grounded-answer execution
+### Assistant: grounded-answer execution
 
-- The UI assistant now executes turns through the same canonical
+- The UI assistant now executes turns through the same
 `QueryService::execute_turn` path as MCP `grounded_answer`, so both
 surfaces share query compilation, hybrid retrieval, graph context,
 answer generation, verification, citations, caching, and audit records.
 - The separate in-process UI MCP-agent path was removed. The session-turn
-endpoint now returns the canonical assistant execution detail directly,
+endpoint now returns the assistant execution detail directly,
 and the SSE form emits safe runtime activity events (`started`,
 `tool_call_started`, periodic `tool_call_progress`,
 `tool_call_finished`, `persisting`) before the terminal `completed` /
 `failed` event.
 - Query-result cache hits are accepted only when the cached execution is
-verified and still has canonical grounding references; stale or
+verified and still has grounding references; stale or
 reference-free cache rows are evicted instead of replayed.
 - Grounded-answer retrieval now degrades across independent vector and
 lexical chunk-search lanes instead of failing the whole assistant/MCP

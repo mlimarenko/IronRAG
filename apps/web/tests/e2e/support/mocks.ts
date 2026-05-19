@@ -70,6 +70,7 @@ export async function installBrowserMocks(
     authenticated: options.authenticated ?? true,
     bootstrapRequired: options.bootstrapRequired ?? false,
     dashboard: options.dashboard ?? emptyDashboard(),
+    queryConversations: options.queryConversations ?? {},
     querySessions: options.querySessions ?? [],
     session: options.session ?? iamSession(),
   };

@@ -13,7 +13,13 @@ use crate::{
     },
 };
 
-const QUERY_ANSWER_STAGE_CATALOG: &[RuntimeStageKind] = &[RuntimeStageKind::Answer];
+const QUERY_ANSWER_STAGE_CATALOG: &[RuntimeStageKind] = &[
+    RuntimeStageKind::Retrieve,
+    RuntimeStageKind::AssembleContext,
+    RuntimeStageKind::Answer,
+    RuntimeStageKind::Verify,
+    RuntimeStageKind::Persist,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -55,8 +61,8 @@ impl RuntimeTask for QueryAnswerTask {
             surface_kind: RuntimeSurfaceKind::Internal,
             binding_purpose: AiBindingPurpose::for_runtime_task_kind(RuntimeTaskKind::QueryAnswer),
             machine_consumed: false,
-            max_turns: 1,
-            max_parallel_actions: 1,
+            max_turns: 4,
+            max_parallel_actions: 3,
             stage_catalog: QUERY_ANSWER_STAGE_CATALOG,
             recovery_policy: RuntimeRecoveryPolicy::None,
             output_mode: RuntimeOutputMode::Text,
@@ -72,3 +78,27 @@ impl RuntimeTask for QueryAnswerTask {
 }
 
 impl TextRuntimeTask for QueryAnswerTask {}
+
+#[cfg(test)]
+mod tests {
+    use crate::agent_runtime::task::RuntimeTask;
+
+    use super::QueryAnswerTask;
+
+    #[test]
+    fn query_answer_runtime_allows_tool_loop_budget() {
+        let spec = QueryAnswerTask::spec();
+
+        assert!(spec.max_turns > 1, "query answers must allow multiple model/tool turns");
+        assert!(spec.max_parallel_actions > 1, "query answers must allow parallel tool calls");
+        assert!(
+            spec.stage_catalog.contains(&crate::domains::agent_runtime::RuntimeStageKind::Answer)
+        );
+        assert!(
+            spec.stage_catalog.contains(&crate::domains::agent_runtime::RuntimeStageKind::Verify)
+        );
+        assert!(
+            spec.stage_catalog.contains(&crate::domains::agent_runtime::RuntimeStageKind::Persist)
+        );
+    }
+}

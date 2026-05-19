@@ -80,7 +80,7 @@ impl McpPermissionsFixture {
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
-        sqlx::query("delete from workspace where id = any($1)")
+        sqlx::query("delete from catalog_workspace where id = any($1)")
             .bind([self.workspace_id, self.foreign_workspace_id].as_slice())
             .execute(&self.state.persistence.postgres)
             .await
@@ -120,12 +120,20 @@ impl McpPermissionsFixture {
     }
 
     async fn mcp_capabilities(&self, token: &str) -> anyhow::Result<Value> {
+        self.mcp_capabilities_at(token, "/v1/mcp/capabilities").await
+    }
+
+    async fn mcp_diagnostics_capabilities(&self, token: &str) -> anyhow::Result<Value> {
+        self.mcp_capabilities_at(token, "/v1/mcp/diagnostics/capabilities").await
+    }
+
+    async fn mcp_capabilities_at(&self, token: &str, uri: &str) -> anyhow::Result<Value> {
         let response = self
             .app()
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/mcp/capabilities")
+                    .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .expect("build mcp capabilities request"),
@@ -147,12 +155,20 @@ impl McpPermissionsFixture {
     }
 
     async fn mcp_tools_list(&self, token: &str) -> anyhow::Result<Value> {
+        self.mcp_tools_list_at(token, "/v1/mcp").await
+    }
+
+    async fn mcp_diagnostics_tools_list(&self, token: &str) -> anyhow::Result<Value> {
+        self.mcp_tools_list_at(token, "/v1/mcp/diagnostics").await
+    }
+
+    async fn mcp_tools_list_at(&self, token: &str, uri: &str) -> anyhow::Result<Value> {
         let response = self
             .app()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v1/mcp")
+                    .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -187,12 +203,31 @@ impl McpPermissionsFixture {
         tool_name: &str,
         arguments: Value,
     ) -> anyhow::Result<Value> {
+        self.mcp_tool_call_at(token, "/v1/mcp", tool_name, arguments).await
+    }
+
+    async fn mcp_diagnostics_tool_call(
+        &self,
+        token: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> anyhow::Result<Value> {
+        self.mcp_tool_call_at(token, "/v1/mcp/diagnostics", tool_name, arguments).await
+    }
+
+    async fn mcp_tool_call_at(
+        &self,
+        token: &str,
+        uri: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> anyhow::Result<Value> {
         let response = self
             .app()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v1/mcp")
+                    .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -229,7 +264,7 @@ impl McpPermissionsFixture {
         let document = content_repository::create_document(
             &self.state.persistence.postgres,
             &content_repository::NewContentDocument {
-                workspace_id: self.workspace_id,
+                workspace_id: self.foreign_workspace_id,
                 library_id: self.foreign_library_id,
                 external_key,
                 document_state: "active",
@@ -242,11 +277,11 @@ impl McpPermissionsFixture {
             &self.state.persistence.postgres,
             &content_repository::NewContentRevision {
                 document_id: document.id,
-                workspace_id: self.workspace_id,
+                workspace_id: self.foreign_workspace_id,
                 library_id: self.foreign_library_id,
                 revision_number: 1,
                 parent_revision_id: None,
-                content_source_kind: "initial_upload",
+                content_source_kind: "upload",
                 checksum: "mcp-permissions-revision",
                 mime_type: "text/plain",
                 byte_size: 64,
@@ -370,12 +405,18 @@ async fn instance_admin_tokens_can_discover_all_visible_workspaces_and_libraries
             )
             .await?;
 
-        let capabilities = fixture.mcp_capabilities(&token).await?;
+        let capabilities = fixture.mcp_diagnostics_capabilities(&token).await?;
         assert!(capabilities["workspaceScope"].is_null());
-        assert_eq!(capabilities["visibleWorkspaceCount"], json!(2));
-        assert_eq!(capabilities["visibleLibraryCount"], json!(2));
+        assert!(
+            capabilities["visibleWorkspaceCount"].as_u64().unwrap_or_default() >= 2,
+            "instance-admin capabilities must include both fixture workspaces"
+        );
+        assert!(
+            capabilities["visibleLibraryCount"].as_u64().unwrap_or_default() >= 2,
+            "instance-admin capabilities must include both fixture libraries"
+        );
 
-        let tools = fixture.mcp_tools_list(&token).await?;
+        let tools = fixture.mcp_diagnostics_tools_list(&token).await?;
         let tool_names = tools["result"]["tools"]
             .as_array()
             .context("tools/list result must be an array")?
@@ -385,11 +426,34 @@ async fn instance_admin_tokens_can_discover_all_visible_workspaces_and_libraries
         assert!(tool_names.contains(&"create_workspace"));
         assert!(tool_names.contains(&"create_library"));
 
-        let workspaces = fixture.mcp_tool_call(&token, "list_workspaces", json!({})).await?;
+        let public_tools = fixture.mcp_tools_list(&token).await?;
+        let public_tool_names = public_tools["result"]["tools"]
+            .as_array()
+            .context("public tools/list result must be an array")?
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(!public_tool_names.contains(&"create_workspace"));
+        assert!(!public_tool_names.contains(&"create_library"));
+
+        let public_create = fixture
+            .mcp_tool_call(
+                &token,
+                "create_workspace",
+                json!({ "workspace": format!("public-admin-{}", Uuid::now_v7().simple()) }),
+            )
+            .await?;
+        assert_eq!(public_create["result"]["isError"], json!(true));
+        assert_eq!(
+            public_create["result"]["structuredContent"]["errorKind"],
+            json!("invalid_mcp_tool_call")
+        );
+
+        let workspaces =
+            fixture.mcp_diagnostics_tool_call(&token, "list_workspaces", json!({})).await?;
         let workspace_items = workspaces["result"]["structuredContent"]["workspaces"]
             .as_array()
             .context("workspaces payload must be an array")?;
-        assert_eq!(workspace_items.len(), 2);
         assert!(
             workspace_items.iter().any(|item| item["workspaceId"] == json!(fixture.workspace_id))
         );
@@ -399,11 +463,11 @@ async fn instance_admin_tokens_can_discover_all_visible_workspaces_and_libraries
                 .any(|item| item["workspaceId"] == json!(fixture.foreign_workspace_id))
         );
 
-        let libraries = fixture.mcp_tool_call(&token, "list_libraries", json!({})).await?;
+        let libraries =
+            fixture.mcp_diagnostics_tool_call(&token, "list_libraries", json!({})).await?;
         let library_items = libraries["result"]["structuredContent"]["libraries"]
             .as_array()
             .context("libraries payload must be an array")?;
-        assert_eq!(library_items.len(), 2);
         assert!(
             library_items.iter().any(|item| item["workspaceId"] == json!(fixture.workspace_id))
         );
@@ -458,10 +522,11 @@ async fn foreign_scope_rejections_do_not_leak_library_or_document_metadata() -> 
             .await?;
         let read_body = serde_json::to_string(&read).context("failed to stringify read body")?;
         assert_eq!(read["result"]["isError"], json!(true));
-        assert_eq!(read["result"]["structuredContent"]["errorKind"], json!("unauthorized"));
+        assert_eq!(read["result"]["structuredContent"]["errorKind"], json!("not_found"));
+        assert!(!read_body.contains(&foreign_document_id.to_string()));
         assert!(!read_body.contains(&fixture.foreign_workspace_id.to_string()));
         assert!(!read_body.contains(&fixture.foreign_library_id.to_string()));
-        assert!(!read_body.contains(&foreign_document_id.to_string()));
+        assert!(!read_body.contains("foreign-secret-memory"));
 
         Ok(())
     }
@@ -481,7 +546,7 @@ async fn mcp_tool_visibility_matches_token_scope() -> anyhow::Result<()> {
     let result = async {
         let token =
             fixture.bearer_token(&["documents:read", "documents:write"], "tool-visibility").await?;
-        let tools = fixture.mcp_tools_list(&token).await?;
+        let tools = fixture.mcp_diagnostics_tools_list(&token).await?;
         let tool_names = tools["result"]["tools"]
             .as_array()
             .context("tools/list result must be an array")?

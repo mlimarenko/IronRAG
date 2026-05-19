@@ -25,6 +25,34 @@ impl AiCatalogService {
         rows.into_iter().map(map_model_row).collect()
     }
 
+    pub async fn get_provider_catalog(
+        &self,
+        state: &AppState,
+        provider_catalog_id: Uuid,
+    ) -> Result<ProviderCatalogEntry, ApiError> {
+        let row = ai_repository::get_provider_catalog_by_id(
+            &state.persistence.postgres,
+            provider_catalog_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("provider_catalog", provider_catalog_id))?;
+        map_provider_row(row)
+    }
+
+    pub async fn get_model_catalog(
+        &self,
+        state: &AppState,
+        model_catalog_id: Uuid,
+    ) -> Result<ModelCatalogEntry, ApiError> {
+        let row =
+            ai_repository::get_model_catalog_by_id(&state.persistence.postgres, model_catalog_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                .ok_or_else(|| ApiError::resource_not_found("model_catalog", model_catalog_id))?;
+        map_model_row(row)
+    }
+
     pub async fn list_resolved_model_catalog(
         &self,
         state: &AppState,

@@ -32,9 +32,10 @@ pub struct LlmIterationDebug {
     pub response_tool_calls: Vec<ResponseToolCallDebug>,
     pub usage: serde_json::Value,
     /// Runtime execution IDs spawned by tool calls in this iteration.
-    /// Populated when a tool call (e.g. `grounded_answer`) recursed into
-    /// `execute_turn` and produced its own `LlmContextSnapshot`. Empty
-    /// for all single-shot grounded-answer iterations.
+    /// Populated on tool-use turns when a tool such as
+    /// `grounded_answer` creates its own query execution and debug
+    /// snapshot. Empty on iterations whose tools do not spawn child
+    /// query executions and on single-shot grounded-answer turns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_runtime_execution_ids: Vec<Uuid>,
 }
@@ -46,6 +47,8 @@ pub struct ResponseToolCallDebug {
     pub name: String,
     pub arguments_json: String,
     pub result_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_json: Option<serde_json::Value>,
     pub is_error: bool,
 }
 
@@ -69,6 +72,7 @@ pub enum AgentStopReason {
     IterationCap,
     Deadline,
     ToolError,
+    ProviderError,
 }
 
 /// Full debug snapshot for one assistant turn — one execution_id.
@@ -215,6 +219,14 @@ mod tests {
         assert_eq!(meta.deadline_ms, 30_000);
         assert_eq!(meta.stopped_reason, AgentStopReason::FinalAnswer);
         assert_eq!(meta.tool_call_count, 3);
+    }
+
+    #[test]
+    fn agent_stop_reason_serializes_provider_error() {
+        assert_eq!(
+            serde_json::to_value(AgentStopReason::ProviderError).expect("serialize"),
+            serde_json::json!("provider_error")
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ export interface Library {
 export type AIPurpose = AiBindingPurpose;
 
 /**
- * Canonical document status enum — mirrors the backend `derived_status`
+ * Document status enum — mirrors the backend `derived_status`
  * CASE expression in `list_document_page_rows`. These are the only
  * values the list API will ever emit; the UI stays 1:1 with the server
  * so nothing has to re-derive buckets client-side.
@@ -138,8 +138,17 @@ export interface AssistantSession {
 
 type AssistantStage = "planning" | "grounding" | "response";
 
+export type AssistantAgentActivityEventType =
+  | "started"
+  | "model_request"
+  | "model_response"
+  | "tool_call_started"
+  | "tool_call_finished"
+  | "working"
+  | "persisting";
+
 export type AssistantAgentActivityEvent = {
-  type: string;
+  type: AssistantAgentActivityEventType;
   deadline_ms?: number;
   iteration?: number;
   provider_kind?: string;

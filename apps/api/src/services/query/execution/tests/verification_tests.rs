@@ -127,6 +127,30 @@ fn verify_answer_accepts_method_path_literal_when_method_and_path_are_grounded()
 }
 
 #[test]
+fn verify_answer_rejects_method_path_literal_spread_across_fragments() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which endpoints are needed?",
+        "The endpoint is `GET /system/info`.",
+        &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            runtime_chunk("The method GET is used for status requests."),
+            runtime_chunk("The path /system/info is mentioned in an unrelated example."),
+        ],
+        "",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert_eq!(verification.unsupported_literals, vec!["GET /system/info"]);
+}
+
+#[test]
 fn verify_answer_accepts_literals_grounded_by_runtime_corpus() {
     let verification = verify_answer_against_canonical_evidence(
         "what is the logic in the code",
@@ -156,6 +180,42 @@ fn verify_answer_accepts_literals_grounded_by_runtime_corpus() {
 }
 
 #[test]
+fn verify_answer_rejects_source_uri_literals_without_source_excerpt_support() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which source was cited?",
+        "Источник: `https://example.test/docs/alpha`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[],
+        "",
+        &AssistantGroundingEvidence {
+            verification_corpus: Vec::new(),
+            document_references: vec![
+                crate::services::query::assistant_grounding::AssistantGroundingDocumentReference {
+                    document_id: Uuid::now_v7(),
+                    revision_id: Some(Uuid::now_v7()),
+                    document_title: "Alpha Guide".to_string(),
+                    source_uri: Some("https://example.test/docs/alpha".to_string()),
+                    source_access: None,
+                    slice_start_offset: 0,
+                    slice_end_offset: 24,
+                    excerpt: "The Alpha Guide is the cited source.".to_string(),
+                    rank: 1,
+                },
+            ],
+        },
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert!(verification.warnings.iter().any(|warning| warning.code == "unsupported_literal"));
+}
+
+#[test]
 fn verify_answer_records_unsupported_literals_for_revision_guard() {
     let verification = verify_answer_against_canonical_evidence(
         "Which command is required?",
@@ -174,6 +234,254 @@ fn verify_answer_records_unsupported_literals_for_revision_guard() {
 
     assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
     assert_eq!(verification.unsupported_literals, vec!["democtl missing --flag"]);
+}
+
+#[test]
+fn verify_answer_accepts_structural_config_literals_with_separate_supported_components() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which feature flag is enabled?",
+        "Set `[AlphaFeature] enableFlag = true`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(
+            "Configuration section [AlphaFeature] contains the enableFlag setting. The documented value is true.",
+        )],
+        "Configuration section [AlphaFeature] contains the enableFlag setting. The documented value is true.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
+}
+
+#[test]
+fn verify_answer_rejects_structural_config_literals_spread_across_fragments() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which feature flag is enabled?",
+        "Set `[AlphaFeature] enableFlag = true`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            runtime_chunk("Configuration section [AlphaFeature] contains enableFlag."),
+            runtime_chunk("Another section documents true for a different key."),
+        ],
+        "Configuration section [AlphaFeature] contains enableFlag. Another section documents true for a different key.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert_eq!(verification.unsupported_literals, vec!["[AlphaFeature] enableFlag = true"]);
+}
+
+#[test]
+fn verify_answer_accepts_code_like_assignment_literals_with_same_fragment_support() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which assignment is documented?",
+        "Use `sendReceiptCopy = false`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(
+            "The sendReceiptCopy option controls receipt output. The documented value is false.",
+        )],
+        "The sendReceiptCopy option controls receipt output. The documented value is false.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
+}
+
+#[test]
+fn verify_answer_rejects_angle_url_as_placeholder() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which command is documented?",
+        "Run `toolctl <https://example.invalid/path>`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk("The toolctl command accepts a target argument.")],
+        "The toolctl command accepts a target argument.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert_eq!(verification.unsupported_literals, vec!["toolctl <https://example.invalid/path>"]);
+}
+
+#[test]
+fn verify_answer_accepts_shared_prefix_slash_alternatives_from_same_fragment() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which connection keys are documented?",
+        "Use `messages.alpha.connection.timeout.user/password`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(
+            "Documented keys include messages.alpha.connection.timeout.user and messages.alpha.connection.timeout.password.",
+        )],
+        "Documented keys include messages.alpha.connection.timeout.user and messages.alpha.connection.timeout.password.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
+}
+
+#[test]
+fn verify_answer_accepts_slash_separated_code_value_lists_from_same_fragment() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which commands and statuses are documented?",
+        "Supported commands are `start / stop / restart / status`; status values are `OPEN / CLOSED / ALL`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(
+            "The service commands are start, stop, restart, and status. Export status values are OPEN, CLOSED, and ALL.",
+        )],
+        "The service commands are start, stop, restart, and status. Export status values are OPEN, CLOSED, and ALL.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
+}
+
+#[test]
+fn verify_answer_rejects_slash_separated_list_when_an_alternative_is_missing() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which commands are documented?",
+        "Supported commands are `start / stop / erase`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk("The service commands are start and stop.")],
+        "The service commands are start and stop.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert_eq!(verification.unsupported_literals, vec!["start / stop / erase"]);
+}
+
+#[test]
+fn verify_answer_accepts_decorated_version_literal_when_numeric_version_is_supported() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which release is supported?",
+        "The supported build is `Release 7.8.9`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(
+            "The release note identifies 7.8.9 as the supported build for this feature.",
+        )],
+        "The release note identifies 7.8.9 as the supported build for this feature.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
+}
+
+#[test]
+fn verify_answer_rejects_decorated_version_literal_when_numeric_version_is_missing() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which release is supported?",
+        "The supported build is `Release 9.9.9`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(
+            "The release note identifies 7.8.9 as the supported build for this feature.",
+        )],
+        "The release note identifies 7.8.9 as the supported build for this feature.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert_eq!(verification.unsupported_literals, vec!["Release 9.9.9"]);
+}
+
+#[test]
+fn verify_answer_accepts_structural_command_placeholders_when_command_is_supported() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which command form is documented?",
+        "Run `toolctl <TARGET> [MODE]`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk("The toolctl command accepts a target and an optional mode argument.")],
+        "The toolctl command accepts a target and an optional mode argument.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"));
+}
+
+#[test]
+fn verify_answer_rejects_simple_assignment_without_exact_support() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which status is configured?",
+        "Use `status = 1`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(
+            "The status field can be CLOSED. Identifier 1 appears in a separate example.",
+        )],
+        "The status field can be CLOSED. Identifier 1 appears in a separate example.",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert_eq!(verification.unsupported_literals, vec!["status = 1"]);
 }
 
 #[test]
@@ -275,6 +583,30 @@ fn verify_answer_accepts_named_decimal_and_hex_html_entities() {
 }
 
 #[test]
+fn verify_answer_rejects_structural_config_literals_spread_too_far_apart() {
+    let verification = verify_answer_against_canonical_evidence(
+        "Which feature flag is enabled?",
+        "Set `[AlphaFeature] enableFlag = true`.",
+        &QueryIntentProfile::default(),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[runtime_chunk(&format!(
+            "Configuration section [AlphaFeature] contains enableFlag. {} The value true belongs to a separate note.",
+            "filler ".repeat(500)
+        ))],
+        "",
+        &AssistantGroundingEvidence::default(),
+    );
+
+    assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
+    assert_eq!(verification.unsupported_literals, vec!["[AlphaFeature] enableFlag = true"]);
+}
+
+#[test]
 fn verify_answer_does_not_decode_malformed_html_entity_without_semicolon() {
     let verification = verify_answer_against_canonical_evidence(
         "Which literal was provided?",
@@ -296,7 +628,7 @@ fn verify_answer_does_not_decode_malformed_html_entity_without_semicolon() {
 }
 
 #[test]
-fn verify_answer_ignores_background_conflicts_when_grounded_literals_are_explicit() {
+fn verify_answer_marks_conflicting_even_when_one_literal_is_grounded() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();
     let conflict_group_id = format!("url:{}", Uuid::now_v7());
@@ -345,8 +677,8 @@ fn verify_answer_ignores_background_conflicts_when_grounded_literals_are_explici
         &AssistantGroundingEvidence::default(),
     );
 
-    assert_eq!(verification.state, QueryVerificationState::Verified);
-    assert!(verification.warnings.iter().all(|warning| warning.code != "conflicting_evidence"));
+    assert_eq!(verification.state, QueryVerificationState::Conflicting);
+    assert!(verification.warnings.iter().any(|warning| warning.code == "conflicting_evidence"));
 }
 
 #[test]

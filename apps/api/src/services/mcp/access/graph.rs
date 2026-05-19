@@ -61,6 +61,10 @@ fn compare_relation_quality(
         .then_with(|| left.created_at.cmp(&right.created_at))
 }
 
+fn relation_topology_signature(row: &RuntimeGraphEdgeRow) -> (Uuid, String, Uuid) {
+    (row.from_node_id, row.relation_type.trim().to_string(), row.to_node_id)
+}
+
 fn select_graph_topology_slice(
     entity_rows: Vec<RuntimeGraphNodeRow>,
     relation_rows: Vec<RuntimeGraphEdgeRow>,
@@ -114,6 +118,8 @@ fn select_ranked_subgraph(
             && selected_entity_ids.contains(&row.to_node_id)
     });
     relation_rows.sort_by(compare_relation_quality);
+    let mut seen_relation_signatures = HashSet::new();
+    relation_rows.retain(|row| seen_relation_signatures.insert(relation_topology_signature(row)));
     relation_rows.truncate(relation_limit);
 
     RankedSubgraph { entities: entity_rows, relations: relation_rows, relation_limit }
@@ -331,7 +337,10 @@ pub async fn list_relations(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let node_rows = repositories::list_admitted_runtime_graph_nodes_by_ids(
+    // `relation_rows` comes from `list_top_admitted_runtime_graph_relations_by_library`,
+    // so every endpoint is already admitted by the same non-empty, non-self-loop
+    // edge predicate. Keep this call paired with that relation source.
+    let node_rows = repositories::list_runtime_graph_nodes_by_ids(
         &state.persistence.postgres,
         library_id,
         projection_version,
@@ -373,34 +382,47 @@ pub async fn get_communities(
         };
 
     let communities = sqlx::query_as::<_, (Uuid, Option<String>, Vec<String>, i32, i64)>(
-        "SELECT c.id,
+        "WITH top_communities AS (
+             SELECT id,
+                    summary_text,
+                    member_node_ids,
+                    cardinality(member_node_ids)::integer AS node_count
+             FROM runtime_graph_community
+             WHERE library_id = $1 AND projection_version = $2
+             ORDER BY cardinality(member_node_ids) DESC, id ASC
+             LIMIT $3
+         )
+         SELECT c.id,
                 c.summary_text,
-                COALESCE(
-                    array_agg(n.label ORDER BY n.support_count DESC, n.label)
-                        FILTER (WHERE n.label IS NOT NULL),
-                    '{}'::text[]
-                ) AS top_entities,
-                cardinality(c.member_node_ids)::integer AS node_count,
-                (
-                    SELECT count(*)::bigint
-                    FROM runtime_graph_edge e
-                    WHERE e.library_id = c.library_id
-                      AND e.projection_version = c.projection_version
-                      AND e.from_node_id = ANY(c.member_node_ids)
-                      AND e.to_node_id = ANY(c.member_node_ids)
-                ) AS edge_count
-         FROM runtime_graph_community c
+                COALESCE(top_nodes.top_entities, '{}'::text[]) AS top_entities,
+                c.node_count,
+                COALESCE(edge_counts.edge_count, 0)::bigint AS edge_count
+         FROM top_communities c
          LEFT JOIN LATERAL (
-             SELECT label, support_count
-             FROM runtime_graph_node n
-             WHERE n.id = ANY(c.member_node_ids)
-             ORDER BY support_count DESC, label ASC
-             LIMIT 10
-         ) n ON true
-         WHERE c.library_id = $1 AND c.projection_version = $2
-         GROUP BY c.id, c.summary_text, c.member_node_ids, c.library_id, c.projection_version
-         ORDER BY cardinality(c.member_node_ids) DESC
-         LIMIT $3",
+             SELECT COALESCE(array_agg(label ORDER BY support_count DESC, label), '{}'::text[])
+                    AS top_entities
+             FROM (
+                 SELECT label, support_count
+                 FROM runtime_graph_node n
+                 WHERE n.library_id = $1
+                   AND n.projection_version = $2
+                   AND n.id = ANY(c.member_node_ids)
+                   AND n.label IS NOT NULL
+                 ORDER BY support_count DESC, label ASC
+                 LIMIT 10
+             ) ranked_nodes
+         ) top_nodes ON true
+         LEFT JOIN LATERAL (
+             SELECT count(*)::bigint AS edge_count
+             FROM runtime_graph_edge e
+             WHERE e.library_id = $1
+               AND e.projection_version = $2
+               AND e.from_node_id = ANY(c.member_node_ids)
+               AND e.to_node_id = ANY(c.member_node_ids)
+               AND btrim(e.relation_type) <> ''
+               AND e.from_node_id <> e.to_node_id
+         ) edge_counts ON true
+         ORDER BY c.node_count DESC, c.id ASC",
     )
     .bind(library_id)
     .bind(projection_version)
@@ -558,5 +580,26 @@ mod tests {
         );
         assert_eq!(selected.relations.len(), 1);
         assert_eq!(selected.relations[0].id, strong_relation.id);
+    }
+
+    #[test]
+    fn ranked_subgraph_deduplicates_relation_signatures_by_strongest_edge() {
+        let source = entity("Orion", 10);
+        let target = entity("Atlas", 8);
+        let duplicate_weaker = relation(source.id, target.id, "depends_on", 2);
+        let duplicate_stronger = relation(source.id, target.id, "depends_on", 9);
+        let distinct_relation = relation(target.id, source.id, "depends_on", 4);
+
+        let selected = select_ranked_subgraph(
+            vec![source, target],
+            vec![duplicate_weaker.clone(), distinct_relation.clone(), duplicate_stronger.clone()],
+            2,
+        );
+
+        assert_eq!(
+            selected.relations.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![duplicate_stronger.id, distinct_relation.id]
+        );
+        assert!(!selected.relations.iter().any(|row| row.id == duplicate_weaker.id));
     }
 }

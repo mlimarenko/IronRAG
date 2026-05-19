@@ -1042,6 +1042,7 @@ pub(crate) async fn load_execution_prepared_reference_context(
 
     Ok(ExecutionPreparedReferenceContext {
         bundle_refs,
+        chunk_rows,
         fact_rank_refs,
         technical_fact_rows,
         block_rank_refs,

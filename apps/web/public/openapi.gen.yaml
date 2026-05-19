@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.14
+  version: 0.4.15
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -14,6 +14,8 @@ paths:
     get:
       tags:
       - admin
+      summary: Get admin surface.
+      description: Returns the admin shell aggregate. The admin UI uses this endpoint to load configuration, readiness, IAM, and model-catalog state with fewer round trips. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getAdminSurface
       responses:
         '200':
@@ -28,6 +30,8 @@ paths:
     get:
       tags:
       - ai
+      summary: List ai library bindings.
+      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAiLibraryBindings
       parameters:
       - name: scopeKind
@@ -65,6 +69,8 @@ paths:
     post:
       tags:
       - ai
+      summary: Create ai library binding.
+      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createAiLibraryBinding
       requestBody:
         content:
@@ -87,6 +93,8 @@ paths:
     put:
       tags:
       - ai
+      summary: Update ai library binding.
+      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateAiLibraryBinding
       parameters:
       - name: bindingId
@@ -118,6 +126,8 @@ paths:
     delete:
       tags:
       - ai
+      summary: Delete ai library binding.
+      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: deleteAiLibraryBinding
       parameters:
       - name: bindingId
@@ -143,6 +153,8 @@ paths:
     post:
       tags:
       - ai
+      summary: Validate ai library binding.
+      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: validateAiLibraryBinding
       parameters:
       - name: bindingId
@@ -169,6 +181,8 @@ paths:
     get:
       tags:
       - ai
+      summary: List ai credentials.
+      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAiCredentials
       parameters:
       - name: scopeKind
@@ -204,6 +218,8 @@ paths:
     post:
       tags:
       - ai
+      summary: Create ai credential.
+      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createAiCredential
       requestBody:
         content:
@@ -226,6 +242,8 @@ paths:
     put:
       tags:
       - ai
+      summary: Update ai credential.
+      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateAiCredential
       parameters:
       - name: credentialId
@@ -258,6 +276,8 @@ paths:
     get:
       tags:
       - ai
+      summary: List ai model presets.
+      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAiModelPresets
       parameters:
       - name: scopeKind
@@ -293,6 +313,8 @@ paths:
     post:
       tags:
       - ai
+      summary: Create ai model preset.
+      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createAiModelPreset
       requestBody:
         content:
@@ -315,6 +337,8 @@ paths:
     put:
       tags:
       - ai
+      summary: Update ai model preset.
+      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateAiModelPreset
       parameters:
       - name: presetId
@@ -347,6 +371,8 @@ paths:
     get:
       tags:
       - ai
+      summary: List ai models.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAiModels
       parameters:
       - name: providerCatalogId
@@ -390,6 +416,8 @@ paths:
     get:
       tags:
       - ai
+      summary: List ai prices.
+      description: Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAiPrices
       parameters:
       - name: modelCatalogId
@@ -418,6 +446,8 @@ paths:
     post:
       tags:
       - ai
+      summary: Create ai price override.
+      description: Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createAiPriceOverride
       requestBody:
         content:
@@ -440,6 +470,8 @@ paths:
     put:
       tags:
       - ai
+      summary: Update ai price override.
+      description: Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateAiPriceOverride
       parameters:
       - name: priceId
@@ -472,6 +504,8 @@ paths:
     get:
       tags:
       - ai
+      summary: List ai providers.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAiProviders
       responses:
         '200':
@@ -488,6 +522,8 @@ paths:
     get:
       tags:
       - audit
+      summary: List audit events.
+      description: Reads immutable audit events. Security and operations teams use this endpoint to inspect who performed sensitive actions and which resources were affected. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAuditEvents
       parameters:
       - name: actorPrincipalId
@@ -604,6 +640,8 @@ paths:
     get:
       tags:
       - billing
+      summary: Get billing execution cost.
+      description: Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getBillingExecutionCost
       parameters:
       - name: executionKind
@@ -634,6 +672,8 @@ paths:
     get:
       tags:
       - billing
+      summary: List billing charges.
+      description: Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listBillingCharges
       parameters:
       - name: executionKind
@@ -666,6 +706,8 @@ paths:
     get:
       tags:
       - billing
+      summary: List billing provider calls.
+      description: Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listBillingProviderCalls
       parameters:
       - name: executionKind
@@ -698,6 +740,8 @@ paths:
     get:
       tags:
       - billing
+      summary: Get library cost summary.
+      description: Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getLibraryCostSummary
       parameters:
       - name: libraryId
@@ -721,6 +765,8 @@ paths:
     get:
       tags:
       - billing
+      summary: List billing library document costs.
+      description: Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listBillingLibraryDocumentCosts
       parameters:
       - name: libraryId
@@ -746,6 +792,8 @@ paths:
     get:
       tags:
       - billing
+      summary: Get workspace cost summary.
+      description: Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getWorkspaceCostSummary
       parameters:
       - name: workspaceId
@@ -769,6 +817,8 @@ paths:
     get:
       tags:
       - catalog
+      summary: Get catalog library.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getCatalogLibrary
       parameters:
       - name: libraryId
@@ -794,6 +844,8 @@ paths:
     put:
       tags:
       - catalog
+      summary: Update catalog library.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateCatalogLibrary
       parameters:
       - name: libraryId
@@ -828,6 +880,8 @@ paths:
     put:
       tags:
       - catalog
+      summary: Update catalog library recognition policy.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateCatalogLibraryRecognitionPolicy
       parameters:
       - name: libraryId
@@ -860,6 +914,8 @@ paths:
     put:
       tags:
       - catalog
+      summary: Update catalog library web ingest policy.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateCatalogLibraryWebIngestPolicy
       parameters:
       - name: libraryId
@@ -892,6 +948,8 @@ paths:
     get:
       tags:
       - catalog
+      summary: List catalog workspaces.
+      description: Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listCatalogWorkspaces
       responses:
         '200':
@@ -907,6 +965,8 @@ paths:
     post:
       tags:
       - catalog
+      summary: Create catalog workspace.
+      description: Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createCatalogWorkspace
       requestBody:
         content:
@@ -927,6 +987,8 @@ paths:
     get:
       tags:
       - catalog
+      summary: Get catalog workspace.
+      description: Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getCatalogWorkspace
       parameters:
       - name: workspaceId
@@ -952,6 +1014,8 @@ paths:
     delete:
       tags:
       - catalog
+      summary: Delete catalog workspace.
+      description: Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: deleteCatalogWorkspace
       parameters:
       - name: workspaceId
@@ -976,6 +1040,8 @@ paths:
     get:
       tags:
       - catalog
+      summary: List catalog libraries.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listCatalogLibraries
       parameters:
       - name: workspaceId
@@ -1001,6 +1067,8 @@ paths:
     post:
       tags:
       - catalog
+      summary: Create catalog library.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createCatalogLibrary
       parameters:
       - name: workspaceId
@@ -1031,6 +1099,8 @@ paths:
     delete:
       tags:
       - catalog
+      summary: Delete catalog library.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: deleteCatalogLibrary
       parameters:
       - name: workspaceId
@@ -1064,6 +1134,8 @@ paths:
     get:
       tags:
       - content
+      summary: List chunks.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listChunks
       parameters:
       - name: documentId
@@ -1164,6 +1236,8 @@ paths:
     post:
       tags:
       - content
+      summary: Create content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createContentDocument
       requestBody:
         content:
@@ -1188,6 +1262,8 @@ paths:
     post:
       tags:
       - content
+      summary: Batch cancel content documents.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it from bulk-action UI flows; the response describes accepted items and any per-item admission failures.
       operationId: batchCancelContentDocuments
       requestBody:
         content:
@@ -1210,6 +1286,8 @@ paths:
     post:
       tags:
       - content
+      summary: Batch delete content documents.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it from bulk-action UI flows; the response describes accepted items and any per-item admission failures.
       operationId: batchDeleteContentDocuments
       requestBody:
         content:
@@ -1265,6 +1343,8 @@ paths:
     post:
       tags:
       - content
+      summary: Upload content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for multipart or direct document uploads; ingestion continues asynchronously after the document record is accepted.
       operationId: uploadContentDocument
       requestBody:
         description: Multipart upload with metadata + file part
@@ -1285,6 +1365,8 @@ paths:
     get:
       tags:
       - content
+      summary: Get content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getContentDocument
       parameters:
       - name: documentId
@@ -1310,6 +1392,8 @@ paths:
     delete:
       tags:
       - content
+      summary: Delete content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: deleteContentDocument
       parameters:
       - name: documentId
@@ -1335,6 +1419,8 @@ paths:
     patch:
       tags:
       - content
+      summary: Patch content document metadata.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: patchContentDocumentMetadata
       parameters:
       - name: documentId
@@ -1369,6 +1455,8 @@ paths:
     post:
       tags:
       - content
+      summary: Append content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: appendContentDocument
       parameters:
       - name: documentId
@@ -1401,6 +1489,8 @@ paths:
     post:
       tags:
       - content
+      summary: Edit content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: editContentDocument
       parameters:
       - name: documentId
@@ -1433,6 +1523,8 @@ paths:
     get:
       tags:
       - content
+      summary: Get content document head.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getContentDocumentHead
       parameters:
       - name: documentId
@@ -1459,6 +1551,8 @@ paths:
     get:
       tags:
       - content
+      summary: List content prepared segments.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listContentPreparedSegments
       parameters:
       - name: documentId
@@ -1497,6 +1591,8 @@ paths:
     post:
       tags:
       - content
+      summary: Replace content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: replaceContentDocument
       parameters:
       - name: documentId
@@ -1527,6 +1623,8 @@ paths:
     post:
       tags:
       - content
+      summary: Reprocess content document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: reprocessContentDocument
       parameters:
       - name: documentId
@@ -1559,6 +1657,8 @@ paths:
     get:
       tags:
       - content
+      summary: List content revisions.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listContentRevisions
       parameters:
       - name: documentId
@@ -1585,6 +1685,8 @@ paths:
     get:
       tags:
       - content
+      summary: Get content document source.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the UI or an integration needs the original stored source file rather than extracted text or derived metadata.
       operationId: getContentDocumentSource
       parameters:
       - name: documentId
@@ -1611,6 +1713,8 @@ paths:
     get:
       tags:
       - content
+      summary: List content technical facts.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listContentTechnicalFacts
       parameters:
       - name: documentId
@@ -1650,6 +1754,7 @@ paths:
       tags:
       - content
       summary: Streams a library snapshot as `application/zstd` (tar.zst).
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to export a portable library archive for backup, migration, or offline inspection.
       operationId: exportLibrarySnapshot
       parameters:
       - name: libraryId
@@ -1676,6 +1781,7 @@ paths:
       tags:
       - content
       summary: Restores a library from a tar.zst snapshot body.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to import a previously exported library archive into the selected library scope.
       operationId: importLibrarySnapshot
       parameters:
       - name: libraryId
@@ -1706,12 +1812,16 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller is not authorized for the library
+        '404':
+          description: Library not found
         '409':
           description: Library already populated and overwrite=reject
   /v1/content/mutations:
     get:
       tags:
       - content
+      summary: List content mutations.
+      description: Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listContentMutations
       parameters:
       - name: libraryId
@@ -1736,6 +1846,8 @@ paths:
     post:
       tags:
       - content
+      summary: Create content mutation.
+      description: Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createContentMutation
       requestBody:
         content:
@@ -1758,6 +1870,8 @@ paths:
     get:
       tags:
       - content
+      summary: Get content mutation.
+      description: Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getContentMutation
       parameters:
       - name: mutationId
@@ -1784,6 +1898,8 @@ paths:
     get:
       tags:
       - content
+      summary: List content web ingest runs.
+      description: Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listContentWebIngestRuns
       parameters:
       - name: libraryId
@@ -1820,6 +1936,8 @@ paths:
     post:
       tags:
       - content
+      summary: Create content web ingest run.
+      description: Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createContentWebIngestRun
       requestBody:
         content:
@@ -1842,6 +1960,8 @@ paths:
     get:
       tags:
       - content
+      summary: Get content web ingest run.
+      description: Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getContentWebIngestRun
       parameters:
       - name: runId
@@ -1868,6 +1988,8 @@ paths:
     post:
       tags:
       - content
+      summary: Cancel content web ingest run.
+      description: Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: cancelContentWebIngestRun
       parameters:
       - name: runId
@@ -1894,6 +2016,8 @@ paths:
     get:
       tags:
       - content
+      summary: List content web ingest run pages.
+      description: Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listContentWebIngestRunPages
       parameters:
       - name: runId
@@ -1922,6 +2046,8 @@ paths:
     get:
       tags:
       - system
+      summary: Check backend liveness.
+      description: Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it for cheap liveness checks; it does not prove that downstream stores or AI bindings are ready.
       operationId: getHealth
       responses:
         '200':
@@ -1935,6 +2061,8 @@ paths:
     post:
       tags:
       - iam
+      summary: Post bootstrap setup.
+      description: Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: postBootstrapSetup
       requestBody:
         content:
@@ -1956,6 +2084,8 @@ paths:
     get:
       tags:
       - iam
+      summary: Get bootstrap status.
+      description: Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getBootstrapStatus
       responses:
         '200':
@@ -1969,6 +2099,8 @@ paths:
     get:
       tags:
       - iam
+      summary: List iam grants.
+      description: Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listIamGrants
       parameters:
       - name: principalId
@@ -1993,6 +2125,8 @@ paths:
     post:
       tags:
       - iam
+      summary: Create iam grant.
+      description: Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createIamGrant
       requestBody:
         content:
@@ -2017,6 +2151,8 @@ paths:
     delete:
       tags:
       - iam
+      summary: Revoke iam grant.
+      description: Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: revokeIamGrant
       parameters:
       - name: grantId
@@ -2039,6 +2175,8 @@ paths:
     get:
       tags:
       - iam
+      summary: Get iam me.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getIamMe
       responses:
         '200':
@@ -2055,6 +2193,8 @@ paths:
     get:
       tags:
       - iam
+      summary: Get iam session.
+      description: Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getIamSession
       responses:
         '200':
@@ -2069,6 +2209,8 @@ paths:
     post:
       tags:
       - iam
+      summary: Login iam session.
+      description: Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: loginIamSession
       requestBody:
         content:
@@ -2090,6 +2232,8 @@ paths:
     post:
       tags:
       - iam
+      summary: Logout iam session.
+      description: Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: logoutIamSession
       responses:
         '200':
@@ -2100,6 +2244,8 @@ paths:
     get:
       tags:
       - iam
+      summary: Resolve iam session.
+      description: Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution. Use the documented parameters and request body schema to call it from the web UI, automation, or service integrations.
       operationId: resolveIamSession
       responses:
         '200':
@@ -2113,6 +2259,8 @@ paths:
     get:
       tags:
       - iam
+      summary: List iam tokens.
+      description: Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listIamTokens
       parameters:
       - name: workspaceId
@@ -2137,6 +2285,8 @@ paths:
     post:
       tags:
       - iam
+      summary: Mint iam token.
+      description: Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: mintIamToken
       requestBody:
         content:
@@ -2161,6 +2311,8 @@ paths:
     delete:
       tags:
       - iam
+      summary: Delete iam token.
+      description: Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: deleteIamToken
       parameters:
       - name: tokenPrincipalId
@@ -2185,6 +2337,8 @@ paths:
     post:
       tags:
       - iam
+      summary: Revoke iam token.
+      description: Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: revokeIamToken
       parameters:
       - name: tokenPrincipalId
@@ -2207,6 +2361,8 @@ paths:
     get:
       tags:
       - ingest
+      summary: Get ingest attempt.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getIngestAttempt
       parameters:
       - name: attemptId
@@ -2233,6 +2389,8 @@ paths:
     get:
       tags:
       - ingest
+      summary: List ingest stage events.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listIngestStageEvents
       parameters:
       - name: attemptId
@@ -2259,6 +2417,8 @@ paths:
     get:
       tags:
       - ingest
+      summary: List ingest jobs.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listIngestJobs
       parameters:
       - name: workspaceId
@@ -2292,6 +2452,8 @@ paths:
     get:
       tags:
       - ingest
+      summary: Get ingest job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getIngestJob
       parameters:
       - name: jobId
@@ -2318,6 +2480,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: Get knowledge context bundle.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getKnowledgeContextBundle
       parameters:
       - name: bundleId
@@ -2344,6 +2508,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: List knowledge context bundles.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listKnowledgeContextBundles
       parameters:
       - name: libraryId
@@ -2370,6 +2536,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: List knowledge documents.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listKnowledgeDocuments
       parameters:
       - name: libraryId
@@ -2396,6 +2564,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: Get knowledge document.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getKnowledgeDocument
       parameters:
       - name: libraryId
@@ -2429,6 +2599,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: Get knowledge entity.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getKnowledgeEntity
       parameters:
       - name: libraryId
@@ -2462,6 +2634,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: List knowledge library generations.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listKnowledgeLibraryGenerations
       parameters:
       - name: libraryId
@@ -2490,6 +2664,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: Get knowledge graph workbench.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getKnowledgeGraphWorkbench
       parameters:
       - name: libraryId
@@ -2514,6 +2690,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: Get knowledge relation.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getKnowledgeRelation
       parameters:
       - name: libraryId
@@ -2547,6 +2725,8 @@ paths:
     get:
       tags:
       - search
+      summary: Search knowledge documents.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.
       operationId: searchKnowledgeDocuments
       parameters:
       - name: libraryId
@@ -2594,6 +2774,8 @@ paths:
     get:
       tags:
       - knowledge
+      summary: Get knowledge library summary.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getKnowledgeLibrarySummary
       parameters:
       - name: libraryId
@@ -2618,9 +2800,11 @@ paths:
     post:
       tags:
       - automation
+      summary: Execute answer-surface MCP JSON-RPC.
+      description: 'Main JSON-RPC endpoint for external MCP clients and other agent runtimes. It supports MCP initialization, tool listing, and tool invocation over the answer surface. Tools on this surface are read-oriented and designed for agentic question answering: catalog discovery, document search/read, graph inspection, runtime trace lookup, and `grounded_answer`. For user-facing answers, clients should let the agent choose tools from the listed schemas. Do not mechanically wrap every user message as a `grounded_answer` call; composite questions often need several document, graph, runtime, and grounded-answer probes before final synthesis.'
       operationId: postMcpRequest
       requestBody:
-        description: JSON-RPC 2.0 request envelope (method, params, id)
+        description: JSON-RPC 2.0 request envelope. Typical methods are initialize, tools/list, and tools/call with method-specific params.
         content:
           application/json:
             schema: {}
@@ -2637,6 +2821,8 @@ paths:
     get:
       tags:
       - automation
+      summary: List answer MCP capabilities for the caller.
+      description: 'Returns the answer-surface MCP tools visible to the authenticated principal. External MCP clients and the UI assistant setup flow can use this endpoint to discover whether the token can see workspaces, libraries, documents, graph tools, runtime tools, and `grounded_answer`. The response is authorization-scoped: workspace and library counts reflect only what the token can access, and the tool list omits tools disallowed for the token kind or policy.'
       operationId: getMcpCapabilities
       responses:
         '200':
@@ -2651,9 +2837,11 @@ paths:
     post:
       tags:
       - automation
+      summary: Execute diagnostics MCP JSON-RPC.
+      description: JSON-RPC endpoint for operational MCP clients. This surface is intended for debugging and automation that needs runtime state or traces, not for ordinary library question answering. Use `/v1/mcp/diagnostics/capabilities` first to check which diagnostic tools the token may call. Keep this surface separate from answer agents when a token should not expose operational inspection tools to normal chat flows.
       operationId: postMcpDiagnosticsRequest
       requestBody:
-        description: JSON-RPC 2.0 request envelope for the diagnostics MCP tool surface
+        description: JSON-RPC 2.0 request envelope for the diagnostics MCP tool surface.
         content:
           application/json:
             schema: {}
@@ -2670,6 +2858,8 @@ paths:
     get:
       tags:
       - automation
+      summary: List diagnostics MCP capabilities for the caller.
+      description: Returns the diagnostics MCP tool surface visible to the authenticated principal. Use this before wiring operational agents that inspect runtime state, traces, or backend diagnostics rather than answering library-content questions. The diagnostics surface is separate from `/v1/mcp` so tokens can expose operational tools without expanding the normal answer surface.
       operationId: getMcpDiagnosticsCapabilities
       responses:
         '200':
@@ -2684,6 +2874,8 @@ paths:
     get:
       tags:
       - system
+      summary: Download the OpenAPI contract.
+      description: Returns the generated OpenAPI 3.1 contract served by the running backend. Swagger UI and API clients use it as the HTTP contract source. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getOpenApiContract
       responses:
         '200':
@@ -2697,6 +2889,8 @@ paths:
     get:
       tags:
       - ops
+      summary: List ingest queue.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listIngestQueue
       parameters:
       - name: workspaceId
@@ -2726,6 +2920,8 @@ paths:
     post:
       tags:
       - ops
+      summary: Cancel ingest queue job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: cancelIngestQueueJob
       parameters:
       - name: jobId
@@ -2754,6 +2950,8 @@ paths:
     post:
       tags:
       - ops
+      summary: Move ingest queue job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: moveIngestQueueJob
       parameters:
       - name: jobId
@@ -2788,6 +2986,8 @@ paths:
     post:
       tags:
       - ops
+      summary: Pause ingest queue job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: pauseIngestQueueJob
       parameters:
       - name: jobId
@@ -2816,6 +3016,8 @@ paths:
     post:
       tags:
       - ops
+      summary: Resume ingest queue job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: resumeIngestQueueJob
       parameters:
       - name: jobId
@@ -2844,6 +3046,8 @@ paths:
     get:
       tags:
       - ops
+      summary: Get library state.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getLibraryState
       parameters:
       - name: libraryId
@@ -2870,6 +3074,8 @@ paths:
     get:
       tags:
       - ops
+      summary: Get library dashboard.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to hydrate dashboards with one server-computed view instead of issuing many smaller requests.
       operationId: getLibraryDashboard
       parameters:
       - name: libraryId
@@ -2896,6 +3102,8 @@ paths:
     get:
       tags:
       - ops
+      summary: Get async operation.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getAsyncOperation
       parameters:
       - name: operationId
@@ -2922,16 +3130,8 @@ paths:
     get:
       tags:
       - query
-      summary: Publish the canonical MCP assistant system prompt.
-      description: |-
-        This is the single source of truth for external MCP clients and the
-        admin UI's "MCP client setup" card, which serves the same text
-        verbatim for operators to copy into their own agents.
-
-        Any drift between MCP client setup surfaces would silently change
-        grounding behavior per client, so the text lives in
-        `services::query::assistant_prompt` and every consumer reads from
-        there.
+      summary: Get the recommended MCP assistant system prompt.
+      description: Returns the prompt text that should be installed in external MCP clients and in the built-in UI assistant setup flow. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, and avoid forwarding the raw latest user message as a hidden grounded-answer query. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
       operationId: getAssistantSystemPrompt
       parameters:
       - name: libraryId
@@ -2942,7 +3142,7 @@ paths:
           format: uuid
       responses:
         '200':
-          description: Canonical assistant system prompt template plus the version rendered for the active library
+          description: Assistant system prompt template plus the version rendered for the active library
           content:
             application/json:
               schema:
@@ -2955,6 +3155,8 @@ paths:
     get:
       tags:
       - query
+      summary: Inspect one assistant execution.
+      description: 'Loads the persisted execution detail for a completed or failed assistant turn. This is the main trace endpoint for the debug inspector and external operators: it includes request/response turns, citations, selected chunks, prepared segments, graph references, verifier verdict, runtime stage summary, policy decisions, and child tool executions when the turn used the agent loop.'
       operationId: getQueryExecution
       parameters:
       - name: executionId
@@ -2981,9 +3183,8 @@ paths:
     get:
       tags:
       - query
-      summary: |-
-        Returns the raw LLM request/response chain that was sent to the
-        provider for this assistant execution.
+      summary: Inspect captured LLM context for one execution.
+      description: 'Returns the durable model transcript captured for an assistant execution: system messages, prior conversation messages, tool definitions, tool-call arguments, tool results, final model responses, token usage, and stop reasons. The UI debug inspector uses this endpoint to show the full prompt/tool context that produced an answer. The endpoint is intended for debugging and audit, not for user-facing answer rendering.'
       operationId: getQueryExecutionLlmContext
       parameters:
       - name: executionId
@@ -3010,6 +3211,8 @@ paths:
     get:
       tags:
       - query
+      summary: List assistant sessions for one library.
+      description: Returns the chat sessions visible to the caller for the requested library. The web UI uses this endpoint to populate the assistant sidebar and restore recent conversations. Clients must provide `libraryId`; authorization is checked against the library before any session metadata is returned.
       operationId: listQuerySessions
       parameters:
       - name: libraryId
@@ -3036,8 +3239,11 @@ paths:
     post:
       tags:
       - query
+      summary: Create an assistant session.
+      description: Creates a persistent assistant conversation scoped to one library. The session stores the user and assistant turns, execution ids, verifier state, citations, runtime traces, and debug snapshots produced by later turns. `workspaceId` is optional for normal callers because the backend derives it from `libraryId`; when supplied it must match the target library.
       operationId: createQuerySession
       requestBody:
+        description: Target library, optional workspace assertion, and optional display title for the new assistant session.
         content:
           application/json:
             schema:
@@ -3060,6 +3266,8 @@ paths:
     get:
       tags:
       - query
+      summary: Load one assistant session with turns.
+      description: 'Returns the hydrated conversation used by the UI chat pane: session metadata, user turns, assistant turns, execution identifiers, citations, and verification state. Use this after selecting a session from the list or after a page reload to reconstruct the visible conversation.'
       operationId: getQuerySession
       parameters:
       - name: sessionId
@@ -3086,6 +3294,8 @@ paths:
     post:
       tags:
       - query
+      summary: Run one UI assistant turn.
+      description: 'Executes one user message through the same MCP-style tool loop used to simulate an external agent in the web UI. The model receives the available answer-surface tool schemas, chooses one or more tool calls, may run independent calls in parallel, reads the tool results, and then writes the final answer. For normal JSON clients the endpoint returns the completed `AssistantExecutionDetail`. When the request `Accept` header includes `text/event-stream`, the same endpoint streams `assistant_turn` SSE events: model requests, model responses, tool-call start/finish activity, periodic working heartbeats, and finally a terminal `completed` or `failed` event.'
       operationId: createQuerySessionTurn
       parameters:
       - name: sessionId
@@ -3096,6 +3306,7 @@ paths:
           type: string
           format: uuid
       requestBody:
+        description: User message plus optional retrieval/debug controls for a new assistant turn.
         content:
           application/json:
             schema:
@@ -3118,6 +3329,8 @@ paths:
     get:
       tags:
       - system
+      summary: Check backend readiness.
+      description: Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it from load balancers, deploy checks, and UI startup gates; it reports whether dependencies and required bootstrap state are usable.
       operationId: getReadiness
       responses:
         '200':
@@ -3137,6 +3350,8 @@ paths:
     get:
       tags:
       - runtime
+      summary: Get runtime execution.
+      description: Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getRuntimeExecution
       parameters:
       - name: executionId
@@ -3163,6 +3378,8 @@ paths:
     get:
       tags:
       - runtime
+      summary: Get runtime execution trace.
+      description: Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getRuntimeExecutionTrace
       parameters:
       - name: executionId
@@ -3189,6 +3406,8 @@ paths:
     get:
       tags:
       - search
+      summary: Search documents.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.
       operationId: searchDocuments
       parameters:
       - name: libraryId
@@ -3237,6 +3456,8 @@ paths:
     get:
       tags:
       - system
+      summary: Get running service version.
+      description: Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getVersion
       responses:
         '200':
@@ -3250,6 +3471,8 @@ paths:
     get:
       tags:
       - system
+      summary: Check for an available release update.
+      description: Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getReleaseUpdate
       responses:
         '200':
@@ -3263,6 +3486,8 @@ paths:
     get:
       tags:
       - webhooks
+      summary: List webhook subscriptions.
+      description: Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listWebhookSubscriptions
       parameters:
       - name: workspaceId
@@ -3287,6 +3512,8 @@ paths:
     post:
       tags:
       - webhooks
+      summary: Create webhook subscription.
+      description: Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createWebhookSubscription
       requestBody:
         content:
@@ -3311,6 +3538,8 @@ paths:
     get:
       tags:
       - webhooks
+      summary: Get webhook subscription.
+      description: Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it when the caller already has the resource identifier and needs the latest authorized server view.
       operationId: getWebhookSubscription
       parameters:
       - name: id
@@ -3336,6 +3565,8 @@ paths:
     delete:
       tags:
       - webhooks
+      summary: Delete webhook subscription.
+      description: Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: deleteWebhookSubscription
       parameters:
       - name: id
@@ -3357,6 +3588,8 @@ paths:
     patch:
       tags:
       - webhooks
+      summary: Update webhook subscription.
+      description: Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateWebhookSubscription
       parameters:
       - name: id
@@ -3391,6 +3624,8 @@ paths:
     get:
       tags:
       - webhooks
+      summary: List webhook delivery attempts.
+      description: Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listWebhookDeliveryAttempts
       parameters:
       - name: id
@@ -3541,6 +3776,7 @@ components:
       - iteration_cap
       - deadline
       - tool_error
+      - provider_error
     AiBindingAssignmentResponse:
       type: object
       required:
@@ -4104,17 +4340,18 @@ components:
           - string
           - 'null'
           description: |-
-            Template rendered with the canonical `<workspace>/<library>` ref
+            Template rendered with the `<workspace>/<library>` ref
             of the requested `libraryId`, when one was passed. Same text the
             public MCP clients should use for that library.
         template:
           type: string
           description: |-
             Raw template with the `{LIBRARY_REF}` placeholder. This is what
-            external MCP clients (Claude Desktop, Codex, Cursor, Continue.dev,
-            …) should paste into their own system prompt when attaching
-            IronRAG's MCP server, so every agent — in-app or external — shares
-            the same grounding discipline.
+            transport-agnostic external MCP clients should paste into their
+            own system prompt when attaching IronRAG's MCP server. Documented
+            clients include Claude Desktop, Claude Code, Cursor, Codex, VS Code
+            with Continue/Cline/Roo, Zed, and Hermes, so every agent — in-app
+            or external — shares the same grounding discipline.
     AssistantTechnicalFactReference:
       type: object
       required:
@@ -8882,9 +9119,10 @@ components:
             format: uuid
           description: |-
             Runtime execution IDs spawned by tool calls in this iteration.
-            Populated when a tool call (e.g. `grounded_answer`) recursed into
-            `execute_turn` and produced its own `LlmContextSnapshot`. Empty
-            for all single-shot grounded-answer iterations.
+            Populated on tool-use turns when a tool such as
+            `grounded_answer` creates its own query execution and debug
+            snapshot. Empty on iterations whose tools do not spawn child
+            query executions and on single-shot grounded-answer turns.
         iteration:
           type: integer
           minimum: 0
@@ -9896,6 +10134,7 @@ components:
           type: boolean
         name:
           type: string
+        resultJson: {}
         resultText:
           type:
           - string
@@ -10615,8 +10854,8 @@ components:
       - postgresRowsByTable
       - arangoDocsByStore
       - arangoEdgesByStore
-      - blobsRestored
       - skippedArangoEdgesByStore
+      - blobsRestored
       properties:
         arangoDocsByStore:
           type: object

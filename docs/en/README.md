@@ -85,7 +85,7 @@ flowchart LR
   classDef retrieve fill:#ecfdf5,stroke:#059669,stroke-width:2px,color:#052e16
   classDef answer fill:#f5f3ff,stroke:#7c3aed,stroke-width:2px,color:#2e1065
 
-  Ask["UI assistant / MCP grounded_answer"]:::entry
+  Ask["agent / grounded_answer tool"]:::entry
   IR["query compiler IR<br/>act, scope, target types"]:::runtime
   Vector["vector lane (ANN over embeddings)"]:::retrieve
   Lexical["lexical / title / literal lane"]:::retrieve

@@ -10,7 +10,7 @@
 
 ## Endpoint
 
-- Canonical URL: `http://127.0.0.1:19000/v1/mcp`
+- Endpoint URL: `http://127.0.0.1:19000/v1/mcp`
 - Transport: **MCP Streamable HTTP, spec `2025-06-18`**. One endpoint handles `POST`, `GET`, and `DELETE` — no separate SSE channel, no stdio proxy.
   - `POST` — every JSON-RPC message. Content negotiated from the `Accept` header:
     - `Accept: application/json` → a plain JSON body (default, curl-friendly).
@@ -66,9 +66,9 @@ Catalog targets use stable refs instead of opaque UUIDs: `workspace` is `<worksp
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `grounded_answer` | Ask a natural-language question and get a grounded answer with evidence references — **the same pipeline the built-in UI assistant uses** (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `library`, `query` |
+| `grounded_answer` | Ask a natural-language question and get a grounded answer with evidence references from IronRAG's grounded-answer pipeline (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `library`, `query` |
 
-Response shape: tool text contains the answer; structured output contains `executionDetail`, the same assistant execution DTO the UI consumes, with chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request, and response fields. Top-level `runtimeExecutionId`, `executionId`, and `conversationId` are shortcuts for trace lookup. An MCP client receives exactly the answer a user would see in the UI for the same library and question — MCP and UI share the same grounded-answer pipeline, no parallel implementation.
+Response shape: tool text contains the answer; structured output contains `executionDetail` with chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request, and response fields. Top-level `runtimeExecutionId`, `executionId`, and `conversationId` are shortcuts for trace lookup. The built-in UI assistant is itself a tool-using agent over this MCP answer surface: it may call `grounded_answer`, inspect raw search/read tools, or answer directly when no library lookup is needed. External MCP clients get the same tool vocabulary, schemas, and grounded-answer result contract.
 
 ### Discovery
 

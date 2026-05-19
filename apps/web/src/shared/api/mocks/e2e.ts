@@ -1,6 +1,7 @@
 import { http, HttpResponse, type HttpHandler } from "msw";
 
 import type {
+  AssistantHydratedConversation,
   GetLibraryDashboardResponse,
   ListQuerySessionsResponse,
   LoginIamSessionResponse,
@@ -34,6 +35,7 @@ export type BrowserMockConfig = {
   authenticated?: boolean;
   bootstrapRequired?: boolean;
   dashboard?: GetLibraryDashboardResponse;
+  queryConversations?: Record<string, AssistantHydratedConversation>;
   querySessions?: ListQuerySessionsResponse;
   session?: LoginIamSessionResponse;
 };
@@ -109,6 +111,7 @@ function resolveSessionPayload(
 export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpHandler[] {
   const session = config.session ?? iamSession();
   const dashboard = config.dashboard ?? opsLibraryDashboard();
+  const queryConversations = config.queryConversations ?? {};
   const querySessions = config.querySessions ?? [];
   let bootstrapRequired = config.bootstrapRequired ?? false;
   let authenticated = config.authenticated ?? false;
@@ -342,6 +345,12 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
       HttpResponse.json(dashboard),
     ),
     http.get("/v1/query/sessions", () => HttpResponse.json(querySessions)),
+    http.get("/v1/query/sessions/:sessionId", ({ params }) => {
+      const conversation = queryConversations[String(params.sessionId)];
+      return conversation
+        ? HttpResponse.json(conversation)
+        : HttpResponse.json({ message: "query session not found" }, { status: 404 });
+    }),
     http.get("/v1/version/update", () =>
       HttpResponse.json({
         checkedAt: "2026-05-05T15:30:00.000Z",

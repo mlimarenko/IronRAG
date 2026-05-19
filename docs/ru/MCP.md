@@ -10,7 +10,7 @@
 
 ## Endpoint
 
-- Canonical URL: `http://127.0.0.1:19000/v1/mcp`
+- Endpoint URL: `http://127.0.0.1:19000/v1/mcp`
 - Transport: **MCP Streamable HTTP, spec `2025-06-18`**. Один endpoint принимает `POST`, `GET` и `DELETE` — никакого отдельного SSE-канала, никакого stdio-прокси.
   - `POST` — все JSON-RPC сообщения. Content-negotiation по заголовку `Accept`:
     - `Accept: application/json` → тело ответа в виде обычного JSON (дефолт, удобно для curl).
@@ -56,7 +56,7 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
 4. В `Admin -> MCP` скопируйте готовый сниппет для клиента.
 
 `tools/list` фильтруется грантами. Если токену что-то нельзя, инструмент просто не будет рекламироваться.
-Каноническая JSON-RPC поверхность намеренно маленькая: `initialize`, `tools/list`, `tools/call` и `notifications/initialized`. Пустой surface `resources/*` IronRAG не рекламирует и не поддерживает.
+JSON-RPC поверхность намеренно маленькая: `initialize`, `tools/list`, `tools/call` и `notifications/initialized`. Пустой surface `resources/*` IronRAG не рекламирует и не поддерживает.
 Аргументы инструментов принимаются только в camelCase-виде.
 Цели каталога задаются через стабильные ref-ы вместо opaque UUID: `workspace` имеет вид `<workspace>`, а `library` — `<workspace>/<library>`. Discovery-ответы возвращают эти значения в поле `ref`.
 
@@ -66,9 +66,9 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `grounded_answer` | Задать вопрос естественным языком и получить grounded ответ с evidence references — **тот же самый pipeline, что использует встроенный UI-ассистент** (QueryCompiler → гибридный поиск → graph-aware context → answer generation → verifier). Предпочитайте этот инструмент `search_documents` + `read_document`, когда пользователю нужен ответ, а не список хитов. | `library`, `query` |
+| `grounded_answer` | Задать вопрос естественным языком и получить grounded ответ с evidence references из grounded-answer pipeline IronRAG (QueryCompiler → гибридный поиск → graph-aware context → answer generation → verifier). Предпочитайте этот инструмент `search_documents` + `read_document`, когда пользователю нужен ответ, а не список хитов. | `library`, `query` |
 
-Response структура: текст tool-result содержит ответ; structured output содержит `executionDetail`, тот же assistant execution DTO, который потребляет UI, включая chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request и response поля. Верхнеуровневые `runtimeExecutionId`, `executionId` и `conversationId` остаются короткими ссылками для trace lookup. MCP-клиент получает ровно тот ответ, который увидел бы пользователь в UI для того же вопроса и библиотеки — MCP и UI используют один и тот же пайплайн grounded Q&A, без параллельных реализаций.
+Response структура: текст tool-result содержит ответ; structured output содержит `executionDetail` с chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request и response полями. Верхнеуровневые `runtimeExecutionId`, `executionId` и `conversationId` остаются короткими ссылками для trace lookup. Встроенный UI-ассистент сам является tool-using агентом над этим MCP answer surface: он может вызвать `grounded_answer`, инспектировать raw search/read tools или ответить напрямую, когда lookup по библиотеке не нужен. Внешние MCP-клиенты получают тот же словарь инструментов, те же схемы и тот же контракт результата `grounded_answer`.
 
 ### Обнаружение
 

@@ -13,9 +13,9 @@ import type { AssistantAgentActivityEvent } from "@/shared/types";
 export type AssistantTurnExecutionResponse = AssistantExecutionDetail;
 export type LlmContextDebugResponse = LlmContextSnapshot;
 
-/** Backend agent turns are capped at 210s; the browser must not abort first. */
-const TURN_TIMEOUT_MS = 240_000;
-const STREAM_RECOVERY_TIMEOUT_MS = 90_000;
+/** Backend agent turns are capped at 180s; browser budgets leave shutdown headroom. */
+const TURN_TIMEOUT_MS = 195_000;
+const STREAM_RECOVERY_TIMEOUT_MS = 195_000;
 const STREAM_RECOVERY_INTERVAL_MS = 1_000;
 
 export type AssistantTurnStreamEvent =

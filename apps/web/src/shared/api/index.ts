@@ -1,4 +1,4 @@
-// Canonical SDK surface — generated from apps/api/contracts/openapi.gen.yaml
+// SDK surface — generated from apps/api/contracts/openapi.gen.yaml
 // via @hey-api/openapi-ts. Re-export the tag classes so call sites can
 // `import { Catalog } from '@/shared/api'` without reaching into the generated/
 // sub-tree (an ESLint boundary rule will be added with the feature-folder
@@ -13,7 +13,7 @@ export { ApiError, unwrap } from "./runtime";
 // server-state hooks.
 export * as queries from "./generated/@tanstack/react-query.gen";
 
-// Canonical UI API facades. Feature modules import these domain facades instead
+// UI API facades. Feature modules import these domain facades instead
 // of depending on generated operation names directly.
 export { authApi } from "./auth";
 export type {
