@@ -40,7 +40,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     },
                     "boundaryPolicy": {
                         "type": "string",
-                        "enum": ["same_host", "allow_external"],
+                        "enum": ["same_host", "same_host_and_subdomains", "allow_external"],
                         "description": "Optional crawl boundary policy."
                     },
                     "maxDepth": {
@@ -515,5 +515,28 @@ async fn cancel_web_ingest_run(context: ToolCallContext<'_>, arguments: &Value) 
             .await;
             tool_error_result(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::shared::web::ingest::WebBoundaryPolicy;
+
+    use super::descriptor;
+
+    #[test]
+    fn submit_web_ingest_boundary_policy_schema_matches_runtime_vocabulary() {
+        let submit_tool = descriptor("submit_web_ingest_run").expect("submit tool descriptor");
+
+        assert_eq!(
+            submit_tool.input_schema["properties"]["boundaryPolicy"]["enum"],
+            json!([
+                WebBoundaryPolicy::SameHost.as_str(),
+                WebBoundaryPolicy::SameHostAndSubdomains.as_str(),
+                WebBoundaryPolicy::AllowExternal.as_str()
+            ])
+        );
     }
 }

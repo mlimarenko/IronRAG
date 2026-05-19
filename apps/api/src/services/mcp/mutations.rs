@@ -34,6 +34,7 @@ use crate::{
         payload_identity_from_source_uri, validate_mcp_upload_batch_size,
         validate_mcp_upload_file_size,
     },
+    shared::outbound_http::{get_public_http_following_redirects, read_response_bytes_with_limit},
 };
 
 pub async fn upload_documents(
@@ -614,116 +615,27 @@ async fn fetch_upload_bytes_from_url(
     index: usize,
     max_file_bytes: u64,
 ) -> Result<Vec<u8>, ApiError> {
-    use std::net::IpAddr;
-
-    let parsed = reqwest::Url::parse(raw_url).map_err(|error| {
-        ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}].fetchUrl is not a valid URL: {error}"
-        ))
-    })?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}].fetchUrl must use http(s); got {}",
-            parsed.scheme()
-        )));
-    }
-    let host = parsed.host_str().ok_or_else(|| {
-        ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}].fetchUrl is missing a host component"
-        ))
-    })?;
-    // Resolve the host once up-front and reject any address that
-    // points back at the network the backend itself is on. This stops
-    // the LLM from being tricked (or tricking itself) into reading
-    // IronRAG's own metadata endpoints.
-    let resolved_addresses: Vec<IpAddr> = tokio::net::lookup_host(format!(
-        "{}:{}",
-        host,
-        parsed.port_or_known_default().unwrap_or(80)
-    ))
+    let response = get_public_http_following_redirects(
+        raw_url,
+        true,
+        5,
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(10),
+        None,
+    )
     .await
     .map_err(|error| {
-        ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}].fetchUrl host could not be resolved: {error}"
-        ))
-    })?
-    .map(|addr| addr.ip())
-    .collect();
-    if resolved_addresses.is_empty() {
-        return Err(ApiError::invalid_mcp_tool_call(format!(
-            "documents[{index}].fetchUrl host resolved to no addresses"
-        )));
-    }
-    for addr in &resolved_addresses {
-        let blocked = match addr {
-            IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-                    || v4.is_multicast()
-            }
-            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_multicast(),
-        };
-        if blocked {
-            return Err(ApiError::invalid_mcp_tool_call(format!(
-                "documents[{index}].fetchUrl resolves to a non-public address ({addr}); \
-                 point the URL at an externally-reachable host instead"
-            )));
-        }
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(|error| {
-            ApiError::BadRequest(format!("failed to build HTTP client for fetchUrl: {error}"))
-        })?;
-    let response = crate::observability::inject_trace_context(client.get(parsed))
-        .send()
-        .await
-        .map_err(|error| {
-            ApiError::invalid_mcp_tool_call(format!(
-                "documents[{index}].fetchUrl request failed: {error}"
-            ))
-        })?;
+        ApiError::invalid_mcp_tool_call(format!("documents[{index}].fetchUrl {error}"))
+    })?;
     if !response.status().is_success() {
         return Err(ApiError::invalid_mcp_tool_call(format!(
             "documents[{index}].fetchUrl returned HTTP {}",
             response.status().as_u16()
         )));
     }
-    if let Some(content_length) = response.content_length() {
-        if content_length > max_file_bytes {
-            return Err(ApiError::invalid_mcp_tool_call(format!(
-                "documents[{index}].fetchUrl Content-Length {content_length} exceeds upload cap {max_file_bytes}"
-            )));
-        }
-    }
-    // Stream the body into memory, stopping the moment we go over
-    // the cap. This defends against responses that omit
-    // `Content-Length` (chunked) and against a cooperative server
-    // advertising a small length but then sending more.
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut stream = response.bytes_stream();
-    use futures::stream::StreamExt;
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|error| {
-            ApiError::invalid_mcp_tool_call(format!(
-                "documents[{index}].fetchUrl body read failed: {error}"
-            ))
-        })?;
-        if buffer.len().saturating_add(chunk.len()) as u64 > max_file_bytes {
-            return Err(ApiError::invalid_mcp_tool_call(format!(
-                "documents[{index}].fetchUrl body exceeds upload cap {max_file_bytes}"
-            )));
-        }
-        buffer.extend_from_slice(&chunk);
-    }
-    Ok(buffer)
+    read_response_bytes_with_limit(response, max_file_bytes).await.map_err(|error| {
+        ApiError::invalid_mcp_tool_call(format!("documents[{index}].fetchUrl {error}"))
+    })
 }
 
 fn default_inline_file_name(title: Option<&str>, source_uri: Option<&str>, index: usize) -> String {

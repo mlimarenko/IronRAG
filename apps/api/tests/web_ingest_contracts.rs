@@ -14,8 +14,9 @@ use ironrag_backend::{
         McpSubmitWebIngestRunRequest,
     },
     shared::web::ingest::{
-        DEFAULT_WEB_CRAWL_DEPTH, DEFAULT_WEB_CRAWL_MAX_PAGES, WebClassificationReason,
-        WebRunCounts, WebRunFailureCode, derive_terminal_run_state, validate_web_run_settings,
+        DEFAULT_WEB_CRAWL_DEPTH, DEFAULT_WEB_CRAWL_MAX_PAGES, WebBoundaryPolicy,
+        WebClassificationReason, WebRunCounts, WebRunFailureCode, derive_terminal_run_state,
+        validate_web_run_settings,
     },
 };
 
@@ -87,6 +88,15 @@ fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
         string_array_child(component_schema(&openapi, "WebIngestMode"), "enum"),
         ["single_page", "recursive_crawl"],
         "web ingest mode enum must stay canonical in OpenAPI",
+    );
+    assert_eq!(
+        string_array_child(component_schema(&openapi, "WebBoundaryPolicy"), "enum"),
+        [
+            WebBoundaryPolicy::SameHost.as_str(),
+            WebBoundaryPolicy::SameHostAndSubdomains.as_str(),
+            WebBoundaryPolicy::AllowExternal.as_str(),
+        ],
+        "web ingest boundary enum must stay canonical in OpenAPI",
     );
 
     let single_page_defaults = validate_web_run_settings("single_page", None, Some(9), None)

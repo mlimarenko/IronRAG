@@ -123,6 +123,14 @@ function Harness({
       >
         Draft
       </button>
+      <button
+        onClick={() => {
+          controller.setSeedUrl('192.0.2.10/docs');
+          controller.setBoundaryPolicy('same_host_and_subdomains');
+        }}
+      >
+        IP subdomain boundary
+      </button>
       <button onClick={() => void controller.startWebIngest()}>Start</button>
     </div>
   );
@@ -212,6 +220,31 @@ describe('useWebIngestController optimistic policy save', () => {
     expect(container.querySelector('[data-testid="saved-count"]')).toHaveTextContent('0');
     expect(toastErrorMock).toHaveBeenCalledWith(
       expect.stringContaining('policy unavailable'),
+    );
+  });
+
+  it('blocks subdomain boundary submissions for IP seed hosts', async () => {
+    await renderHarness();
+
+    const boundaryButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('IP subdomain boundary'),
+    );
+    await act(async () => {
+      boundaryButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
+    const startButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Start'),
+    );
+    await act(async () => {
+      startButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
+    expect(documentsApiMock.createWebIngestRun).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      'documents.subdomainBoundaryRequiresDnsHost',
     );
   });
 });

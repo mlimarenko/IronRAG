@@ -200,7 +200,7 @@ helm upgrade --install ironrag charts/ironrag \
 By default the chart deploys the API, worker, and web images with the
 `v<appVersion>` image tag derived from `Chart.appVersion`. Override
 `api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning
-a different published image, for example `--set web.image.tag=v0.4.17`.
+a different published image, for example `--set web.image.tag=v0.4.18`.
 
 ## License
 

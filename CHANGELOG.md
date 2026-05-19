@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.18 — 2026-05-19
+
+### Outbound HTTP security
+
+- Added one canonical outbound public-HTTP resolver for webhook delivery.
+  Webhook targets are now resolved and policy-checked before delivery,
+  redirects are not followed, private and loopback address ranges are
+  rejected, and response excerpts are bounded before persistence.
+- Webhook failure handling now records rejected targets without leaving
+  attempts stuck in an in-flight state, and retry dedupe keys track the
+  effective attempt number.
+
+### Web ingest boundaries
+
+- Added a third recursive web-ingest boundary policy: same host plus
+  subdomains of the selected host. The new policy is exposed through
+  REST, MCP, OpenAPI, generated web types, and the documents-page web
+  ingest dialog.
+- IP-address seed URLs now reject the subdomain boundary mode and the UI
+  disables that option automatically for IP hosts. URL identity handling
+  now classifies exact seed-host matches separately from seed-subdomain
+  matches, so crawl and materialization rules share the same boundary
+  semantics.
+
+### Assistant citations
+
+- Assistant source references are now rendered as styled links instead
+  of plain text echoes. Stored-document links and external source URLs
+  are deduplicated, attached under the answer, and covered by component
+  and browser smoke tests.
+
 ## 0.4.17 — 2026-05-19
 
 ### Migrations

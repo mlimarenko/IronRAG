@@ -686,7 +686,7 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
         );
         assert_eq!(
             submit_tool["inputSchema"]["properties"]["boundaryPolicy"]["enum"],
-            json!(["same_host", "allow_external"])
+            json!(["same_host", "same_host_and_subdomains", "allow_external"])
         );
         assert!(
             submit_tool["inputSchema"]["properties"]["maxDepth"]["description"]

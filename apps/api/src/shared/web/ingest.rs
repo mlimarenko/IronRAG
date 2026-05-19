@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use super::url_identity::{HostClassification, seed_host_supports_subdomains};
+
 pub const DEFAULT_WEB_CRAWL_DEPTH: i32 = 3;
 pub const DEFAULT_WEB_CRAWL_MAX_PAGES: i32 = 100;
 pub const MAX_WEB_CRAWL_DEPTH: i32 = 100;
@@ -28,6 +30,7 @@ impl WebIngestMode {
 #[serde(rename_all = "snake_case")]
 pub enum WebBoundaryPolicy {
     SameHost,
+    SameHostAndSubdomains,
     AllowExternal,
 }
 
@@ -36,7 +39,20 @@ impl WebBoundaryPolicy {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SameHost => "same_host",
+            Self::SameHostAndSubdomains => "same_host_and_subdomains",
             Self::AllowExternal => "allow_external",
+        }
+    }
+
+    #[must_use]
+    pub const fn allows_host_classification(self, classification: &HostClassification) -> bool {
+        match self {
+            Self::SameHost => matches!(classification, HostClassification::SameHost),
+            Self::SameHostAndSubdomains => matches!(
+                classification,
+                HostClassification::SameHost | HostClassification::SeedSubdomain
+            ),
+            Self::AllowExternal => true,
         }
     }
 }
@@ -527,7 +543,7 @@ pub fn validate_web_run_settings(
 ) -> Result<ValidatedWebRunSettings, String> {
     let mode = parse_mode(mode)?;
     let boundary_policy =
-        parse_boundary_policy(boundary_policy.unwrap_or(WebBoundaryPolicy::SameHost.as_str()))?;
+        parse_web_boundary_policy(boundary_policy.unwrap_or(WebBoundaryPolicy::SameHost.as_str()))?;
     let normalized_depth = match mode {
         WebIngestMode::SinglePage => 0,
         WebIngestMode::RecursiveCrawl => max_depth.unwrap_or(DEFAULT_WEB_CRAWL_DEPTH),
@@ -551,6 +567,24 @@ pub fn validate_web_run_settings(
         max_depth: normalized_depth,
         max_pages: normalized_pages,
     })
+}
+
+/// Validates the relationship between a boundary policy and the normalized seed URL.
+///
+/// # Errors
+///
+/// Returns an error when the selected boundary policy does not apply to the seed host.
+pub fn validate_web_boundary_seed_host(
+    boundary_policy: &str,
+    normalized_seed_url: &str,
+) -> Result<(), String> {
+    let boundary_policy = parse_web_boundary_policy(boundary_policy)?;
+    if boundary_policy == WebBoundaryPolicy::SameHostAndSubdomains
+        && !seed_host_supports_subdomains(normalized_seed_url).map_err(|error| error.to_string())?
+    {
+        return Err("boundaryPolicy same_host_and_subdomains requires a DNS seed host".to_string());
+    }
+    Ok(())
 }
 
 /// Derives the terminal run state from the observed crawl counters.
@@ -603,11 +637,15 @@ fn parse_mode(mode: &str) -> Result<WebIngestMode, String> {
 /// # Errors
 ///
 /// Returns an error when the boundary policy is not one of the canonical values.
-fn parse_boundary_policy(boundary_policy: &str) -> Result<WebBoundaryPolicy, String> {
+pub fn parse_web_boundary_policy(boundary_policy: &str) -> Result<WebBoundaryPolicy, String> {
     match boundary_policy {
         "same_host" => Ok(WebBoundaryPolicy::SameHost),
+        "same_host_and_subdomains" => Ok(WebBoundaryPolicy::SameHostAndSubdomains),
         "allow_external" => Ok(WebBoundaryPolicy::AllowExternal),
-        _ => Err("boundaryPolicy must be one of: same_host, allow_external".to_string()),
+        _ => Err(
+            "boundaryPolicy must be one of: same_host, same_host_and_subdomains, allow_external"
+                .to_string(),
+        ),
     }
 }
 
@@ -615,12 +653,14 @@ fn parse_boundary_policy(boundary_policy: &str) -> Result<WebBoundaryPolicy, Str
 mod tests {
     use super::{
         DEFAULT_WEB_CRAWL_DEPTH, DEFAULT_WEB_CRAWL_MAX_PAGES, MAX_WEB_CRAWL_DEPTH,
-        MAX_WEB_CRAWL_MAX_PAGES, WebClassificationReason, WebIngestPattern, WebIngestPolicy,
-        WebIngestUrlFilter, WebRunCounts, WebRunFailureCode, WebRunState,
+        MAX_WEB_CRAWL_MAX_PAGES, WebBoundaryPolicy, WebClassificationReason, WebIngestPattern,
+        WebIngestPolicy, WebIngestUrlFilter, WebRunCounts, WebRunFailureCode, WebRunState,
         classify_web_crawl_filter_exclusion, classify_web_materialization_filter_exclusion,
-        derive_terminal_run_state, match_web_ingest_pattern, validate_web_ingest_policy,
+        derive_terminal_run_state, match_web_ingest_pattern, parse_web_boundary_policy,
+        validate_web_boundary_seed_host, validate_web_ingest_policy,
         validate_web_ingest_url_filter, validate_web_run_settings,
     };
+    use crate::shared::web::url_identity::HostClassification;
 
     #[test]
     fn single_page_forces_zero_depth() {
@@ -641,6 +681,52 @@ mod tests {
         };
         assert_eq!(settings.max_depth, DEFAULT_WEB_CRAWL_DEPTH);
         assert_eq!(settings.max_pages, DEFAULT_WEB_CRAWL_MAX_PAGES);
+    }
+
+    #[test]
+    fn subdomain_boundary_policy_is_canonical_runtime_vocabulary() {
+        let settings = match validate_web_run_settings(
+            "recursive_crawl",
+            Some("same_host_and_subdomains"),
+            None,
+            None,
+        ) {
+            Ok(settings) => settings,
+            Err(error) => panic!("validate settings: {error}"),
+        };
+        assert_eq!(settings.boundary_policy, "same_host_and_subdomains");
+        assert!(
+            WebBoundaryPolicy::SameHostAndSubdomains
+                .allows_host_classification(&HostClassification::SameHost)
+        );
+        assert!(
+            WebBoundaryPolicy::SameHostAndSubdomains
+                .allows_host_classification(&HostClassification::SeedSubdomain)
+        );
+        assert!(
+            !WebBoundaryPolicy::SameHostAndSubdomains
+                .allows_host_classification(&HostClassification::External)
+        );
+        assert!(
+            parse_web_boundary_policy("same_host_and_subdomains")
+                .expect("boundary policy parse")
+                .allows_host_classification(&HostClassification::SeedSubdomain)
+        );
+    }
+
+    #[test]
+    fn subdomain_boundary_rejects_ip_seed_hosts() {
+        assert!(
+            validate_web_boundary_seed_host("same_host_and_subdomains", "https://192.0.2.10/docs",)
+                .is_err()
+        );
+        assert!(
+            validate_web_boundary_seed_host(
+                "same_host_and_subdomains",
+                "https://example.com/docs",
+            )
+            .is_ok()
+        );
     }
 
     #[test]

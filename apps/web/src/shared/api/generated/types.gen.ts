@@ -2673,7 +2673,7 @@ export type VersionResponse = {
     version: string;
 };
 
-export type WebBoundaryPolicy = 'same_host' | 'allow_external';
+export type WebBoundaryPolicy = 'same_host' | 'same_host_and_subdomains' | 'allow_external';
 
 export type WebClassificationReason = 'seed_accepted' | 'duplicate_canonical_url' | 'duplicate_content' | 'outside_boundary_policy' | 'exceeded_max_depth' | 'exceeded_max_pages' | 'url_filter' | 'unsupported_scheme' | 'invalid_url' | 'inaccessible' | 'unsupported_content' | 'cancel_requested';
 

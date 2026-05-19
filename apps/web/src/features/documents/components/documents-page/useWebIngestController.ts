@@ -19,6 +19,10 @@ import {
   buildWebIngestUrlFilter,
   formatWebIngestPatterns,
 } from "@/features/documents/model/webIngestPatterns";
+import {
+  isSubdomainBoundaryAvailableForSeed,
+  normalizeWebIngestSeedUrlInput,
+} from "@/features/documents/model/webIngestBoundary";
 
 import type {
   WebIngestPolicyDraft,
@@ -229,12 +233,16 @@ export function useWebIngestController({
 
   const startWebIngest = useCallback(async () => {
     if (!activeLibrary || !seedUrl.trim()) return;
-    let url = seedUrl.trim();
-    if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
-    try {
-      new URL(url);
-    } catch {
+    const url = normalizeWebIngestSeedUrlInput(seedUrl);
+    if (!url) {
       toast.error(t("documents.invalidUrl"));
+      return;
+    }
+    if (
+      boundaryPolicy === "same_host_and_subdomains" &&
+      !isSubdomainBoundaryAvailableForSeed(url)
+    ) {
+      toast.error(t("documents.subdomainBoundaryRequiresDnsHost"));
       return;
     }
     setWebIngestLoading(true);

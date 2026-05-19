@@ -40,11 +40,36 @@ test("renders assistant markdown source links as visible links", async ({ page }
             timestamp: "2026-05-13T00:00:00.000Z",
           },
           {
-            content: "The answer cites a source.\n\n---\nSources\n- [Alpha Guide](https://example.test/source)",
+            content: "The answer cites a source.\n\n---\nSources\nAlpha Guide",
             executionId: "execution-source-link",
             id: "turn-assistant",
             role: "assistant",
             timestamp: "2026-05-13T00:00:01.000Z",
+            evidence: {
+              preparedSegmentReferences: [
+                {
+                  blockKind: "heading",
+                  documentId: "doc-1",
+                  documentTitle: "Alpha Guide",
+                  headingTrail: ["Alpha Guide"],
+                  rank: 1,
+                  score: 0.91,
+                  sectionPath: [],
+                  segmentId: "seg-1",
+                  sourceAccess: {
+                    href: "/v1/content/documents/doc-1/source",
+                    kind: "stored_document",
+                  },
+                  sourceUri: "upload://doc-1",
+                },
+              ],
+              technicalFactReferences: [],
+              entityReferences: [],
+              relationReferences: [],
+              verificationState: "verified",
+              verificationWarnings: [],
+              runtimeStageSummaries: [],
+            },
           },
         ],
       },
@@ -57,7 +82,7 @@ test("renders assistant markdown source links as visible links", async ({ page }
 
   const sourceLink = page.getByRole("link", { name: "Alpha Guide" });
   await expect(sourceLink).toBeVisible();
-  await expect(sourceLink).toHaveAttribute("href", "https://example.test/source");
+  await expect(sourceLink).toHaveAttribute("href", /\/v1\/content\/documents\/doc-1\/source$/);
   await expect(sourceLink).toHaveAttribute("target", "_blank");
   await expect(sourceLink).toHaveCSS("text-decoration-line", "underline");
 

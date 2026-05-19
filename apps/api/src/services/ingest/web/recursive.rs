@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::*;
 use crate::shared::web::ingest::{
     WebIngestUrlFilter, classify_web_crawl_filter_exclusion,
-    classify_web_materialization_filter_exclusion,
+    classify_web_materialization_filter_exclusion, parse_web_boundary_policy,
 };
 
 pub(super) async fn enqueue_recursive_run(
@@ -72,6 +72,15 @@ pub(super) async fn discover_recursive_scope(
         run.materialization_allow_patterns.clone(),
         run.materialization_block_patterns.clone(),
     )?;
+    let boundary_policy = parse_web_boundary_policy(&run.boundary_policy).map_err(|error| {
+        error!(
+            run_id = %run.id,
+            boundary_policy = %run.boundary_policy,
+            validation_error = %error,
+            "web ingest run has invalid persisted boundary policy"
+        );
+        ApiError::Internal
+    })?;
 
     if let Some(filter_exclusion) =
         classify_web_crawl_filter_exclusion(&seed_candidate.normalized_url, &crawl_filter)
@@ -208,10 +217,9 @@ pub(super) async fn discover_recursive_scope(
                 &resource.final_url,
             )
             .unwrap_or_else(|| resource.final_url.clone());
-            let is_same_host = host_classification == HostClassification::SameHost;
             let host_classification_label = host_classification.as_str();
 
-            if run.boundary_policy == "same_host" && !is_same_host {
+            if !boundary_policy.allows_host_classification(&host_classification) {
                 let _ = ingest_repository::update_web_discovered_page(
                     &state.persistence.postgres,
                     candidate.id,
@@ -406,6 +414,7 @@ pub(super) async fn discover_recursive_scope(
                     service,
                     state,
                     run,
+                    boundary_policy,
                     &candidate_row,
                     &resource,
                     &crawl_filter,
@@ -478,6 +487,7 @@ pub(super) async fn discover_recursive_scope(
                 service,
                 state,
                 run,
+                boundary_policy,
                 &candidate_row,
                 &resource,
                 &crawl_filter,
@@ -498,6 +508,7 @@ async fn discover_outbound_candidates(
     service: &WebIngestService,
     state: &AppState,
     run: &WebIngestRunRow,
+    boundary_policy: crate::shared::web::ingest::WebBoundaryPolicy,
     referrer: &WebDiscoveredPageRow,
     resource: &FetchedWebResource,
     crawl_filter: &WebIngestUrlFilter,
@@ -541,9 +552,7 @@ async fn discover_outbound_candidates(
                 Some(WebClassificationReason::ExceededMaxDepth.as_str()),
                 None,
             )
-        } else if run.boundary_policy == "same_host"
-            && discovered_host != HostClassification::SameHost
-        {
+        } else if !boundary_policy.allows_host_classification(&discovered_host) {
             (
                 WebCandidateState::Excluded,
                 Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),

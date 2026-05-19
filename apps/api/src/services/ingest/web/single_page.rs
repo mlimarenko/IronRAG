@@ -317,12 +317,9 @@ pub(super) async fn fetch_web_resource(
     service: &WebIngestService,
     seed_url: &str,
 ) -> Result<FetchedWebResource, WebRunFailure> {
-    let response = crate::observability::inject_trace_context(service.http_client().get(seed_url))
-        .send()
-        .await
-        .map_err(|error| {
-            WebRunFailure::inaccessible(format!("failed to fetch seed url: {error}"))
-        })?;
+    let response = service.fetch_public_http_response(seed_url).await.map_err(|error| {
+        WebRunFailure::inaccessible(format!("failed to fetch seed url: {error}"))
+    })?;
     let http_status = i32::from(response.status().as_u16());
     let final_url = crate::shared::web::url_identity::normalize_absolute_url(
         response.url().as_str(),
@@ -349,7 +346,12 @@ pub(super) async fn fetch_web_resource(
         ));
     }
 
-    let payload_bytes = response.bytes().await.map_err(|error| {
+    let payload_bytes = crate::shared::outbound_http::read_response_bytes_with_limit(
+        response,
+        super::MAX_WEB_FETCH_BODY_BYTES,
+    )
+    .await
+    .map_err(|error| {
         WebRunFailure::inaccessible_with_response(
             format!("failed to read fetched response body: {error}"),
             Some(final_url.clone()),
@@ -358,12 +360,7 @@ pub(super) async fn fetch_web_resource(
         )
     })?;
 
-    Ok(FetchedWebResource {
-        final_url,
-        content_type,
-        http_status,
-        payload_bytes: payload_bytes.to_vec(),
-    })
+    Ok(FetchedWebResource { final_url, content_type, http_status, payload_bytes })
 }
 
 pub(super) async fn persist_resource_snapshot(

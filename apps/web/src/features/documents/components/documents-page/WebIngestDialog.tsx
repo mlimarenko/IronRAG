@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import type { TFunction } from "i18next";
 import {
   CheckCircle2,
@@ -10,7 +10,7 @@ import {
   XCircle,
 } from "lucide-react";
 
-import type { WebBoundaryPolicy, WebIngestMode } from "@/shared/api";
+import type { WebIngestMode } from "@/shared/api";
 import { Button } from "@/shared/components/ui/button";
 import {
   Dialog,
@@ -32,6 +32,11 @@ import {
 import { Textarea } from "@/shared/components/ui/textarea";
 
 import {
+  WEB_BOUNDARY_POLICIES,
+  isSubdomainBoundaryAvailableForSeed,
+  isWebBoundaryPolicy,
+} from "@/features/documents/model/webIngestBoundary";
+import {
   buildWebIngestUrlFilter,
   evaluateWebIngestUrlFilter,
   formatWebIngestPattern,
@@ -44,17 +49,9 @@ const WEB_INGEST_MODES: readonly WebIngestMode[] = [
   "single_page",
   "recursive_crawl",
 ];
-const WEB_BOUNDARY_POLICIES: readonly WebBoundaryPolicy[] = [
-  "same_host",
-  "allow_external",
-];
 
 function isWebIngestMode(value: string): value is WebIngestMode {
   return WEB_INGEST_MODES.some((mode) => mode === value);
-}
-
-function isWebBoundaryPolicy(value: string): value is WebBoundaryPolicy {
-  return WEB_BOUNDARY_POLICIES.some((policy) => policy === value);
 }
 
 type FilterEditorProps = {
@@ -309,6 +306,9 @@ type WebIngestDialogProps = {
 
 export function WebIngestDialog({ controller, t }: WebIngestDialogProps) {
   const isRecursive = controller.crawlMode === "recursive_crawl";
+  const subdomainBoundaryAvailable = isSubdomainBoundaryAvailableForSeed(
+    controller.seedUrl,
+  );
   const parsedFilters = useMemo(
     () =>
       buildParsedRuleFilters(
@@ -324,6 +324,14 @@ export function WebIngestDialog({ controller, t }: WebIngestDialogProps) {
       controller.materializationBlockPatternsText,
     ],
   );
+  useEffect(() => {
+    if (
+      !subdomainBoundaryAvailable &&
+      controller.boundaryPolicy === "same_host_and_subdomains"
+    ) {
+      controller.setBoundaryPolicy("same_host");
+    }
+  }, [controller, subdomainBoundaryAvailable]);
   return (
     <Dialog
       open={controller.addLinkOpen}
@@ -385,6 +393,12 @@ export function WebIngestDialog({ controller, t }: WebIngestDialogProps) {
                 <SelectContent>
                   <SelectItem value="same_host">
                     {t("documents.sameHost")}
+                  </SelectItem>
+                  <SelectItem
+                    value="same_host_and_subdomains"
+                    disabled={!subdomainBoundaryAvailable}
+                  >
+                    {t("documents.sameHostAndSubdomains")}
                   </SelectItem>
                   <SelectItem value="allow_external">
                     {t("documents.allowExternal")}

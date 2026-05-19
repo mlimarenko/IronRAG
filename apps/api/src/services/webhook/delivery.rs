@@ -20,10 +20,16 @@ use crate::{
         webhook_repository::{self, WebhookDeliveryAttemptRow, WebhookSubscriptionRow},
     },
     services::webhook::{error::WebhookServiceError, signature},
+    shared::outbound_http::{
+        build_no_redirect_public_http_client, read_response_text_excerpt_with_limit,
+        resolve_public_http_url,
+    },
 };
 
 const MAX_ATTEMPTS: i32 = 8;
 const MAX_DELAY_MINUTES: i64 = 360; // 6 h
+const MAX_WEBHOOK_RESPONSE_BODY_BYTES: u64 = 64 * 1024;
+const WEBHOOK_RESPONSE_EXCERPT_CHARS: usize = 512;
 
 pub async fn run_webhook_delivery_job(
     state: &Arc<AppState>,
@@ -32,15 +38,33 @@ pub async fn run_webhook_delivery_job(
     // The dedupe_key encodes the attempt_id: "wh-delivery-{sub_id}-{event_id}".
     // We recover the attempt by looking up via job_id.
     let attempt = find_attempt_for_job(state, job.id).await?;
+    let sub = load_subscription(state, attempt.subscription_id).await?;
+    let attempt_number = attempt.attempt_number + 1;
 
-    // Transition to 'delivering' now that the worker has leased the job.
+    let allow_http = std::env::var("IRONRAG_WEBHOOK_ALLOW_HTTP").map(|v| v == "1").unwrap_or(false);
+    let resolved_target = match resolve_public_http_url(&attempt.target_url, allow_http).await {
+        Ok(value) => value,
+        Err(error) => {
+            let error_msg = format!("webhook target_url rejected before delivery: {error}");
+            let retryable = !error.is_terminal_policy_rejection();
+            record_webhook_delivery_failure(
+                state,
+                &attempt,
+                attempt_number,
+                attempt.subscription_id,
+                error_msg.as_str(),
+                retryable,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Transition to 'delivering' only after policy checks that can fail before
+    // the request. This keeps rejected targets from getting stuck in-flight.
     webhook_repository::mark_attempt_delivering(&state.persistence.postgres, attempt.id)
         .await
         .context("failed to mark delivery attempt as delivering")?;
-
-    let sub = load_subscription(state, attempt.subscription_id).await?;
-
-    let attempt_number = attempt.attempt_number + 1;
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -52,11 +76,16 @@ pub async fn run_webhook_delivery_job(
 
     let sig_header = signature::sign(sub.secret.as_bytes(), ts, &body_bytes);
 
-    let mut req = state
-        .canonical_services
-        .webhook
-        .http_client()
-        .post(&attempt.target_url)
+    let client = build_no_redirect_public_http_client(
+        &resolved_target,
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(10),
+        Some("ironrag-webhook/1.0"),
+    )
+    .map_err(|error| WebhookServiceError::Internal(anyhow::anyhow!(error)))?;
+
+    let mut req = client
+        .post(resolved_target.url().clone())
         .header("Content-Type", "application/json")
         .header(signature::header_name(), &sig_header)
         .body(body_bytes.clone());
@@ -74,8 +103,13 @@ pub async fn run_webhook_delivery_job(
     match response {
         Ok(resp) => {
             let status = resp.status().as_u16() as i32;
-            let body_excerpt =
-                resp.text().await.unwrap_or_default().chars().take(512).collect::<String>();
+            let body_excerpt = read_response_text_excerpt_with_limit(
+                resp,
+                MAX_WEBHOOK_RESPONSE_BODY_BYTES,
+                WEBHOOK_RESPONSE_EXCERPT_CHARS,
+            )
+            .await
+            .unwrap_or_default();
 
             // 2xx → success; 408/429/5xx → retryable; all other 4xx → terminal failure.
             let retryable = matches!(status as u16, 408 | 429 | 500..=599);
@@ -121,44 +155,64 @@ pub async fn run_webhook_delivery_job(
 
             if retryable && !terminal && attempt_number < MAX_ATTEMPTS {
                 // Re-enqueue for retry at next_at.
-                schedule_retry(state, &attempt, next_at).await?;
+                schedule_retry(state, &attempt, attempt_number, next_at).await?;
             }
         }
         Err(e) => {
             let error_msg = e.to_string();
-            let next_at = if attempt_number < MAX_ATTEMPTS {
-                Some(next_attempt_at(attempt_number))
-            } else {
-                None
-            };
-
-            let final_state = if attempt_number >= MAX_ATTEMPTS { "abandoned" } else { "failed" };
-
-            tracing::warn!(
-                attempt_id = %attempt.id,
-                subscription_id = %sub.id,
+            record_webhook_delivery_failure(
+                state,
+                &attempt,
                 attempt_number,
-                error = %error_msg,
-                "webhook delivery HTTP request failed"
-            );
-
-            webhook_repository::record_webhook_delivery_result(
-                &state.persistence.postgres,
-                attempt.id,
-                final_state,
-                attempt_number,
-                None,
-                None,
-                Some(error_msg.as_str()),
-                next_at,
+                sub.id,
+                &error_msg,
+                true,
             )
-            .await
-            .context("failed to record webhook delivery failure")?;
-
-            if attempt_number < MAX_ATTEMPTS {
-                schedule_retry(state, &attempt, next_at).await?;
-            }
+            .await?;
         }
+    }
+
+    Ok(())
+}
+
+async fn record_webhook_delivery_failure(
+    state: &Arc<AppState>,
+    attempt: &WebhookDeliveryAttemptRow,
+    attempt_number: i32,
+    subscription_id: uuid::Uuid,
+    error_msg: &str,
+    retryable: bool,
+) -> Result<(), WebhookServiceError> {
+    let should_retry = retryable && attempt_number < MAX_ATTEMPTS;
+    let next_at = if should_retry { Some(next_attempt_at(attempt_number)) } else { None };
+
+    let final_state =
+        if retryable && attempt_number >= MAX_ATTEMPTS { "abandoned" } else { "failed" };
+
+    tracing::warn!(
+        attempt_id = %attempt.id,
+        subscription_id = %subscription_id,
+        attempt_number,
+        retryable,
+        error = %error_msg,
+        "webhook delivery attempt failed"
+    );
+
+    webhook_repository::record_webhook_delivery_result(
+        &state.persistence.postgres,
+        attempt.id,
+        final_state,
+        attempt_number,
+        None,
+        None,
+        Some(error_msg),
+        next_at,
+    )
+    .await
+    .context("failed to record webhook delivery failure")?;
+
+    if should_retry {
+        schedule_retry(state, attempt, attempt_number, next_at).await?;
     }
 
     Ok(())
@@ -213,6 +267,7 @@ fn attempt_custom_headers(sub: &WebhookSubscriptionRow) -> Option<Vec<(String, S
 async fn schedule_retry(
     state: &Arc<AppState>,
     attempt: &WebhookDeliveryAttemptRow,
+    attempt_number: i32,
     available_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<(), WebhookServiceError> {
     use crate::infra::repositories::ingest_repository::NewIngestJob;
@@ -232,9 +287,7 @@ async fn schedule_retry(
             priority: 5,
             dedupe_key: Some(format!(
                 "wh-retry-{}-{}-{}",
-                attempt.subscription_id,
-                attempt.event_id,
-                attempt.attempt_number + 1
+                attempt.subscription_id, attempt.event_id, attempt_number
             )),
             queued_at: None,
             available_at,
@@ -254,7 +307,7 @@ async fn schedule_retry(
         &state.persistence.postgres,
         attempt.id,
         "pending",
-        attempt.attempt_number,
+        attempt_number,
         None,
         None,
         None,

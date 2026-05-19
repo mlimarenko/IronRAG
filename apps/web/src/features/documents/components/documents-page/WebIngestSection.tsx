@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 
 import { WebRunsPanel } from "@/features/documents/WebRunsPanel";
+import { isWebBoundaryPolicy } from "@/features/documents/model/webIngestBoundary";
 import { formatWebIngestPatterns } from "@/features/documents/model/webIngestPatterns";
 
 import { WebIngestDialog } from "./WebIngestDialog";
@@ -26,8 +27,8 @@ export function WebIngestSection({ controller, t }: WebIngestSectionProps) {
               run.mode === "single_page" ? "single_page" : "recursive_crawl",
             );
             controller.setBoundaryPolicy(
-              run.boundaryPolicy === "allow_external"
-                ? "allow_external"
+              isWebBoundaryPolicy(run.boundaryPolicy)
+                ? run.boundaryPolicy
                 : "same_host",
             );
             controller.setMaxDepth(String(run.maxDepth ?? 3));

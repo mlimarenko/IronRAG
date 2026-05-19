@@ -1,12 +1,14 @@
 use reqwest::Url;
 use std::fmt;
+use std::net::IpAddr;
 
 const TRACKING_PARAM_PREFIXES: &[&str] = &["utm_", "mc_"];
 const TRACKING_PARAM_NAMES: &[&str] = &["fbclid", "gclid", "dclid", "msclkid", "ref", "source"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostClassification {
     SameHost,
+    SeedSubdomain,
     External,
 }
 
@@ -15,6 +17,7 @@ impl HostClassification {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SameHost => "same_host",
+            Self::SeedSubdomain => "seed_subdomain",
             Self::External => "external",
         }
     }
@@ -74,7 +77,8 @@ pub fn resolve_discovered_url(base_url: &str, href: &str) -> Result<String, UrlI
     Ok(normalize_url(joined).to_string())
 }
 
-/// Classifies whether a candidate URL shares the same host as the seed URL.
+/// Classifies whether a candidate URL shares the same host, a subdomain of
+/// the seed host, or neither.
 ///
 /// # Errors
 ///
@@ -85,16 +89,26 @@ pub fn classify_host(
 ) -> Result<HostClassification, UrlIdentityError> {
     let seed = parse_http_url(seed_url)?;
     let candidate = parse_http_url(candidate_url)?;
-    let seed_host =
-        seed.host_str().ok_or_else(|| UrlIdentityError::new("seed url host is missing"))?;
-    let candidate_host = candidate
-        .host_str()
-        .ok_or_else(|| UrlIdentityError::new("candidate url host is missing"))?;
-    if seed_host.eq_ignore_ascii_case(candidate_host) {
+    let seed_host = normalized_required_host(&seed, "seed")?;
+    let candidate_host = normalized_required_host(&candidate, "candidate")?;
+    if seed_host == candidate_host {
         Ok(HostClassification::SameHost)
+    } else if is_dns_subdomain_of(&candidate_host, &seed_host) {
+        Ok(HostClassification::SeedSubdomain)
     } else {
         Ok(HostClassification::External)
     }
+}
+
+/// Returns whether the seed URL host can have DNS subdomains.
+///
+/// # Errors
+///
+/// Returns a [`UrlIdentityError`] when the seed URL is invalid or uses a non-HTTP scheme.
+pub fn seed_host_supports_subdomains(seed_url: &str) -> Result<bool, UrlIdentityError> {
+    let seed = parse_http_url(seed_url)?;
+    let seed_host = normalized_required_host(&seed, "seed")?;
+    Ok(!is_ip_host(&seed_host))
 }
 
 fn parse_http_url(raw: &str) -> Result<Url, UrlIdentityError> {
@@ -148,6 +162,29 @@ fn normalize_url(mut url: Url) -> Url {
     url
 }
 
+fn normalized_required_host(url: &Url, field: &str) -> Result<String, UrlIdentityError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| UrlIdentityError::new(format!("{field} url host is missing")))?;
+    Ok(normalize_host(host))
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim_matches(['[', ']']).trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn is_dns_subdomain_of(candidate_host: &str, seed_host: &str) -> bool {
+    !is_ip_host(candidate_host)
+        && !is_ip_host(seed_host)
+        && candidate_host.len() > seed_host.len()
+        && candidate_host.ends_with(seed_host)
+        && candidate_host.as_bytes()[candidate_host.len() - seed_host.len() - 1] == b'.'
+}
+
+fn is_ip_host(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok()
+}
+
 fn is_tracking_query_param(name: &str) -> bool {
     TRACKING_PARAM_NAMES.iter().any(|candidate| candidate.eq_ignore_ascii_case(name))
         || TRACKING_PARAM_PREFIXES
@@ -159,6 +196,7 @@ fn is_tracking_query_param(name: &str) -> bool {
 mod tests {
     use super::{
         HostClassification, classify_host, normalize_absolute_url, resolve_discovered_url,
+        seed_host_supports_subdomains,
     };
 
     #[test]
@@ -197,6 +235,47 @@ mod tests {
                 Err(error) => panic!("classify: {error}"),
             },
             HostClassification::External
+        );
+    }
+
+    #[test]
+    fn classify_seed_subdomains_without_matching_lookalikes() {
+        assert_eq!(
+            match classify_host("https://example.com/start", "https://docs.example.com/api") {
+                Ok(value) => value,
+                Err(error) => panic!("classify: {error}"),
+            },
+            HostClassification::SeedSubdomain
+        );
+        assert_eq!(
+            match classify_host("https://example.com/start", "https://badexample.com/api") {
+                Ok(value) => value,
+                Err(error) => panic!("classify: {error}"),
+            },
+            HostClassification::External
+        );
+        assert_eq!(
+            match classify_host("https://example.com/start", "https://example.com.evil/api") {
+                Ok(value) => value,
+                Err(error) => panic!("classify: {error}"),
+            },
+            HostClassification::External
+        );
+    }
+
+    #[test]
+    fn ip_seed_hosts_do_not_support_subdomains() {
+        assert!(
+            !seed_host_supports_subdomains("https://192.0.2.10/docs")
+                .expect("ipv4 seed classification")
+        );
+        assert!(
+            !seed_host_supports_subdomains("https://[2001:db8::1]/docs")
+                .expect("ipv6 seed classification")
+        );
+        assert!(
+            seed_host_supports_subdomains("https://example.com/docs")
+                .expect("dns seed classification")
         );
     }
 }

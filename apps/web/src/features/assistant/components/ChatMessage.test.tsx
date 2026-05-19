@@ -49,4 +49,96 @@ describe('ChatMessage', () => {
     expect(link?.className).toContain('text-primary');
     expect(link?.className).toContain('underline');
   });
+
+  it('renders structured evidence sources as visible clickable links', async () => {
+    await act(async () => {
+      root?.render(
+        <ChatMessage
+          t={t}
+          message={{
+            id: 'assistant-2',
+            role: 'assistant',
+            content: 'The answer cites a source title in plain text.\n\n---\nSources\nAlpha Guide',
+            timestamp: '2026-04-10T10:00:00Z',
+            evidence: {
+              segmentRefs: [
+                {
+                  documentId: 'doc-1',
+                  documentName: 'Alpha Guide.md',
+                  documentTitle: 'Alpha Guide',
+                  sourceUri: 'upload://doc-1',
+                  sourceAccess: {
+                    kind: 'stored_document',
+                    href: '/v1/content/documents/doc-1/source',
+                  },
+                  segmentOrdinal: 1,
+                  excerpt: 'Installation',
+                  relevance: 0.91,
+                },
+              ],
+              factRefs: [],
+              entityRefs: [],
+              relationRefs: [],
+              verificationState: 'passed',
+              verificationWarnings: [],
+            },
+          }}
+        />,
+      );
+    });
+
+    const sourceLink = container.querySelector<HTMLAnchorElement>(
+      'a[href="/v1/content/documents/doc-1/source"]',
+    );
+    expect(sourceLink).toBeTruthy();
+    expect(sourceLink?.textContent).toContain('Alpha Guide');
+    expect(sourceLink?.target).toBe('_blank');
+    expect(sourceLink?.rel).toContain('noopener');
+    expect(sourceLink?.className).toContain('text-primary');
+    expect(sourceLink?.className).toContain('underline');
+    expect(container.querySelector('hr')).toBeNull();
+  });
+
+  it('keeps prose after a separator when it is not a bare source list', async () => {
+    await act(async () => {
+      root?.render(
+        <ChatMessage
+          t={t}
+          message={{
+            id: 'assistant-3',
+            role: 'assistant',
+            content:
+              'The answer has a separate note.\n\n---\nConclusion\nAlpha Guide covers setup details.',
+            timestamp: '2026-04-10T10:00:00Z',
+            evidence: {
+              segmentRefs: [
+                {
+                  documentId: 'doc-1',
+                  documentName: 'Alpha Guide.md',
+                  documentTitle: 'Alpha Guide',
+                  sourceUri: 'upload://doc-1',
+                  sourceAccess: {
+                    kind: 'stored_document',
+                    href: '/v1/content/documents/doc-1/source',
+                  },
+                  segmentOrdinal: 1,
+                  excerpt: 'Setup details',
+                  relevance: 0.91,
+                },
+              ],
+              factRefs: [],
+              entityRefs: [],
+              relationRefs: [],
+              verificationState: 'passed',
+              verificationWarnings: [],
+            },
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain('Conclusion');
+    expect(container.textContent).toContain('Alpha Guide covers setup details.');
+    expect(container.querySelector('hr')).toBeTruthy();
+  });
 });

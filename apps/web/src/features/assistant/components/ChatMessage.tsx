@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from 'react';
 import type { TFunction } from 'i18next';
-import { BrainCircuit, CheckCircle2, Loader2, Wrench } from 'lucide-react';
+import { BrainCircuit, CheckCircle2, ExternalLink, FileText, Loader2, Wrench } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { AssistantAgentActivityEvent, AssistantMessage } from '@/shared/types';
 import { VERIFICATION_CONFIG, verificationLabel } from "../model/verificationConfig";
@@ -9,6 +9,14 @@ type ChatMessageProps = {
   t: TFunction;
   message: AssistantMessage;
 };
+
+type AnswerSourceLink = {
+  href: string;
+  label: string;
+  kind: 'stored_document' | 'external_url';
+};
+
+const MAX_INLINE_SOURCE_LINKS = 5;
 
 function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -83,6 +91,85 @@ function renderActivityIcon(event: AssistantAgentActivityEvent | undefined) {
   }
   if (event?.type === 'persisting') return <CheckCircle2 className={className} />;
   return <Loader2 className={className} />;
+}
+
+function collectAnswerSourceLinks(message: AssistantMessage): AnswerSourceLink[] {
+  const seen = new Set<string>();
+  const links: AnswerSourceLink[] = [];
+  const contentLower = message.content.toLocaleLowerCase();
+
+  for (const ref of message.evidence?.segmentRefs ?? []) {
+    const sourceAccess = ref.sourceAccess;
+    const fallbackSourceUri = ref.sourceUri?.trim();
+    const href =
+      sourceAccess?.href ??
+      (fallbackSourceUri?.startsWith('http://') || fallbackSourceUri?.startsWith('https://')
+        ? fallbackSourceUri
+        : null);
+    if (!href || seen.has(href)) continue;
+    if (contentLower.includes(href.toLocaleLowerCase())) continue;
+
+    const label = (ref.documentTitle || ref.documentName || href).trim();
+    links.push({
+      href,
+      label: label || href,
+      kind: sourceAccess?.kind ?? 'external_url',
+    });
+    seen.add(href);
+    if (links.length >= MAX_INLINE_SOURCE_LINKS) break;
+  }
+
+  return links;
+}
+
+function stripTrailingSourceEcho(content: string, sourceLinks: AnswerSourceLink[]): string {
+  if (sourceLinks.length === 0) return content;
+
+  const lines = content.trimEnd().split(/\r?\n/);
+  let separatorIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/^-{3,}$/.test(lines[index].trim())) {
+      separatorIndex = index;
+      break;
+    }
+  }
+  if (separatorIndex < 0) return content;
+
+  const tailLines = lines.slice(separatorIndex + 1).map((line) => line.trim()).filter(Boolean);
+  if (tailLines.length === 0) return content;
+
+  const tailText = tailLines.join(' ');
+  if (/\]\(|https?:\/\//i.test(tailText)) return content;
+
+  const sourceLabels = new Set(
+    sourceLinks.map((link) => link.label.trim().toLocaleLowerCase()).filter(Boolean),
+  );
+  let firstSourceLineIndex = -1;
+  const isSourceTitleLine = (line: string) => {
+    const bareLine = line.replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '').trim();
+    return sourceLabels.has(bareLine.toLocaleLowerCase());
+  };
+
+  for (let index = 0; index < tailLines.length; index += 1) {
+    if (isSourceTitleLine(tailLines[index])) {
+      firstSourceLineIndex = index;
+      break;
+    }
+  }
+  if (firstSourceLineIndex < 0) return content;
+
+  const leadingHeaderLines = tailLines.slice(0, firstSourceLineIndex);
+  const hasOnlyCompactLeadingHeader =
+    leadingHeaderLines.length <= 1 &&
+    leadingHeaderLines.every((line) => {
+      const normalized = line.replace(/:$/, '').trim();
+      return normalized.length > 0 && normalized.length <= 40 && !/\s/.test(normalized);
+    });
+  const tailIsBareSourceList =
+    hasOnlyCompactLeadingHeader && tailLines.slice(firstSourceLineIndex).every(isSourceTitleLine);
+  if (!tailIsBareSourceList) return content;
+
+  return lines.slice(0, separatorIndex).join('\n').trimEnd();
 }
 
 function PendingAssistantActivity({
@@ -202,6 +289,9 @@ function ChatMessageImpl({ t, message }: ChatMessageProps) {
   const vc = vcState && vcState !== 'not_run' ? VERIFICATION_CONFIG[vcState] : null;
   const vcLabel = vcState && vcState !== 'not_run' ? verificationLabel(vcState, t) : null;
   const isPendingAssistant = !isUser && !message.content;
+  const sourceLinks = !isUser && !isPendingAssistant ? collectAnswerSourceLinks(message) : [];
+  const renderedContent =
+    sourceLinks.length > 0 ? stripTrailingSourceEcho(message.content, sourceLinks) : message.content;
   const messageWidthClass = isUser
     ? 'max-w-[80%]'
     : isPendingAssistant
@@ -247,8 +337,34 @@ function ChatMessageImpl({ t, message }: ChatMessageProps) {
           {!isUser ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown components={markdownComponents}>
-                {message.content}
+                {renderedContent}
               </ReactMarkdown>
+              {sourceLinks.length > 0 && (
+                <div className="not-prose mt-3 border-t border-border/70 pt-2">
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase text-muted-foreground">
+                    {t('assistant.sources')}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {sourceLinks.map((link) => (
+                      <a
+                        key={link.href}
+                        href={link.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex max-w-full items-center gap-1 rounded-md border border-primary/30 bg-primary/5 px-2 py-1 text-xs font-semibold text-primary underline decoration-primary/50 underline-offset-2 transition-colors hover:bg-primary/10 hover:decoration-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        title={link.label}
+                      >
+                        {link.kind === 'stored_document' ? (
+                          <FileText className="h-3 w-3 shrink-0" />
+                        ) : (
+                          <ExternalLink className="h-3 w-3 shrink-0" />
+                        )}
+                        <span className="min-w-0 truncate">{link.label}</span>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             message.content.split('\n').map((line, i) => (

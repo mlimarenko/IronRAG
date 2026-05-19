@@ -2,6 +2,7 @@ pub mod ast_extraction;
 pub mod auth_tokens;
 pub mod extraction;
 pub mod json_coercion;
+pub mod outbound_http;
 pub mod provenance;
 pub mod provider_base_url;
 pub mod retry;

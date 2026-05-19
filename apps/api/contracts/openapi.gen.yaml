@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.15
+  version: 0.4.18
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -11593,6 +11593,7 @@ components:
       type: string
       enum:
       - same_host
+      - same_host_and_subdomains
       - allow_external
     WebClassificationReason:
       type: string

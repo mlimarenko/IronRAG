@@ -14,7 +14,6 @@ mod single_page;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use reqwest::Client;
 use sha2::{Digest, Sha256};
 use tracing::error;
 use uuid::Uuid;
@@ -40,17 +39,21 @@ use crate::{
         extraction::html_main_content::{
             extract_html_canonical_url, payload_looks_like_html_document,
         },
+        outbound_http::{get_public_http_following_redirects, read_response_bytes_with_limit},
         telemetry,
         web::{
             ingest::{
                 WebCandidateState, WebClassificationReason, WebIngestMode, WebIngestPattern,
                 WebIngestUrlFilter, WebRunFailureCode, WebRunState, derive_terminal_run_state,
-                now_if_terminal, validate_web_ingest_url_filter, validate_web_run_settings,
+                now_if_terminal, validate_web_boundary_seed_host, validate_web_ingest_url_filter,
+                validate_web_run_settings,
             },
             url_identity::{HostClassification, normalize_seed_url},
         },
     },
 };
+
+const MAX_WEB_FETCH_BODY_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Descriptor returned by `WebIngestService::refetch_document_source` after
 /// successfully fetching a fresh copy of a web document. The caller (retry
@@ -102,7 +105,6 @@ impl Default for WebIngestRuntimeSettings {
 #[derive(Clone)]
 pub struct WebIngestService {
     runtime: WebIngestRuntimeSettings,
-    http: Client,
 }
 
 /// Result of `materialize_snapshot_resource`. Mirrors
@@ -198,16 +200,7 @@ impl Default for WebIngestService {
 impl WebIngestService {
     #[must_use]
     pub fn new(runtime: WebIngestRuntimeSettings) -> Self {
-        let http = match Client::builder()
-            .timeout(Duration::from_secs(runtime.request_timeout_seconds))
-            .redirect(reqwest::redirect::Policy::limited(runtime.max_redirects))
-            .user_agent(runtime.user_agent.clone())
-            .build()
-        {
-            Ok(client) => client,
-            Err(_) => Client::new(),
-        };
-        Self { runtime, http }
+        Self { runtime }
     }
 
     #[must_use]
@@ -215,9 +208,20 @@ impl WebIngestService {
         &self.runtime
     }
 
-    #[must_use]
-    pub fn http_client(&self) -> &Client {
-        &self.http
+    async fn fetch_public_http_response(
+        &self,
+        initial_url: &str,
+    ) -> Result<reqwest::Response, String> {
+        get_public_http_following_redirects(
+            initial_url,
+            true,
+            self.runtime.max_redirects,
+            Duration::from_secs(self.runtime.request_timeout_seconds),
+            Duration::from_secs(self.runtime.request_timeout_seconds.min(10)),
+            Some(&self.runtime.user_agent),
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     /// Re-fetches a web-captured document's source URL and persists the fresh
@@ -244,12 +248,9 @@ impl WebIngestService {
                 "web document has no source_uri to re-fetch".to_string(),
             ));
         }
-        let response = crate::observability::inject_trace_context(self.http.get(trimmed))
-            .send()
-            .await
-            .map_err(|error| {
-                ApiError::BadRequest(format!("failed to re-fetch {trimmed}: {error}"))
-            })?;
+        let response = self.fetch_public_http_response(trimmed).await.map_err(|error| {
+            ApiError::BadRequest(format!("failed to re-fetch {trimmed}: {error}"))
+        })?;
         let http_status = response.status();
         if !http_status.is_success() {
             return Err(ApiError::BadRequest(format!(
@@ -264,13 +265,10 @@ impl WebIngestService {
             .filter(|value| !value.is_empty())
             .map(str::to_ascii_lowercase);
         let final_url = response.url().as_str().to_string();
-        let payload_bytes = response
-            .bytes()
-            .await
-            .map_err(|error| {
-                ApiError::BadRequest(format!("failed to read body of {trimmed}: {error}"))
-            })?
-            .to_vec();
+        let payload_bytes =
+            read_response_bytes_with_limit(response, MAX_WEB_FETCH_BODY_BYTES).await.map_err(
+                |error| ApiError::BadRequest(format!("failed to read body of {trimmed}: {error}")),
+            )?;
         let byte_size = i64::try_from(payload_bytes.len()).unwrap_or(i64::MAX);
         let checksum = format!(
             "sha256:{}",
@@ -306,6 +304,8 @@ impl WebIngestService {
             command.max_pages,
         )
         .map_err(ApiError::BadRequest)?;
+        validate_web_boundary_seed_host(&validated.boundary_policy, &normalized_seed_url)
+            .map_err(ApiError::BadRequest)?;
         let crawl_filter = validate_web_ingest_url_filter(command.crawl_filter, "crawlFilter")
             .map_err(ApiError::BadRequest)?;
         let materialization_filter =
