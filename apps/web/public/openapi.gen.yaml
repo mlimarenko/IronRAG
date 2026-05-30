@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.15
+  version: 0.4.20
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -3131,7 +3131,7 @@ paths:
       tags:
       - query
       summary: Get the recommended MCP assistant system prompt.
-      description: Returns the prompt text that should be installed in external MCP clients and in the built-in UI assistant setup flow. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, and avoid forwarding the raw latest user message as a hidden grounded-answer query. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
+      description: Returns the exact prompt text used by the built-in UI assistant and recommended for external MCP clients. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, prefer high-signal grounded-answer probes for content questions, and avoid answering from catalog titles alone. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
       operationId: getAssistantSystemPrompt
       parameters:
       - name: libraryId
@@ -10128,12 +10128,22 @@ components:
       properties:
         argumentsJson:
           type: string
+          description: |-
+            Effective arguments executed after server-side defaults and
+            scope guards were applied.
         id:
           type: string
         isError:
           type: boolean
         name:
           type: string
+        requestedArgumentsJson:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Raw arguments emitted by the model when server-side defaults or
+            guards changed the executable payload.
         resultJson: {}
         resultText:
           type:
@@ -11593,6 +11603,7 @@ components:
       type: string
       enum:
       - same_host
+      - same_host_and_subdomains
       - allow_external
     WebClassificationReason:
       type: string

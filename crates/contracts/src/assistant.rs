@@ -153,6 +153,10 @@ pub struct AssistantVerificationWarning {
 pub struct AssistantRuntimeStageSummary {
     pub stage_kind: String,
     pub stage_label: String,
+    /// Total wall-clock spent in this pipeline stage across its attempts.
+    /// `None` for executions recorded before stage timing existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

@@ -28,7 +28,7 @@ pub use document::{
 
 pub(crate) use contracts::FailedRevisionReadiness;
 pub(crate) use readiness::{
-    derive_failed_revision_readiness, fail_revision_vector_graph_readiness,
+    GRAPH_STATE_DEGRADED, derive_failed_revision_readiness, fail_revision_vector_graph_readiness,
     graph_extract_success_message, graph_state_after_successful_extract,
 };
 

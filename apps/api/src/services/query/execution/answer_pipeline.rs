@@ -21,9 +21,10 @@ use crate::{
 
 use super::question_intent::query_ir_has_focused_document_answer_intent;
 use super::technical_literals::{
-    TechnicalLiteralIntent, detect_technical_literal_intent_from_query_ir,
-    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
-    extract_prefix_literals, extract_url_literals,
+    TechnicalLiteralIntent, detect_explicit_technical_literal_intent_from_query_ir,
+    detect_technical_literal_intent_from_query_ir, extract_explicit_path_literals,
+    extract_http_methods, extract_parameter_literals, extract_prefix_literals,
+    extract_url_literals,
 };
 use super::tuning::{
     CLARIFY_DOMINANCE_RATIO, CLARIFY_MAX_VARIANTS, CLARIFY_MIN_DISTINCT_DOCUMENTS,
@@ -69,20 +70,80 @@ pub(crate) async fn prepare_answer_query(
     top_k: usize,
     include_debug: bool,
 ) -> anyhow::Result<PreparedAnswerQueryResult> {
+    // Capture fine-grained timed spans (DB queries, retrieval lanes) recorded
+    // during preparation so the debug inspector can show where time went. The
+    // sink propagates across the same-task parallelism used below.
+    let (result, spans) =
+        crate::services::query::turn_spans::capture_turn_spans(prepare_answer_query_inner(
+            state,
+            library_id,
+            question,
+            conversation_history,
+            mode,
+            top_k,
+            include_debug,
+        ))
+        .await;
+    let mut prepared = result?;
+    prepared.retrieval_spans = spans;
+    Ok(prepared)
+}
+
+async fn prepare_answer_query_inner(
+    state: &AppState,
+    library_id: Uuid,
+    question: String,
+    conversation_history: Option<&str>,
+    mode: crate::domains::query::RuntimeQueryMode,
+    top_k: usize,
+    include_debug: bool,
+) -> anyhow::Result<PreparedAnswerQueryResult> {
     // Stage 1: compile + planning run in parallel, then retrieval waits
     // for the compiled IR. This keeps the expensive planning/embedding
     // work overlapped while still letting retrieval consume
     // `document_focus`, scope, and subject entities on the first pass.
     let stage_1_started = std::time::Instant::now();
     let compile_future = compile_query_ir(state, library_id, &question, conversation_history);
+    let plan_started = std::time::Instant::now();
     let planning_future = crate::agent_runtime::pipeline::try_op::run_async_try_op((), |_| {
         super::plan_structured_query(state, library_id, &question, mode, top_k)
     });
     let (compile_result, planning_result) = tokio::join!(compile_future, planning_future);
+    let plan_elapsed_ms = plan_started.elapsed().as_millis();
     let (query_ir, query_compile_usage) = compile_result?;
-    let planning_stage = planning_result?;
+    let mut planning_stage = planning_result?;
+    tracing::info!(
+        stage = "answer.plan_done",
+        library_id = %library_id,
+        elapsed_ms = plan_elapsed_ms,
+        planned_mode = ?planning_stage.plan.planned_mode,
+        "query compile+plan parallel step done"
+    );
+    // For elliptic follow-ups the compiler folds the recovered subject/scope
+    // into `retrieval_query`; when that resolved string differs from the raw
+    // question we re-derive the question-dependent plan/embeddings so the
+    // retrieval lanes search the standalone query instead of the bare
+    // fragment. The expensive question-independent graph/document indexes are
+    // reused, and the common path (resolved == raw) is byte-identical.
+    let retrieval_question = query_ir.effective_retrieval_query(&question).to_string();
+    if retrieval_question != question {
+        tracing::info!(
+            stage = "answer.resolved_retrieval_query",
+            library_id = %library_id,
+            "compiler emitted a resolved standalone retrieval query for an elliptic follow-up"
+        );
+        super::replan_for_resolved_retrieval_query(
+            state,
+            library_id,
+            &mut planning_stage,
+            &retrieval_question,
+            mode,
+            top_k,
+        )
+        .await?;
+    }
     let query_ir_for_retrieval = query_ir.clone();
-    let retrieval_question = question.clone();
+    let retrieve_started = std::time::Instant::now();
     let retrieval_stage = crate::agent_runtime::pipeline::try_op::run_async_try_op(
         planning_stage,
         |planning_stage| {
@@ -101,7 +162,14 @@ pub(crate) async fn prepare_answer_query(
         },
     )
     .await?;
+    tracing::info!(
+        stage = "answer.retrieve_done",
+        library_id = %library_id,
+        elapsed_ms = retrieve_started.elapsed().as_millis(),
+        "structured retrieval done"
+    );
     let rerank_question = question.clone();
+    let rerank_started = std::time::Instant::now();
     let mut rerank_stage = crate::agent_runtime::pipeline::try_op::run_async_try_op(
         retrieval_stage,
         |retrieval_stage| {
@@ -110,6 +178,12 @@ pub(crate) async fn prepare_answer_query(
         },
     )
     .await?;
+    tracing::info!(
+        stage = "answer.rerank_done",
+        library_id = %library_id,
+        elapsed_ms = rerank_started.elapsed().as_millis(),
+        "rerank done"
+    );
     let stage_1_elapsed_ms = stage_1_started.elapsed().as_millis();
 
     // IR-aware consolidation: if the compiler pinned the question to
@@ -141,6 +215,7 @@ pub(crate) async fn prepare_answer_query(
             "removed non-head revision chunks after focused-document consolidation"
         );
     }
+    let source_context_started = std::time::Instant::now();
     let source_context = super::augment_structured_source_context(
         state,
         library_id,
@@ -152,6 +227,12 @@ pub(crate) async fn prepare_answer_query(
         &mut rerank_stage.retrieval.bundle.chunks,
     )
     .await?;
+    tracing::info!(
+        stage = "answer.source_context_done",
+        library_id = %library_id,
+        elapsed_ms = source_context_started.elapsed().as_millis(),
+        "augment_structured_source_context complete"
+    );
     // Temporal hard-filter on the bundle AFTER source-context augmentation.
     // The companion paths (focused-match, source profile, neighbor expansion,
     // library source profile) bypass the AQL temporal filter and pull
@@ -206,6 +287,7 @@ pub(crate) async fn prepare_answer_query(
     if source_context.source_profile_count > 0
         || source_context.neighbor_count > 0
         || source_context.focused_match_count > 0
+        || source_context.procedural_structured_sibling_count > 0
         || source_context.source_slice_count > 0
     {
         tracing::info!(
@@ -215,6 +297,7 @@ pub(crate) async fn prepare_answer_query(
             source_profile_count = source_context.source_profile_count,
             neighbor_count = source_context.neighbor_count,
             focused_match_count = source_context.focused_match_count,
+            procedural_structured_sibling_count = source_context.procedural_structured_sibling_count,
             library_profile_count = source_context.library_profile_count,
             source_slice_count = source_context.source_slice_count,
             "structured source context companions added after consolidation"
@@ -344,6 +427,9 @@ pub(crate) async fn prepare_answer_query(
         consolidation,
         query_ir,
         query_compile_usage,
+        // Filled in by the `prepare_answer_query` wrapper after draining the
+        // span sink scoped around this call.
+        retrieval_spans: Vec::new(),
     })
 }
 
@@ -463,21 +549,93 @@ pub(crate) async fn generate_answer_query(
     let answer_question = if answer_question.is_empty() { user_question } else { answer_question };
     let generation_question = answer_generation_question(effective_question, user_question);
 
-    if let Some(answer) = super::build_ordered_source_units_answer(
+    if let Some(exact_version_answer) = super::build_exact_version_change_summary_answer(
+        &prepared.query_ir,
+        &prepared.structured.context_chunks,
+        &prepared.structured.graph_evidence_context_lines,
+    ) {
+        tracing::info!(
+            stage = "answer.exact_version_deterministic",
+            %execution_id,
+            %library_id,
+            "deterministic exact-version change answer selected"
+        );
+        let verification_stage = verify_generated_answer(
+            state,
+            execution_id,
+            effective_question,
+            AnswerGenerationStage {
+                intent_profile: prepared.structured.intent_profile.clone(),
+                canonical_answer_chunks: selected_runtime_answer_chunks(&prepared),
+                canonical_evidence: super::CanonicalAnswerEvidence {
+                    bundle: None,
+                    chunk_rows: Vec::new(),
+                    structured_blocks: Vec::new(),
+                    technical_facts: Vec::new(),
+                },
+                assistant_grounding: selected_runtime_grounding_evidence(
+                    &prepared,
+                    AssistantGroundingEvidence::default(),
+                ),
+                answer: exact_version_answer,
+                provider: _answer_provider.clone(),
+                usage_json: serde_json::json!({
+                    "deterministic": true,
+                    "answer_kind": "exact_version_change_summary",
+                }),
+                prompt_context: prepared.answer_context.clone(),
+                query_ir: prepared.query_ir.clone(),
+            },
+        )
+        .await?;
+        let final_answer = verification_stage.generation.answer.clone();
+        persist_llm_context_snapshot(
+            state,
+            crate::services::query::llm_context_debug::LlmContextSnapshot {
+                execution_id,
+                library_id,
+                question: user_question.to_string(),
+                total_iterations: 0,
+                iterations: Vec::new(),
+                final_answer: Some(final_answer.clone()),
+                captured_at: chrono::Utc::now(),
+                query_ir: Some(
+                    serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
+                ),
+                agent_loop: None,
+                spans: Vec::new(),
+            },
+        )
+        .await?;
+        return Ok(RuntimeAnswerQueryResult {
+            answer: final_answer,
+            provider: verification_stage.generation.provider,
+            usage_json: verification_stage.generation.usage_json,
+        });
+    }
+
+    if let Some(source_slice_answer) = super::build_ordered_source_slice_answer(
         &prepared.query_ir,
         &prepared.structured.ordered_source_units,
+        &prepared.structured.context_chunks,
     ) {
         tracing::info!(
             stage = "answer.source_slice_deterministic",
             %execution_id,
             %library_id,
-            source_unit_count = prepared.structured.ordered_source_units.len(),
+            source_unit_count = source_slice_answer.unit_count,
+            used_context_fallback = source_slice_answer.used_context_fallback,
             "deterministic ordered source-slice answer selected"
         );
         let usage_json = serde_json::json!({
             "deterministic": true,
-            "answer_kind": "ordered_source_slice",
-            "source_unit_count": prepared.structured.ordered_source_units.len(),
+            "answer_kind": if source_slice_answer.used_context_fallback {
+                "ordered_source_slice_identity_fallback"
+            } else {
+                "ordered_source_slice"
+            },
+            "source_unit_count": source_slice_answer.unit_count,
+            "used_context_fallback": source_slice_answer.used_context_fallback,
         });
         let verification_stage = verify_generated_answer(
             state,
@@ -496,7 +654,7 @@ pub(crate) async fn generate_answer_query(
                     &prepared,
                     AssistantGroundingEvidence::default(),
                 ),
-                answer,
+                answer: source_slice_answer.answer,
                 provider: _answer_provider.clone(),
                 usage_json,
                 prompt_context: prepared.answer_context.clone(),
@@ -519,6 +677,7 @@ pub(crate) async fn generate_answer_query(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
                 agent_loop: None,
+                spans: Vec::new(),
             },
         )
         .await?;
@@ -600,6 +759,7 @@ pub(crate) async fn generate_answer_query(
                                         .unwrap_or(serde_json::Value::Null),
                                 ),
                                 agent_loop: None,
+                                spans: Vec::new(),
                             },
                         )
                         .await?;
@@ -650,10 +810,16 @@ pub(crate) async fn generate_answer_query(
         match single_shot_result {
             Ok(single) => {
                 let single_shot_elapsed_ms = single_shot_start.elapsed().as_millis();
+                let single_answer = enforce_hard_output_boundary(
+                    execution_id,
+                    "answer.single_shot",
+                    &prepared.query_ir,
+                    single.answer.clone(),
+                );
                 tracing::info!(
                     stage = "answer.single_shot_done",
                     %execution_id,
-                    answer_len = single.answer.len(),
+                    answer_len = single_answer.len(),
                     elapsed_ms = single_shot_elapsed_ms,
                     "single-shot grounded-answer fast path done"
                 );
@@ -666,13 +832,14 @@ pub(crate) async fn generate_answer_query(
                         question: user_question.to_string(),
                         total_iterations: single.iterations,
                         iterations: single_debug.clone(),
-                        final_answer: (!single.answer.is_empty()).then(|| single.answer.clone()),
+                        final_answer: (!single_answer.is_empty()).then(|| single_answer.clone()),
                         captured_at: chrono::Utc::now(),
                         query_ir: Some(
                             serde_json::to_value(&prepared.query_ir)
                                 .unwrap_or(serde_json::Value::Null),
                         ),
                         agent_loop: None,
+                        spans: Vec::new(),
                     },
                 )
                 .await?;
@@ -705,7 +872,7 @@ pub(crate) async fn generate_answer_query(
                             technical_facts: Vec::new(),
                         },
                         assistant_grounding: fast_path_grounding.clone(),
-                        answer: single.answer.clone(),
+                        answer: single_answer,
                         provider: single.provider.clone(),
                         usage_json: single.usage_json.clone(),
                         prompt_context: prepared.answer_context.clone(),
@@ -723,13 +890,17 @@ pub(crate) async fn generate_answer_query(
                     );
                     let revision_context =
                         literal_revision_context(&prepared.answer_context, &fast_path_grounding);
+                    let revision_targets = literal_revision_targets(
+                        &verification_stage.generation.answer,
+                        &verification_stage.verification.unsupported_literals,
+                    );
                     match crate::services::query::agent_loop::run_literal_fidelity_revision_turn(
                         state,
                         library_id,
                         generation_question,
                         conversation_history_messages,
                         &verification_stage.generation.answer,
-                        &verification_stage.verification.unsupported_literals,
+                        &revision_targets,
                         &revision_context,
                     )
                     .await
@@ -740,9 +911,15 @@ pub(crate) async fn generate_answer_query(
                                 &revision.usage_json,
                             );
                             single_debug.extend(revision.debug_iterations);
+                            let revision_answer = enforce_hard_output_boundary(
+                                execution_id,
+                                "answer.single_shot_literal_revision",
+                                &prepared.query_ir,
+                                revision.answer.clone(),
+                            );
                             if literal_revision_can_replace_answer(
                                 &verification_stage.generation.answer,
-                                &revision.answer,
+                                &revision_answer,
                             ) {
                                 let revised_stage = verify_generated_answer(
                                     state,
@@ -761,7 +938,7 @@ pub(crate) async fn generate_answer_query(
                                             &prepared,
                                             revision.assistant_grounding,
                                         ),
-                                        answer: revision.answer.clone(),
+                                        answer: revision_answer,
                                         provider: revision.provider.clone(),
                                         usage_json,
                                         prompt_context: prepared.answer_context.clone(),
@@ -821,6 +998,7 @@ pub(crate) async fn generate_answer_query(
                                     .unwrap_or(serde_json::Value::Null),
                             ),
                             agent_loop: None,
+                            spans: Vec::new(),
                         },
                     )
                     .await?;
@@ -890,6 +1068,7 @@ pub(crate) async fn generate_answer_query(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
                 agent_loop: None,
+                spans: Vec::new(),
             },
         )
         .await?;
@@ -928,6 +1107,7 @@ pub(crate) async fn generate_answer_query(
                     serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
                 ),
                 agent_loop: None,
+                spans: Vec::new(),
             },
         )
         .await?;
@@ -981,6 +1161,12 @@ pub(crate) async fn generate_answer_query(
                     elapsed_ms = preflight_single_started.elapsed().as_millis(),
                     "canonical preflight single-shot answer done"
                 );
+                let preflight_answer = enforce_hard_output_boundary(
+                    execution_id,
+                    "answer.preflight_single_shot",
+                    &prepared.query_ir,
+                    preflight_single.answer.clone(),
+                );
                 let mut preflight_debug = preflight_single.debug_iterations.clone();
                 let mut verification_stage = verify_generated_answer(
                     state,
@@ -992,7 +1178,7 @@ pub(crate) async fn generate_answer_query(
                         canonical_evidence: preflight.canonical_evidence.clone(),
                         assistant_grounding:
                             crate::services::query::assistant_grounding::AssistantGroundingEvidence::default(),
-                        answer: preflight_single.answer.clone(),
+                        answer: preflight_answer,
                         provider: preflight_single.provider.clone(),
                         usage_json: preflight_single.usage_json.clone(),
                         prompt_context: preflight.prompt_context.clone(),
@@ -1012,13 +1198,17 @@ pub(crate) async fn generate_answer_query(
                         &preflight.prompt_context,
                         &crate::services::query::assistant_grounding::AssistantGroundingEvidence::default(),
                     );
+                    let revision_targets = literal_revision_targets(
+                        &verification_stage.generation.answer,
+                        &verification_stage.verification.unsupported_literals,
+                    );
                     match crate::services::query::agent_loop::run_literal_fidelity_revision_turn(
                         state,
                         library_id,
                         generation_question,
                         conversation_history_messages,
                         &verification_stage.generation.answer,
-                        &verification_stage.verification.unsupported_literals,
+                        &revision_targets,
                         &revision_context,
                     )
                     .await
@@ -1029,9 +1219,15 @@ pub(crate) async fn generate_answer_query(
                                 &revision.usage_json,
                             );
                             preflight_debug.extend(revision.debug_iterations);
+                            let revision_answer = enforce_hard_output_boundary(
+                                execution_id,
+                                "answer.preflight_single_shot_literal_revision",
+                                &prepared.query_ir,
+                                revision.answer.clone(),
+                            );
                             if literal_revision_can_replace_answer(
                                 &verification_stage.generation.answer,
-                                &revision.answer,
+                                &revision_answer,
                             ) {
                                 let revised_stage = verify_generated_answer(
                                     state,
@@ -1044,7 +1240,7 @@ pub(crate) async fn generate_answer_query(
                                         canonical_evidence: preflight.canonical_evidence.clone(),
                                         assistant_grounding:
                                             crate::services::query::assistant_grounding::AssistantGroundingEvidence::default(),
-                                        answer: revision.answer.clone(),
+                                        answer: revision_answer,
                                         provider: revision.provider.clone(),
                                         usage_json,
                                         prompt_context: preflight.prompt_context.clone(),
@@ -1102,6 +1298,7 @@ pub(crate) async fn generate_answer_query(
                                     .unwrap_or(serde_json::Value::Null),
                             ),
                             agent_loop: None,
+                            spans: Vec::new(),
                         },
                     )
                     .await?;
@@ -1204,6 +1401,7 @@ pub(crate) async fn generate_answer_query(
                 serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
             ),
             agent_loop: None,
+            spans: Vec::new(),
         },
     )
     .await?;
@@ -1464,7 +1662,7 @@ fn query_ir_carries_answerable_focus(ir: &QueryIR, user_question: &str) -> bool 
     if query_ir_has_focused_document_answer_intent(ir) {
         return true;
     }
-    if detect_technical_literal_intent_from_query_ir(user_question, ir).any() {
+    if detect_explicit_technical_literal_intent_from_query_ir(user_question, ir).any() {
         return true;
     }
     matches!(ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
@@ -1476,7 +1674,7 @@ fn structural_clarify_allowed_without_compiler(ir: &QueryIR, user_question: &str
     use crate::domains::query_ir::QueryAct;
 
     match ir.act {
-        QueryAct::ConfigureHow => true,
+        QueryAct::ConfigureHow => question_is_terse_variant_selector(user_question),
         QueryAct::RetrieveValue => question_is_terse_variant_selector(user_question),
         _ => false,
     }
@@ -2126,7 +2324,7 @@ fn query_requires_single_shot_focus_support(query_ir: &QueryIR) -> bool {
     if !matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::RetrieveValue) {
         return false;
     }
-    let intent = detect_technical_literal_intent_from_query_ir("", query_ir);
+    let intent = detect_explicit_technical_literal_intent_from_query_ir("", query_ir);
     intent.any() || query_ir.document_focus.is_some() || query_ir.has_exact_technical_literal()
 }
 
@@ -2185,7 +2383,249 @@ fn answer_omits_expected_technical_literals(
     if context_literals.is_empty() {
         return false;
     }
+    if answer_omits_focused_configuration_paths(answer, query_ir, grounding_context) {
+        return true;
+    }
+    if answer_omits_focused_parameter_listing(answer, query_ir, grounding_context) {
+        return true;
+    }
     collect_intended_technical_literals(answer, intent, 2).is_empty()
+}
+
+fn answer_omits_focused_configuration_paths(
+    answer: &str,
+    query_ir: &QueryIR,
+    grounding_context: &str,
+) -> bool {
+    if !matches!(query_ir.act, QueryAct::ConfigureHow) {
+        return false;
+    }
+    let expected = collect_focused_context_path_literals(grounding_context, query_ir, 8);
+    if expected.is_empty() {
+        return false;
+    }
+    let actual = collect_intended_technical_literals(
+        answer,
+        TechnicalLiteralIntent { wants_paths: true, ..TechnicalLiteralIntent::default() },
+        expected.len().max(8),
+    );
+    expected.iter().any(|literal| !actual.contains(literal))
+}
+
+fn answer_omits_focused_parameter_listing(
+    answer: &str,
+    query_ir: &QueryIR,
+    grounding_context: &str,
+) -> bool {
+    if !matches!(query_ir.act, QueryAct::ConfigureHow) {
+        return false;
+    }
+    let expected = collect_focused_context_parameter_literals(grounding_context, query_ir, 32);
+    if expected.len() < 4 {
+        return false;
+    }
+    let actual = collect_intended_technical_literals(
+        answer,
+        TechnicalLiteralIntent { wants_parameters: true, ..TechnicalLiteralIntent::default() },
+        expected.len().max(32),
+    );
+    expected.iter().any(|literal| !actual.contains(literal))
+}
+
+fn collect_focused_context_parameter_literals(
+    grounding_context: &str,
+    query_ir: &QueryIR,
+    limit: usize,
+) -> HashSet<String> {
+    collect_focused_context_literals(
+        grounding_context,
+        query_ir,
+        limit,
+        "Parameters:",
+        extract_parameter_literals,
+    )
+}
+
+fn collect_focused_context_path_literals(
+    grounding_context: &str,
+    query_ir: &QueryIR,
+    limit: usize,
+) -> HashSet<String> {
+    collect_focused_context_literals(
+        grounding_context,
+        query_ir,
+        limit,
+        "Paths:",
+        extract_explicit_path_literals,
+    )
+}
+
+fn collect_focused_context_literals(
+    grounding_context: &str,
+    query_ir: &QueryIR,
+    limit: usize,
+    label: &str,
+    extractor: fn(&str, usize) -> Vec<String>,
+) -> HashSet<String> {
+    let focus_segments = query_focus_support_segments(query_ir);
+    if focus_segments.is_empty() {
+        return HashSet::new();
+    }
+    let mut literals = HashSet::<String>::new();
+    let mut current_label: Option<String> = None;
+    let mut current_body = String::new();
+    for line in grounding_context.lines() {
+        if let Some(document_label) = exact_technical_literal_document_label(line) {
+            push_focused_context_literals(
+                current_label.as_deref(),
+                &current_body,
+                &focus_segments,
+                limit,
+                label,
+                extractor,
+                &mut literals,
+            );
+            current_label = Some(document_label);
+            current_body.clear();
+            continue;
+        }
+        if current_label.is_some() {
+            current_body.push_str(line);
+            current_body.push('\n');
+        }
+    }
+    push_focused_context_literals(
+        current_label.as_deref(),
+        &current_body,
+        &focus_segments,
+        limit,
+        label,
+        extractor,
+        &mut literals,
+    );
+    literals
+}
+
+fn push_focused_context_literals(
+    document_label: Option<&str>,
+    body: &str,
+    focus_segments: &[BTreeSet<String>],
+    limit: usize,
+    label: &str,
+    extractor: fn(&str, usize) -> Vec<String>,
+    out: &mut HashSet<String>,
+) {
+    let Some(document_label) = document_label else {
+        return;
+    };
+    if out.len() >= limit || !document_label_matches_focus(document_label, focus_segments) {
+        return;
+    }
+    let literal_text = collect_focused_literal_candidate_text(body, label);
+    push_focused_literals_from_text(&literal_text, limit, extractor, out);
+}
+
+fn push_focused_literals_from_text(
+    text: &str,
+    limit: usize,
+    extractor: fn(&str, usize) -> Vec<String>,
+    out: &mut HashSet<String>,
+) {
+    let remaining = limit.saturating_sub(out.len());
+    if remaining == 0 {
+        return;
+    }
+    for literal in extractor(text, remaining) {
+        out.insert(literal);
+        if out.len() >= limit {
+            return;
+        }
+    }
+}
+
+fn collect_labelled_literal_inventory(body: &str, label: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_label = false;
+    for line in body.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix(label) {
+            in_label = true;
+            lines.push(line.to_string());
+            let suffix = rest.trim();
+            if !suffix.is_empty() {
+                lines.push(suffix.to_string());
+            }
+            continue;
+        }
+        if !in_label {
+            continue;
+        }
+        if line.starts_with("- `") {
+            lines.push(line.to_string());
+            continue;
+        }
+        if line.ends_with(':') && !line.starts_with('-') {
+            break;
+        }
+        if !line.is_empty() && !line.starts_with('-') {
+            break;
+        }
+    }
+    lines.join("\n")
+}
+
+fn collect_focused_literal_candidate_text(body: &str, label: &str) -> String {
+    let mut lines = Vec::new();
+    let labelled = collect_labelled_literal_inventory(body, label);
+    if !labelled.is_empty() {
+        lines.push(labelled);
+    }
+    if label == "Parameters:" {
+        for line in body.lines().map(str::trim) {
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(table_row) = line.strip_prefix("- table_row ") {
+                push_structured_parameter_table_row(table_row, &mut lines);
+                continue;
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+fn push_structured_parameter_table_row(row: &str, out: &mut Vec<String>) {
+    let Some((_, cells)) = row.split_once(": ") else {
+        return;
+    };
+    let candidate_cells =
+        cells.split('|').map(str::trim).filter(|cell| !cell.is_empty()).collect::<Vec<_>>();
+    if candidate_cells.len() < 2 {
+        return;
+    }
+    let first = candidate_cells[0];
+    if first.chars().any(char::is_whitespace) {
+        return;
+    }
+    if crate::domains::query_ir::literal_text_is_identifier_shaped(first) {
+        out.push(first.to_string());
+    }
+}
+
+fn exact_technical_literal_document_label(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("- Document: `")?;
+    let (label, _) = rest.split_once('`')?;
+    let label = label.trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
+fn document_label_matches_focus(label: &str, focus_segments: &[BTreeSet<String>]) -> bool {
+    let label_tokens = crate::services::query::text_match::normalized_alnum_tokens(label, 4);
+    focus_segments.iter().any(|segment| {
+        let overlap =
+            crate::services::query::text_match::near_token_overlap_count(segment, &label_tokens);
+        overlap >= segment.len().min(2)
+    })
 }
 
 fn collect_intended_technical_literals(
@@ -2218,6 +2658,95 @@ fn answer_needs_literal_revision(verification: &AnswerVerificationStage) -> bool
     })
 }
 
+pub(crate) fn literal_revision_targets(
+    answer: &str,
+    unsupported_literals: &[String],
+) -> Vec<String> {
+    if unsupported_literals.is_empty() {
+        return Vec::new();
+    }
+    let mut targets = unsupported_literals.to_vec();
+    let mut seen = targets.iter().cloned().collect::<HashSet<_>>();
+    for block in fenced_code_blocks(answer) {
+        if unsupported_literals.iter().any(|literal| fenced_block_contains_literal(&block, literal))
+            && seen.insert(block.clone())
+        {
+            targets.push(block);
+        }
+    }
+    targets
+}
+
+fn fenced_code_blocks(answer: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let bytes = answer.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if !bytes[cursor..].starts_with(b"```") {
+            cursor += utf8_char_len(bytes[cursor]);
+            continue;
+        }
+        let body_start = cursor + 3;
+        let Some(relative_end) = find_subslice(&bytes[body_start..], b"```") else {
+            break;
+        };
+        let body_end = body_start + relative_end;
+        let body = answer[body_start..body_end]
+            .strip_prefix('\n')
+            .or_else(|| answer[body_start..body_end].strip_prefix("\r\n"))
+            .unwrap_or(&answer[body_start..body_end]);
+        let mut lines = body.lines().collect::<Vec<_>>();
+        if lines.first().is_some_and(|line| is_fenced_language_hint(line.trim())) {
+            lines.remove(0);
+        }
+        let normalized = lines
+            .into_iter()
+            .map(|line| line.trim_end_matches('\r'))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        if !normalized.is_empty() {
+            blocks.push(normalized);
+        }
+        cursor = body_end + 3;
+    }
+    blocks
+}
+
+fn fenced_block_contains_literal(block: &str, literal: &str) -> bool {
+    let literal = literal.trim();
+    !literal.is_empty()
+        && block.lines().map(str::trim).any(|line| line == literal || line.contains(literal))
+}
+
+fn is_fenced_language_hint(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && candidate.chars().count() <= 20
+        && candidate
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '+' | '_' | '.'))
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn utf8_char_len(byte: u8) -> usize {
+    if byte < 0x80 {
+        1
+    } else if byte < 0xE0 {
+        2
+    } else if byte < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 fn answer_generation_question<'a>(effective_question: &'a str, user_question: &'a str) -> &'a str {
     let user_question = user_question.trim();
     if !user_question.is_empty() {
@@ -2226,20 +2755,146 @@ fn answer_generation_question<'a>(effective_question: &'a str, user_question: &'
     effective_question.trim()
 }
 
-fn literal_revision_can_replace_answer(draft_answer: &str, revision_answer: &str) -> bool {
-    let draft_chars = draft_answer.trim().chars().count();
+fn literal_revision_can_replace_answer(_draft_answer: &str, revision_answer: &str) -> bool {
     let revision = revision_answer.trim();
-    let revision_chars = revision.chars().count();
-    if revision_chars == 0 {
+    if revision.is_empty() {
         return false;
     }
     if looks_like_internal_effective_query_block(revision) {
         return false;
     }
-    if draft_chars >= 600 && revision_chars.saturating_mul(3) < draft_chars {
-        return false;
-    }
     true
+}
+
+fn enforce_hard_output_boundary(
+    execution_id: Uuid,
+    source_stage: &'static str,
+    query_ir: &QueryIR,
+    answer: String,
+) -> String {
+    let expected_inventory_count =
+        query_ir.source_slice.as_ref().and_then(|source_slice| source_slice.count).map(usize::from);
+    let Some(trimmed) = strip_trailing_inventory_meta_paragraph(&answer, expected_inventory_count)
+    else {
+        return answer;
+    };
+    tracing::info!(
+        stage = "answer.hard_boundary_trim",
+        %execution_id,
+        source_stage,
+        trimmed_chars = answer.chars().count().saturating_sub(trimmed.chars().count()),
+        "trimmed trailing inventory meta paragraph from generated answer"
+    );
+    trimmed
+}
+
+fn strip_trailing_inventory_meta_paragraph(
+    answer: &str,
+    expected_inventory_count: Option<usize>,
+) -> Option<String> {
+    let trimmed = answer.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lines = trimmed.lines().collect::<Vec<_>>();
+    let mut trailing_end = lines.len();
+    while trailing_end > 0 && lines[trailing_end - 1].trim().is_empty() {
+        trailing_end -= 1;
+    }
+    if trailing_end == 0 {
+        return None;
+    }
+    let mut trailing_start = trailing_end - 1;
+    while trailing_start > 0 && !lines[trailing_start - 1].trim().is_empty() {
+        trailing_start -= 1;
+    }
+    if trailing_start == 0 || !lines[trailing_start - 1].trim().is_empty() {
+        return None;
+    }
+    let trailing_paragraph = lines[trailing_start..trailing_end]
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if trailing_paragraph.is_empty()
+        || trailing_paragraph.chars().count() > 300
+        || trailing_paragraph.contains('`')
+        || trailing_paragraph.contains("://")
+        || trailing_paragraph.contains("```")
+        || sentence_terminal_count(&trailing_paragraph) > 2
+        || lines[trailing_start..trailing_end]
+            .iter()
+            .any(|line| is_markdown_inventory_item(line.trim_start()))
+    {
+        return None;
+    }
+    let mut previous_end = trailing_start;
+    while previous_end > 0 && lines[previous_end - 1].trim().is_empty() {
+        previous_end -= 1;
+    }
+    if previous_end == 0 {
+        return None;
+    }
+    let mut previous_start = previous_end - 1;
+    while previous_start > 0 && !lines[previous_start - 1].trim().is_empty() {
+        previous_start -= 1;
+    }
+    if !lines[previous_start..previous_end]
+        .iter()
+        .any(|line| is_markdown_inventory_item(line.trim_start()))
+    {
+        return None;
+    }
+    let list_item_count = markdown_inventory_item_count(&lines[..previous_end]);
+    let expected_count_satisfied = expected_inventory_count
+        .filter(|expected| *expected > 0)
+        .is_some_and(|expected| list_item_count >= expected);
+    if !ends_with_question_mark(&trailing_paragraph) && !expected_count_satisfied {
+        return None;
+    }
+    Some(lines[..previous_end].join("\n").trim_end().to_string())
+}
+
+fn markdown_inventory_item_count(lines: &[&str]) -> usize {
+    lines.iter().filter(|line| is_markdown_inventory_item(line.trim_start())).count()
+}
+
+fn is_markdown_inventory_item(line: &str) -> bool {
+    let mut chars = line.chars();
+    match chars.next() {
+        Some('-' | '*' | '•') => chars.next().is_some_and(char::is_whitespace),
+        Some(first) if first.is_ascii_digit() => {
+            let mut saw_separator = false;
+            for ch in chars {
+                if ch.is_ascii_digit() {
+                    continue;
+                }
+                saw_separator = matches!(ch, '.' | ')');
+                if !saw_separator {
+                    return false;
+                }
+                break;
+            }
+            saw_separator
+                && line
+                    .chars()
+                    .skip_while(|ch| ch.is_ascii_digit())
+                    .nth(1)
+                    .is_some_and(char::is_whitespace)
+        }
+        _ => false,
+    }
+}
+
+fn ends_with_question_mark(value: &str) -> bool {
+    value.trim_end().chars().next_back().is_some_and(|ch| matches!(ch, '?' | '？' | '؟'))
+}
+
+fn sentence_terminal_count(value: &str) -> usize {
+    value
+        .chars()
+        .filter(|ch| matches!(ch, '.' | '!' | '?' | '…' | '。' | '！' | '？' | '؟'))
+        .count()
 }
 
 fn looks_like_internal_effective_query_block(value: &str) -> bool {
@@ -2428,8 +3083,9 @@ mod tests {
     use super::{
         AnswerDisposition, answer_generation_question, classify_answer_disposition,
         classify_answer_disposition_from_evidence, classify_answer_disposition_from_groups,
-        literal_revision_can_replace_answer, selected_runtime_answer_chunks,
-        selected_runtime_grounding_evidence, verify_answer_against_canonical_evidence,
+        literal_revision_can_replace_answer, literal_revision_targets,
+        selected_runtime_answer_chunks, selected_runtime_grounding_evidence,
+        strip_trailing_inventory_meta_paragraph, verify_answer_against_canonical_evidence,
     };
     use crate::domains::query::{GroupedReference, GroupedReferenceKind, QueryVerificationState};
     use crate::domains::query_ir::{
@@ -2437,8 +3093,9 @@ mod tests {
         EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope, UnresolvedRef,
     };
     use crate::services::query::assistant_grounding::AssistantGroundingEvidence;
-    use crate::services::query::execution::RuntimeRetrievedDocumentBrief;
-    use crate::services::query::execution::{ConsolidationDiagnostics, FocusReason};
+    use crate::services::query::execution::{
+        ConsolidationDiagnostics, FocusReason, RuntimeRetrievedDocumentBrief,
+    };
 
     fn sample_ir(confidence: f32, needs_clarification: Option<ClarificationReason>) -> QueryIR {
         sample_ir_with_act(QueryAct::ConfigureHow, confidence, needs_clarification)
@@ -2466,6 +3123,7 @@ mod tests {
             needs_clarification: needs_clarification
                 .map(|reason| ClarificationSpec { reason, suggestion: String::new() }),
             source_slice: None,
+            retrieval_query: None,
             confidence,
         }
     }
@@ -2548,6 +3206,100 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn literal_revision_allows_removing_unsupported_synthetic_code_blocks() {
+        let draft = format!(
+            "{}\n\n```ini\n[Generated]\nalpha = <value>\nbeta = <value>\ngamma = <value>\n```\n",
+            "This setup uses the Alpha connector. ".repeat(24)
+        );
+        let revision = "This setup uses the Alpha connector. The evidence provides the parameter names but not a complete ready configuration file.";
+
+        assert!(literal_revision_can_replace_answer(&draft, revision));
+    }
+
+    #[test]
+    fn strips_trailing_interrogative_meta_paragraph_after_numbered_inventory() {
+        let answer = "1. Alpha item\n2. Beta item\n\nMore detail?";
+
+        assert_eq!(
+            strip_trailing_inventory_meta_paragraph(answer, None).as_deref(),
+            Some("1. Alpha item\n2. Beta item")
+        );
+    }
+
+    #[test]
+    fn strips_meta_paragraph_after_multiline_inventory_item() {
+        let answer =
+            "1. Alpha item\n   Source: alpha.md\n2. Beta item\n   Source: beta.md\n\nMore detail?";
+
+        assert_eq!(
+            strip_trailing_inventory_meta_paragraph(answer, None).as_deref(),
+            Some("1. Alpha item\n   Source: alpha.md\n2. Beta item\n   Source: beta.md")
+        );
+    }
+
+    #[test]
+    fn strips_short_meta_paragraph_when_requested_inventory_count_is_satisfied() {
+        let answer = "1. Alpha item\n2. Beta item\n\nOverall theme: Alpha and Beta changes.";
+
+        assert_eq!(
+            strip_trailing_inventory_meta_paragraph(answer, Some(2)).as_deref(),
+            Some("1. Alpha item\n2. Beta item")
+        );
+    }
+
+    #[test]
+    fn strips_trailing_interrogative_meta_paragraph_after_bulleted_inventory() {
+        let answer = "- Alpha item\n- Beta item\n\nContinue？";
+
+        assert_eq!(
+            strip_trailing_inventory_meta_paragraph(answer, None).as_deref(),
+            Some("- Alpha item\n- Beta item")
+        );
+    }
+
+    #[test]
+    fn preserves_trailing_coverage_limit_statement() {
+        let answer =
+            "1. Alpha item\n2. Beta item\n\nOnly the first two matching items were grounded.";
+
+        assert!(strip_trailing_inventory_meta_paragraph(answer, None).is_none());
+    }
+
+    #[test]
+    fn preserves_non_inventory_question_answer() {
+        let answer = "The selected evidence contains two matching items. Which one is relevant?";
+
+        assert!(strip_trailing_inventory_meta_paragraph(answer, None).is_none());
+    }
+
+    #[test]
+    fn preserves_trailing_technical_paragraph() {
+        let answer = "1. Alpha item\n2. Beta item\n\nCheck `alpha --status`?";
+
+        assert!(strip_trailing_inventory_meta_paragraph(answer, Some(2)).is_none());
+    }
+
+    #[test]
+    fn literal_revision_targets_include_fenced_block_for_unsupported_fenced_line() {
+        let answer = "Supported facts:\n\n```ini\n[Alpha]\nendpoint = https://alpha.example\nsecretKey = <secret>\n```\n\nDone.";
+        let targets = literal_revision_targets(answer, &["secretKey = <secret>".to_string()]);
+
+        assert_eq!(targets[0], "secretKey = <secret>");
+        assert!(targets.iter().any(|target| {
+            target == "[Alpha]\nendpoint = https://alpha.example\nsecretKey = <secret>"
+        }));
+    }
+
+    #[test]
+    fn literal_revision_targets_do_not_duplicate_existing_targets() {
+        let block = "[Alpha]\nsecretKey = <secret>";
+        let answer = format!("```ini\n{block}\n```");
+        let targets = literal_revision_targets(&answer, &[block.to_string()]);
+
+        assert_eq!(targets, vec![block.to_string()]);
+    }
+
     fn retrieved_doc(title: &str, document_hint: &str) -> RuntimeRetrievedDocumentBrief {
         RuntimeRetrievedDocumentBrief {
             title: title.to_string(),
@@ -2624,6 +3376,7 @@ mod tests {
             consolidation: ConsolidationDiagnostics::noop(),
             query_ir,
             query_compile_usage: None,
+            retrieval_spans: Vec::new(),
         }
     }
 
@@ -2793,6 +3546,125 @@ mod tests {
         ));
         assert!(!super::answer_omits_expected_technical_literals(
             "Use `/srv/scans` for the scan directory.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn configure_setup_answer_requires_focused_parameter_coverage() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types =
+            vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        let context = r#"
+Exact technical literals
+- Document: `Provider Alpha setup`
+  Paths: `/opt/alpha/modules/connector/connector.conf`
+  Parameters: `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`
+- Document: `Provider Beta setup`
+  Parameters: `otherEndpoint`, `otherSecret`, `otherTimeout`, `otherFlag`
+"#;
+
+        assert!(super::answer_omits_expected_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, and set `endpointUrl`, `partnerId`, `secretKey`.",
+            &ir,
+            context,
+        ));
+        assert!(super::answer_omits_expected_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/display/display.ini`, and set `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`.",
+            &ir,
+            context,
+        ));
+        let expected = super::collect_focused_context_parameter_literals(context, &ir, 32);
+        let actual = super::collect_intended_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, and set `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`.",
+            super::TechnicalLiteralIntent {
+                wants_parameters: true,
+                ..super::TechnicalLiteralIntent::default()
+            },
+            32,
+        );
+        assert!(
+            expected.iter().all(|literal| actual.contains(literal)),
+            "expected={expected:?} actual={actual:?}"
+        );
+        assert!(!super::answer_omits_expected_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, and set `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn configure_setup_parameter_coverage_ignores_aggregate_metadata_values() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types =
+            vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        let context = r#"
+Exact technical literals
+- Document: `Provider Alpha setup`
+  Paths:
+    - `/opt/alpha/modules/connector/connector.conf`
+  Parameters:
+    - `endpointUrl`
+    - `partnerId`
+    - `secretKey`
+    - `retryInterval`
+
+Prepared segments
+- metadata_block > Provider Alpha setup: Table Summary | Sheet: Module setup | Column: Name | Value Kind: categorical | Most Frequent Values: retryTimeout; sendDetails; auditMode
+- paragraph > Provider Alpha setup: The `sendDetails` flag controls whether payment details are forwarded.
+"#;
+
+        let expected = super::collect_focused_context_parameter_literals(context, &ir, 32);
+
+        assert!(!expected.contains("retryTimeout"));
+        assert!(!expected.contains("sendDetails"));
+        assert!(!expected.contains("auditMode"));
+
+        assert!(super::answer_omits_expected_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, and set `endpointUrl`, `partnerId`.",
+            &ir,
+            context,
+        ));
+        assert!(!super::answer_omits_expected_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, and set `endpointUrl`, `partnerId`, `secretKey`, `retryInterval`.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn configure_setup_parameter_coverage_ignores_prose_only_literals() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types =
+            vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        let context = r#"
+Exact technical literals
+- Document: `Provider Alpha setup`
+  Parameters:
+    - `endpointUrl`
+    - `partnerId`
+    - `secretKey`
+    - `retryTimeout`
+
+Prepared segments
+- paragraph > Provider Alpha setup: Operators may inspect `LOG_LEVEL` while diagnosing a setup issue.
+- list_item > Provider Alpha setup: Keep `backupBeforeChange` enabled for maintenance notes.
+"#;
+
+        let expected = super::collect_focused_context_parameter_literals(context, &ir, 32);
+
+        assert!(!expected.contains("LOG_LEVEL"));
+        assert!(!expected.contains("backupBeforeChange"));
+        assert!(!super::answer_omits_expected_technical_literals(
+            "Set `endpointUrl`, `partnerId`, `secretKey`, and `retryTimeout`.",
             &ir,
             context,
         ));
@@ -3450,6 +4322,51 @@ mod tests {
                 panic!("expected structural clarify without compiler clarification")
             }
         }
+    }
+
+    #[test]
+    fn disposition_answers_non_terse_configure_without_compiler_reason() {
+        let groups = vec![
+            GroupedReference {
+                id: "document:1".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 1,
+                title: "PaymentLink Provider Alpha Manual".to_string(),
+                excerpt: None,
+                evidence_count: 3,
+                support_ids: vec!["chunk:1".to_string()],
+            },
+            GroupedReference {
+                id: "document:2".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 2,
+                title: "PaymentLink Provider Beta Manual".to_string(),
+                excerpt: None,
+                evidence_count: 3,
+                support_ids: vec!["chunk:2".to_string()],
+            },
+            GroupedReference {
+                id: "document:3".to_string(),
+                kind: GroupedReferenceKind::Document,
+                rank: 3,
+                title: "PaymentLink Provider Gamma Manual".to_string(),
+                excerpt: None,
+                evidence_count: 2,
+                support_ids: vec!["chunk:3".to_string()],
+            },
+        ];
+
+        let disposition = classify_answer_disposition_from_groups(
+            "how should operators configure paymentlink provider routing before checkout?",
+            &sample_ir(0.6, None),
+            &[],
+            &groups,
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "non-terse configure questions should answer from retrieved evidence unless the compiler requested clarification"
+        );
     }
 
     #[test]

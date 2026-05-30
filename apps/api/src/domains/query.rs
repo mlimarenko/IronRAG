@@ -220,6 +220,10 @@ impl std::str::FromStr for QueryTurnKind {
 pub struct QueryRuntimeStageSummary {
     pub stage_kind: RuntimeStageKind,
     pub stage_label: String,
+    /// Total wall-clock spent in this stage across its attempts, derived
+    /// from runtime stage records. `None` when no completed timing exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

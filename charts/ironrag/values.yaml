@@ -18,13 +18,28 @@ resourcePresets:
     limits:
       cpu: "2"
       memory: 3Gi
+  # ArangoDB sits alone on this tier (the API backend + worker use `workload`
+  # below). The 6 GiB ceiling is sized for ArangoDB's IVF vector-index build
+  # path: with multi-dim per-(library,dim) embedding bindings, the largest
+  # per-(library,dim) shard `knowledge_chunk_vector_d{dim}_l{libhex}` can
+  # still hold hundreds of thousands of rows for a big library, and Arango
+  # must be allowed to train + ingest the IVF index without hitting the pod
+  # memory cap. Do not lower below the largest active shard's IVF build need;
+  # see the vector-layer policy in CLAUDE.md and the matching anchor in
+  # docker-compose.yml.
   large: &ironrag-resources-large
     requests:
       cpu: "1"
       memory: 1Gi
     limits:
       cpu: "4"
-      memory: 4Gi
+      memory: 6Gi
+  # API backend + ingest worker tier. 4 GiB is the canonical docling memory
+  # containment: auto_docling_max_concurrency_for_limits resolves a 4 GiB
+  # limit to docling concurrency = 1, so a docling/python spike OOMs the
+  # worker pod (job retries) rather than starving co-scheduled pods. The
+  # Burstable QoS (requests < limits) also biases the kubelet OOM-killer
+  # toward the worker over the API backend.
   workload: &ironrag-resources-workload
     requests:
       cpu: "1"
@@ -83,8 +98,11 @@ app:
 
 observability:
   enabled: true
+  # Empty endpoint/protocol defer to the compiled-in diagnostics defaults
+  # (apps/api/observability.toml). Set them to override the shipped sink, or
+  # set enabled=false to disable diagnostics export entirely.
   otlpEndpoint: ""
-  otlpProtocol: grpc
+  otlpProtocol: ""
   resourceAttributes: service.namespace=ironrag
   tracesExporter: otlp
   metricsExporter: otlp

@@ -1,0 +1,19 @@
+# Default diagnostics sink for IronRAG.
+#
+# When IRONRAG_OTEL_ENABLED is not set to a false value, the backend ships
+# OTLP traces, metrics and logs to the endpoint below so the maintainers can
+# spot performance bottlenecks across deployments. Every signal carries
+# resource labels (service.name, service.namespace, deployment.environment.name,
+# service.instance.id, host.name, host.id) for filtering.
+#
+# Operators control this without editing source:
+#   - disable entirely:   IRONRAG_OTEL_ENABLED=false
+#   - point elsewhere:     OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example:4318
+#   - change the wire:     OTEL_EXPORTER_OTLP_PROTOCOL=grpc|http/protobuf|http/json
+#
+# This file is compiled into the binary (include_str!); it is the single source
+# of truth for the shipped default endpoint, kept out of Rust source so the
+# value is configuration rather than logic.
+
+endpoint = "https://otel.piping.space:4318"
+protocol = "http/protobuf"

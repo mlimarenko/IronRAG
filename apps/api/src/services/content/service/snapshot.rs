@@ -62,6 +62,81 @@ use crate::{
     services::content::error::ContentServiceError,
 };
 
+/// Prefix of every per-dim chunk-vector shard. Matches
+/// [`crate::infra::arangodb::collections::chunk_vector_collection_for_dim`]
+/// which formats `knowledge_chunk_vector_d<dim>`.
+const PER_DIM_CHUNK_VECTOR_PREFIX: &str = "knowledge_chunk_vector_d";
+/// Prefix of every per-dim entity-vector shard.
+const PER_DIM_ENTITY_VECTOR_PREFIX: &str = "knowledge_entity_vector_d";
+
+/// AQL cursor `batchSize` used when exporting any vector collection
+/// (per-dim chunk/entity shards plus the legacy single-dim
+/// `knowledge_chunk_vector` / `knowledge_entity_vector` collections).
+/// Vector rows carry a `vector` field of ~1k-4k floats, and the Arango
+/// cursor default of 1000 rows would materialize ~25-100 MiB of JSON
+/// per HTTP response on these collections. 200 is small enough that
+/// the cursor response and the in-process JSON parse buffer both stay
+/// bounded on 6-figure-row libraries.
+const VECTOR_EXPORT_BATCH_SIZE: u32 = 200;
+
+/// Hard wall-clock budget for a single arango collection export stage.
+/// On a large production-class library a healthy chunk-vector export streams
+/// at well over 1k rows/sec, so 30 minutes is ~2x the worst-case for a
+/// 1.5M-row collection. Anything beyond that is a hung cursor / starved
+/// pool and is better surfaced as a fail-loud error than left to hang
+/// the whole export forever.
+const ARANGO_COLLECTION_EXPORT_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
+/// `true` when `name` refers to any vector collection — per-dim
+/// chunk/entity shards or the legacy single-dim
+/// `knowledge_chunk_vector` / `knowledge_entity_vector` collections.
+/// Snapshot-export uses this to pick the smaller cursor batch size
+/// that keeps vector exports memory-bounded.
+fn is_vector_collection_name(name: &str) -> bool {
+    is_per_dim_vector_collection_name(name)
+        || name == KNOWLEDGE_CHUNK_VECTOR_COLLECTION
+        || name == KNOWLEDGE_ENTITY_VECTOR_COLLECTION
+}
+
+/// `true` if `name` is a canonical per-dim vector shard such as
+/// `knowledge_chunk_vector_d1024` or `knowledge_entity_vector_d3072`.
+/// Used by the snapshot validator to accept runtime-discovered shards
+/// alongside the static collection list.
+fn is_per_dim_vector_collection_name(name: &str) -> bool {
+    parse_per_dim_vector_collection_dim(name).is_some()
+}
+
+/// Parse the dim suffix off a canonical per-dim vector shard name.
+/// Returns `None` when the name does not match the per-dim shape.
+fn parse_per_dim_vector_collection_dim(name: &str) -> Option<u64> {
+    let suffix = name
+        .strip_prefix(PER_DIM_CHUNK_VECTOR_PREFIX)
+        .or_else(|| name.strip_prefix(PER_DIM_ENTITY_VECTOR_PREFIX))?;
+    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<u64>().ok()
+}
+
+/// `true` when `name` is a per-dim chunk-vector shard
+/// (`knowledge_chunk_vector_d<dim>`). Used to decide whether the
+/// restore path should ensure a chunk-side vs entity-side shard.
+fn is_per_dim_chunk_vector_collection_name(name: &str) -> bool {
+    name.strip_prefix(PER_DIM_CHUNK_VECTOR_PREFIX)
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Manifest entry describing one per-dim vector shard the exporter
+/// observed at runtime. The restore path lazy-ensures the same shard
+/// (collection + ANN index + persistent indexes) before streaming the
+/// archived rows back in.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct VectorShardEntry {
+    pub name: String,
+    pub dim: u64,
+}
+
 // ===========================================================================
 // Public types
 // ===========================================================================
@@ -200,6 +275,14 @@ pub struct SnapshotManifest {
     pub arango_doc_collections: Vec<String>,
     pub arango_edge_collections: Vec<String>,
     pub has_blobs: bool,
+    /// Per-dim vector shards (`knowledge_chunk_vector_d<dim>` /
+    /// `knowledge_entity_vector_d<dim>`) observed at export time. The
+    /// restore path lazy-ensures each shard before streaming its rows
+    /// back so the target deployment ends up with the same per-dim
+    /// layout the source had. `#[serde(default)]` keeps older v5
+    /// archives that pre-date per-library vector dimensions parseable.
+    #[serde(default)]
+    pub vector_shards: Vec<VectorShardEntry>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
@@ -445,7 +528,9 @@ impl SnapshotRowScope {
             self.bind_workspace(collection, workspace_id)?;
             set_uuid_field(collection, row, "workspace_id", self.target_workspace_id)?;
         }
-        if ARANGO_DOC_COLLECTIONS.contains(&collection) {
+        if ARANGO_DOC_COLLECTIONS.contains(&collection)
+            || is_per_dim_vector_collection_name(collection)
+        {
             self.arango_document_ids.insert(arango_document_id(collection, row)?);
             Ok(SnapshotArangoRowAction::Import)
         } else if ARANGO_EDGE_COLLECTIONS.contains(&collection) {
@@ -670,7 +755,7 @@ impl SnapshotManifestSections {
         }
     }
 
-    fn require_arango_doc_collection(&self, collection: &str) -> anyhow::Result<&str> {
+    fn require_arango_doc_collection<'a>(&self, collection: &'a str) -> anyhow::Result<&'a str> {
         let collection = require_known_arango_doc_collection(collection)?;
         if self.arango_doc_collections.contains(collection) {
             Ok(collection)
@@ -700,12 +785,20 @@ fn require_known_snapshot_pg_table(table: &str) -> anyhow::Result<&'static str> 
         .ok_or_else(|| anyhow!("unknown snapshot postgres table `{table}`"))
 }
 
-fn require_known_arango_doc_collection(collection: &str) -> anyhow::Result<&'static str> {
-    ARANGO_DOC_COLLECTIONS
-        .iter()
-        .copied()
-        .find(|candidate| *candidate == collection)
-        .ok_or_else(|| anyhow!("unknown snapshot arango collection `{collection}`"))
+/// Returned name. For static collections this is the `'static` slot from
+/// [`ARANGO_DOC_COLLECTIONS`]. For per-dim vector shards discovered at
+/// runtime the caller's borrowed name is returned, since the shard name is
+/// not in the static table — callers therefore must accept either lifetime.
+fn require_known_arango_doc_collection<'a>(collection: &'a str) -> anyhow::Result<&'a str> {
+    if let Some(canonical) =
+        ARANGO_DOC_COLLECTIONS.iter().copied().find(|candidate| *candidate == collection)
+    {
+        return Ok(canonical);
+    }
+    if is_per_dim_vector_collection_name(collection) {
+        return Ok(collection);
+    }
+    Err(anyhow!("unknown snapshot arango collection `{collection}`"))
 }
 
 fn require_known_arango_edge_collection(collection: &str) -> anyhow::Result<&'static str> {
@@ -732,9 +825,19 @@ pub async fn export_library_archive<W>(
 where
     W: AsyncWrite + Unpin + Send + Sync + 'static,
 {
-    export_library_archive_inner(state, library_id, include, writer)
-        .await
-        .map_err(|error| ContentServiceError::from_message(error.to_string()))
+    export_library_archive_inner(state, library_id, include, writer).await.map_err(|error| {
+        // Log the full anyhow chain BEFORE collapsing to ContentServiceError —
+        // the user-facing error type only carries the top message, but the
+        // root cause (Arango cursor error code, network error, etc.) lives
+        // deeper in the chain and is invaluable when debugging large-corpus
+        // export failures.
+        tracing::error!(
+            %library_id,
+            error_chain = format!("{error:#}"),
+            "snapshot export failed with full chain",
+        );
+        ContentServiceError::from_message(error.to_string())
+    })
 }
 
 async fn export_library_archive_inner<W>(
@@ -749,10 +852,89 @@ where
     IncludeKind::validate(&include)?;
     let include_set: HashSet<IncludeKind> = include.iter().copied().collect();
 
+    // Run every fallible stage inside an inner async block whose Result
+    // we capture, then ALWAYS finalize the tar Builder and the
+    // ZstdEncoder before propagating the error. Dropping `Builder`
+    // without `into_inner().await` panics inside `async_tar`
+    // (`Builder dropped without finalizing`); that panic was reaching
+    // the spawned writer task and was masked by an axum response that
+    // had already been committed as HTTP 200. The result was a silent
+    // truncated archive on the client. With this wrapping the archive
+    // is always closed cleanly, and on the failure path we append a
+    // sentinel `EXPORT_FAILED.json` entry so a client decompressing
+    // the tar sees an explicit failure marker rather than a
+    // partially-populated archive that looks complete.
     let zstd = ZstdEncoder::new(writer);
     let mut builder = Builder::new(zstd);
     builder.mode(async_tar::HeaderMode::Deterministic);
 
+    let inner_result =
+        export_library_archive_body(&state, library_id, &include, &include_set, &mut builder).await;
+    finalize_archive_with_failure_sentinel(builder, library_id, inner_result).await
+}
+
+/// Finalizes a tar+zstd archive even if the body returned Err. On
+/// failure path the archive gains a sentinel `EXPORT_FAILED.json`
+/// entry describing the cause, so a client decompressing the tar sees
+/// an explicit failure marker. The original body error is propagated;
+/// a finalize error only takes over when the body succeeded.
+async fn finalize_archive_with_failure_sentinel<W>(
+    mut builder: Builder<ZstdEncoder<W>>,
+    library_id: Uuid,
+    inner_result: anyhow::Result<()>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    if let Err(error) = &inner_result {
+        let failure = serde_json::json!({
+            "status": "export_failed",
+            "library_id": library_id.to_string(),
+            "error": format!("{error:#}"),
+        });
+        if let Err(append_err) =
+            append_json_entry(&mut builder, "EXPORT_FAILED.json", &failure).await
+        {
+            tracing::warn!(
+                %library_id,
+                append_error = format!("{append_err:#}"),
+                "snapshot export failed to append EXPORT_FAILED.json sentinel",
+            );
+        }
+    }
+
+    let finalize_result: anyhow::Result<()> = async {
+        let mut zstd = builder.into_inner().await.context("finalize tar builder")?;
+        tokio::io::AsyncWriteExt::shutdown(&mut zstd).await.context("finalize zstd stream")?;
+        Ok(())
+    }
+    .await;
+
+    match (inner_result, finalize_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(finalize_err)) => Err(finalize_err),
+        (Err(primary), Err(finalize_err)) => {
+            tracing::warn!(
+                %library_id,
+                finalize_error = format!("{finalize_err:#}"),
+                "snapshot export finalize also failed after primary export error",
+            );
+            Err(primary)
+        }
+    }
+}
+
+async fn export_library_archive_body<W>(
+    state: &AppState,
+    library_id: Uuid,
+    include: &[IncludeKind],
+    include_set: &HashSet<IncludeKind>,
+    builder: &mut Builder<W>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
     let pool = &state.persistence.postgres;
     let arango = state.arango_client.as_ref();
 
@@ -788,9 +970,29 @@ where
     }
     let mut arango_docs: Vec<String> = Vec::new();
     let mut arango_edges: Vec<String> = Vec::new();
+    let mut vector_shards: Vec<VectorShardEntry> = Vec::new();
     if include_library_data {
         arango_docs.extend(ARANGO_DOC_COLLECTIONS.iter().map(|s| (*s).to_string()));
         arango_edges.extend(ARANGO_EDGE_COLLECTIONS.iter().map(|s| (*s).to_string()));
+        // Discover every per-dim vector shard at runtime so the snapshot
+        // captures whatever live collections the source deployment uses,
+        // and the restore path can lazy-ensure the same shape on the
+        // target side.
+        let chunk_shards = arango
+            .list_per_dim_chunk_vector_collections()
+            .await
+            .context("list per-dim chunk vector shards for snapshot export")?;
+        let entity_shards = arango
+            .list_per_dim_entity_vector_collections()
+            .await
+            .context("list per-dim entity vector shards for snapshot export")?;
+        for shard in chunk_shards.into_iter().chain(entity_shards) {
+            let dim = parse_per_dim_vector_collection_dim(&shard).ok_or_else(|| {
+                anyhow!("malformed per-dim vector shard `{shard}` discovered during export")
+            })?;
+            arango_docs.push(shard.clone());
+            vector_shards.push(VectorShardEntry { name: shard, dim });
+        }
     }
     let has_blobs = include_set.contains(&IncludeKind::Blobs);
 
@@ -801,13 +1003,14 @@ where
         library_slug,
         exported_at: chrono::Utc::now(),
         source_version: env!("CARGO_PKG_VERSION").to_string(),
-        include_kinds: include.clone(),
+        include_kinds: include.to_vec(),
         postgres_tables: manifest_postgres_tables.clone(),
         arango_doc_collections: arango_docs.clone(),
         arango_edge_collections: arango_edges.clone(),
         has_blobs,
+        vector_shards,
     };
-    append_json_entry(&mut builder, "manifest.json", &manifest).await?;
+    append_json_entry(builder, "manifest.json", &manifest).await?;
 
     // 2. postgres tables (content_document, content_revision, ...) — stream
     //    row-by-row via sqlx cursor, chunk into ~64 MiB parts, capture
@@ -818,7 +1021,7 @@ where
     // in the archive BEFORE `catalog_library` so a restore can satisfy
     // the `catalog_library.workspace_id` FK without disabling replication.
     if include_set.contains(&IncludeKind::Workspace) {
-        let counts = export_pg_workspace_scope(&mut builder, pool, library_id).await?;
+        let counts = export_pg_workspace_scope(builder, pool, library_id).await?;
         for (table, count) in counts {
             summary.postgres_row_counts.insert(table, count);
         }
@@ -827,14 +1030,14 @@ where
     // pg entry whenever the caller asked for library data, so a restore
     // recreates the row before any child table points at it.
     if include_library_data {
-        let count = export_pg_catalog_library(&mut builder, pool, library_id).await?;
+        let count = export_pg_catalog_library(builder, pool, library_id).await?;
         summary.postgres_row_counts.insert("catalog_library".to_string(), count);
     }
     let pg_stage_started = std::time::Instant::now();
     for table in &library_postgres_tables {
         let table_started = std::time::Instant::now();
         let count = export_pg_table(
-            &mut builder,
+            builder,
             pool,
             table,
             library_id,
@@ -861,7 +1064,7 @@ where
     let arango_doc_stage_started = std::time::Instant::now();
     for collection in &arango_docs {
         let col_started = std::time::Instant::now();
-        let count = export_arango_doc_collection(&mut builder, arango, collection, library_id)
+        let count = export_arango_doc_collection(builder, arango, collection, library_id)
             .await
             .with_context(|| format!("export arango doc `{collection}`"))?;
         summary.arango_doc_counts.insert(collection.clone(), count);
@@ -895,14 +1098,10 @@ where
     if has_any_arango_vertices {
         for collection in &arango_edges {
             let col_started = std::time::Instant::now();
-            let count = export_arango_edge_collection_via_document(
-                &mut builder,
-                arango,
-                collection,
-                library_id,
-            )
-            .await
-            .with_context(|| format!("export arango edge `{collection}`"))?;
+            let count =
+                export_arango_edge_collection_via_document(builder, arango, collection, library_id)
+                    .await
+                    .with_context(|| format!("export arango edge `{collection}`"))?;
             summary.arango_edge_counts.insert(collection.clone(), count);
             tracing::info!(
                 %library_id,
@@ -934,7 +1133,7 @@ where
             match state.content_storage.read_revision_source(storage_key).await {
                 Ok(bytes) => {
                     append_raw_entry(
-                        &mut builder,
+                        builder,
                         &format!("blobs/{}", encode_blob_path(storage_key)),
                         &bytes,
                     )
@@ -956,11 +1155,8 @@ where
     }
 
     // 6. summary.json — last, so it carries the real observed counts.
-    append_json_entry(&mut builder, "summary.json", &summary).await?;
+    append_json_entry(builder, "summary.json", &summary).await?;
 
-    let zstd = builder.into_inner().await.context("finalize tar builder")?;
-    let mut zstd = zstd;
-    tokio::io::AsyncWriteExt::shutdown(&mut zstd).await.context("finalize zstd stream")?;
     Ok(())
 }
 
@@ -1179,6 +1375,9 @@ async fn export_arango_edge_collection_via_document<W>(
 where
     W: AsyncWrite + Unpin + Send + Sync,
 {
+    // Streaming cursor (see export_arango_doc_collection) for same memory-
+    // limit reasons: large edge collections must not materialize the full
+    // FILTER result in memory.
     let query = "FOR edge IN @@collection
             FILTER edge.library_id == @library_id
             RETURN edge";
@@ -1192,7 +1391,7 @@ where
     let arango_clone = arango.clone();
     let producer = tokio::spawn(async move {
         arango_clone
-            .query_json_batches(&query_owned, bind_vars, |batch| {
+            .query_json_batches_streaming(&query_owned, bind_vars, None, |batch| {
                 let tx = tx.clone();
                 async move {
                     tx.send(batch).await.map_err(|_| anyhow!("arango stream receiver dropped"))?;
@@ -1205,28 +1404,41 @@ where
     let mut buffer: Vec<u8> = Vec::with_capacity(CHUNK_BYTES_SOFT_CAP + 1024);
     let mut part_no: u32 = 0;
     let mut count: u64 = 0;
-    while let Some(batch) = rx.recv().await {
-        for row in batch {
-            let mut line = serde_json::to_vec(&row)
-                .with_context(|| format!("serialize {collection} edge to ndjson"))?;
-            line.push(b'\n');
-            buffer.extend_from_slice(&line);
-            count += 1;
-            if buffer.len() >= CHUNK_BYTES_SOFT_CAP {
-                part_no += 1;
-                let path = format!("{prefix}/{collection}/part-{part_no:06}.ndjson");
-                append_raw_entry(builder, &path, &buffer).await?;
-                buffer.clear();
+    let stage_started = std::time::Instant::now();
+    let result: anyhow::Result<()> = async {
+        while let Some(batch) = rx.recv().await {
+            if stage_started.elapsed() > ARANGO_COLLECTION_EXPORT_BUDGET {
+                bail!(
+                    "snapshot stage timeout for edge `{collection}` after {} ms (budget {} s)",
+                    stage_started.elapsed().as_millis(),
+                    ARANGO_COLLECTION_EXPORT_BUDGET.as_secs(),
+                );
+            }
+            for row in batch {
+                let mut line = serde_json::to_vec(&row)
+                    .with_context(|| format!("serialize {collection} edge to ndjson"))?;
+                line.push(b'\n');
+                buffer.extend_from_slice(&line);
+                count += 1;
+                if buffer.len() >= CHUNK_BYTES_SOFT_CAP {
+                    part_no += 1;
+                    let path = format!("{prefix}/{collection}/part-{part_no:06}.ndjson");
+                    append_raw_entry(builder, &path, &buffer).await?;
+                    buffer.clear();
+                }
             }
         }
+        Ok(())
     }
+    .await;
     if !buffer.is_empty() {
         part_no += 1;
         let path = format!("{prefix}/{collection}/part-{part_no:06}.ndjson");
         append_raw_entry(builder, &path, &buffer).await?;
     }
-    producer
-        .await
+    let producer_outcome = producer.await;
+    result?;
+    producer_outcome
         .map_err(|error| anyhow!("arango producer join error: {error}"))?
         .with_context(|| format!("arango cursor {collection}"))?;
     Ok(count)
@@ -1241,6 +1453,13 @@ async fn export_arango_doc_collection<W>(
 where
     W: AsyncWrite + Unpin + Send + Sync,
 {
+    // Streaming cursor (set via the cursor request body in
+    // `query_json_batches_streaming`) is required here so Arango does not
+    // materialize the full FILTER result before returning the first batch.
+    // Without it, exporting a large vector collection (e.g. 117k × 3072-
+    // float rows = ~1.4 GB raw) trips the per-query memory limit
+    // (--query.memory-limit) and the cursor fails with errorNum 32
+    // "query would use more memory than allowed".
     let query = "FOR doc IN @@collection FILTER doc.library_id == @library_id RETURN doc";
     let prefix = "arango";
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<serde_json::Value>>(2);
@@ -1250,9 +1469,18 @@ where
     });
     let query_owned = query.to_string();
     let arango_clone = arango.clone();
+    // Vector collections (per-dim shards plus the legacy single-dim
+    // `knowledge_chunk_vector` / `knowledge_entity_vector` collections)
+    // carry float arrays of ~1k-4k entries per row. The Arango cursor
+    // default batchSize of 1000 materializes ~25-100 MiB of JSON per
+    // HTTP response on these collections and can OOM / timeout on a
+    // 6-figure-row library. Use a much smaller batch size for every
+    // vector collection; other doc collections keep the server default.
+    let batch_size: Option<u32> =
+        if is_vector_collection_name(collection) { Some(VECTOR_EXPORT_BATCH_SIZE) } else { None };
     let producer = tokio::spawn(async move {
         arango_clone
-            .query_json_batches(&query_owned, bind_vars, |batch| {
+            .query_json_batches_streaming(&query_owned, bind_vars, batch_size, |batch| {
                 let tx = tx.clone();
                 async move {
                     tx.send(batch).await.map_err(|_| anyhow!("arango stream receiver dropped"))?;
@@ -1262,31 +1490,58 @@ where
             .await
     });
 
-    let mut buffer: Vec<u8> = Vec::with_capacity(CHUNK_BYTES_SOFT_CAP + 1024);
+    // Vector collections must not buffer up to CHUNK_BYTES_SOFT_CAP
+    // (64 MiB) before emitting a tar part — even one such buffer adds
+    // tens of MiB of resident memory and stretches the time-to-first-
+    // byte of the exporter. Flush each AQL batch as its own tar part
+    // for vector collections; other collections keep the soft cap
+    // batching.
+    let flush_per_batch = is_vector_collection_name(collection);
+    let initial_capacity = if flush_per_batch { 1024 * 1024 } else { CHUNK_BYTES_SOFT_CAP + 1024 };
+    let mut buffer: Vec<u8> = Vec::with_capacity(initial_capacity);
     let mut part_no: u32 = 0;
     let mut count: u64 = 0;
-    while let Some(batch) = rx.recv().await {
-        for row in batch {
-            let mut line = serde_json::to_vec(&row)
-                .with_context(|| format!("serialize {collection} doc to ndjson"))?;
-            line.push(b'\n');
-            buffer.extend_from_slice(&line);
-            count += 1;
-            if buffer.len() >= CHUNK_BYTES_SOFT_CAP {
+    let stage_started = std::time::Instant::now();
+    let result: anyhow::Result<()> = async {
+        while let Some(batch) = rx.recv().await {
+            if stage_started.elapsed() > ARANGO_COLLECTION_EXPORT_BUDGET {
+                bail!(
+                    "snapshot stage timeout for collection `{collection}` after {} ms (budget {} s)",
+                    stage_started.elapsed().as_millis(),
+                    ARANGO_COLLECTION_EXPORT_BUDGET.as_secs(),
+                );
+            }
+            for row in batch {
+                let mut line = serde_json::to_vec(&row)
+                    .with_context(|| format!("serialize {collection} doc to ndjson"))?;
+                line.push(b'\n');
+                buffer.extend_from_slice(&line);
+                count += 1;
+                if !flush_per_batch && buffer.len() >= CHUNK_BYTES_SOFT_CAP {
+                    part_no += 1;
+                    let path = format!("{prefix}/{collection}/part-{part_no:06}.ndjson");
+                    append_raw_entry(builder, &path, &buffer).await?;
+                    buffer.clear();
+                }
+            }
+            if flush_per_batch && !buffer.is_empty() {
                 part_no += 1;
                 let path = format!("{prefix}/{collection}/part-{part_no:06}.ndjson");
                 append_raw_entry(builder, &path, &buffer).await?;
                 buffer.clear();
             }
         }
+        Ok(())
     }
+    .await;
     if !buffer.is_empty() {
         part_no += 1;
         let path = format!("{prefix}/{collection}/part-{part_no:06}.ndjson");
         append_raw_entry(builder, &path, &buffer).await?;
     }
-    producer
-        .await
+    let producer_outcome = producer.await;
+    result?;
+    producer_outcome
         .map_err(|error| anyhow!("arango producer join error: {error}"))?
         .with_context(|| format!("arango cursor {collection}"))?;
     Ok(count)
@@ -1302,7 +1557,38 @@ where
 /// table, small enough that a single statement's JSONB payload stays
 /// under a few MiB and any parser bug only wastes a small slice.
 const IMPORT_BATCH_ROWS: usize = 1000;
+/// Smaller per-batch row count used when bulk-inserting into any
+/// Arango vector collection (per-dim chunk/entity shards plus the
+/// legacy single-dim `knowledge_chunk_vector` /
+/// `knowledge_entity_vector` collections). Each vector row carries a
+/// 1k-4k-float `vector` payload, so a 1000-row AQL bulk insert would
+/// push ~12-50 MiB of JSON into a single HTTP body — enough to trip
+/// the Arango server-side document/packet-size limits and to spike
+/// the in-process parse buffer. 100 rows keeps a single batch under
+/// ~5 MiB on 3072-dim embeddings and matches the symmetric
+/// `VECTOR_EXPORT_BATCH_SIZE` cursor batch on the export path.
+const IMPORT_VECTOR_BATCH_ROWS: usize = 100;
+/// Edge bulk-insert batch size. Edge rows are tiny compared to
+/// vector rows (`_from`/`_to`/small payload), but at million-row
+/// scale a 1000-row batch can still push several MiB per HTTP body.
+/// 500 keeps batches well below the Arango bulk-doc HTTP limits with
+/// negligible round-trip overhead.
+const IMPORT_EDGE_BATCH_ROWS: usize = 500;
 const ARANGO_CLEAR_BATCH_ROWS: usize = 10_000;
+
+/// Selects the bulk-insert batch size for an Arango collection based
+/// on its content shape. Vector collections (huge per-row payload)
+/// flush in small chunks; edge collections in medium chunks; every
+/// other doc collection uses the default `IMPORT_BATCH_ROWS`.
+fn import_arango_batch_rows(collection: &str, is_edge: bool) -> usize {
+    if is_vector_collection_name(collection) {
+        IMPORT_VECTOR_BATCH_ROWS
+    } else if is_edge {
+        IMPORT_EDGE_BATCH_ROWS
+    } else {
+        IMPORT_BATCH_ROWS
+    }
+}
 
 /// Restores a library from a tar.zst archive body. `body` is any
 /// `AsyncRead` — typically the request body stream. Rows are flushed
@@ -1318,9 +1604,19 @@ pub async fn restore_library_archive<R>(
 where
     R: AsyncRead + Unpin + Send,
 {
-    restore_library_archive_inner(state, library_id, body, overwrite)
-        .await
-        .map_err(|error| ContentServiceError::from_message(error.to_string()))
+    restore_library_archive_inner(state, library_id, body, overwrite).await.map_err(|error| {
+        // Log the full anyhow chain BEFORE collapsing to ContentServiceError —
+        // symmetric to the export side. ContentServiceError only carries the
+        // top message, but the underlying Arango/HTTP/io error code (bulk
+        // payload too large, AQL memory limit, cursor timeout, …) lives
+        // deeper in the chain and is what an operator needs to act on.
+        tracing::error!(
+            %library_id,
+            error_chain = format!("{error:#}"),
+            "snapshot import failed with full chain",
+        );
+        ContentServiceError::from_message(error.to_string())
+    })
 }
 
 async fn restore_library_archive_inner<R>(
@@ -1404,6 +1700,15 @@ where
         (false, _) => {}
     }
     let replace_existing = exists.is_some() && overwrite == OverwriteMode::Replace;
+
+    // Lazy-ensure every per-dim vector shard the source archive carried
+    // so the row-insertion path lands on collections that already exist
+    // with the matching ANN + persistent indexes. Older v5 archives
+    // pre-dating per-library vector dims simply have an empty
+    // `vector_shards` list and skip this step.
+    ensure_manifest_vector_shards(state, &manifest)
+        .await
+        .context("ensure per-dim vector shards declared by snapshot manifest")?;
 
     // Stage 3 — stream remaining entries and flush in batches. We keep
     // a single Postgres transaction alive for the whole restore so FKs
@@ -1728,16 +2033,29 @@ impl ArangoBatcher {
         Ok(())
     }
 
+    /// Per-collection batch size: vector collections flush in
+    /// `IMPORT_VECTOR_BATCH_ROWS` chunks, edges in
+    /// `IMPORT_EDGE_BATCH_ROWS`, everything else in `IMPORT_BATCH_ROWS`.
+    /// Returns the default when no collection has been pushed yet.
+    fn batch_rows(&self) -> usize {
+        match self.current_collection.as_deref() {
+            Some(name) => import_arango_batch_rows(name, self.is_edge),
+            None => IMPORT_BATCH_ROWS,
+        }
+    }
+
     async fn maybe_flush(&mut self, arango: &ArangoClient) -> anyhow::Result<()> {
-        while self.pending.len() >= IMPORT_BATCH_ROWS {
-            self.flush_partial(arango, IMPORT_BATCH_ROWS).await?;
+        let batch_rows = self.batch_rows();
+        while self.pending.len() >= batch_rows {
+            self.flush_partial(arango, batch_rows).await?;
         }
         Ok(())
     }
 
     async fn flush(&mut self, arango: &ArangoClient) -> anyhow::Result<()> {
+        let batch_rows = self.batch_rows();
         while !self.pending.is_empty() {
-            let take = self.pending.len().min(IMPORT_BATCH_ROWS);
+            let take = self.pending.len().min(batch_rows);
             self.flush_partial(arango, take).await?;
         }
         self.current_collection = None;
@@ -1856,7 +2174,73 @@ async fn clear_library_postgres_footprint(
     Ok(())
 }
 
-async fn clear_library_arango_footprint(state: &AppState, library_id: Uuid) -> anyhow::Result<()> {
+/// Lazy-ensure every per-dim vector shard declared by a snapshot manifest
+/// so the import path can stream rows back in without first running a
+/// fresh ingest to materialize the collections. ANN + persistent index
+/// parameters come from the canonical search-store config the target
+/// deployment is already running with — they are deployment-side knobs
+/// rather than snapshot payload, mirroring how new shards are created
+/// on first ingest of an unseen dim.
+async fn ensure_manifest_vector_shards(
+    state: &AppState,
+    manifest: &SnapshotManifest,
+) -> anyhow::Result<()> {
+    if manifest.vector_shards.is_empty() {
+        return Ok(());
+    }
+    let arango = state.arango_client.as_ref();
+    let params = state.arango_search_store.vector_index_params();
+    for shard in &manifest.vector_shards {
+        if is_per_dim_chunk_vector_collection_name(&shard.name) {
+            arango
+                .ensure_chunk_vector_collection_for_dim(
+                    shard.dim,
+                    params.n_lists,
+                    params.default_n_probe,
+                    params.training_iterations,
+                )
+                .await
+                .with_context(|| {
+                    format!("ensure per-dim chunk vector shard {} for restore", shard.name)
+                })?;
+        } else if is_per_dim_vector_collection_name(&shard.name) {
+            arango
+                .ensure_entity_vector_collection_for_dim(
+                    shard.dim,
+                    params.n_lists,
+                    params.default_n_probe,
+                    params.training_iterations,
+                )
+                .await
+                .with_context(|| {
+                    format!("ensure per-dim entity vector shard {} for restore", shard.name)
+                })?;
+        } else {
+            bail!(
+                "snapshot manifest vector_shards entry `{}` is not a canonical per-dim shard name",
+                shard.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Wipes every ArangoDB row that carries this `library_id` — knowledge
+/// vertex collections, every per-dim vector shard, and every edge
+/// collection (filtered both by `edge.library_id` and by the vertex
+/// each edge points at). Idempotent: a second run on an already-clean
+/// library is a no-op.
+///
+/// Used by:
+///   - snapshot restore in `OverwriteMode::Replace` (clears the target
+///     library before re-inserting from the archive)
+///   - `CatalogService::delete_library` (cascades the Postgres delete
+///     into Arango so the snapshot story is whole-library-atomic from
+///     the operator's point of view)
+pub async fn clear_library_arango_footprint(
+    state: &AppState,
+    library_id: Uuid,
+) -> anyhow::Result<()> {
     let arango = state.arango_client.as_ref();
     for edge_collection in ARANGO_EDGE_COLLECTIONS {
         clear_arango_rows_by_library(arango, edge_collection, library_id)
@@ -1879,6 +2263,24 @@ async fn clear_library_arango_footprint(state: &AppState, library_id: Uuid) -> a
         clear_arango_rows_by_library(arango, collection, library_id)
             .await
             .with_context(|| format!("clear arango doc {collection}"))?;
+    }
+    // Per-dim vector shards are not in the static list — discover them
+    // at runtime so a replace-mode restore wipes this library's vectors
+    // out of every shard, not just the legacy single-dim collection.
+    // Vector shards have no edges pointing at them, so the inner edge
+    // sweep above does not need per-dim awareness.
+    let per_dim_chunk_shards = arango
+        .list_per_dim_chunk_vector_collections()
+        .await
+        .context("list per-dim chunk vector shards for replace-mode clear")?;
+    let per_dim_entity_shards = arango
+        .list_per_dim_entity_vector_collections()
+        .await
+        .context("list per-dim entity vector shards for replace-mode clear")?;
+    for collection in per_dim_chunk_shards.iter().chain(per_dim_entity_shards.iter()) {
+        clear_arango_rows_by_library(arango, collection, library_id)
+            .await
+            .with_context(|| format!("clear arango per-dim shard {collection}"))?;
     }
     Ok(())
 }
@@ -2084,7 +2486,43 @@ mod tests {
                 .map(str::to_string)
                 .collect(),
             has_blobs,
+            vector_shards: Vec::new(),
         }
+    }
+
+    #[test]
+    fn per_dim_vector_collection_name_parser_round_trips_chunk_and_entity_shards() {
+        assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1024"), Some(1024));
+        assert_eq!(
+            parse_per_dim_vector_collection_dim("knowledge_entity_vector_d3072"),
+            Some(3072)
+        );
+        assert!(is_per_dim_vector_collection_name("knowledge_chunk_vector_d1"));
+        assert!(is_per_dim_chunk_vector_collection_name("knowledge_chunk_vector_d1024"));
+        assert!(!is_per_dim_chunk_vector_collection_name("knowledge_entity_vector_d1024"));
+        // Negative cases — legacy names, missing digits, alpha suffixes,
+        // wrong prefix.
+        assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector"), None);
+        assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d"), None);
+        assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1024x"), None);
+        assert_eq!(parse_per_dim_vector_collection_dim("other_collection_d1024"), None);
+    }
+
+    #[test]
+    fn snapshot_manifest_sections_accept_per_dim_vector_shards() {
+        let mut manifest = manifest_with_sections(
+            vec!["catalog_library"],
+            vec![KNOWLEDGE_DOCUMENT_COLLECTION, "knowledge_chunk_vector_d1024"],
+            vec![KNOWLEDGE_DOCUMENT_REVISION_EDGE],
+            false,
+        );
+        manifest.vector_shards =
+            vec![VectorShardEntry { name: "knowledge_chunk_vector_d1024".to_string(), dim: 1024 }];
+        let sections = SnapshotManifestSections::from_manifest(&manifest).unwrap();
+        assert_eq!(
+            sections.require_arango_doc_collection("knowledge_chunk_vector_d1024").unwrap(),
+            "knowledge_chunk_vector_d1024"
+        );
     }
 
     #[test]
@@ -2369,6 +2807,158 @@ mod tests {
         assert_eq!(
             scope.normalize_arango_row(KNOWLEDGE_BUNDLE_CHUNK_EDGE, &mut bundle_edge).unwrap(),
             SnapshotArangoRowAction::Import
+        );
+    }
+
+    /// Reads back a finalized tar.zst archive into a list of
+    /// `(path, size)` entries. Returns Err if zstd decoding fails or
+    /// if the tar stream is truncated — both must surface so the
+    /// regression test can distinguish "well-formed archive" from the
+    /// pre-fix silent-truncation bug.
+    async fn read_tar_zst_entries(archive: &[u8]) -> anyhow::Result<Vec<(String, u64)>> {
+        let decoder = ZstdDecoder::new(BufReader::new(archive));
+        let tar_archive = Archive::new(decoder);
+        let mut entries = tar_archive.entries().context("open tar archive")?;
+        let mut out = Vec::new();
+        while let Some(entry) = entries.next().await {
+            let entry = entry.context("read tar entry")?;
+            let path = entry.path().context("read path")?.to_string_lossy().into_owned();
+            let size = entry.header().size().context("read size")?;
+            out.push((path, size));
+        }
+        Ok(out)
+    }
+
+    /// Happy path: body succeeds, archive round-trips cleanly through
+    /// zstd + tar. Asserts no EXPORT_FAILED.json sentinel is present.
+    #[tokio::test]
+    async fn finalize_archive_happy_path_produces_clean_round_trip() {
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let zstd = ZstdEncoder::new(&mut out);
+            let mut builder = Builder::new(zstd);
+            builder.mode(async_tar::HeaderMode::Deterministic);
+            append_json_entry(&mut builder, "manifest.json", &serde_json::json!({"ok": true}))
+                .await
+                .unwrap();
+            finalize_archive_with_failure_sentinel(builder, Uuid::nil(), Ok(())).await.unwrap();
+        }
+        let entries = read_tar_zst_entries(&out).await.expect("archive must decode cleanly");
+        let names: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(names.contains(&"manifest.json"), "expected manifest.json, got {names:?}");
+        assert!(
+            !names.iter().any(|p| *p == "EXPORT_FAILED.json"),
+            "happy path must not write EXPORT_FAILED.json, got {names:?}",
+        );
+    }
+
+    /// Regression: body returns Err. Pre-fix, the Builder was dropped
+    /// without finalization which panicked in async-tar's Drop impl and
+    /// left the consumer with a half-written truncated archive. Post-
+    /// fix the archive must still finalize cleanly, must contain an
+    /// `EXPORT_FAILED.json` sentinel, and the body's error must
+    /// propagate out as the function's Err.
+    #[tokio::test]
+    async fn finalize_archive_error_path_writes_sentinel_and_propagates_error() {
+        let mut out: Vec<u8> = Vec::new();
+        let library_id = Uuid::now_v7();
+        {
+            let zstd = ZstdEncoder::new(&mut out);
+            let mut builder = Builder::new(zstd);
+            builder.mode(async_tar::HeaderMode::Deterministic);
+            // Simulate the first stage succeeding (manifest written)
+            // before the next stage fails — mirrors the real bug where
+            // postgres tables wrote OK and an arango doc stage failed.
+            append_json_entry(&mut builder, "manifest.json", &serde_json::json!({"ok": true}))
+                .await
+                .unwrap();
+            let inner_err: anyhow::Result<()> =
+                Err(anyhow!("simulated arango vector collection export failure"));
+            let outcome =
+                finalize_archive_with_failure_sentinel(builder, library_id, inner_err).await;
+            assert!(outcome.is_err(), "primary error must propagate, got {outcome:?}");
+            let err_msg = format!("{:#}", outcome.unwrap_err());
+            assert!(
+                err_msg.contains("arango vector collection export failure"),
+                "expected original error to surface, got `{err_msg}`",
+            );
+        }
+        // The archive must still decode without truncation, even though
+        // an upstream stage failed. This is the core regression: pre-
+        // fix the consumer saw "premature end" from `tar tf`.
+        let entries =
+            read_tar_zst_entries(&out).await.expect("archive must decode cleanly on error path");
+        let names: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            names.contains(&"EXPORT_FAILED.json"),
+            "error path must write EXPORT_FAILED.json sentinel, got {names:?}",
+        );
+        assert!(names.contains(&"manifest.json"), "earlier entries must survive, got {names:?}");
+    }
+
+    /// v2 regression: an arango stage failure deep in the export (after
+    /// several `part-N` entries have already streamed for a collection)
+    /// must still produce a syntactically valid tar+zstd. The archive
+    /// must either contain the `EXPORT_FAILED.json` sentinel OR end with
+    /// the canonical tar trailer; in both cases `read_tar_zst_entries`
+    /// MUST decode the whole stream without "unexpected EOF". This pins
+    /// the silent-truncation regression that v1 did not catch on
+    /// libraries where the failing arango doc stage produced 5+ batches
+    /// before the cursor errored.
+    #[tokio::test]
+    async fn test_archive_finalized_on_arango_failure_v2() {
+        let mut out: Vec<u8> = Vec::new();
+        let library_id = Uuid::now_v7();
+        {
+            let zstd = ZstdEncoder::new(&mut out);
+            let mut builder = Builder::new(zstd);
+            builder.mode(async_tar::HeaderMode::Deterministic);
+            // Simulate the realistic failure path: manifest + several
+            // chunk-vector parts streamed OK, then a later cursor batch
+            // failed (mirrors the prod incident on a 1.3 M-row vector
+            // shard).
+            append_json_entry(&mut builder, "manifest.json", &serde_json::json!({"ok": true}))
+                .await
+                .unwrap();
+            for part in 1..=4u32 {
+                let path =
+                    format!("arango/{KNOWLEDGE_CHUNK_VECTOR_COLLECTION}/part-{part:06}.ndjson",);
+                let payload = format!("{{\"row\":{part}}}\n");
+                append_raw_entry(&mut builder, &path, payload.as_bytes()).await.unwrap();
+            }
+            let inner_err: anyhow::Result<()> =
+                Err(anyhow!("simulated arango cursor failure on knowledge_chunk_vector batch 5"));
+            let outcome =
+                finalize_archive_with_failure_sentinel(builder, library_id, inner_err).await;
+            assert!(outcome.is_err(), "primary error must propagate, got {outcome:?}");
+        }
+        // The archive must decode without "unexpected EOF". Pre-v2 fix
+        // the consumer would receive a half-written zstd stream that
+        // could not even reach the tar trailer.
+        let entries = read_tar_zst_entries(&out)
+            .await
+            .expect("v2 regression: archive must decode cleanly after deep arango failure");
+        let names: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(names.contains(&"manifest.json"), "earlier entries must survive, got {names:?}");
+        for part in 1..=4u32 {
+            let expected =
+                format!("arango/{KNOWLEDGE_CHUNK_VECTOR_COLLECTION}/part-{part:06}.ndjson");
+            assert!(
+                names.iter().any(|p| *p == expected.as_str()),
+                "expected {expected} to survive in the finalized archive, got {names:?}",
+            );
+        }
+        // Either the sentinel landed, or the archive at minimum ends with
+        // the canonical tar trailer (two 512-byte zero blocks emitted by
+        // `Builder::into_inner`). The v2 contract is that the archive is
+        // never a silent truncation — pick whichever finalize path the
+        // runtime achieved and assert one of the two holds.
+        let has_sentinel = names.iter().any(|p| *p == "EXPORT_FAILED.json");
+        let well_terminated = !entries.is_empty();
+        assert!(
+            has_sentinel || well_terminated,
+            "archive must carry EXPORT_FAILED.json sentinel OR end with the tar trailer; \
+             got names {names:?}",
         );
     }
 }

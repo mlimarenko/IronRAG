@@ -77,13 +77,31 @@ export function ChatThread({
           </div>
         </div>
       ) : (
-        messages.map((message) => (
-          <ChatMessage
-            key={message.id}
-            t={t}
-            message={message}
-          />
-        ))
+        messages.map((message, index) => {
+          let responseMs: number | undefined;
+          if (message.role === 'assistant' && message.timestamp) {
+            const assistantMs = Date.parse(message.timestamp);
+            for (let i = index - 1; i >= 0; i -= 1) {
+              const prev = messages[i];
+              if (prev?.role === 'user' && prev.timestamp) {
+                const userMs = Date.parse(prev.timestamp);
+                const delta = assistantMs - userMs;
+                if (Number.isFinite(delta) && delta > 0) {
+                  responseMs = delta;
+                }
+                break;
+              }
+            }
+          }
+          return (
+            <ChatMessage
+              key={message.id}
+              t={t}
+              message={message}
+              responseMs={responseMs}
+            />
+          );
+        })
       )}
 
       <div ref={messagesEndRef} />

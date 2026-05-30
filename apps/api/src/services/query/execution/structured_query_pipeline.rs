@@ -4,17 +4,19 @@ use uuid::Uuid;
 use crate::{
     agent_runtime::pipeline::try_op::run_async_try_op,
     app::state::AppState,
-    domains::query::RuntimeQueryMode,
+    domains::{provider_profiles::EffectiveProviderProfile, query::RuntimeQueryMode},
     infra::repositories,
     services::{
         ingest::runtime::resolve_effective_provider_profile,
-        query::planner::{QueryPlanTaskInput, build_task_query_plan},
+        query::latest_versions::query_requests_latest_versions,
+        query::planner::{QueryPlanTaskInput, RuntimeQueryPlan, build_task_query_plan},
         query::support::{
             IntentResolutionRequest, derive_query_planning_metadata, derive_rerank_metadata,
         },
     },
 };
 
+use super::embed::QuestionEmbeddingResult;
 use super::*;
 
 /// Finalize a reranked bundle into a `RuntimeStructuredQueryResult`
@@ -165,45 +167,27 @@ pub(crate) async fn plan_structured_query(
     })
     .map_err(|failure| anyhow::anyhow!(failure.summary))?;
     let technical_literal_intent = TechnicalLiteralIntent::default();
-    let skip_vector_search = should_skip_vector_search(&plan);
-    let (question_embedding, hyde_embedding, embedding_usage) = if skip_vector_search {
-        tracing::info!(
-            stage = "embed",
-            exact_literal_technical = true,
-            "vector retrieval skipped for exact technical literal query"
-        );
-        (Vec::new(), None, None)
-    } else {
-        let embed_result = embed_question(state, library_id, &provider_profile, question).await?;
-        let question_embedding = embed_result.embedding.clone();
+    let (question_embedding, hyde_embedding, embedding_usage) =
+        compute_question_embeddings(state, library_id, &provider_profile, &plan, question).await?;
 
-        let hyde_embedding = if plan.hyde_recommended {
-            tracing::info!(
-                stage = "hyde",
-                hyde_recommended = true,
-                "HyDE activated for this query"
-            );
-            let passage = generate_hyde_passage(state, library_id, question).await?;
-            tracing::debug!(stage = "hyde", passage_len = passage.len(), "HyDE passage generated");
-            tracing::trace!(stage = "hyde", passage = %passage, "HyDE passage content");
-            let hyde_result = embed_question(state, library_id, &provider_profile, &passage)
-                .await
-                .context("failed to embed HyDE passage")?;
-            tracing::debug!(stage = "hyde_embed", "HyDE embedding computed");
-            Some(hyde_result.embedding)
-        } else {
-            tracing::debug!(
-                stage = "hyde",
-                hyde_recommended = false,
-                "HyDE skipped — not recommended for this query intent"
-            );
-            None
-        };
-        (question_embedding, hyde_embedding, Some(embed_result))
-    };
-
+    let graph_index_started = std::time::Instant::now();
     let graph_index = load_graph_index(state, library_id).await?;
+    tracing::info!(
+        stage = "plan.load_graph_index",
+        library_id = %library_id,
+        elapsed_ms = graph_index_started.elapsed().as_millis(),
+        node_count = graph_index.node_count(),
+        "graph index loaded for query planning"
+    );
+    let document_index_started = std::time::Instant::now();
     let document_index = load_document_index(state, library_id).await?;
+    tracing::info!(
+        stage = "plan.load_document_index",
+        library_id = %library_id,
+        elapsed_ms = document_index_started.elapsed().as_millis(),
+        document_count = document_index.len(),
+        "document index loaded for query planning"
+    );
     let candidate_limit = expanded_candidate_limit(
         plan.planned_mode,
         plan.top_k,
@@ -224,6 +208,103 @@ pub(crate) async fn plan_structured_query(
         document_index,
         candidate_limit,
     })
+}
+
+/// Embed the query string for the vector lane plus, when the plan asks for
+/// it, a HyDE passage. Skipped entirely for exact-literal technical queries
+/// where vector retrieval would only add noise.
+async fn compute_question_embeddings(
+    state: &AppState,
+    library_id: Uuid,
+    provider_profile: &EffectiveProviderProfile,
+    plan: &RuntimeQueryPlan,
+    question: &str,
+) -> anyhow::Result<(Vec<f32>, Option<Vec<f32>>, Option<QuestionEmbeddingResult>)> {
+    if should_skip_vector_search(plan) {
+        tracing::info!(
+            stage = "embed",
+            exact_literal_technical = true,
+            "vector retrieval skipped for exact technical literal query"
+        );
+        return Ok((Vec::new(), None, None));
+    }
+    let embed_result = embed_question(state, library_id, provider_profile, question).await?;
+    let question_embedding = embed_result.embedding.clone();
+    let hyde_embedding = if plan.hyde_recommended {
+        tracing::info!(stage = "hyde", hyde_recommended = true, "HyDE activated for this query");
+        let passage = generate_hyde_passage(state, library_id, question).await?;
+        tracing::debug!(stage = "hyde", passage_len = passage.len(), "HyDE passage generated");
+        tracing::trace!(stage = "hyde", passage = %passage, "HyDE passage content");
+        let hyde_result = embed_question(state, library_id, provider_profile, &passage)
+            .await
+            .context("failed to embed HyDE passage")?;
+        tracing::debug!(stage = "hyde_embed", "HyDE embedding computed");
+        Some(hyde_result.embedding)
+    } else {
+        tracing::debug!(
+            stage = "hyde",
+            hyde_recommended = false,
+            "HyDE skipped — not recommended for this query intent"
+        );
+        None
+    };
+    Ok((question_embedding, hyde_embedding, Some(embed_result)))
+}
+
+/// Re-derive the question-dependent parts of an already-built planning stage
+/// for a resolved standalone retrieval query (elliptic follow-up case).
+///
+/// The expensive question-independent loads (`graph_index`, `document_index`)
+/// are reused as-is; only the planning metadata, plan, embeddings and
+/// candidate limit are recomputed for the resolved string. The common path
+/// (resolved query == raw question) never calls this.
+pub(crate) async fn replan_for_resolved_retrieval_query(
+    state: &AppState,
+    library_id: Uuid,
+    planning: &mut StructuredQueryPlanningStage,
+    resolved_query: &str,
+    mode: RuntimeQueryMode,
+    top_k: usize,
+) -> anyhow::Result<()> {
+    let source_truth_version =
+        repositories::get_library_source_truth_version(&state.persistence.postgres, library_id)
+            .await
+            .context("failed to load library source-truth version for resolved-query replan")?;
+    let metadata = derive_query_planning_metadata(&IntentResolutionRequest {
+        library_id,
+        question: resolved_query.to_string(),
+        explicit_mode: mode,
+        source_truth_version,
+    });
+    let plan = build_task_query_plan(&QueryPlanTaskInput {
+        question: resolved_query.to_string(),
+        top_k: Some(top_k),
+        explicit_mode: Some(mode),
+        metadata: Some(metadata.clone()),
+    })
+    .map_err(|failure| anyhow::anyhow!(failure.summary))?;
+    let (question_embedding, hyde_embedding, embedding_usage) = compute_question_embeddings(
+        state,
+        library_id,
+        &planning.provider_profile,
+        &plan,
+        resolved_query,
+    )
+    .await?;
+    let candidate_limit = expanded_candidate_limit(
+        plan.planned_mode,
+        plan.top_k,
+        state.retrieval_intelligence.rerank_enabled,
+        state.retrieval_intelligence.rerank_candidate_limit,
+    )
+    .max(technical_literal_candidate_limit(planning.technical_literal_intent, plan.top_k));
+    planning.planning = metadata;
+    planning.plan = plan;
+    planning.question_embedding = question_embedding;
+    planning.hyde_embedding = hyde_embedding;
+    planning.embedding_usage = embedding_usage;
+    planning.candidate_limit = candidate_limit;
+    Ok(())
 }
 
 pub(crate) async fn retrieve_structured_query(
@@ -261,7 +342,13 @@ pub(crate) async fn retrieve_structured_query(
     let locked_target_document_ids =
         (!document_filter_ids.is_empty()).then_some(&document_filter_ids);
 
-    let mut bundle = match plan.planned_mode {
+    let bundle_retrieval_started = std::time::Instant::now();
+    // For Hybrid/Mix the graph-only bundle (entities/relationships) is
+    // built here, but the document-chunk leg is deferred so it can run
+    // concurrently with graph-evidence hydration below — both depend
+    // only on the graph bundle plus shared read-only inputs, never on
+    // each other.
+    let (mut bundle, needs_document_chunks) = match plan.planned_mode {
         RuntimeQueryMode::Document => {
             let chunks = retrieve_document_chunks(
                 state,
@@ -276,9 +363,9 @@ pub(crate) async fn retrieve_structured_query(
                 query_ir,
             )
             .await?;
-            RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks }
+            (RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks }, false)
         }
-        RuntimeQueryMode::Local => {
+        RuntimeQueryMode::Local => (
             retrieve_local_bundle(
                 state,
                 library_id,
@@ -290,9 +377,10 @@ pub(crate) async fn retrieve_structured_query(
                 question_embedding,
                 graph_index,
             )
-            .await?
-        }
-        RuntimeQueryMode::Global => {
+            .await?,
+            false,
+        ),
+        RuntimeQueryMode::Global => (
             retrieve_global_bundle(
                 state,
                 library_id,
@@ -304,10 +392,11 @@ pub(crate) async fn retrieve_structured_query(
                 question_embedding,
                 graph_index,
             )
-            .await?
-        }
-        RuntimeQueryMode::Hybrid => {
-            let mut bundle = retrieve_local_bundle(
+            .await?,
+            false,
+        ),
+        RuntimeQueryMode::Hybrid => (
+            retrieve_local_bundle(
                 state,
                 library_id,
                 provider_profile,
@@ -318,8 +407,45 @@ pub(crate) async fn retrieve_structured_query(
                 question_embedding,
                 graph_index,
             )
-            .await?;
-            bundle.chunks = retrieve_document_chunks(
+            .await?,
+            true,
+        ),
+        RuntimeQueryMode::Mix => (
+            retrieve_mixed_graph_bundle(
+                state,
+                library_id,
+                provider_profile,
+                plan,
+                query_ir,
+                &target_entity_profiles,
+                candidate_limit,
+                question_embedding,
+                graph_index,
+            )
+            .await?,
+            true,
+        ),
+    };
+    tracing::info!(
+        stage = "retrieval.bundle",
+        library_id = %library_id,
+        planned_mode = ?plan.planned_mode,
+        elapsed_ms = bundle_retrieval_started.elapsed().as_millis(),
+        chunk_count = bundle.chunks.len(),
+        entity_count = bundle.entities.len(),
+        relationship_count = bundle.relationships.len(),
+        "bundle retrieval complete"
+    );
+
+    // Document-chunk retrieval (Hybrid/Mix) and graph-evidence hydration
+    // are independent reads off the same graph bundle; overlap them so
+    // the turn pays the slower of the two, not their sum. Output is
+    // identical: `merge_graph_evidence_chunks` runs only after both
+    // complete and consumes both result sets explicitly.
+    let graph_evidence_started = std::time::Instant::now();
+    let document_chunks_future = async {
+        if needs_document_chunks {
+            retrieve_document_chunks(
                 state,
                 library_id,
                 provider_profile,
@@ -331,40 +457,13 @@ pub(crate) async fn retrieve_structured_query(
                 document_index,
                 query_ir,
             )
-            .await?;
-            bundle
-        }
-        RuntimeQueryMode::Mix => {
-            let mut bundle = retrieve_mixed_graph_bundle(
-                state,
-                library_id,
-                provider_profile,
-                plan,
-                query_ir,
-                &target_entity_profiles,
-                candidate_limit,
-                question_embedding,
-                graph_index,
-            )
-            .await?;
-            bundle.chunks = retrieve_document_chunks(
-                state,
-                library_id,
-                provider_profile,
-                question,
-                locked_target_document_ids,
-                plan,
-                candidate_limit,
-                question_embedding,
-                document_index,
-                query_ir,
-            )
-            .await?;
-            bundle
+            .await
+            .map(Some)
+        } else {
+            Ok(None)
         }
     };
-
-    let graph_evidence = load_graph_evidence_chunks_for_bundle(
+    let graph_evidence_future = load_graph_evidence_chunks_for_bundle(
         state,
         library_id,
         question,
@@ -377,8 +476,20 @@ pub(crate) async fn retrieve_structured_query(
         document_index,
         &document_filter_ids,
         &plan.keywords,
-    )
-    .await?;
+    );
+    let (document_chunks, graph_evidence) =
+        tokio::try_join!(document_chunks_future, graph_evidence_future)?;
+    if let Some(document_chunks) = document_chunks {
+        bundle.chunks = document_chunks;
+    }
+    tracing::info!(
+        stage = "retrieval.graph_evidence",
+        library_id = %library_id,
+        elapsed_ms = graph_evidence_started.elapsed().as_millis(),
+        graph_chunk_count = graph_evidence.chunks.len(),
+        document_chunk_count = bundle.chunks.len(),
+        "graph evidence + document chunks loaded concurrently"
+    );
     if !graph_evidence.chunks.is_empty() {
         bundle.chunks = merge_graph_evidence_chunks(
             std::mem::take(&mut bundle.chunks),
@@ -473,6 +584,12 @@ async fn assemble_structured_query(
         render_exact_technical_literals_section(&technical_literal_groups);
     truncate_bundle(bundle, effective_top_k, Some(query_ir));
 
+    let include_graph_context = !suppress_graph_context_for_query(query_ir);
+    if !include_graph_context {
+        bundle.entities.clear();
+        bundle.relationships.clear();
+    }
+
     let grouped_references = group_visible_references_for_query(
         &build_grouped_reference_candidates(
             &bundle.entities,
@@ -484,9 +601,14 @@ async fn assemble_structured_query(
     );
     let effective_context_budget =
         source_slice_context_budget_chars(query_ir, plan.context_budget_chars);
-    let mut graph_evidence_lines =
-        target_entity_context_lines(query_ir, &rerank.retrieval.planning.graph_index);
-    graph_evidence_lines.extend(rerank.retrieval.graph_evidence_context_lines.clone());
+    let mut graph_evidence_lines = if include_graph_context {
+        target_entity_context_lines(query_ir, &rerank.retrieval.planning.graph_index)
+    } else {
+        Vec::new()
+    };
+    if include_graph_context {
+        graph_evidence_lines.extend(rerank.retrieval.graph_evidence_context_lines.clone());
+    }
     let context_text = assemble_bounded_context_for_query(
         query_ir,
         question,
@@ -542,9 +664,16 @@ fn merge_technical_literal_intent(
     }
 }
 
+fn suppress_graph_context_for_query(query_ir: &crate::domains::query_ir::QueryIR) -> bool {
+    query_requests_latest_versions(query_ir)
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
+    use crate::domains::query_ir::{
+        QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceFilter,
+        SourceSliceSpec,
+    };
     use uuid::Uuid;
 
     use super::*;
@@ -622,6 +751,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.82,
         };
         let target_document_id = Uuid::now_v7();
@@ -710,6 +840,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.8,
         };
 
@@ -723,5 +854,31 @@ mod tests {
         assert!(intent.wants_paths);
         assert!(intent.wants_methods);
         assert!(intent.wants_parameters);
+    }
+
+    #[test]
+    fn latest_version_queries_suppress_graph_context() {
+        let query_ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::LibraryMeta,
+            language: QueryLanguage::Auto,
+            target_types: vec!["release".to_string(), "version".to_string()],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: Some(SourceSliceSpec {
+                direction: SourceSliceDirection::Tail,
+                count: Some(10),
+                filter: SourceSliceFilter::ReleaseMarker,
+            }),
+            retrieval_query: None,
+            confidence: 0.9,
+        };
+
+        assert!(suppress_graph_context_for_query(&query_ir));
     }
 }

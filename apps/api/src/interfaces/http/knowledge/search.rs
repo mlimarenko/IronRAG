@@ -29,6 +29,7 @@ use crate::{
         authorization::{POLICY_KNOWLEDGE_READ, load_library_and_authorize},
         router_support::ApiError,
     },
+    services::query::vector_dimensions::library_vector_index_dimensions,
     shared::{
         extraction::text_render::repair_technical_layout_noise,
         text_tokens::normalized_alnum_token_sequence_by,
@@ -366,7 +367,11 @@ async fn search_documents_impl(
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
         let embedding_model_key = context.model_catalog_id.to_string();
+        let library_dim = library_vector_index_dimensions(&state, library_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
         let vector_chunk_future = state.arango_search_store.search_chunk_vectors_by_similarity(
+            library_dim,
             library_id,
             &embedding_model_key,
             &context.query_vector,
@@ -376,6 +381,7 @@ async fn search_documents_impl(
             None,
         );
         let vector_entity_future = state.arango_search_store.search_entity_vectors_by_similarity(
+            library_dim,
             library_id,
             &embedding_model_key,
             &context.query_vector,

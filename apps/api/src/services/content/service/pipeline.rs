@@ -1496,17 +1496,23 @@ impl ContentService {
             }
         }
 
-        if let Some(reason) = graph_failure {
-            super::fail_revision_vector_graph_readiness(state, context.revision_id, &reason)
-                .await
-                .map_err(|error| {
-                    ApiError::internal_with_log(
-                        error,
-                        "failed to mark inline graph failure readiness",
-                    )
-                })?;
-            return Err(ApiError::internal_with_log(&reason, "inline graph pipeline failed"));
-        }
+        // The inline path only reaches the graph stage after chunk embedding
+        // succeeded (embed failure short-circuits above), so chunk vectors
+        // always exist here. Graph is an enrichment layer over chunk-vector
+        // retrieval: a terminal graph-extraction failure must not discard those
+        // vectors or block the document. Mark the graph layer degraded, keep the
+        // vectors, and let the idle graph re-extract loop backfill the graph
+        // later — the document stays searchable via vector + lexical retrieval.
+        let graph_degraded = if let Some(reason) = graph_failure {
+            warn!(
+                revision_id = %context.revision_id,
+                reason = %reason,
+                "inline graph extraction degraded after provider retries; keeping embedded chunk vectors, document remains searchable (graph backfilled by idle re-extract loop)",
+            );
+            true
+        } else {
+            false
+        };
 
         let revision = state
             .arango_document_store
@@ -1523,7 +1529,11 @@ impl ContentService {
                 revision.revision_id,
                 &revision.text_state,
                 "ready",
-                graph_state_after_successful_extract(graph_ready),
+                if graph_degraded {
+                    super::GRAPH_STATE_DEGRADED
+                } else {
+                    graph_state_after_successful_extract(graph_ready)
+                },
                 revision.text_readable_at,
                 revision.vector_ready_at.or(Some(now)),
                 revision.graph_ready_at.or(graph_ready.then_some(now)),

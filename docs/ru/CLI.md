@@ -178,3 +178,549 @@ docker exec <container> ironrag-cli create-workspace staging --name "Staging"
 docker exec <container> ironrag-cli list-libraries default
 docker exec <container> ironrag-cli create-library default docs --name "Документация" --description "Публичная документация"
 ```
+
+# IronRAG maintenance CLI
+
+`ironrag-maintenance` — единая операторская поверхность для всего,
+что поддерживает в порядке storage-слой IronRAG: посмотреть, что
+лежит на диске, удалить то, что можно безопасно удалить,
+восстановить то, что в сломанном состоянии, и проинспектировать
+durable scheduler, который сам гоняет те же sweeper'ы в роли
+worker'а.
+
+Два инварианта, которые держим в голове на всех subcommand'ах:
+
+* Каждая destructive-команда по умолчанию отказывается запускаться.
+  Либо это явный opt-in (`--dry-run` выключен и нужен флаг типа
+  `--yes`), либо команда берёт per-library advisory lock и
+  отказывается работать, пока в библиотеке идёт ingest.
+* Worker-контейнер крутит scheduler, который ходит по тем же
+  sweeper'ам на rolling-каденции. Ручной CLI-вызов с ним не
+  конфликтует: оба идут через одну и ту же lease-таблицу и
+  блокируют друг друга чисто, если случайно подбираются на ту же
+  строку.
+
+## Когда что запускать?
+
+Короткий decision-guide перед погружением в отдельные subcommand'ы.
+
+| Симптом | Куда смотреть |
+|---|---|
+| «Диск кончается, что его съело?» | [`audit storage-summary`](#audit-storage-summary) |
+| «Retrieval медленный, подозреваю плохие индексы» | [`audit index-bloat`](#audit-index-bloat) |
+| «Документ загрузился, но в ответах не появляется» | [`audit null-head-docs`](#audit-null-head-docs), потом [`repair null-heads`](#repair-null-heads) |
+| «Удалили библиотеки на той неделе, Arango освободил место?» | [`audit orphan-libraries`](#audit-orphan-libraries) |
+| «Старые чанки копятся после замены ревизий» | [`gc stale-chunks`](#gc-stale-chunks) |
+| «`runtime_graph_evidence` больше остальной БД вместе взятой» | [`gc stale-evidence`](#gc-stale-evidence) |
+| «Подтверждённый orphan-след в Arango, нужно вычистить» | [`gc orphan-libraries --yes`](#gc-orphan-libraries) |
+| «Failed ingest наплодил кучу null-head документов» | [`repair null-heads-auto`](#repair-null-heads-auto) |
+| «ingest_stage_event в архивах, запросы тормозят» | [`retention stage-events`](#retention-stage-events) |
+| «Сменили embedding-модель, вектора нужно перенести в новый шард» | [`migrate vector-per-dim`](#migrate-vector-per-dim) |
+| «JSONL-чанки без temporal bounds» | [`migrate chunk-temporal-bounds`](#migrate-chunk-temporal-bounds) |
+| «Векторы чанков лежат в общем per-dim шарде; хочу перенести в per-library шарды» | [`migrate chunk-vector-per-library`](#migrate-chunk-vector-per-library) |
+| «Хочу пере-embed всю библиотеку» | [`rebuild vector-plane`](#rebuild-vector-plane) |
+| «Graph разъехался с документами» | [`rebuild runtime-graph`](#rebuild-runtime-graph) |
+| «Что сейчас делает фоновый scheduler?» | [`lease summary`](#lease-summary) |
+| «Sweeper ушёл в dead-letter, нужно вернуть после фикса root cause» | [`lease clear-failure`](#lease-clear-failure) |
+
+## Сборка
+
+```bash
+cargo build --release -p ironrag-backend --bin ironrag-maintenance
+```
+
+Поставляется в Docker-образе по пути `/usr/local/bin/ironrag-maintenance`.
+
+## Конфигурация
+
+Использует те же переменные окружения, что и backend (главное —
+`DATABASE_URL` и ArangoDB-кредентиалы).
+
+## Замена устаревших maintenance-бинарей
+
+`ironrag-maintenance` консолидирует per-task maintenance-бинари,
+которые раньше шли вместе с `ironrag-backend`. Старые имена удалены —
+вместо них вызывается новый subcommand.
+
+| Удалённый бинарь | Subcommand-замена |
+|---|---|
+| `ironrag-gc-stale-chunks` | `ironrag-maintenance gc stale-chunks` |
+| `ironrag-audit-orphan-data` | `ironrag-maintenance audit orphan-libraries` (read-only) + `ironrag-maintenance gc orphan-libraries --yes` (destructive) |
+| `ironrag-promote-null-heads` | `ironrag-maintenance repair null-heads` |
+| `ironrag-vector-migrate-to-per-dim` | `ironrag-maintenance migrate vector-per-dim` |
+| `ironrag-vector-rebuild` | `ironrag-maintenance rebuild vector-plane --source-library <uuid>` |
+| `ironrag-backfill-chunk-temporal-bounds` | `ironrag-maintenance migrate chunk-temporal-bounds` |
+| `rebuild_runtime_graph` | `ironrag-maintenance rebuild runtime-graph` |
+
+---
+
+## `audit` — read-only инспекция
+
+Семейство audit отвечает на вопрос «что происходит» — никаких
+изменений на диске. Безопасно запускать в любое время, в том числе
+пока ingest и retrieval обрабатывают трафик.
+
+### `audit storage-summary`
+
+**Что показывает.** Топ Postgres-таблиц по размеру с
+live/dead-tuple счётчиками и временем последнего autovacuum.
+
+**Когда запускать.** Диск кончается. Запросы тормозят. Первый шаг
+любого расследования «почему это так раздулось».
+
+**Пример.**
+
+```bash
+ironrag-maintenance audit storage-summary --limit 20 --json
+```
+
+Если в выводе `runtime_graph_evidence` на 24 GB — это твой
+единственный самый жирный кандидат на чистку, иди в
+[`gc stale-evidence`](#gc-stale-evidence).
+
+### `audit index-bloat`
+
+**Что показывает.** Размер и количество сканов по каждому индексу
+write-heavy таблиц. Колонка `idx_scan` говорит, как часто индекс
+реально использовался — крупный индекс с нулём сканов это
+кандидат на ревью под `DROP INDEX`.
+
+**Когда запускать.** Подозреваешь bloat. Готовишься к окну
+`REINDEX`. Нужны данные для PR про удалённый индекс.
+
+**Пример.**
+
+```bash
+ironrag-maintenance audit index-bloat --min-size-mb 100 --json
+```
+
+Ограничить набор таблиц через `--tables=table_a,table_b`, когда
+интересна одна подсистема.
+
+### `audit null-head-docs`
+
+**Что показывает.** Документы, у которых
+`content_document_head` без readable и active ревизии. Retrieval их
+игнорирует — обычно потому, что ingest упал до того, как продуктовая
+ревизия была собрана. В выводе есть `recovery_attempts_count` и
+`dead_letter_at`, чтобы видеть, как rate-limited recovery
+потратила свой бюджет.
+
+**Когда запускать.** Пользователи говорят «загрузил, в ответах
+нет». После известного ingest-инцидента, до решения сколько
+документов восстанавливать.
+
+**Пример.**
+
+```bash
+ironrag-maintenance audit null-head-docs --library <uuid> --limit 100 --json
+```
+
+Если у документов в выводе `dead_letter_at IS NOT NULL` — recovery
+уже исчерпала бюджет. См.
+[`repair clear-recovery-dead-letter`](#repair-clear-recovery-dead-letter)
+до повторной попытки.
+
+### `audit orphan-libraries`
+
+**Что показывает.** Строки в ArangoDB, чей `library_id` не
+соответствует живой строке `catalog_library` в Postgres. Такие
+строки оставляли старые delete-пути и pre-cascade-fix код; в отчёте
+для каждой orphan-библиотеки расписано, сколько строк осело в каких
+knowledge-коллекциях.
+
+**Когда запускать.** Регулярная гигиена, особенно после удалений
+библиотек на старых деплоях. Всегда read-only — destructive чистка
+это отдельная команда.
+
+**Пример.**
+
+```bash
+ironrag-maintenance audit orphan-libraries --json
+```
+
+Непустой отчёт — каноничный pre-flight перед
+[`gc orphan-libraries --yes`](#gc-orphan-libraries).
+
+---
+
+## `gc` — удаление мусора
+
+Семейство gc удаляет контент, до которого канонические heads
+больше не дотягиваются. Каждый gc subcommand берёт per-library
+graph advisory lock и отказывается работать, пока в библиотеке есть
+ingest job в состоянии `queued` / `leased` / `paused` — так
+параллельный ingest не теряет данные из-за sweeper'а.
+
+### `gc stale-chunks`
+
+**Что делает.** Удаляет чанки из ArangoDB (и их вектора во всех
+per-dim шардах плюс legacy single-dim коллекции), у которых
+revision больше не readable/active head документа. По умолчанию —
+консервативно: документы, у которых head null на обоих pointer'ах
+(failed ingest), пропускаются, чтобы recoverable doc не был стёрт
+насовсем.
+
+**Когда запускать.** Давление на Arango-volume, особенно после
+многих замен ревизий. Подозрение, что «остались старые чанки».
+
+**Пример.**
+
+```bash
+# Безопасный preview: посчитать, не запуская destructive AQL.
+ironrag-maintenance gc stale-chunks --dry-run --json
+
+# Реальный запуск, одна библиотека.
+ironrag-maintenance gc stale-chunks --library <uuid>
+
+# Агрессивный режим: чистить также failed-ingest docs (только
+# chunks/vectors; row документа остаётся). Использовать, когда
+# доказано, что документ unrecoverable.
+ironrag-maintenance gc stale-chunks --library <uuid> --include-null-head
+```
+
+### `gc stale-evidence`
+
+**Что делает.** Удаляет строки `runtime_graph_evidence`, у которых
+revision больше не readable/active head исходного документа, плюс
+строки с `chunk_id` на чанк, который уже свипнул
+`gc stale-chunks`. Оба lane пропускают строки, у которых документ
+сейчас в активном ingest.
+
+**Когда запускать.** Когда `audit storage-summary` показывает
+`runtime_graph_evidence` как самую жирную таблицу. Обычно после
+revision-тяжёлого периода или после `gc stale-chunks`, потому что
+оба sweeper'а дополняют друг друга.
+
+**Пример.**
+
+```bash
+ironrag-maintenance gc stale-evidence --library <uuid> --json
+```
+
+Пример вывода: `stale_revision_rows: 157645` означает, что 157k
+строк в `runtime_graph_evidence` были привязаны к устаревшим
+ревизиям. Спутник `phantom_chunk_rows` показывает строки,
+привязанные к уже удалённым чанкам.
+
+### `gc orphan-libraries`
+
+**Что делает.** Destructive-спутник `audit orphan-libraries`.
+Вычищает все строки в ArangoDB, чей `library_id` не соответствует
+живой строке PG. Отказывается работать без `--yes`.
+
+**Когда запускать.** Только после того, как `audit orphan-libraries`
+проверен и оператор принял его список.
+
+**Пример.**
+
+```bash
+# Preview сначала
+ironrag-maintenance audit orphan-libraries --json
+
+# Потом purge
+ironrag-maintenance gc orphan-libraries --yes --json
+```
+
+---
+
+## `repair` — вернуть сломанный state в канон
+
+Семейство repair — это про *восстановление*, не про удаление. Оно
+пишет новые строки, чтобы привести объекты, разъехавшиеся с
+канонической формой, обратно в state, который ingest pipeline даёт
+на success.
+
+### `repair null-heads`
+
+**Что делает.** Для каждого документа с `readable_revision_id IS
+NULL AND active_revision_id IS NULL`, у которого есть хотя бы одна
+revision с persisted chunks, продвигает самую свежую chunk-bearing
+revision в head. Использует тот же `promote_document_head`, что
+ingest pipeline в success-flow, поэтому результат неотличим от
+свежего успешного ingest. Идемпотентно.
+
+**Когда запускать.** Single-shot восстановление за один проход
+после известного инцидента. Когда нужно отработать каждый
+eligible-документ сразу, без rate-limit.
+
+**Пример.**
+
+```bash
+ironrag-maintenance repair null-heads --library <uuid> --json
+```
+
+### `repair null-heads-auto`
+
+**Что делает.** То же recovery-действие, что `repair null-heads`,
+но per-document результат теперь записывается на
+`content_document_head`, чтобы flaky upstream не сжёг recovery-
+бюджет на одном документе:
+
+* Документ, тронутый за последний час, пропускается (cooldown).
+* На success `recovery_attempts_count` сбрасывается,
+  `last_recovery_attempt_at = now()`.
+* На failure `recovery_attempts_count` инкрементируется, если
+  новая ошибка совпадает с `last_recovery_error_code`; иначе
+  счётчик сбрасывается в 1.
+* Три подряд same-error failure'а ставят `dead_letter_at`,
+  документ выпадает из будущих авто-проходов до тех пор, пока
+  оператор не снимет метку.
+
+**Когда запускать.** Перезапускаешь recovery на одну библиотеку
+циклами или из cron. Везде, где flaky внешняя зависимость может
+ронять один и тот же документ повторно — rate-limit превращает
+это в управляемый backlog вместо tight retry storm.
+
+**Пример.**
+
+```bash
+ironrag-maintenance repair null-heads-auto --library <uuid> --json
+```
+
+Пример вывода: `"promoted": 24, "failed": 0, "dead_lettered": 0,
+"cooldown_skipped": 0` — за этот проход чисто восстановлено 24
+документа; следующие проходы в течение часа эти 24 пропустят.
+
+### `repair clear-recovery-dead-letter`
+
+**Что делает.** Снимает `dead_letter_at` и recovery-счётчики с
+`content_document_head` для одного документа. Следующий проход
+`repair null-heads-auto` снова возьмёт его в работу.
+
+**Когда запускать.** Только после того, как причина dead-letter
+диагностирована и пофикшена.
+
+**Пример.**
+
+```bash
+ironrag-maintenance repair clear-recovery-dead-letter --document <uuid>
+```
+
+---
+
+## `retention` — TTL-чистка history-таблиц
+
+Семейство retention удаляет строки из INSERT-only history-таблиц,
+которые перевалили за каноническую retention-windows. Каждая
+прогонка батчуется (10 000 строк на DELETE, 100 мс пауза между
+батчами) — конкурентные ingest-writer'ы остаются отзывчивыми.
+
+### `retention stage-events`
+
+**Что делает.** Удаляет строки `ingest_stage_event` старше
+`--older-than-days`. Поддерживающий индекс
+`idx_ingest_stage_event_recorded_at` поставлен миграцией 0017, и
+predicate компилируется в index range scan вместо seq scan под
+`AccessExclusiveLock`.
+
+**Когда запускать.** Когда `audit storage-summary` показывает
+`ingest_stage_event` как раздутую. Регулярно, когда запросы
+ingest-истории `/v1/ingest/...` тормозят.
+
+**Пример.**
+
+```bash
+# 90-дневный retention window
+ironrag-maintenance retention stage-events --older-than-days 90 --json
+
+# Будь осторожен с агрессивными значениями в dev/test
+ironrag-maintenance retention stage-events --older-than-days 30 --json
+```
+
+---
+
+## `migrate` — one-shot data migrations
+
+Семейство migrate идемпотентно: повторный запуск после успеха —
+no-op. Это НЕ recurring — они существуют для канонического пути
+«конвертировать старую форму в новую» и удаляются из операторского
+catalog'а, как только деплой полностью мигрирован.
+
+### `migrate vector-per-dim`
+
+**Что делает.** Переносит строки из legacy single-dim коллекций
+`knowledge_chunk_vector` / `knowledge_entity_vector` в per-dim
+шарды (`knowledge_*_vector_d<dim>`). Обходит каждую отдельную
+vector-размерность в legacy-коллекции и создаёт соответствующий
+шард on demand.
+
+**Когда запускать.** Один раз на кластер, после апгрейда на
+per-dim схему. Повторные запуски безопасны после прерывания.
+
+**Пример.**
+
+```bash
+ironrag-maintenance migrate vector-per-dim --json
+```
+
+### `migrate chunk-temporal-bounds`
+
+**Что делает.** Backfill `occurred_at` / `occurred_until` для
+чанков, у которых `normalized_text` содержит канонический JSONL
+temporal header, но колонки всё ещё NULL. Cursor-пагинация по
+chunk id, поэтому повторы после краха естественно продолжают
+работу.
+
+**Когда запускать.** Один раз на кластер, после апгрейда на
+схему с temporal-колонками.
+
+**Пример.**
+
+```bash
+# Preview без записи
+ironrag-maintenance migrate chunk-temporal-bounds --dry-run --json
+
+# Реальный запуск, одна библиотека
+ironrag-maintenance migrate chunk-temporal-bounds --library <uuid> --json
+```
+
+### `migrate chunk-vector-per-library`
+
+**Что делает.** Переносит векторы чанков из общего per-dim шарда
+(`knowledge_chunk_vector_d<dim>`) в per-`(library, dim)` шарды
+(`knowledge_chunk_vector_d<dim>_l<library>`). Обходит каждую
+уникальную пару `(library_id, dim)` в общем шарде и записывает строки
+в соответствующий per-library шард, создавая его on demand при
+необходимости. Идемпотентно: повторный запуск после завершения
+миграции — no-op. Векторы сущностей этой командой не переносятся —
+они остаются в общем per-dim шарде.
+
+**Когда запускать.** Один раз на кластер, после апгрейда на схему с
+per-library шардами. Повторные запуски после прерывания безопасны.
+
+**Пример.**
+
+```bash
+# Перенести векторы из общего per-dim шарда в per-library шарды
+ironrag-maintenance migrate chunk-vector-per-library
+
+# То же самое, но с JSON-сводкой
+ironrag-maintenance migrate chunk-vector-per-library --json
+```
+
+---
+
+## `rebuild` — тяжёлые operator-only passes
+
+Семейство rebuild специально *никогда* не подключается к
+recurring scheduler. Эти проходы тратят значительный provider-
+бюджет или удерживают долго-живущие ArangoDB-ресурсы; оператор
+обязан запускать их явно с полным контекстом.
+
+### `rebuild vector-plane`
+
+**Что делает.** Согласует instance-wide ArangoDB vector index
+dimensions с активным vector binding исходной библиотеки и
+пересобирает всё library vector-материал, который должен делить
+эти индексы.
+
+**Когда запускать.** При смене embedding-размерности глобально
+(например, миграция с 1536-dim на 3072-dim по всему кластеру).
+Исходная библиотека говорит rebuilder'у, какая размерность теперь
+канон.
+
+**Пример.**
+
+```bash
+ironrag-maintenance rebuild vector-plane --source-library <uuid>
+```
+
+### `rebuild runtime-graph`
+
+**Что делает.** Перезапускает канонический runtime-graph
+projection для одной библиотеки или для всех. Batch-mode терпит
+per-library `StateConflict` ошибки и в конце даёт non-zero exit,
+чтобы operator-скрипты могли распознать partial completion.
+
+**Когда запускать.** Граф видимо разъехался с документами
+(например, удаления документов применились, но graph edges всё
+ещё на них ссылаются). После schema migration, тронувшей graph
+projection.
+
+**Пример.**
+
+```bash
+# Одна библиотека
+ironrag-maintenance rebuild runtime-graph --library <uuid>
+
+# Все библиотеки (batch mode)
+ironrag-maintenance rebuild runtime-graph
+```
+
+---
+
+## `lease` — внутренности scheduler'а
+
+Фоновый scheduler отслеживает каждую (class, scope) maintenance-
+единицу в строке `maintenance_job_run`. Subcommand'ы lease
+инспектируют эту таблицу и управляют восстановлением после ошибок.
+
+### `lease show`
+
+**Что показывает.** Текущую lease-строку для каждой (class,
+scope), которую scheduler отслеживает, в том числе кто держит её
+сейчас, какой у неё `next_due_at` и последняя ошибка, если есть.
+
+**Когда запускать.** Расследуешь, почему scheduler не подбирает
+класс. После dead-letter alert'а.
+
+**Пример.**
+
+```bash
+ironrag-maintenance lease show --class gc.stale-chunks --json
+ironrag-maintenance lease show --state dead_letter --json
+```
+
+### `lease summary`
+
+**Что показывает.** Сводку по классу: pending / leased /
+completed / failed / dead-letter. Компактный обзор state'а
+scheduler'а.
+
+**Когда запускать.** Quick-check здоровья, подходит для cron-style
+мониторинга.
+
+**Пример.**
+
+```bash
+ironrag-maintenance lease summary --json
+```
+
+### `lease clear-failure`
+
+**Что делает.** Сбрасывает dead-letter lease-строку обратно в
+`pending`, чтобы scheduler подобрал её на следующем тике.
+Использовать после фикса root cause.
+
+**Пример.**
+
+```bash
+# Per-library class
+ironrag-maintenance lease clear-failure --class gc.stale-chunks --library <uuid>
+
+# Instance-scope class (без --library)
+ironrag-maintenance lease clear-failure --class retention.stage-events
+```
+
+### `lease reap-stale`
+
+**Что делает.** Подбирает leased-строки, у которых heartbeat
+старше порога. Scheduler делает это на каждом тике; команда —
+ручной рычаг, если оператор подозревает, что что-то застряло.
+
+**Пример.**
+
+```bash
+ironrag-maintenance lease reap-stale --stale-after-secs 300
+```
+
+---
+
+## Использование в Docker
+
+```bash
+docker exec <container> ironrag-maintenance audit storage-summary --json
+docker exec <container> ironrag-maintenance gc stale-chunks --dry-run
+docker exec <container> ironrag-maintenance lease summary --json
+```

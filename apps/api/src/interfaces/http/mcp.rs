@@ -59,6 +59,7 @@ pub const MCP_ANSWER_TOOL_NAMES: &[&str] = &[
     "grounded_answer",
     "search_documents",
     "read_document",
+    "view_document_image",
     "list_documents",
     "search_entities",
     "get_graph_topology",
@@ -77,6 +78,7 @@ pub const MCP_DIAGNOSTICS_TOOL_NAMES: &[&str] = &[
     "create_library",
     "search_documents",
     "read_document",
+    "view_document_image",
     "list_documents",
     "upload_documents",
     "update_document",
@@ -794,6 +796,7 @@ fn grounded_answer_structured_content(
     }
     json!({
         "executionDetail": sanitized_execution_detail,
+        "finalAnswerReady": grounded_answer_final_answer_ready(execution_detail),
         "runtimeExecutionId": execution_detail.execution.runtime_execution_id,
         "executionId": execution_detail.execution.id,
         "conversationId": execution_detail.execution.conversation_id,
@@ -801,6 +804,16 @@ fn grounded_answer_structured_content(
         "workspaceId": execution_detail.execution.workspace_id,
         "lifecycleState": execution_detail.execution.lifecycle_state,
     })
+}
+
+fn grounded_answer_final_answer_ready(
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+) -> bool {
+    execution_detail.execution.lifecycle_state == "completed"
+        && matches!(
+            execution_detail.verification_state,
+            ironrag_contracts::assistant::AssistantVerificationState::Verified
+        )
 }
 
 pub(super) fn tool_error_result(error: ApiError) -> McpToolResult {

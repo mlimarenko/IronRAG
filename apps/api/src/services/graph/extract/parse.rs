@@ -39,6 +39,19 @@ pub fn parse_graph_extraction_output(
             ),
         }
     })?;
+    // A graph extraction payload is always a `{ "entities": [...], "relations": [...] }`
+    // object. A recovered top-level array or scalar (e.g. named sections without an
+    // outer object, where structural recovery latches onto the first balanced array)
+    // is never a valid graph and must fail loudly so the re-extract loop retries
+    // rather than silently storing an empty graph.
+    if !parsed.is_object() {
+        return Err(GraphServiceError::ProviderUnavailable {
+            message: format!(
+                "{}: graph extraction output is not a JSON object",
+                GraphExtractionTaskFailureCode::MalformedOutput.as_str()
+            ),
+        });
+    }
     let entities = parsed
         .get("entities")
         .and_then(serde_json::Value::as_array)
@@ -497,7 +510,91 @@ fn extract_json_payload(output_text: &str) -> AnyhowResult<serde_json::Value> {
     if trimmed.is_empty() {
         return Err(anyhow!("graph extraction output is empty"));
     }
+
+    // Fast path: the provider emitted a clean JSON document and nothing
+    // else. This is the common, well-behaved case.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Ok(value);
+    }
+
+    // Providers intermittently wrap the JSON in a markdown code fence or
+    // surround it with prose ("here is the extraction: { ... }"). Recover
+    // the embedded JSON value structurally: strip a fence, then fall back
+    // to scanning for the first balanced top-level object/array. This makes
+    // no assumption about the natural language of any surrounding text — it
+    // only inspects JSON structure — so it stays language-agnostic.
+    let unfenced = strip_markdown_code_fence(trimmed);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(unfenced.trim()) {
+        return Ok(value);
+    }
+    if let Some(candidate) = extract_first_balanced_json(unfenced) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&candidate) {
+            return Ok(value);
+        }
+    }
+
+    // Nothing recoverable (e.g. the model truncated the JSON mid-document).
+    // Re-run the strict parse so the surfaced error reflects the original
+    // failure for diagnostics.
     serde_json::from_str::<serde_json::Value>(trimmed).context("invalid graph extraction json")
+}
+
+/// Strip a single wrapping markdown code fence (```` ``` ```` or
+/// ```` ```json ````) when the text is fenced, returning the inner
+/// content. Returns the input unchanged when no opening fence is present.
+fn strip_markdown_code_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return text;
+    };
+    // Drop the optional language tag that follows the opening fence on the
+    // same line (e.g. ```json).
+    let inner = match rest.find('\n') {
+        Some(idx) => &rest[idx + 1..],
+        None => rest,
+    };
+    match inner.rfind("```") {
+        Some(idx) => inner[..idx].trim_matches('\n'),
+        None => inner,
+    }
+}
+
+/// Scan for the first balanced top-level JSON object or array, honoring
+/// string literals and escape sequences so brackets inside string values
+/// do not affect nesting depth. Returns the matched substring, or `None`
+/// when no balanced region exists (e.g. truncated output).
+fn extract_first_balanced_json(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let start = bytes.iter().position(|&byte| byte == b'{' || byte == b'[')?;
+    let open = bytes[start];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, &byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b if b == open => depth += 1,
+            b if b == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..=idx].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -607,5 +704,63 @@ mod tests {
             relation_type: "uses".to_string(),
             summary: None,
         }
+    }
+
+    use super::{extract_first_balanced_json, extract_json_payload};
+
+    #[test]
+    fn extract_json_payload_parses_clean_object_unchanged() {
+        let value = extract_json_payload(r#"{"entities":[],"relations":[]}"#).unwrap();
+        assert!(value.get("entities").is_some());
+        assert!(value.get("relations").is_some());
+    }
+
+    #[test]
+    fn extract_json_payload_recovers_language_tagged_fenced_json() {
+        let fenced = "```json\n{\"entities\":[{\"label\":\"NODE-1\"}],\"relations\":[]}\n```";
+        let value = extract_json_payload(fenced).unwrap();
+        assert_eq!(value["entities"][0]["label"], "NODE-1");
+    }
+
+    #[test]
+    fn extract_json_payload_recovers_bare_fenced_json() {
+        let value = extract_json_payload("```\n[1, 2, 3]\n```").unwrap();
+        assert_eq!(value, serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn extract_json_payload_recovers_json_surrounded_by_symbolic_noise() {
+        // Surrounding noise is purely symbolic punctuation — carries no
+        // natural-language tokens, so the recovery stays language-agnostic.
+        let noisy = "### {\"entities\":[],\"relations\":[]} ###";
+        let value = extract_json_payload(noisy).unwrap();
+        assert!(value.get("relations").is_some());
+    }
+
+    #[test]
+    fn extract_json_payload_rejects_truncated_json() {
+        assert!(extract_json_payload("{\"entities\":[{\"label\":").is_err());
+    }
+
+    #[test]
+    fn extract_json_payload_rejects_empty_output() {
+        assert!(extract_json_payload("   \n  ").is_err());
+    }
+
+    #[test]
+    fn extract_first_balanced_json_picks_first_object_only() {
+        let candidate = extract_first_balanced_json("xx {\"a\":1} yy {\"b\":2}").unwrap();
+        assert_eq!(candidate, "{\"a\":1}");
+    }
+
+    #[test]
+    fn extract_first_balanced_json_honors_brackets_inside_string_literals() {
+        let candidate = extract_first_balanced_json(r#"{"k":"}{"} "#).unwrap();
+        assert_eq!(candidate, r#"{"k":"}{"}"#);
+    }
+
+    #[test]
+    fn extract_first_balanced_json_returns_none_when_unbalanced() {
+        assert!(extract_first_balanced_json("{\"k\": [1, 2").is_none());
     }
 }

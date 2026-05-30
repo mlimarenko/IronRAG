@@ -448,9 +448,28 @@ impl UnifiedGateway {
     #[must_use]
     pub fn from_settings(settings: &Settings) -> Self {
         let timeout = Duration::from_secs(settings.llm_http_timeout_seconds.max(1));
+        // Aggressive pool / keep-alive tuning to defeat a 90-second
+        // stale-connection hang observed on the canonical SBP turn:
+        // a `generate_with_tools` POST that direct-curl completed in
+        // ~8.5 s spent 102 s inside the gateway. Root cause was a dead
+        // HTTP keep-alive socket waiting on the OS TCP timeout (~90 s)
+        // before reqwest reissued the request. `pool_idle_timeout`
+        // drops cached sockets aggressively; `tcp_keepalive` lets the
+        // kernel probe sockets every 15 s so dead peers (load
+        // balancer reaping, NAT-table eviction, provider scaling)
+        // surface long before they cost a full turn budget. None of
+        // these settings change the canonical timeout semantics —
+        // the gateway still aborts after `llm_http_timeout_seconds`
+        // — they only prevent the path from blocking on a known-dead
+        // socket.
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(timeout)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(15))
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { client }

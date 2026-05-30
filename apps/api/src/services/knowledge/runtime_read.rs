@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -9,28 +10,39 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
-    services::{
-        graph::canonical_projection::canonicalize_runtime_graph_projection,
-        knowledge::error::KnowledgeServiceError,
-    },
+    infra::repositories::{self, RuntimeGraphQueryEdgeRow, RuntimeGraphQueryNodeRow},
+    services::knowledge::error::KnowledgeServiceError,
 };
+
+/// Evict idle graph projections after 3 minutes to reclaim RAM for
+/// libraries that are no longer actively queried. On large corpora each
+/// cached projection can hold substantial graph state, and under peak
+/// concurrent load the backend cgroup can hit its memory ceiling. A
+/// tighter idle window trades a slightly higher cache-miss rate for a
+/// substantially lower steady-state RSS. A fresh load is triggered on the
+/// next cache miss.
+const PROJECTION_FRESHNESS_TTL: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Clone)]
 pub struct ActiveRuntimeGraphProjection {
-    pub nodes: Vec<RuntimeGraphNodeRow>,
-    pub edges: Vec<RuntimeGraphEdgeRow>,
+    pub nodes: Vec<RuntimeGraphQueryNodeRow>,
+    pub edges: Vec<RuntimeGraphQueryEdgeRow>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    projection: Arc<ActiveRuntimeGraphProjection>,
+    inserted_at: Instant,
 }
 
 /// In-memory cache of admitted graph projections. Key is the published
 /// topology identity `(library_id, projection_version, topology_generation)`;
-/// values are `Arc`-shared so
-/// multiple concurrent queries can read the same projection without
-/// cloning 100k+ rows. Cache is populated lazily by
-/// `load_active_runtime_graph_projection` and evicts older versions
-/// for the same library on every miss, which keeps the working set
-/// bounded by `active libraries × 1 current version`.
-type RuntimeGraphProjectionEntries = HashMap<(Uuid, i64, i64), Arc<ActiveRuntimeGraphProjection>>;
+/// values are `Arc`-shared so multiple concurrent queries can read the same
+/// projection without cloning 100k+ rows. Cache is populated lazily by
+/// `load_active_runtime_graph_projection` and evicts older versions for the
+/// same library on every insert, and idle entries after
+/// `PROJECTION_FRESHNESS_TTL` to bound RSS on multi-library deployments.
+type RuntimeGraphProjectionEntries = HashMap<(Uuid, i64, i64), CacheEntry>;
 type RuntimeGraphProjectionLoadLocks = HashMap<(Uuid, i64, i64), Arc<Mutex<()>>>;
 
 #[derive(Debug, Default, Clone)]
@@ -50,7 +62,8 @@ impl RuntimeGraphProjectionCache {
             .read()
             .await
             .get(&(library_id, projection_version, topology_generation))
-            .cloned()
+            .filter(|entry| entry.inserted_at.elapsed() < PROJECTION_FRESHNESS_TTL)
+            .map(|entry| entry.projection.clone())
     }
 
     async fn insert(
@@ -61,11 +74,15 @@ impl RuntimeGraphProjectionCache {
         projection: Arc<ActiveRuntimeGraphProjection>,
     ) {
         let mut guard = self.entries.write().await;
-        // Keep one live projection per library. The published topology
-        // identity includes generation because targeted refreshes mutate
-        // the active projection without changing projection_version.
-        guard.retain(|(lib, _, _), _| *lib != library_id);
-        guard.insert((library_id, projection_version, topology_generation), projection);
+        // Keep one live projection per library and evict any TTL-expired
+        // entries from other libraries to reclaim RAM.
+        guard.retain(|(lib, _, _), entry| {
+            *lib != library_id && entry.inserted_at.elapsed() < PROJECTION_FRESHNESS_TTL
+        });
+        guard.insert(
+            (library_id, projection_version, topology_generation),
+            CacheEntry { projection, inserted_at: Instant::now() },
+        );
 
         let mut load_locks = self.load_locks.lock().await;
         load_locks.retain(|(lib, version, generation), _| {
@@ -146,7 +163,12 @@ pub async fn load_active_runtime_graph_projection(
     }
 
     let load_started = std::time::Instant::now();
-    let edges = repositories::list_admitted_runtime_graph_edges_by_library(
+    // Use slim query rows (no `metadata_json`, no `canonical_key` on edges) to
+    // reduce per-row heap allocations on large corpora. On a 430 k-edge library
+    // each dropped `serde_json::Value` is one fewer heap object; the cumulative
+    // savings are proportional to the average `metadata_json` payload size
+    // (typically 50–500 B/row depending on sub_type population).
+    let edges = repositories::list_admitted_runtime_graph_query_edges_by_library(
         &state.persistence.postgres,
         library_id,
         projection_version,
@@ -159,7 +181,7 @@ pub async fn load_active_runtime_graph_projection(
         connected_node_ids.insert(edge.to_node_id);
     }
     let connected_node_ids: Vec<Uuid> = connected_node_ids.into_iter().collect();
-    let nodes = repositories::list_runtime_graph_nodes_by_ids_or_document_type(
+    let nodes = repositories::list_runtime_graph_query_nodes_by_ids_or_document_type(
         &state.persistence.postgres,
         library_id,
         projection_version,
@@ -169,11 +191,16 @@ pub async fn load_active_runtime_graph_projection(
     .context("failed to load admitted runtime graph nodes")?;
     let elapsed_ms = load_started.elapsed().as_millis();
 
-    let canonical_projection = canonicalize_runtime_graph_projection(nodes, edges);
-    let projection = Arc::new(ActiveRuntimeGraphProjection {
-        nodes: canonical_projection.nodes,
-        edges: canonical_projection.edges,
-    });
+    // Slim rows bypass `canonicalize_runtime_graph_projection` (which takes fat
+    // types and re-allocates). The Postgres query already de-dupes by
+    // (library_id, canonical_key, projection_version) at upsert time, so
+    // duplicate nodes are not expected here; the dedup pass is a no-op in
+    // practice. Edge dedup by (from, relation_type, to) is similarly handled at
+    // upsert time. We keep the edges as returned and deduplicate only by id to
+    // guard against any unexpected Postgres-level races.
+    let mut seen_edge_ids = HashSet::with_capacity(edges.len());
+    let edges: Vec<_> = edges.into_iter().filter(|e| seen_edge_ids.insert(e.id)).collect();
+    let projection = Arc::new(ActiveRuntimeGraphProjection { nodes, edges });
     tracing::info!(
         stage = "graph_projection_cache",
         %library_id,

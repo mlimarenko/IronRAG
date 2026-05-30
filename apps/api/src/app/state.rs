@@ -294,7 +294,14 @@ impl AppState {
         };
         let arango_document_store = ArangoDocumentStore::new(Arc::clone(&arango_client));
         let arango_graph_store = ArangoGraphStore::new(Arc::clone(&arango_client));
-        let arango_search_store = ArangoSearchStore::new(Arc::clone(&arango_client));
+        let arango_search_store = ArangoSearchStore::new(
+            Arc::clone(&arango_client),
+            crate::infra::arangodb::search_store::VectorIndexParams {
+                n_lists: settings.arangodb_vector_index_n_lists,
+                default_n_probe: settings.arangodb_vector_index_default_n_probe,
+                training_iterations: settings.arangodb_vector_index_training_iterations,
+            },
+        );
         let arango_context_store = ArangoContextStore::new(Arc::clone(&arango_client));
         let retrieval_intelligence = RetrievalIntelligenceSettings {
             query_intent_cache_ttl_hours: settings.query_intent_cache_ttl_hours,

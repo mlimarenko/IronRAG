@@ -8,8 +8,11 @@ use crate::{
     domains::query::{QueryTurnKind, QueryVerificationState},
     infra::{
         arangodb::{
-            context_store::{KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow},
-            document_store::KnowledgeStructuredBlockRow,
+            context_store::{
+                KnowledgeBundleChunkReferenceRow, KnowledgeContextBundleReferenceSetRow,
+                KnowledgeContextBundleRow,
+            },
+            document_store::{KnowledgeChunkRow, KnowledgeStructuredBlockRow},
             graph_store::KnowledgeEvidenceRow,
         },
         repositories::query_repository,
@@ -31,6 +34,7 @@ use super::{
     session::{
         build_conversation_runtime_context,
         build_conversation_runtime_context_with_external_history,
+        build_prior_grounded_answer_context_messages,
     },
 };
 
@@ -501,7 +505,8 @@ Connector TargetName uses the [TargetName] section with `targetSecret` and merch
     assert!(!context.effective_query_text.contains("Connector Alpha"));
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.effective_query_text.contains("\nquestion: TargetNme how"));
-    assert!(context.coreference_entities.contains(&"targetSecret".to_string()));
+    assert!(context.coreference_entities.contains(&"TargetName".to_string()));
+    assert!(!context.coreference_entities.contains(&"targetSecret".to_string()));
     assert!(!context.coreference_entities.contains(&"alphaSecret".to_string()));
     assert!(context.effective_query_text.ends_with("TargetNme how"));
     assert_eq!(
@@ -615,6 +620,107 @@ fn build_conversation_runtime_context_exports_bounded_typed_grounded_answer_tool
 }
 
 #[test]
+fn build_conversation_runtime_context_keeps_short_disambiguator_for_tool_follow_up() {
+    let conversation_id = Uuid::now_v7();
+    let first_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "how do I configure account connectors".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_choice_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Available variants: Provider Alpha, Provider Beta.".to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let disambiguator_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "Provider Alpha".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_detail_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 4,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Provider Alpha uses `/opt/provider-alpha/connector.conf` with `alphaUrl`."
+            .to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let second_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 5,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "show how to configure it".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let second_assistant_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 6,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Set `alphaSecret` and `alphaTimeout`.".to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 7,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "ready config please".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[
+            first_user_turn,
+            assistant_choice_turn,
+            disambiguator_turn,
+            assistant_detail_turn,
+            second_user_turn,
+            second_assistant_turn,
+            follow_up_turn.clone(),
+        ],
+        follow_up_turn.id,
+    );
+
+    let history_text = context
+        .grounded_answer_tool_history
+        .iter()
+        .map(|turn| turn.content_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(history_text.contains("Provider Alpha"));
+    assert!(history_text.contains("/opt/provider-alpha/connector.conf"));
+    assert!(history_text.contains("alphaSecret"));
+    assert_eq!(context.grounded_answer_tool_history.len(), 6);
+}
+
+#[test]
 fn build_conversation_runtime_context_preserves_dense_assistant_literals_in_tool_history() {
     let conversation_id = Uuid::now_v7();
     let first_user_turn = query_repository::QueryTurnRow {
@@ -667,6 +773,60 @@ fn build_conversation_runtime_context_preserves_dense_assistant_literals_in_tool
 }
 
 #[test]
+fn build_conversation_runtime_context_preserves_long_path_literals_in_tool_history() {
+    let conversation_id = Uuid::now_v7();
+    let first_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "how do I configure Provider Alpha".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: format!(
+            "Use `/opt/provider-alpha/configuration/files/provider-alpha-primary.conf` and set `alphaSecret` `alphaUrl` `alphaTimeout` `alphaMode` `alphaToken` `alphaCurrency` `alphaRetries`. {}",
+            "long filler ".repeat(260)
+        ),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "show the config".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[first_user_turn, assistant_turn, follow_up_turn.clone()],
+        follow_up_turn.id,
+    );
+
+    let assistant_history = context
+        .grounded_answer_tool_history
+        .iter()
+        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+        .expect("assistant history should be exported");
+    assert!(
+        assistant_history
+            .content_text
+            .contains("`/opt/provider-alpha/configuration/files/provider-alpha-primary.conf`")
+    );
+}
+
+#[test]
 fn build_conversation_runtime_context_scopes_external_history_turn_even_when_current_text_is_long()
 {
     let conversation_id = Uuid::now_v7();
@@ -702,6 +862,41 @@ fn build_conversation_runtime_context_scopes_external_history_turn_even_when_cur
 }
 
 #[test]
+fn build_conversation_runtime_context_ignores_question_marker_for_history_focus() {
+    let conversation_id = Uuid::now_v7();
+    let current_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "Q100. summarize ports".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let external_prior_turns = vec![
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Q100 appears only in a page footer marker.".to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Network ports include transport endpoints for Alpha Suite.".to_string(),
+        },
+    ];
+
+    let context = build_conversation_runtime_context_with_external_history(
+        &[current_turn.clone()],
+        current_turn.id,
+        &external_prior_turns,
+    );
+
+    assert!(context.effective_query_text.contains("Network ports include transport endpoints"));
+    assert!(!context.effective_query_text.contains("page footer marker"));
+    assert!(context.effective_query_text.ends_with("question: Q100. summarize ports"));
+}
+
+#[test]
 fn build_conversation_runtime_context_preserves_prior_answer_literals_for_external_follow_up() {
     let conversation_id = Uuid::now_v7();
     let current_turn = query_repository::QueryTurnRow {
@@ -733,11 +928,186 @@ fn build_conversation_runtime_context_preserves_prior_answer_literals_for_extern
 
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.effective_query_text.contains("which package-like modules exist"));
-    assert!(context.effective_query_text.contains("entities: pkg-alpha"));
-    assert!(context.effective_query_text.contains("pkg-mu"));
+    assert!(!context.effective_query_text.contains("entities:"));
+    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("`pkg-alpha`"));
+    assert!(context.effective_query_text.contains("`pkg-mu`"));
     assert!(context.effective_query_text.ends_with("describe each item"));
-    assert!(context.coreference_entities.contains(&"pkg-alpha".to_string()));
-    assert!(context.coreference_entities.contains(&"pkg-mu".to_string()));
+    assert!(!context.coreference_entities.contains(&"pkg-alpha".to_string()));
+    assert!(!context.coreference_entities.contains(&"pkg-mu".to_string()));
+    let tool_history = context
+        .grounded_answer_tool_history
+        .iter()
+        .map(|turn| turn.content_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(tool_history.contains("`pkg-alpha`"));
+    assert!(tool_history.contains("`pkg-mu`"));
+}
+
+#[test]
+fn build_conversation_runtime_context_converts_compacted_literals_to_retrieval_anchors() {
+    let conversation_id = Uuid::now_v7();
+    let current_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "explain all settings".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let external_prior_turns = vec![
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::User,
+            content_text: "how do I configure Provider Alpha".to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "literals: `alpha-provider-module`, `/opt/alpha/alpha.conf`, `enableAlpha`, `/var/log/alpha.log`\nProvider Alpha settings use a module package, a module configuration file, and parameter defaults.".to_string(),
+        },
+    ];
+
+    let context = build_conversation_runtime_context_with_external_history(
+        &[current_turn.clone()],
+        current_turn.id,
+        &external_prior_turns,
+    );
+
+    assert!(context.effective_query_text.starts_with("scope: "));
+    assert!(context.effective_query_text.contains("Provider Alpha settings use"));
+    assert!(!context.effective_query_text.contains("literals:"));
+    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("`/var/log/alpha.log`"));
+    assert!(context.effective_query_text.contains("`enableAlpha`"));
+    assert!(context.effective_query_text.ends_with("explain all settings"));
+}
+
+#[test]
+fn build_conversation_runtime_context_keeps_compacted_literals_case_insensitive() {
+    let conversation_id = Uuid::now_v7();
+    let current_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "describe the settings".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let external_prior_turns = vec![ExternalConversationTurn {
+        turn_kind: QueryTurnKind::Assistant,
+        content_text:
+            "`AlphaKey` `alphakey` `BetaKey` `GammaKey` `DeltaKey` `EpsilonKey` `ZetaKey` `EtaKey` `ThetaKey`"
+                .to_string(),
+    }];
+
+    let context = build_conversation_runtime_context_with_external_history(
+        &[current_turn.clone()],
+        current_turn.id,
+        &external_prior_turns,
+    );
+
+    let assistant_history = context
+        .grounded_answer_tool_history
+        .iter()
+        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+        .expect("assistant tool history");
+    let literal_line = assistant_history
+        .content_text
+        .lines()
+        .find(|line| line.starts_with("literals:"))
+        .expect("compacted literal summary");
+    assert!(literal_line.contains("`AlphaKey`"));
+    assert!(
+        !literal_line.contains("`alphakey`"),
+        "compact literal summary keeps the first spelling only"
+    );
+}
+
+#[test]
+fn build_conversation_runtime_context_scopes_four_token_external_follow_up() {
+    let conversation_id = Uuid::now_v7();
+    let current_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "show full ready config".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let external_prior_turns = vec![
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::User,
+            content_text: "how do I configure Provider Alpha".to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Provider Alpha uses `alpha-provider-module`, `/opt/alpha/alpha.conf`, and `enableAlpha`.".to_string(),
+        },
+    ];
+
+    let context = build_conversation_runtime_context_with_external_history(
+        &[current_turn.clone()],
+        current_turn.id,
+        &external_prior_turns,
+    );
+
+    assert!(context.effective_query_text.starts_with("scope: "));
+    assert!(context.effective_query_text.contains("how do I configure Provider Alpha"));
+    assert!(context.effective_query_text.contains("entities: Provider, Alpha"));
+    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("`alpha-provider-module`"));
+    assert!(context.effective_query_text.contains("`/opt/alpha/alpha.conf`"));
+    assert!(context.effective_query_text.ends_with("show full ready config"));
+    let tool_history = context
+        .grounded_answer_tool_history
+        .iter()
+        .map(|turn| turn.content_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(tool_history.contains("`alpha-provider-module`"));
+    assert!(tool_history.contains("`/opt/alpha/alpha.conf`"));
+}
+
+#[test]
+fn build_conversation_runtime_context_drops_plain_backtick_words_from_literal_anchors() {
+    let conversation_id = Uuid::now_v7();
+    let current_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "explain settings".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let external_prior_turns = vec![ExternalConversationTurn {
+        turn_kind: QueryTurnKind::Assistant,
+        content_text: "Use `setup` and `engine`; configure `alphaModule` in `/etc/alpha.conf`."
+            .to_string(),
+    }];
+
+    let context = build_conversation_runtime_context_with_external_history(
+        &[current_turn.clone()],
+        current_turn.id,
+        &external_prior_turns,
+    );
+
+    let anchor_line = context
+        .effective_query_text
+        .lines()
+        .find(|line| line.contains("literal anchors:"))
+        .expect("literal anchor scope");
+    assert!(anchor_line.contains("`alphaModule`"));
+    assert!(anchor_line.contains("`/etc/alpha.conf`"));
+    assert!(!anchor_line.contains("`setup`"));
+    assert!(!anchor_line.contains("`engine`"));
 }
 
 #[test]
@@ -797,4 +1167,148 @@ fn build_conversation_runtime_context_standalone_question_after_assistant_answer
         !context.effective_query_text.contains("alphaSecret"),
         "standalone query should not be rewritten with prior entities"
     );
+    assert!(
+        !context.effective_query_text.contains("literal anchors:"),
+        "standalone query should not inherit prior literal anchors"
+    );
+}
+
+#[test]
+fn prior_grounded_answer_context_messages_preserve_chunk_evidence() {
+    let library_id = Uuid::now_v7();
+    let execution_id = Uuid::now_v7();
+    let chunk_id = Uuid::now_v7();
+    let higher_rank_chunk_id = Uuid::now_v7();
+    let reference = test_chunk_reference(chunk_id, 2, 0.92);
+    let higher_rank_reference = test_chunk_reference(higher_rank_chunk_id, 1, 0.88);
+    let chunk = test_chunk_row(
+        library_id,
+        chunk_id,
+        "Connector Alpha configuration uses [Alpha]\nalphaSecret = ${ALPHA_SECRET}\nalphaMode = strict",
+        &["Setup", "Configuration"],
+    );
+    let higher_rank_chunk = test_chunk_row(
+        library_id,
+        higher_rank_chunk_id,
+        "Connector Alpha package is alpha-connector.",
+        &["Setup", "Package"],
+    );
+
+    let replay = build_prior_grounded_answer_context_messages(
+        library_id,
+        execution_id,
+        "How is Connector Alpha configured?",
+        &[reference, higher_rank_reference],
+        &[chunk, higher_rank_chunk],
+        4_000,
+    )
+    .expect("prior grounded answer replay");
+
+    assert_eq!(replay.messages.len(), 1);
+    assert_eq!(replay.chunk_ids, vec![higher_rank_chunk_id, chunk_id]);
+    let message = &replay.messages[0];
+    assert_eq!(message.role, "system");
+    assert!(message.tool_calls.is_empty());
+    assert!(message.tool_call_id.is_none());
+    assert!(message.name.is_none());
+    let content = message.content.as_deref().expect("context content");
+    assert!(content.contains("Earlier grounded answer evidence"));
+    assert!(content.contains(&chunk_id.to_string()));
+    assert!(content.contains("section: Setup > Configuration"));
+    assert!(content.contains("alphaSecret"));
+    let package_position = content.find("alpha-connector").expect("package chunk");
+    let config_position = content.find("alphaSecret").expect("config chunk");
+    assert!(package_position < config_position);
+}
+
+#[test]
+fn prior_grounded_answer_context_messages_filter_foreign_library_chunks() {
+    let library_id = Uuid::now_v7();
+    let foreign_library_id = Uuid::now_v7();
+    let execution_id = Uuid::now_v7();
+    let kept_chunk_id = Uuid::now_v7();
+    let foreign_chunk_id = Uuid::now_v7();
+    let references = vec![
+        test_chunk_reference(foreign_chunk_id, 1, 0.99),
+        test_chunk_reference(kept_chunk_id, 2, 0.88),
+    ];
+    let chunks = vec![
+        test_chunk_row(
+            foreign_library_id,
+            foreign_chunk_id,
+            "Foreign connector setting must not cross library boundaries.",
+            &["Foreign"],
+        ),
+        test_chunk_row(
+            library_id,
+            kept_chunk_id,
+            "Connector Beta keeps betaWindow in [Beta].",
+            &["Setup", "Beta"],
+        ),
+    ];
+
+    let replay = build_prior_grounded_answer_context_messages(
+        library_id,
+        execution_id,
+        "How is Connector Beta configured?",
+        &references,
+        &chunks,
+        4_000,
+    )
+    .expect("filtered prior grounded answer replay");
+
+    assert_eq!(replay.chunk_ids, vec![kept_chunk_id]);
+    let content = replay.messages[0].content.as_deref().expect("context content");
+    assert!(content.contains("betaWindow"));
+    assert!(!content.contains("Foreign connector"));
+    assert!(!content.contains(&foreign_chunk_id.to_string()));
+}
+
+fn test_chunk_reference(chunk_id: Uuid, rank: i32, score: f64) -> KnowledgeBundleChunkReferenceRow {
+    KnowledgeBundleChunkReferenceRow {
+        key: format!("chunk-ref-{chunk_id}"),
+        bundle_id: Uuid::now_v7(),
+        chunk_id,
+        rank,
+        score,
+        inclusion_reason: Some("synthetic".to_string()),
+        created_at: Utc::now(),
+    }
+}
+
+fn test_chunk_row(
+    library_id: Uuid,
+    chunk_id: Uuid,
+    content_text: &str,
+    heading_trail: &[&str],
+) -> KnowledgeChunkRow {
+    KnowledgeChunkRow {
+        key: format!("chunk-{chunk_id}"),
+        arango_id: None,
+        arango_rev: None,
+        chunk_id,
+        workspace_id: Uuid::now_v7(),
+        library_id,
+        document_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: Some("text".to_string()),
+        content_text: content_text.to_string(),
+        normalized_text: content_text.to_string(),
+        span_start: None,
+        span_end: None,
+        token_count: None,
+        support_block_ids: Vec::new(),
+        section_path: heading_trail.iter().map(|value| (*value).to_string()).collect(),
+        heading_trail: heading_trail.iter().map(|value| (*value).to_string()).collect(),
+        literal_digest: None,
+        chunk_state: "ready".to_string(),
+        text_generation: Some(1),
+        vector_generation: Some(1),
+        quality_score: None,
+        window_text: None,
+        raptor_level: None,
+        occurred_at: None,
+        occurred_until: None,
+    }
 }

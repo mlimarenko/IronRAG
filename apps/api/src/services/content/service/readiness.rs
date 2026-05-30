@@ -52,6 +52,19 @@ pub(crate) fn graph_state_after_successful_extract(graph_ready: bool) -> &'stati
     if graph_ready { "ready" } else { "processing" }
 }
 
+/// Graph state for a revision whose chunk vectors are embedded and
+/// searchable but whose graph-extraction enrichment failed terminally
+/// after provider retries. Graph is an enrichment layer over chunk-vector
+/// retrieval, so the document stays answerable via vector + lexical
+/// retrieval immediately; the idle graph re-extract loop backfills the
+/// graph layer on a later tick once the revision is promoted to active.
+/// Kept distinct from "processing" (reconcile pending after a *successful*
+/// extract) so operators and the document listing can tell a degraded
+/// graph apart from an in-flight one. Treated as not-graph-ready by every
+/// consumer (which match only "ready"/"graph_ready"), so introducing it is
+/// purely additive and needs no schema migration.
+pub(crate) const GRAPH_STATE_DEGRADED: &str = "graph_degraded";
+
 pub(crate) async fn fail_revision_vector_graph_readiness(
     state: &AppState,
     revision_id: Uuid,

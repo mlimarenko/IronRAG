@@ -140,6 +140,25 @@ def resolve_auth_headers(base_url: str, login: str) -> dict[str, str]:
     return {"Cookie": _cookie_auth_header(base_url, login, password)}
 
 
+def _resolve_http_timeout_seconds(default: int) -> int:
+    """Read `IRONRAG_HTTP_TIMEOUT` (seconds) with a sensible default.
+
+    The canonical SLO sits at full-turn p95 ≤ 90 s, so the default budget
+    has to cover a full agent turn (multiple tool-calls + planning + verify)
+    with margin. Set the env var explicitly when running concurrency
+    sweeps where head-of-line blocking may temporarily push individual
+    request wallclocks beyond the typical p95.
+    """
+    raw = os.environ.get("IRONRAG_HTTP_TIMEOUT", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
 def _post(
     base_url: str,
     path: str,
@@ -150,7 +169,8 @@ def _post(
     url = base_url.rstrip("/") + path
     data = json.dumps(body).encode()
     req = urllib_request.Request(url, data=data, headers=_headers(auth_headers), method="POST")
-    with urllib_request.urlopen(req, timeout=120) as resp:
+    timeout_seconds = _resolve_http_timeout_seconds(default=180)
+    with urllib_request.urlopen(req, timeout=timeout_seconds) as resp:
         return json.loads(resp.read().decode())
 
 

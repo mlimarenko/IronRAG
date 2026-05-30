@@ -15,6 +15,7 @@ use crate::{
     },
     services::content::document_hint::resolve_document_hint,
     services::query::{
+        latest_versions::query_requests_latest_versions,
         support::{
             ContextAssemblyRequest, GroupedReferenceCandidate, assemble_context_metadata,
             group_visible_references,
@@ -258,7 +259,7 @@ fn target_entity_context_line_limit(query_ir: &QueryIR) -> usize {
 }
 
 fn graph_node_matches_target_label(
-    node: &crate::infra::repositories::RuntimeGraphNodeRow,
+    node: &crate::infra::repositories::RuntimeGraphQueryNodeRow,
     normalized_label: &str,
     wildcard_prefixes: &[String],
 ) -> bool {
@@ -283,7 +284,7 @@ fn graph_node_matches_target_label(
 }
 
 fn graph_node_target_context_line(
-    node: &crate::infra::repositories::RuntimeGraphNodeRow,
+    node: &crate::infra::repositories::RuntimeGraphQueryNodeRow,
 ) -> String {
     let tail = format!("{} ({})", node.label, node.node_type);
     if let Some(summary) = node.summary.as_deref().map(str::trim).filter(|value| !value.is_empty())
@@ -456,6 +457,22 @@ fn order_bounded_context_chunks<'a>(
             ordered.push(chunk);
         }
     }
+    let mut identity_chunks = chunks
+        .iter()
+        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::DocumentIdentity)
+        .collect::<Vec<_>>();
+    identity_chunks.sort_by(|left, right| {
+        score_value(right.score)
+            .total_cmp(&score_value(left.score))
+            .then_with(|| left.document_id.cmp(&right.document_id))
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    for chunk in identity_chunks {
+        if seen.insert(chunk.chunk_id) {
+            ordered.push(chunk);
+        }
+    }
     for chunk in selected {
         if seen.insert(chunk.chunk_id) {
             ordered.push(chunk);
@@ -512,6 +529,16 @@ fn bounded_context_document_block(
             excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
         );
     }
+    if chunk.score_kind == RuntimeChunkScoreKind::DocumentIdentity {
+        let source_text = chunk.source_text.trim();
+        let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
+        return format!(
+            "[document document_identity ordinal={} document=\"{}\"]\n{}",
+            chunk.chunk_index,
+            context_label(&chunk.document_label),
+            excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
+        );
+    }
     let text = query_focused_chunk_context_text(chunk, ordinary_keywords);
     format!("[document] {}: {}", chunk.document_label, text.trim())
 }
@@ -559,7 +586,20 @@ fn assemble_ordered_source_slice_context(
     if content_chunks.is_empty() {
         return None;
     }
-    content_chunks.sort_by_key(|chunk| (chunk.document_label.clone(), chunk.chunk_index));
+    let latest_version_context = query_requests_latest_versions(query_ir);
+    if latest_version_context {
+        let identity_chunks = content_chunks
+            .iter()
+            .copied()
+            .filter(|chunk| matches!(chunk.score_kind, RuntimeChunkScoreKind::DocumentIdentity))
+            .collect::<Vec<_>>();
+        if !identity_chunks.is_empty() {
+            content_chunks = identity_chunks;
+        }
+        content_chunks.sort_by(latest_version_source_slice_chunk_order);
+    } else {
+        content_chunks.sort_by_key(|chunk| (chunk.document_label.clone(), chunk.chunk_index));
+    }
     let mut content_blocks = content_chunks
         .iter()
         .map(|chunk| {
@@ -582,8 +622,11 @@ fn assemble_ordered_source_slice_context(
     let prefix_len =
         header.len() + profile_blocks.iter().map(|block| block.len() + 2).sum::<usize>() + 2;
     let remaining_budget = budget_chars.saturating_sub(prefix_len);
-    content_blocks =
-        select_source_slice_blocks_for_budget(content_blocks, remaining_budget, slice.direction);
+    content_blocks = if latest_version_context {
+        select_blocks_for_budget_in_order(content_blocks, remaining_budget)
+    } else {
+        select_source_slice_blocks_for_budget(content_blocks, remaining_budget, slice.direction)
+    };
     if content_blocks.is_empty() {
         return None;
     }
@@ -592,6 +635,30 @@ fn assemble_ordered_source_slice_context(
     sections.append(&mut profile_blocks);
     sections.append(&mut content_blocks);
     Some(sections.join("\n\n"))
+}
+
+fn latest_version_source_slice_chunk_order(
+    left: &&RuntimeMatchedChunk,
+    right: &&RuntimeMatchedChunk,
+) -> std::cmp::Ordering {
+    score_value(right.score)
+        .total_cmp(&score_value(left.score))
+        .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+        .then_with(|| left.document_label.cmp(&right.document_label))
+}
+
+fn select_blocks_for_budget_in_order(blocks: Vec<String>, budget_chars: usize) -> Vec<String> {
+    let mut selected = Vec::<String>::new();
+    let mut used = 0usize;
+    for block in blocks {
+        let projected = used.saturating_add(block.len()).saturating_add(2);
+        if projected > budget_chars && !selected.is_empty() {
+            break;
+        }
+        used = projected;
+        selected.push(block);
+    }
+    selected
 }
 
 fn select_source_slice_blocks_for_budget(
@@ -1143,7 +1210,13 @@ async fn load_retrieved_document_preview_and_hint(
     let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
 
     let revision_future = state.arango_document_store.get_revision(revision_id);
-    let chunks_future = state.arango_document_store.list_chunks_by_revision(revision_id);
+    // The preview only consumes the first few reading-order chunks, so
+    // fetch a small head window instead of scanning the whole revision
+    // (a large document can hold thousands of chunks). Extra headroom
+    // covers empty/profile chunks dropped during normalization below.
+    let chunks_future = state
+        .arango_document_store
+        .list_head_chunks_by_revision(revision_id, RETRIEVED_DOCUMENT_BRIEF_SOURCE_CHUNKS * 4);
     let (revision_result, chunks_result) =
         futures::future::join(revision_future, chunks_future).await;
 
@@ -1227,10 +1300,11 @@ mod tests {
     use chrono::Utc;
 
     use crate::domains::query_ir::{
-        EntityMention, EntityRole, QueryAct, QueryLanguage, QueryScope, SourceSliceSpec,
+        EntityMention, EntityRole, QueryAct, QueryLanguage, QueryScope, SourceSliceFilter,
+        SourceSliceSpec,
     };
     use crate::{
-        infra::repositories::RuntimeGraphNodeRow,
+        infra::repositories::RuntimeGraphQueryNodeRow,
         services::knowledge::runtime_read::ActiveRuntimeGraphProjection,
     };
 
@@ -1249,9 +1323,21 @@ mod tests {
             document_focus: None,
             conversation_refs: Vec::new(),
             needs_clarification: None,
-            source_slice: Some(SourceSliceSpec { direction, count: Some(count) }),
+            source_slice: Some(SourceSliceSpec {
+                direction,
+                count: Some(count),
+                filter: SourceSliceFilter::None,
+            }),
+            retrieval_query: None,
             confidence: 0.9,
         }
+    }
+
+    fn latest_version_slice_ir(count: u16) -> QueryIR {
+        let mut ir = source_slice_ir(SourceSliceDirection::Tail, count);
+        ir.scope = QueryScope::LibraryMeta;
+        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir
     }
 
     fn general_ir() -> QueryIR {
@@ -1268,6 +1354,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }
@@ -1289,6 +1376,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }
@@ -1310,6 +1398,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }
@@ -1328,6 +1417,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }
@@ -1344,6 +1434,21 @@ mod tests {
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(3.0),
             source_text: source_text.to_string(),
+        }
+    }
+
+    fn latest_version_chunk(label: &str, chunk_index: i32, score: f32) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index,
+            chunk_kind: Some("paragraph".to_string()),
+            document_label: label.to_string(),
+            excerpt: format!("{label} excerpt {chunk_index}"),
+            score_kind: RuntimeChunkScoreKind::DocumentIdentity,
+            score: Some(score),
+            source_text: format!("{label} body {chunk_index}"),
         }
     }
 
@@ -1381,8 +1486,8 @@ mod tests {
         label: &str,
         node_type: &str,
         summary: Option<&str>,
-    ) -> RuntimeGraphNodeRow {
-        RuntimeGraphNodeRow {
+    ) -> RuntimeGraphQueryNodeRow {
+        RuntimeGraphQueryNodeRow {
             id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
             canonical_key: format!("{node_type}:{label}"),
@@ -1390,7 +1495,6 @@ mod tests {
             node_type: node_type.to_string(),
             aliases_json: serde_json::json!([]),
             summary: summary.map(str::to_string),
-            metadata_json: serde_json::json!({}),
             support_count: 1,
             projection_version: 1,
             created_at: Utc::now(),
@@ -1398,7 +1502,7 @@ mod tests {
         }
     }
 
-    fn graph_index_with_nodes(nodes: Vec<RuntimeGraphNodeRow>) -> QueryGraphIndex {
+    fn graph_index_with_nodes(nodes: Vec<RuntimeGraphQueryNodeRow>) -> QueryGraphIndex {
         let node_positions =
             nodes.iter().enumerate().map(|(position, node)| (node.id, position)).collect();
         QueryGraphIndex::new(
@@ -1536,6 +1640,34 @@ mod tests {
     }
 
     #[test]
+    fn latest_version_source_slice_context_uses_runtime_rank_order() {
+        let query_ir = latest_version_slice_ir(3);
+        let chunks = vec![
+            latest_version_chunk("Version 1.0.1", 0, 100.0),
+            latest_version_chunk("Version 1.0.3", 0, 300.0),
+            latest_version_chunk("Version 1.0.2", 0, 200.0),
+            ordinary_chunk("unranked", "unranked"),
+        ];
+
+        let context = assemble_bounded_context_for_query(
+            &query_ir,
+            "latest releases",
+            &[],
+            &[],
+            &chunks,
+            &[],
+            4_000,
+        );
+
+        let newest = context.find("Version 1.0.3").unwrap();
+        let middle = context.find("Version 1.0.2").unwrap();
+        let oldest = context.find("Version 1.0.1").unwrap();
+        assert!(newest < middle);
+        assert!(middle < oldest);
+        assert!(!context.contains("unranked"));
+    }
+
+    #[test]
     fn bounded_context_ranks_source_units_by_question_focus_and_renders_source_text() {
         let query_ir = general_ir();
         let document_id = Uuid::now_v7();
@@ -1611,6 +1743,60 @@ mod tests {
         assert!(context.contains("[document source_context"));
         assert!(context.contains("Device A"));
         assert!(context.contains("Device D"));
+    }
+
+    #[test]
+    fn bounded_context_renders_document_identity_chunks_with_source_unit_budget() {
+        let source = format!(
+            "{}\nInstall the module:\naptitude install alpha-connector\n\nConfiguration file: /opt/alpha/modules/connector/connector.conf\n[Main]\nendpointUrl = https://alpha.example.test/api\npartnerId = demo-partner",
+            "Provider Alpha overview. ".repeat(80)
+        );
+        let mut chunk = ordinary_chunk("Provider Alpha setup", &source);
+        chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+
+        let context = assemble_bounded_context_for_query(
+            &general_ir(),
+            "How do I configure Provider Alpha?",
+            &[],
+            &[],
+            &[chunk],
+            &[],
+            8192,
+        );
+
+        assert!(context.contains("[document document_identity"));
+        assert!(context.contains("aptitude install alpha-connector"));
+        assert!(context.contains("/opt/alpha/modules/connector/connector.conf"));
+        assert!(context.contains("[Main]"));
+        assert!(context.contains("partnerId = demo-partner"));
+    }
+
+    #[test]
+    fn bounded_context_orders_document_identity_chunks_by_retrieval_score() {
+        let mut overview = ordinary_chunk("Provider Alpha overview", "Provider Alpha overview.");
+        overview.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+        overview.score = Some(1200.0);
+        overview.chunk_index = 0;
+
+        let mut setup = ordinary_chunk(
+            "Provider Alpha configuration",
+            "Install the module:\naptitude install alpha-connector\nConfiguration file: /opt/alpha/modules/connector/connector.conf",
+        );
+        setup.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+        setup.score = Some(2600.0);
+        setup.document_id = overview.document_id;
+        setup.revision_id = overview.revision_id;
+        setup.chunk_index = 1;
+
+        let chunks = vec![overview, setup];
+        let ordered = order_bounded_context_chunks(
+            "How do I configure Provider Alpha?",
+            &general_ir(),
+            &chunks,
+            &[],
+        );
+
+        assert_eq!(ordered.first().map(|chunk| chunk.chunk_index), Some(1));
     }
 
     #[test]

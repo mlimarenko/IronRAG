@@ -152,7 +152,26 @@ fn reorder_chunks(
     chunks: Vec<RuntimeMatchedChunk>,
     ordered_ids: &[String],
 ) -> Vec<RuntimeMatchedChunk> {
-    reorder_by_ids(chunks, ordered_ids, |chunk| chunk.chunk_id.to_string())
+    let order_index = ordered_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let ordered_len = ordered_ids.len();
+    let mut indexed = chunks.into_iter().enumerate().collect::<Vec<_>>();
+    for (_, chunk) in &mut indexed {
+        let Some(rank) = order_index.get(&chunk.chunk_id.to_string()).copied() else {
+            continue;
+        };
+        chunk.score = Some(ordered_len.saturating_sub(rank) as f32);
+    }
+    indexed.sort_by(|(left_index, left), (right_index, right)| {
+        let left_order = order_index.get(&left.chunk_id.to_string()).copied().unwrap_or(usize::MAX);
+        let right_order =
+            order_index.get(&right.chunk_id.to_string()).copied().unwrap_or(usize::MAX);
+        left_order.cmp(&right_order).then_with(|| left_index.cmp(right_index))
+    });
+    indexed.into_iter().map(|(_, item)| item).collect()
 }
 
 fn reorder_by_ids<T>(

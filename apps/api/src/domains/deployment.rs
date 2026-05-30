@@ -36,6 +36,15 @@ impl ServiceRole {
     pub const fn runs_startup_authority(self) -> bool {
         matches!(self, Self::Startup)
     }
+
+    /// The maintenance scheduler runs in the same role that owns
+    /// background ingest work. Keeping the scheduler out of the API
+    /// role avoids letting a misbehaving sweeper degrade
+    /// request-handling latency.
+    #[must_use]
+    pub const fn runs_maintenance_scheduler(self) -> bool {
+        matches!(self, Self::Worker)
+    }
 }
 
 impl fmt::Display for ServiceRole {

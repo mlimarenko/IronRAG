@@ -30,7 +30,7 @@ use crate::{
     integrations::docling,
     services::{
         content::service::{
-            MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand,
+            GRAPH_STATE_DEGRADED, MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand,
             fail_revision_vector_graph_readiness, graph_extract_success_message,
             graph_state_after_successful_extract,
         },
@@ -1834,10 +1834,30 @@ async fn run_canonical_ingest_pipeline(
         }
     }
 
-    if let Some(reason) = graph_failure {
-        fail_revision_vector_graph_readiness(state, revision_id, &reason).await?;
-        return Err(anyhow::anyhow!(reason));
-    }
+    // Graph extraction is an enrichment layer over chunk-vector retrieval, not
+    // the core. When the chunks for this revision are already embedded, a
+    // terminal graph-extraction failure must NOT discard those vectors or block
+    // the document from becoming searchable. Mark the graph layer degraded, keep
+    // the vectors, promote the document as readable, and let the idle graph
+    // re-extract loop backfill the graph on a later tick. Only when the vectors
+    // themselves are missing do we fail destructively (nothing to preserve).
+    let graph_degraded = if let Some(reason) = graph_failure {
+        if embed_chunk_success {
+            warn!(
+                %worker_id,
+                job_id = %job.id,
+                revision_id = %revision_id,
+                reason = %reason,
+                "graph extraction degraded after provider retries; keeping embedded chunk vectors and promoting document as searchable (graph backfilled by idle re-extract loop)",
+            );
+            true
+        } else {
+            fail_revision_vector_graph_readiness(state, revision_id, &reason).await?;
+            return Err(anyhow::anyhow!(reason));
+        }
+    } else {
+        false
+    };
 
     // --- Generate document summary from structured blocks ---------------------
     match generate_document_summary_from_blocks(state, revision_id).await {
@@ -1902,7 +1922,11 @@ async fn run_canonical_ingest_pipeline(
             revision_id,
             "ready",
             vector_state_label,
-            graph_state_after_successful_extract(graph_ready),
+            if graph_degraded {
+                GRAPH_STATE_DEGRADED
+            } else {
+                graph_state_after_successful_extract(graph_ready)
+            },
             Some(now),
             vector_ready_at,
             graph_ready.then_some(now),

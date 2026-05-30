@@ -21,8 +21,11 @@ use crate::{
         McpReadabilityState, McpRelationReference, McpSearchDocumentsRequest,
         McpSearchDocumentsResponse, McpTechnicalFactReference,
     },
-    services::mcp::support::{
-        char_slice, encode_continuation_token, normalize_read_request, saturating_rank,
+    services::{
+        mcp::support::{
+            char_slice, encode_continuation_token, normalize_read_request, saturating_rank,
+        },
+        query::vector_dimensions::library_vector_index_dimensions,
     },
     shared::versioning::dotted_version_key,
 };
@@ -80,9 +83,13 @@ pub async fn search_documents(
                 .vector_plane_read_guard(state)
                 .await
                 .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+            let library_dim = library_vector_index_dimensions(state, library.library.id)
+                .await
+                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
             match state
                 .arango_search_store
                 .search_chunk_vectors_by_similarity(
+                    library_dim,
                     library.library.id,
                     &context.model_catalog_id.to_string(),
                     &context.query_vector,

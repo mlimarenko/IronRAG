@@ -49,6 +49,88 @@ pub struct RuntimeGraphEdgeRow {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Lean projection of a graph node for adjacency-only consumers (community
+/// detection / label propagation). Holds only the canonical id — no heavy
+/// text columns (`summary`, `label`, `canonical_key`, JSON blobs) — so the
+/// in-RAM footprint per row stays at 16 bytes instead of multi-KB.
+///
+/// See `list_runtime_graph_node_ids_by_library`.
+#[derive(Debug, Clone, Copy, FromRow)]
+pub struct RuntimeGraphNodeIdRow {
+    pub id: Uuid,
+}
+
+/// Lean projection of a graph edge for adjacency-only consumers. Holds only
+/// the columns label-propagation actually reads (`from`, `to`,
+/// `support_count`) so large libraries avoid materializing heavy edge payloads
+/// in memory.
+///
+/// See `list_runtime_graph_edges_adjacency_by_library`.
+#[derive(Debug, Clone, Copy, FromRow)]
+pub struct RuntimeGraphEdgeAdjacencyRow {
+    pub from_node_id: Uuid,
+    pub to_node_id: Uuid,
+    pub support_count: i32,
+}
+
+/// Slim node row for the query-time graph index. Drops `metadata_json`
+/// (the largest per-row allocation — a `serde_json::Value` heap object
+/// that query-time callers never read) while keeping every other column
+/// that `graph_retrieval.rs`, `retrieve.rs`, and `context.rs` actually
+/// access: `id`, `library_id`, `canonical_key`, `label`, `node_type`,
+/// `aliases_json`, `summary`, `support_count`, `projection_version`,
+/// `created_at`, `updated_at`.
+///
+/// On a large corpus this drops one `serde_json::Value` heap allocation per
+/// node on every cache-miss load. Per-row savings depend on the average
+/// `metadata_json` payload size; typical sub_type objects are 50–300 bytes,
+/// so at six-figure node counts this saves on the order of tens of MB for
+/// nodes alone.
+///
+/// See `list_runtime_graph_query_nodes_by_ids_or_document_type`.
+#[derive(Debug, Clone, FromRow)]
+pub struct RuntimeGraphQueryNodeRow {
+    pub id: Uuid,
+    pub library_id: Uuid,
+    pub canonical_key: String,
+    pub label: String,
+    pub node_type: String,
+    pub aliases_json: serde_json::Value,
+    pub summary: Option<String>,
+    pub support_count: i32,
+    pub projection_version: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Slim edge row for the query-time graph index. Drops `metadata_json`
+/// and `canonical_key` — neither is accessed by any query-time caller
+/// (`graph_retrieval.rs`, `retrieve.rs`, `context.rs`). The remaining
+/// columns cover all accesses: `id`, `library_id`, `from_node_id`,
+/// `to_node_id`, `relation_type`, `summary`, `weight`, `support_count`,
+/// `projection_version`, `created_at`, `updated_at`.
+///
+/// On a large corpus this drops one `serde_json::Value` heap allocation plus
+/// the `canonical_key` String per edge. Savings scale with edge count and
+/// `metadata_json` population density — on the order of tens to a couple
+/// hundred MB at six-figure edge counts.
+///
+/// See `list_admitted_runtime_graph_query_edges_by_library`.
+#[derive(Debug, Clone, FromRow)]
+pub struct RuntimeGraphQueryEdgeRow {
+    pub id: Uuid,
+    pub library_id: Uuid,
+    pub from_node_id: Uuid,
+    pub to_node_id: Uuid,
+    pub relation_type: String,
+    pub summary: Option<String>,
+    pub weight: Option<f64>,
+    pub support_count: i32,
+    pub projection_version: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphEvidenceRow {
     pub id: Uuid,
@@ -426,6 +508,66 @@ pub async fn list_admitted_runtime_graph_edges_by_library(
     .bind(projection_version)
         .fetch_all(pool)
         .await
+}
+
+/// Lists admitted runtime graph edges for one projection version using the slim
+/// query row type — drops `metadata_json` and `canonical_key` to cut
+/// per-row heap usage for the query-time graph index path.
+///
+/// This is the canonical replacement for `list_admitted_runtime_graph_edges_by_library`
+/// on the query path. Ingest and graph-stream callers that need the full row
+/// continue to use the fat variant.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying admitted graph edges.
+pub async fn list_admitted_runtime_graph_query_edges_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphQueryEdgeRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphQueryEdgeRow>(
+        "select id, library_id, from_node_id, to_node_id, relation_type,
+            summary, weight, support_count, projection_version, created_at, updated_at
+         from runtime_graph_edge
+         where library_id = $1
+           and projection_version = $2
+           and btrim(relation_type) <> ''
+           and from_node_id <> to_node_id
+         order by relation_type asc, created_at asc, id asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Fetches slim node rows for a pre-computed set of admitted ids plus every
+/// `document`-type node. Mirrors
+/// `list_runtime_graph_nodes_by_ids_or_document_type` but selects only the
+/// columns consumed by the query-time graph index, omitting `metadata_json`.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying graph nodes.
+pub async fn list_runtime_graph_query_nodes_by_ids_or_document_type(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    admitted_ids: &[Uuid],
+) -> Result<Vec<RuntimeGraphQueryNodeRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphQueryNodeRow>(
+        "select id, library_id, canonical_key, label, node_type, aliases_json,
+            summary, support_count, projection_version, created_at, updated_at
+         from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and (node_type = 'document' or id = any($3::uuid[]))
+         order by node_type asc, label asc, created_at asc, id asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(admitted_ids)
+    .fetch_all(pool)
+    .await
 }
 
 /// Compact edge row — only the columns consumed by the NDJSON topology
@@ -971,6 +1113,30 @@ pub async fn list_runtime_graph_nodes_by_library(
     .await
 }
 
+/// Lists node ids only — the lean projection consumed by community
+/// detection / label propagation. Skips the heavy text columns (`summary`,
+/// `metadata_json`, `aliases_json`, `canonical_key`, `label`, `node_type`)
+/// so a large library doesn't materialise multi-KB-per-row in worker RAM.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying node ids.
+#[tracing::instrument(skip(pool), fields(library_id = %library_id, projection_version))]
+pub async fn list_runtime_graph_node_ids_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphNodeIdRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphNodeIdRow>(
+        "select id
+         from runtime_graph_node
+         where library_id = $1 and projection_version = $2",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
 /// Aggregates observed `sub_type` values per `node_type` for one library at a
 /// given projection version. Drives vocabulary-aware extraction: the returned
 /// rows feed the `sub_type_hints` prompt section so the LLM converges on terms
@@ -1112,6 +1278,32 @@ pub async fn list_runtime_graph_edges_by_library(
          from runtime_graph_edge
          where library_id = $1 and projection_version = $2
          order by relation_type asc, created_at asc, id asc",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists `(from, to, support_count)` triples for every edge — the lean
+/// projection consumed by community detection / label propagation. Skips
+/// heavy text columns (`summary`, `relation_type`, `canonical_key`,
+/// `metadata_json`) and `ORDER BY` because label propagation produces its
+/// own deterministic node ordering. Cuts the in-RAM Vec from KB-scale edge
+/// payloads to the adjacency fields required by the algorithm.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying edges.
+#[tracing::instrument(skip(pool), fields(library_id = %library_id, projection_version))]
+pub async fn list_runtime_graph_edges_adjacency_by_library(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<RuntimeGraphEdgeAdjacencyRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEdgeAdjacencyRow>(
+        "select from_node_id, to_node_id, support_count
+         from runtime_graph_edge
+         where library_id = $1 and projection_version = $2",
     )
     .bind(library_id)
     .bind(projection_version)

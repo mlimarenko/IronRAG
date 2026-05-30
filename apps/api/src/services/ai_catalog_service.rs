@@ -344,6 +344,12 @@ fn vector_index_counterpart_purpose(binding_purpose: AiBindingPurpose) -> Option
     }
 }
 
+fn invalidate_vector_dimension_cache_for_binding(binding_purpose: AiBindingPurpose) {
+    if vector_index_counterpart_purpose(binding_purpose).is_some() {
+        crate::services::query::vector_dimensions::invalidate_vector_index_dimension_cache();
+    }
+}
+
 fn validate_provider_capability_for_binding(
     provider: &ProviderCatalogEntry,
     binding_purpose: AiBindingPurpose,
@@ -437,6 +443,7 @@ impl AiCatalogService {
             command.updated_by_principal_id,
         )
         .await?;
+        invalidate_vector_dimension_cache_for_binding(command.binding_purpose);
         map_binding_assignment_row(row)
     }
 
@@ -493,6 +500,7 @@ impl AiCatalogService {
             )
             .await?;
         }
+        invalidate_vector_dimension_cache_for_binding(binding_purpose);
         map_binding_assignment_row(row)
     }
 
@@ -642,6 +650,7 @@ impl AiCatalogService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         }
+        invalidate_vector_dimension_cache_for_binding(binding_purpose);
         Ok(())
     }
 
@@ -1040,20 +1049,25 @@ impl AiCatalogService {
         library_id: Uuid,
         binding_purpose: AiBindingPurpose,
     ) -> Result<Option<ResolvedRuntimeBinding>, ApiError> {
+        // Fan out the two independent PG lookups. The library row and the
+        // effective binding assignment both key off `library_id` only —
+        // neither feeds the other — so running them sequentially used to
+        // pay 2× round-trips for no reason.
+        let (library_result, binding_result) = tokio::join!(
+            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id),
+            ai_repository::get_effective_binding_assignment_by_purpose(
+                &state.persistence.postgres,
+                library_id,
+                binding_purpose_key(binding_purpose),
+            ),
+        );
         let Some(library) =
-            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            library_result.map_err(|e| ApiError::internal_with_log(e, "internal"))?
         else {
             return Ok(None);
         };
-        let Some(binding) = ai_repository::get_effective_binding_assignment_by_purpose(
-            &state.persistence.postgres,
-            library_id,
-            binding_purpose_key(binding_purpose),
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        let Some(binding) =
+            binding_result.map_err(|e| ApiError::internal_with_log(e, "internal"))?
         else {
             return Ok(None);
         };
@@ -1085,13 +1099,23 @@ impl AiCatalogService {
         workspace_id: Uuid,
         library_id: Uuid,
     ) -> Result<ResolvedRuntimeBinding, ApiError> {
-        let provider_credential =
-            self.get_provider_credential(state, binding.provider_credential_id).await?;
-        let model_preset = self.get_model_preset(state, binding.model_preset_id).await?;
+        // First parallel hop: credential ⟂ preset (both keyed off `binding` only).
+        let (credential_result, preset_result) = tokio::join!(
+            self.get_provider_credential(state, binding.provider_credential_id),
+            self.get_model_preset(state, binding.model_preset_id),
+        );
+        let provider_credential = credential_result?;
+        let model_preset = preset_result?;
         let binding_purpose = parse_binding_purpose(&binding.binding_purpose)?;
-        let provider =
-            self.get_provider_catalog(state, provider_credential.provider_catalog_id).await?;
-        let model = self.get_model_catalog(state, model_preset.model_catalog_id).await?;
+        // Second parallel hop: provider catalog ⟂ model catalog. Provider
+        // depends on the resolved credential, model depends on the resolved
+        // preset, but the two catalog lookups are independent of each other.
+        let (provider_result, model_result) = tokio::join!(
+            self.get_provider_catalog(state, provider_credential.provider_catalog_id),
+            self.get_model_catalog(state, model_preset.model_catalog_id),
+        );
+        let provider = provider_result?;
+        let model = model_result?;
         if model.provider_catalog_id != provider.id {
             return Err(ApiError::BadRequest(
                 "binding links a provider credential to a model from another provider".to_string(),

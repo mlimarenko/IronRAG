@@ -195,6 +195,11 @@ export type AssistantRelationReference = {
 };
 
 export type AssistantRuntimeStageSummary = {
+    /**
+     * Total wall-clock spent in this pipeline stage across its attempts.
+     * `None` for executions recorded before stage timing existed.
+     */
+    durationMs?: number | null;
     stageKind: string;
     stageLabel: string;
 };
@@ -1827,6 +1832,13 @@ export type LlmContextSnapshot = {
      */
     queryIr?: unknown;
     question: string;
+    /**
+     * Fine-grained timed sub-operations recorded during this execution
+     * (individual DB/Arango queries, retrieval lanes, …) so the inspector can
+     * surface where time went and operators can catch heavy sections. Empty
+     * on records written before span capture existed.
+     */
+    spans?: Array<TurnSpan>;
     totalIterations: number;
 };
 
@@ -1838,6 +1850,14 @@ export type LlmContextSnapshot = {
  */
 export type LlmIterationDebug = {
     /**
+     * Query-execution IDs of the child executions spawned by this
+     * iteration's tool calls. These are the IDs the execution-detail /
+     * llm-context endpoints accept, so the debug inspector can drill
+     * into a child `grounded_answer` execution. (The runtime IDs above
+     * key a different table and are not directly fetchable.)
+     */
+    childQueryExecutionIds?: Array<string>;
+    /**
      * Runtime execution IDs spawned by tool calls in this iteration.
      * Populated on tool-use turns when a tool such as
      * `grounded_answer` creates its own query execution and debug
@@ -1845,6 +1865,12 @@ export type LlmIterationDebug = {
      * query executions and on single-shot grounded-answer turns.
      */
     childRuntimeExecutionIds?: Array<string>;
+    /**
+     * Wall-clock the model spent on this iteration — request sent to
+     * response received ("model think time"). `None` on records written
+     * before timing capture existed.
+     */
+    durationMs?: number | null;
     iteration: number;
     modelName: string;
     providerKind: string;
@@ -2195,10 +2221,24 @@ export type ReprocessDocumentRequest = {
 };
 
 export type ResponseToolCallDebug = {
+    /**
+     * Effective arguments executed after server-side defaults and
+     * scope guards were applied.
+     */
     argumentsJson: string;
+    /**
+     * Wall-clock the tool ran ("tool wait time" the model blocked on).
+     * `None` on records written before timing capture existed.
+     */
+    durationMs?: number | null;
     id: string;
     isError: boolean;
     name: string;
+    /**
+     * Raw arguments emitted by the model when server-side defaults or
+     * guards changed the executable payload.
+     */
+    requestedArgumentsJson?: string | null;
     resultJson?: unknown;
     resultText?: string | null;
 };
@@ -2571,6 +2611,27 @@ export type TopologyStatus = {
 };
 
 export type TopologySupport = 'supported' | 'not_supported';
+
+/**
+ * One timed sub-operation within an execution.
+ */
+export type TurnSpan = {
+    detail?: string | null;
+    durationMs: number;
+    /**
+     * Coarse category for grouping/colour: `db` | `lane` | `stage` | `llm`.
+     */
+    kind: string;
+    /**
+     * Operator-facing label, e.g. `arango.cursor`, `retrieve.vector`.
+     */
+    name: string;
+    rows?: number | null;
+    /**
+     * Offset from execution start, for ordering on a timeline.
+     */
+    startedOffsetMs: number;
+};
 
 export type TypedTechnicalFact = {
     canonicalValue: TechnicalFactValue;

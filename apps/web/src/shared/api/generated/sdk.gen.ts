@@ -46,7 +46,7 @@ export class Ai {
             ...options
         });
     }
-
+    
     /**
      * Create ai library binding.
      *
@@ -63,7 +63,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * Delete ai library binding.
      *
@@ -76,7 +76,7 @@ export class Ai {
             ...options
         });
     }
-
+    
     /**
      * Update ai library binding.
      *
@@ -93,7 +93,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * Validate ai library binding.
      *
@@ -106,7 +106,7 @@ export class Ai {
             ...options
         });
     }
-
+    
     /**
      * List ai credentials.
      *
@@ -119,7 +119,7 @@ export class Ai {
             ...options
         });
     }
-
+    
     /**
      * Create ai credential.
      *
@@ -136,7 +136,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * Update ai credential.
      *
@@ -153,7 +153,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * List ai model presets.
      *
@@ -166,7 +166,7 @@ export class Ai {
             ...options
         });
     }
-
+    
     /**
      * Create ai model preset.
      *
@@ -183,7 +183,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * Update ai model preset.
      *
@@ -200,7 +200,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * List ai models.
      *
@@ -213,7 +213,7 @@ export class Ai {
             ...options
         });
     }
-
+    
     /**
      * List ai prices.
      *
@@ -226,7 +226,7 @@ export class Ai {
             ...options
         });
     }
-
+    
     /**
      * Create ai price override.
      *
@@ -243,7 +243,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * Update ai price override.
      *
@@ -260,7 +260,7 @@ export class Ai {
             }
         });
     }
-
+    
     /**
      * List ai providers.
      *
@@ -303,7 +303,7 @@ export class Billing {
             ...options
         });
     }
-
+    
     /**
      * List billing charges.
      *
@@ -316,7 +316,7 @@ export class Billing {
             ...options
         });
     }
-
+    
     /**
      * List billing provider calls.
      *
@@ -329,7 +329,7 @@ export class Billing {
             ...options
         });
     }
-
+    
     /**
      * Get library cost summary.
      *
@@ -342,7 +342,7 @@ export class Billing {
             ...options
         });
     }
-
+    
     /**
      * List billing library document costs.
      *
@@ -355,7 +355,7 @@ export class Billing {
             ...options
         });
     }
-
+    
     /**
      * Get workspace cost summary.
      *
@@ -383,7 +383,7 @@ export class Catalog {
             ...options
         });
     }
-
+    
     /**
      * Update catalog library.
      *
@@ -400,7 +400,7 @@ export class Catalog {
             }
         });
     }
-
+    
     /**
      * Update catalog library recognition policy.
      *
@@ -417,7 +417,7 @@ export class Catalog {
             }
         });
     }
-
+    
     /**
      * Update catalog library web ingest policy.
      *
@@ -434,7 +434,7 @@ export class Catalog {
             }
         });
     }
-
+    
     /**
      * List catalog workspaces.
      *
@@ -447,7 +447,7 @@ export class Catalog {
             ...options
         });
     }
-
+    
     /**
      * Create catalog workspace.
      *
@@ -464,7 +464,7 @@ export class Catalog {
             }
         });
     }
-
+    
     /**
      * Delete catalog workspace.
      *
@@ -477,7 +477,7 @@ export class Catalog {
             ...options
         });
     }
-
+    
     /**
      * Get catalog workspace.
      *
@@ -490,7 +490,7 @@ export class Catalog {
             ...options
         });
     }
-
+    
     /**
      * List catalog libraries.
      *
@@ -503,7 +503,7 @@ export class Catalog {
             ...options
         });
     }
-
+    
     /**
      * Create catalog library.
      *
@@ -520,7 +520,7 @@ export class Catalog {
             }
         });
     }
-
+    
     /**
      * Delete catalog library.
      *
@@ -548,7 +548,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Canonical slim paginated document list.
      *
@@ -564,7 +564,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Create content document.
      *
@@ -581,7 +581,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Batch cancel content documents.
      *
@@ -598,7 +598,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Batch delete content documents.
      *
@@ -615,7 +615,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Canonical async batch-reprocess handler.
      *
@@ -640,7 +640,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Upload content document.
      *
@@ -658,7 +658,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Delete content document.
      *
@@ -671,7 +671,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Get content document.
      *
@@ -684,7 +684,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Patch content document metadata.
      *
@@ -701,7 +701,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Append content document.
      *
@@ -718,7 +718,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Edit content document.
      *
@@ -735,7 +735,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Get content document head.
      *
@@ -748,7 +748,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * List content prepared segments.
      *
@@ -761,7 +761,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Replace content document.
      *
@@ -779,7 +779,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Reprocess content document.
      *
@@ -796,7 +796,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * List content revisions.
      *
@@ -809,7 +809,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Get content document source.
      *
@@ -822,7 +822,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * List content technical facts.
      *
@@ -835,7 +835,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Streams a library snapshot as `application/zstd` (tar.zst).
      *
@@ -848,7 +848,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Restores a library from a tar.zst snapshot body.
      *
@@ -865,7 +865,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * List content mutations.
      *
@@ -878,7 +878,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Create content mutation.
      *
@@ -895,7 +895,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Get content mutation.
      *
@@ -908,7 +908,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * List content web ingest runs.
      *
@@ -921,7 +921,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Create content web ingest run.
      *
@@ -938,7 +938,7 @@ export class Content {
             }
         });
     }
-
+    
     /**
      * Get content web ingest run.
      *
@@ -951,7 +951,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * Cancel content web ingest run.
      *
@@ -964,7 +964,7 @@ export class Content {
             ...options
         });
     }
-
+    
     /**
      * List content web ingest run pages.
      *
@@ -988,7 +988,7 @@ export class System {
     public static getHealth<ThrowOnError extends boolean = false>(options?: Options<GetHealthData, ThrowOnError>) {
         return (options?.client ?? client).get<GetHealthResponses, unknown, ThrowOnError>({ url: '/v1/health', ...options });
     }
-
+    
     /**
      * Download the OpenAPI contract.
      *
@@ -997,7 +997,7 @@ export class System {
     public static getOpenApiContract<ThrowOnError extends boolean = false>(options?: Options<GetOpenApiContractData, ThrowOnError>) {
         return (options?.client ?? client).get<GetOpenApiContractResponses, unknown, ThrowOnError>({ url: '/v1/openapi/ironrag.openapi.yaml', ...options });
     }
-
+    
     /**
      * Check backend readiness.
      *
@@ -1006,7 +1006,7 @@ export class System {
     public static getReadiness<ThrowOnError extends boolean = false>(options?: Options<GetReadinessData, ThrowOnError>) {
         return (options?.client ?? client).get<GetReadinessResponses, GetReadinessErrors, ThrowOnError>({ url: '/v1/ready', ...options });
     }
-
+    
     /**
      * Get running service version.
      *
@@ -1015,7 +1015,7 @@ export class System {
     public static getVersion<ThrowOnError extends boolean = false>(options?: Options<GetVersionData, ThrowOnError>) {
         return (options?.client ?? client).get<GetVersionResponses, unknown, ThrowOnError>({ url: '/v1/version', ...options });
     }
-
+    
     /**
      * Check for an available release update.
      *
@@ -1042,7 +1042,7 @@ export class Iam {
             }
         });
     }
-
+    
     /**
      * Get bootstrap status.
      *
@@ -1051,7 +1051,7 @@ export class Iam {
     public static getBootstrapStatus<ThrowOnError extends boolean = false>(options?: Options<GetBootstrapStatusData, ThrowOnError>) {
         return (options?.client ?? client).get<GetBootstrapStatusResponses, unknown, ThrowOnError>({ url: '/v1/iam/bootstrap/status', ...options });
     }
-
+    
     /**
      * List iam grants.
      *
@@ -1064,7 +1064,7 @@ export class Iam {
             ...options
         });
     }
-
+    
     /**
      * Create iam grant.
      *
@@ -1081,7 +1081,7 @@ export class Iam {
             }
         });
     }
-
+    
     /**
      * Revoke iam grant.
      *
@@ -1094,7 +1094,7 @@ export class Iam {
             ...options
         });
     }
-
+    
     /**
      * Get iam me.
      *
@@ -1107,7 +1107,7 @@ export class Iam {
             ...options
         });
     }
-
+    
     /**
      * Get iam session.
      *
@@ -1120,7 +1120,7 @@ export class Iam {
             ...options
         });
     }
-
+    
     /**
      * Login iam session.
      *
@@ -1136,7 +1136,7 @@ export class Iam {
             }
         });
     }
-
+    
     /**
      * Logout iam session.
      *
@@ -1149,7 +1149,7 @@ export class Iam {
             ...options
         });
     }
-
+    
     /**
      * Resolve iam session.
      *
@@ -1158,7 +1158,7 @@ export class Iam {
     public static resolveIamSession<ThrowOnError extends boolean = false>(options?: Options<ResolveIamSessionData, ThrowOnError>) {
         return (options?.client ?? client).get<ResolveIamSessionResponses, unknown, ThrowOnError>({ url: '/v1/iam/session/resolve', ...options });
     }
-
+    
     /**
      * List iam tokens.
      *
@@ -1171,7 +1171,7 @@ export class Iam {
             ...options
         });
     }
-
+    
     /**
      * Mint iam token.
      *
@@ -1188,7 +1188,7 @@ export class Iam {
             }
         });
     }
-
+    
     /**
      * Delete iam token.
      *
@@ -1201,7 +1201,7 @@ export class Iam {
             ...options
         });
     }
-
+    
     /**
      * Revoke iam token.
      *
@@ -1229,7 +1229,7 @@ export class Ingest {
             ...options
         });
     }
-
+    
     /**
      * List ingest stage events.
      *
@@ -1242,7 +1242,7 @@ export class Ingest {
             ...options
         });
     }
-
+    
     /**
      * List ingest jobs.
      *
@@ -1255,7 +1255,7 @@ export class Ingest {
             ...options
         });
     }
-
+    
     /**
      * Get ingest job.
      *
@@ -1283,7 +1283,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * List knowledge context bundles.
      *
@@ -1296,7 +1296,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * List knowledge documents.
      *
@@ -1309,7 +1309,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * Get knowledge document.
      *
@@ -1322,7 +1322,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * Get knowledge entity.
      *
@@ -1335,7 +1335,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * List knowledge library generations.
      *
@@ -1348,7 +1348,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * Get knowledge graph workbench.
      *
@@ -1361,7 +1361,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * Get knowledge relation.
      *
@@ -1374,7 +1374,7 @@ export class Knowledge {
             ...options
         });
     }
-
+    
     /**
      * Get knowledge library summary.
      *
@@ -1402,7 +1402,7 @@ export class Search {
             ...options
         });
     }
-
+    
     /**
      * Search documents.
      *
@@ -1434,7 +1434,7 @@ export class Automation {
             }
         });
     }
-
+    
     /**
      * List answer MCP capabilities for the caller.
      *
@@ -1447,7 +1447,7 @@ export class Automation {
             ...options
         });
     }
-
+    
     /**
      * Execute diagnostics MCP JSON-RPC.
      *
@@ -1464,7 +1464,7 @@ export class Automation {
             }
         });
     }
-
+    
     /**
      * List diagnostics MCP capabilities for the caller.
      *
@@ -1492,7 +1492,7 @@ export class Ops {
             ...options
         });
     }
-
+    
     /**
      * Cancel ingest queue job.
      *
@@ -1505,7 +1505,7 @@ export class Ops {
             ...options
         });
     }
-
+    
     /**
      * Move ingest queue job.
      *
@@ -1522,7 +1522,7 @@ export class Ops {
             }
         });
     }
-
+    
     /**
      * Pause ingest queue job.
      *
@@ -1535,7 +1535,7 @@ export class Ops {
             ...options
         });
     }
-
+    
     /**
      * Resume ingest queue job.
      *
@@ -1548,7 +1548,7 @@ export class Ops {
             ...options
         });
     }
-
+    
     /**
      * Get library state.
      *
@@ -1561,7 +1561,7 @@ export class Ops {
             ...options
         });
     }
-
+    
     /**
      * Get library dashboard.
      *
@@ -1574,7 +1574,7 @@ export class Ops {
             ...options
         });
     }
-
+    
     /**
      * Get async operation.
      *
@@ -1593,7 +1593,7 @@ export class Query {
     /**
      * Get the recommended MCP assistant system prompt.
      *
-     * Returns the prompt text that should be installed in external MCP clients and in the built-in UI assistant setup flow. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, and avoid forwarding the raw latest user message as a hidden grounded-answer query. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
+     * Returns the exact prompt text used by the built-in UI assistant and recommended for external MCP clients. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, prefer high-signal grounded-answer probes for content questions, and avoid answering from catalog titles alone. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
      */
     public static getAssistantSystemPrompt<ThrowOnError extends boolean = false>(options?: Options<GetAssistantSystemPromptData, ThrowOnError>) {
         return (options?.client ?? client).get<GetAssistantSystemPromptResponses, GetAssistantSystemPromptErrors, ThrowOnError>({
@@ -1602,7 +1602,7 @@ export class Query {
             ...options
         });
     }
-
+    
     /**
      * Inspect one assistant execution.
      *
@@ -1615,7 +1615,7 @@ export class Query {
             ...options
         });
     }
-
+    
     /**
      * Inspect captured LLM context for one execution.
      *
@@ -1628,7 +1628,7 @@ export class Query {
             ...options
         });
     }
-
+    
     /**
      * List assistant sessions for one library.
      *
@@ -1641,7 +1641,7 @@ export class Query {
             ...options
         });
     }
-
+    
     /**
      * Create an assistant session.
      *
@@ -1658,7 +1658,7 @@ export class Query {
             }
         });
     }
-
+    
     /**
      * Load one assistant session with turns.
      *
@@ -1671,7 +1671,7 @@ export class Query {
             ...options
         });
     }
-
+    
     /**
      * Run one UI assistant turn.
      *
@@ -1703,7 +1703,7 @@ export class Runtime {
             ...options
         });
     }
-
+    
     /**
      * Get runtime execution trace.
      *
@@ -1731,7 +1731,7 @@ export class Webhooks {
             ...options
         });
     }
-
+    
     /**
      * Create webhook subscription.
      *
@@ -1748,7 +1748,7 @@ export class Webhooks {
             }
         });
     }
-
+    
     /**
      * Delete webhook subscription.
      *
@@ -1761,7 +1761,7 @@ export class Webhooks {
             ...options
         });
     }
-
+    
     /**
      * Get webhook subscription.
      *
@@ -1774,7 +1774,7 @@ export class Webhooks {
             ...options
         });
     }
-
+    
     /**
      * Update webhook subscription.
      *
@@ -1791,7 +1791,7 @@ export class Webhooks {
             }
         });
     }
-
+    
     /**
      * List webhook delivery attempts.
      *

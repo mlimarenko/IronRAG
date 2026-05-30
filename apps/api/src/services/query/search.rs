@@ -20,8 +20,8 @@ use crate::{
     infra::arangodb::{
         collections::{
             KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-            KNOWLEDGE_CHUNK_VECTOR_INDEX, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-            KNOWLEDGE_ENTITY_VECTOR_INDEX,
+            KNOWLEDGE_ENTITY_VECTOR_COLLECTION, chunk_vector_collection_for_dim,
+            entity_vector_collection_for_dim,
         },
         document_store::KnowledgeChunkRow,
         graph_store::KnowledgeEntityRow,
@@ -31,7 +31,7 @@ use crate::{
             KnowledgeRelationSearchRow, KnowledgeTechnicalFactSearchRow,
         },
     },
-    infra::repositories::{ai_repository, catalog_repository, content_repository},
+    infra::repositories::{ai_repository, content_repository},
     integrations::llm::{EmbeddingBatchRequest, EmbeddingRequest},
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
@@ -45,7 +45,7 @@ use crate::{
 use super::{
     error::QueryServiceError,
     vector_dimensions::{
-        current_vector_index_dimensions, require_current_vector_index_dimensions,
+        invalidate_library_vector_index_dimensions, library_vector_index_dimensions,
         validate_embedding_vector_dimensions,
     },
 };
@@ -284,10 +284,19 @@ impl SearchService {
         writes: &[ChunkEmbeddingWrite],
     ) -> std::result::Result<usize, QueryServiceError> {
         let _vector_guard = self.vector_plane_read_guard(state).await?;
-        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        let mut dimensions_by_library: HashMap<Uuid, u64> = HashMap::new();
         let mut written = 0usize;
         for write in writes {
             let chunk = load_knowledge_chunk(state, write.chunk_id).await?;
+            let expected_dimensions = match dimensions_by_library.get(&chunk.library_id).copied() {
+                Some(dimensions) => dimensions,
+                None => {
+                    let dimensions =
+                        library_vector_index_dimensions(state, chunk.library_id).await?;
+                    dimensions_by_library.insert(chunk.library_id, dimensions);
+                    dimensions
+                }
+            };
             let freshness_generation =
                 resolve_chunk_vector_generation(state, &chunk).await.with_context(|| {
                     format!("failed to resolve vector generation for chunk {}", write.chunk_id)
@@ -341,7 +350,7 @@ impl SearchService {
         writes: &[GraphNodeEmbeddingWrite],
     ) -> std::result::Result<usize, QueryServiceError> {
         let _vector_guard = self.vector_plane_read_guard(state).await?;
-        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        let mut dimensions_by_library: HashMap<Uuid, u64> = HashMap::new();
         let mut written = 0usize;
         for write in writes {
             let entity = state
@@ -357,6 +366,15 @@ impl SearchService {
                         write.node_id
                     )
                 })?;
+            let expected_dimensions = match dimensions_by_library.get(&entity.library_id).copied() {
+                Some(dimensions) => dimensions,
+                None => {
+                    let dimensions =
+                        library_vector_index_dimensions(state, entity.library_id).await?;
+                    dimensions_by_library.insert(entity.library_id, dimensions);
+                    dimensions
+                }
+            };
             let vector = write.embedding_vector.clone();
             let row = KnowledgeEntityVectorRow {
                 key: build_entity_vector_key(
@@ -447,136 +465,119 @@ impl SearchService {
         Ok(())
     }
 
-    pub async fn rebuild_vector_plane_from_library_binding(
+    /// Rebuild the vector plane for a single library against its active
+    /// `EmbedChunk` binding dimension. Per-library now: dropping a library's
+    /// rows from any wrong-dim shard, ensuring the target-dim shard exists,
+    /// then re-embedding chunks and entities into it.
+    ///
+    /// Other libraries' material is untouched — different libraries on
+    /// different embed bindings (and therefore different dims) coexist in
+    /// separate per-dim shards.
+    pub async fn rebuild_vector_plane_for_library(
         &self,
         state: &AppState,
         library_id: Uuid,
     ) -> std::result::Result<VectorPlaneRebuildOutcome, QueryServiceError> {
         let _vector_guard = self.vector_plane_write_guard(state).await?;
-        let mut dimension_cache = HashMap::new();
+        invalidate_library_vector_index_dimensions(library_id);
         let target_dimensions =
-            self.probe_library_vector_dimensions(state, library_id, &mut dimension_cache).await?;
-        let previous_dimensions = current_vector_index_dimensions(state).await?;
-        let libraries = catalog_repository::list_libraries(&state.persistence.postgres, None)
+            crate::services::query::vector_dimensions::library_vector_index_dimensions(
+                state, library_id,
+            )
+            .await?;
+        let previous_dimensions = None;
+
+        // Make sure the target-dim shards exist (and their ANN indexes).
+        state
+            .arango_search_store
+            .ensure_chunk_vector_shard(target_dimensions)
             .await
-            .context("failed to list libraries before vector-plane rebuild")?;
-        let mut rebuild_library_ids = Vec::new();
-        for library in libraries {
-            let has_material = library.id == library_id
-                || library_has_vector_material(state, library.id).await.with_context(|| {
-                    format!("failed to inspect vector material for library {}", library.id)
-                })?;
-            if !has_material {
+            .context("failed to ensure chunk vector shard for library rebuild")?;
+        state
+            .arango_search_store
+            .ensure_entity_vector_shard(target_dimensions)
+            .await
+            .context("failed to ensure entity vector shard for library rebuild")?;
+
+        // Drop this library's rows from every per-dim shard whose dim
+        // does not match the new target. Includes the legacy single-dim
+        // collection — its rows are pre-migration material that must
+        // not survive a binding change. The target-dim shard itself is
+        // also cleared so the subsequent re-embed writes a clean set.
+        let target_chunk_collection = chunk_vector_collection_for_dim(target_dimensions);
+        let target_entity_collection = entity_vector_collection_for_dim(target_dimensions);
+
+        let mut chunk_targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        chunk_targets.extend(state.arango_client.list_per_dim_chunk_vector_collections().await?);
+        for collection in &chunk_targets {
+            if collection == &target_chunk_collection {
                 continue;
             }
-            let dimensions = self
-                .probe_library_vector_dimensions(state, library.id, &mut dimension_cache)
+            let _ = state
+                .arango_client
+                .query_json(
+                    "FOR row IN @@collection
+                     FILTER row.library_id == @library_id
+                     REMOVE row IN @@collection
+                     RETURN OLD._key",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "library_id": library_id,
+                    }),
+                )
                 .await
                 .with_context(|| {
-                    format!(
-                        "failed to probe active vector binding dimensions for library {}",
-                        library.id
-                    )
+                    format!("failed to drop library {library_id} chunk vectors from {collection}")
                 })?;
-            if dimensions != target_dimensions {
-                return Err(anyhow!(
-                    "cannot rebuild Arango vector plane to {target_dimensions} dimensions: library {} active vector binding produces {dimensions} dimensions",
-                    library.id
-                )
-                .into());
-            }
-            rebuild_library_ids.push(library.id);
         }
 
-        let dimensions_changed = previous_dimensions != Some(target_dimensions);
-        let indexes_recreated = true;
-        if indexes_recreated {
-            state
+        let mut entity_targets = vec![KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string()];
+        entity_targets.extend(state.arango_client.list_per_dim_entity_vector_collections().await?);
+        for collection in &entity_targets {
+            if collection == &target_entity_collection {
+                continue;
+            }
+            let _ = state
                 .arango_client
-                .delete_index_by_name(
-                    KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    KNOWLEDGE_CHUNK_VECTOR_INDEX,
+                .query_json(
+                    "FOR row IN @@collection
+                     FILTER row.library_id == @library_id
+                     REMOVE row IN @@collection
+                     RETURN OLD._key",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "library_id": library_id,
+                    }),
                 )
                 .await
-                .context("failed to drop chunk vector index before vector-plane rebuild")?;
-            state
-                .arango_client
-                .delete_index_by_name(
-                    KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-                    KNOWLEDGE_ENTITY_VECTOR_INDEX,
-                )
-                .await
-                .context("failed to drop entity vector index before vector-plane rebuild")?;
-        }
-        if dimensions_changed {
-            state
-                .arango_search_store
-                .delete_all_chunk_vectors()
-                .await
-                .context("failed to clear chunk vectors before vector-plane rebuild")?;
-            state
-                .arango_search_store
-                .delete_all_entity_vectors()
-                .await
-                .context("failed to clear entity vectors before vector-plane rebuild")?;
+                .with_context(|| {
+                    format!("failed to drop library {library_id} entity vectors from {collection}")
+                })?;
         }
 
         let mut outcome = VectorPlaneRebuildOutcome {
             previous_dimensions,
             target_dimensions,
-            indexes_recreated,
+            indexes_recreated: false,
             libraries_rebuilt: 0,
             chunk_embeddings_rebuilt: 0,
             graph_node_embeddings_rebuilt: 0,
         };
-        for rebuild_library_id in rebuild_library_ids {
-            outcome.chunk_embeddings_rebuilt += self
-                .rebuild_chunk_embeddings_with_expected_dimensions(
-                    state,
-                    rebuild_library_id,
-                    target_dimensions,
-                )
-                .await?;
-            outcome.graph_node_embeddings_rebuilt += self
-                .rebuild_graph_node_embeddings_with_expected_dimensions(
-                    state,
-                    rebuild_library_id,
-                    target_dimensions,
-                )
-                .await?;
-            outcome.libraries_rebuilt += 1;
-        }
-        if indexes_recreated {
-            state
-                .arango_client
-                .ensure_vector_index(
-                    KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    KNOWLEDGE_CHUNK_VECTOR_INDEX,
-                    "vector",
-                    target_dimensions,
-                    state.settings.arangodb_vector_index_n_lists,
-                    state.settings.arangodb_vector_index_default_n_probe,
-                    state.settings.arangodb_vector_index_training_iterations,
-                )
-                .await
-                .context("failed to recreate chunk vector index after vector-plane rebuild")?;
-            state
-                .arango_client
-                .ensure_vector_index(
-                    KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-                    KNOWLEDGE_ENTITY_VECTOR_INDEX,
-                    "vector",
-                    target_dimensions,
-                    state.settings.arangodb_vector_index_n_lists,
-                    state.settings.arangodb_vector_index_default_n_probe,
-                    state.settings.arangodb_vector_index_training_iterations,
-                )
-                .await
-                .context("failed to recreate entity vector index after vector-plane rebuild")?;
-        }
+        outcome.chunk_embeddings_rebuilt += self
+            .rebuild_chunk_embeddings_with_expected_dimensions(state, library_id, target_dimensions)
+            .await?;
+        outcome.graph_node_embeddings_rebuilt += self
+            .rebuild_graph_node_embeddings_with_expected_dimensions(
+                state,
+                library_id,
+                target_dimensions,
+            )
+            .await?;
+        outcome.libraries_rebuilt = 1;
         Ok(outcome)
     }
 
+    #[allow(dead_code)]
     async fn probe_library_vector_dimensions(
         &self,
         state: &AppState,
@@ -663,7 +664,7 @@ impl SearchService {
         let freshness_generation = revision.revision_number;
         let reused_chunk_ids = {
             let _vector_guard = self.vector_plane_read_guard(state).await?;
-            let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+            let expected_dimensions = library_vector_index_dimensions(state, library_id).await?;
             let mut reused_chunk_ids = match load_current_revision_chunk_vector_ids(
                 state,
                 revision_id,
@@ -828,7 +829,8 @@ impl SearchService {
 
             let persist_result = async {
                 let _vector_guard = self.vector_plane_read_guard(state).await?;
-                let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+                let expected_dimensions =
+                    library_vector_index_dimensions(state, library_id).await?;
                 let mut batch_rows: Vec<KnowledgeChunkVectorRow> = Vec::with_capacity(batch.len());
                 for (chunk_index, vector) in batch.iter().zip(batch_response.embeddings.iter()) {
                     ensure_not_cancelled(cancellation_token)?;
@@ -987,7 +989,7 @@ impl SearchService {
         library_id: Uuid,
     ) -> std::result::Result<usize, QueryServiceError> {
         let _vector_guard = self.vector_plane_write_guard(state).await?;
-        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        let expected_dimensions = library_vector_index_dimensions(state, library_id).await?;
         self.rebuild_chunk_embeddings_with_expected_dimensions(
             state,
             library_id,
@@ -1198,7 +1200,7 @@ impl SearchService {
         library_id: Uuid,
     ) -> std::result::Result<usize, QueryServiceError> {
         let _vector_guard = self.vector_plane_write_guard(state).await?;
-        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        let expected_dimensions = library_vector_index_dimensions(state, library_id).await?;
         self.rebuild_graph_node_embeddings_with_expected_dimensions(
             state,
             library_id,
@@ -1333,6 +1335,7 @@ fn build_entity_embedding_input(entity: &KnowledgeEntityRow) -> String {
     )
 }
 
+#[allow(dead_code)]
 async fn probe_binding_vector_dimensions(
     state: &AppState,
     binding: &ResolvedRuntimeBinding,
@@ -1378,6 +1381,7 @@ async fn probe_binding_vector_dimensions(
     Ok(dimensions)
 }
 
+#[allow(dead_code)]
 fn runtime_binding_vector_fingerprint(binding: &ResolvedRuntimeBinding) -> String {
     let extra_parameters =
         serde_json::to_string(&binding.extra_parameters_json).unwrap_or_else(|_| "{}".to_string());
@@ -1713,12 +1717,14 @@ async fn list_knowledge_chunks_by_library(
     decode_many_results(cursor)
 }
 
+#[allow(dead_code)]
 async fn library_has_vector_material(state: &AppState, library_id: Uuid) -> AnyhowResult<bool> {
     Ok(collection_has_library_row(state, KNOWLEDGE_CHUNK_VECTOR_COLLECTION, library_id).await?
         || collection_has_library_row(state, KNOWLEDGE_ENTITY_VECTOR_COLLECTION, library_id)
             .await?)
 }
 
+#[allow(dead_code)]
 async fn collection_has_library_row(
     state: &AppState,
     collection: &str,

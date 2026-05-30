@@ -14,15 +14,18 @@ mod endpoint_chunk_answer;
 mod fact_lookup;
 mod focused_document_answer;
 mod graph_retrieval;
-mod hyde_crag;
+mod hyde;
+mod multi_query;
 mod port_answer;
 mod preflight;
 pub(crate) mod question_intent;
 mod rerank;
 mod retrieve;
+mod sentence_window;
 mod source_context;
 mod source_profile;
 mod structured_query_pipeline;
+mod sub_question;
 mod table_retrieval;
 mod table_row_answer;
 mod table_summary_answer;
@@ -45,7 +48,7 @@ use crate::domains::query::QueryVerificationState;
 #[cfg(test)]
 use crate::domains::query::QueryVerificationWarning;
 use embed::embed_question;
-use hyde_crag::generate_hyde_passage;
+use hyde::generate_hyde_passage;
 #[cfg(test)]
 use port_answer::{build_port_and_protocol_answer, build_port_answer};
 #[cfg(test)]
@@ -67,8 +70,7 @@ use technical_literals::technical_literal_focus_keyword_segments;
 use technical_literals::{
     TechnicalLiteralIntent, technical_literal_candidate_limit, technical_literal_focus_keywords,
 };
-#[cfg(test)]
-use types::RuntimeAnswerVerification;
+pub(crate) use types::RuntimeAnswerVerification;
 #[cfg(test)]
 use verification::{enrich_query_assembly_diagnostics, enrich_query_candidate_summary};
 

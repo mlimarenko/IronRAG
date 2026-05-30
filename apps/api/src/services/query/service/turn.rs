@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use chrono::Utc;
 use tokio::sync::mpsc::Sender;
@@ -19,9 +22,10 @@ use crate::{
     app::state::AppState,
     domains::catalog::CatalogLifecycleState,
     domains::query::{
-        QueryConversationState, QueryExecutionDetail, QueryVerificationState,
+        QueryConversationState, QueryExecutionDetail, QueryTurnKind, QueryVerificationState,
         QueryVerificationWarning, resolve_top_k,
     },
+    domains::query_ir::literal_text_is_identifier_shaped,
     domains::{
         agent_runtime::{
             RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState,
@@ -58,13 +62,14 @@ use crate::{
         query::{
             agent_loop::{
                 AgentLoopActivityEvent, AgentTurnFailure, McpToolAgentTurnInput,
+                run_literal_fidelity_revision_turn, run_literal_inventory_coverage_revision_turn,
                 run_mcp_tool_agent_turn,
             },
             assistant_grounding::AssistantGroundingEvidence,
             execution::{
-                CanonicalAnswerEvidence, RuntimeAnswerQueryResult, generate_answer_query,
-                persist_query_verification, prepare_answer_query,
-                verify_answer_against_canonical_evidence,
+                CanonicalAnswerEvidence, RuntimeAnswerQueryResult, RuntimeAnswerVerification,
+                generate_answer_query, literal_revision_targets, persist_query_verification,
+                prepare_answer_query, verify_answer_against_canonical_evidence,
             },
             planner::QueryIntentProfile,
             result_cache,
@@ -73,8 +78,8 @@ use crate::{
 };
 
 use super::{
-    CANONICAL_QUERY_MODE, ConversationRuntimeContext, ExecuteConversationTurnCommand, QueryService,
-    QueryTurnExecutionResult,
+    CANONICAL_QUERY_MODE, ConversationRuntimeContext, ExecuteConversationTurnCommand,
+    ExternalConversationTurn, QueryService, QueryTurnExecutionResult,
     context::{assemble_context_bundle, load_execution_prepared_reference_context},
     formatting::{
         build_assistant_document_references, build_prepared_segment_references,
@@ -86,14 +91,16 @@ use super::{
     session::{
         build_conversation_runtime_context,
         build_conversation_runtime_context_with_external_history, derive_conversation_title,
-        enrich_query_with_coreference_entities, map_conversation_row, map_execution_row,
-        map_turn_row, normalize_required_text, should_refresh_conversation_title,
+        enrich_query_with_coreference_entities, load_prior_grounded_answer_context_messages,
+        map_conversation_row, map_execution_row, map_turn_row, normalize_required_text,
+        should_refresh_conversation_title,
     },
 };
 
 const REFERENCE_CONTEXT_HYDRATION_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const ASSISTANT_AGENT_LOOP_DEADLINE_MS: u64 = 180_000;
 pub(crate) const ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS: u64 = 35_000;
+const ASSISTANT_LITERAL_INVENTORY_REVISION_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Debug, Clone)]
 struct QueryResultCacheContext {
@@ -205,6 +212,27 @@ impl QueryService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("workspace", library.workspace_id))?;
         let library_ref = library_catalog_ref(&workspace.slug, &library.slug);
+        let prior_grounded_answer_context_messages = if conversation_context
+            .prompt_history_messages
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            match load_prior_grounded_answer_context_messages(state, conversation.id, library.id)
+                .await
+            {
+                Ok(messages) => messages,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        conversation_id = %conversation.id,
+                        "failed to build prior grounded-answer context replay; continuing with text history only"
+                    );
+                    Vec::new()
+                }
+            }
+        };
+        let agent_conversation_history = conversation_context.prompt_history_messages.clone();
 
         let execution_id = Uuid::now_v7();
         let execution_context_bundle_id = Uuid::now_v7();
@@ -295,7 +323,8 @@ impl QueryService {
                     library_id: library.id,
                     library_ref: &library_ref,
                     user_question: &content_text,
-                    conversation_history: &conversation_context.prompt_history_messages,
+                    conversation_history: &agent_conversation_history,
+                    follow_up_context_messages: &prior_grounded_answer_context_messages,
                     grounded_answer_tool_history: &conversation_context
                         .grounded_answer_tool_history,
                     request_id: &agent_request_id,
@@ -310,7 +339,7 @@ impl QueryService {
                 })
                 .await
                 {
-                    Ok(agent_result) => {
+                    Ok(mut agent_result) => {
                         record_query_runtime_stage(
                             state.agent_runtime.executor(),
                             &mut runtime_session,
@@ -333,6 +362,7 @@ impl QueryService {
                                     captured_at: Utc::now(),
                                     query_ir: None,
                                     agent_loop: agent_result.agent_loop.clone(),
+                                    spans: Vec::new(),
                                 },
                             )
                             .await
@@ -344,6 +374,7 @@ impl QueryService {
                             );
                         }
 
+                        let mut revised_agent_answer_for_snapshot = false;
                         let verification_outcome = if let Err(failure) = begin_query_runtime_stage(
                             state.agent_runtime.executor(),
                             &mut runtime_session,
@@ -374,7 +405,6 @@ impl QueryService {
                                 .agent_loop
                                 .as_ref()
                                 .is_some_and(|metadata| metadata.tool_call_count > 0);
-                            let mut adopted_verified_grounded_answer_passthrough = false;
                             if !has_verifiable_tool_evidence {
                                 let (verification_state, verification_warnings) =
                                     if tool_loop_called_any_tool {
@@ -415,17 +445,10 @@ impl QueryService {
                                 .await
                                 {
                                     Ok(Some(materialized)) => {
-                                        adopted_verified_grounded_answer_passthrough =
-                                            agent_verified_grounded_answer_passthrough_adopted(
-                                                agent_result
-                                                    .verified_grounded_answer_passthrough_execution_id,
-                                                materialized,
-                                            );
                                         tracing::info!(
                                             execution_id = %execution.id,
                                             source_execution_id = %materialized.source_execution_id,
                                             primary_execution_id = %materialized.primary_execution_id,
-                                            verified_grounded_answer_passthrough = adopted_verified_grounded_answer_passthrough,
                                             "attached child grounded-answer evidence to UI agent execution"
                                         );
                                     }
@@ -443,9 +466,9 @@ impl QueryService {
                             if verify_failure.is_none()
                                 && agent_answer_requires_parent_tool_evidence_verification(
                                     has_verifiable_tool_evidence,
-                                    adopted_verified_grounded_answer_passthrough,
                                 )
-                                && let Err(error) = verify_agent_answer_against_tool_evidence(
+                            {
+                                match verify_agent_answer_against_tool_evidence(
                                     state,
                                     &execution,
                                     execution_context_bundle_id,
@@ -453,13 +476,207 @@ impl QueryService {
                                     &agent_result.assistant_grounding,
                                 )
                                 .await
-                            {
-                                verify_failure = Some(make_query_answer_failure(
-                                    "query_agent_verify_failed",
-                                    format!(
-                                        "failed to verify UI agent answer against MCP tool evidence: {error}"
-                                    ),
-                                ));
+                                {
+                                    Ok(verification) => {
+                                        if agent_verification_needs_literal_revision(&verification)
+                                        {
+                                            let prompt_context = agent_result
+                                                .assistant_grounding
+                                                .verification_corpus
+                                                .join("\n\n");
+                                            let revision_targets = literal_revision_targets(
+                                                &agent_result.answer,
+                                                &verification.unsupported_literals,
+                                            );
+                                            if !revision_targets.is_empty() {
+                                                match run_literal_fidelity_revision_turn(
+                                                    state,
+                                                    library.id,
+                                                    &content_text,
+                                                    &conversation_context.prompt_history_messages,
+                                                    &agent_result.answer,
+                                                    &revision_targets,
+                                                    &prompt_context,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(revision) => {
+                                                        match verify_agent_answer_against_tool_evidence(
+                                                            state,
+                                                            &execution,
+                                                            execution_context_bundle_id,
+                                                            &revision.answer,
+                                                            &agent_result.assistant_grounding,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(revised_verification)
+                                                                if revised_verification.state
+                                                                    == QueryVerificationState::Verified =>
+                                                            {
+                                                                tracing::info!(
+                                                                    execution_id = %execution.id,
+                                                                    unsupported_literals =
+                                                                        verification.unsupported_literals.len(),
+                                                                    revised_answer_chars =
+                                                                        revision.answer.chars().count(),
+                                                                    "accepted literal-fidelity revision for UI agent answer"
+                                                                );
+                                                                crate::services::query::agent_loop::merge_usage_into(
+                                                                    &mut agent_result.usage_json,
+                                                                    &revision.usage_json,
+                                                                );
+                                                                agent_result
+                                                                    .debug_iterations
+                                                                    .extend(revision.debug_iterations);
+                                                                agent_result.answer = revision.answer;
+                                                                revised_agent_answer_for_snapshot = true;
+                                                            }
+                                                            Ok(revised_verification) => {
+                                                                tracing::info!(
+                                                                    execution_id = %execution.id,
+                                                                    original_state = ?verification.state,
+                                                                    revised_state = ?revised_verification.state,
+                                                                    original_warnings =
+                                                                        verification.warnings.len(),
+                                                                    revised_warnings =
+                                                                        revised_verification.warnings.len(),
+                                                                    "literal-fidelity revision for UI agent answer was not verified"
+                                                                );
+                                                            }
+                                                            Err(error) => {
+                                                                warn!(
+                                                                    error = %error,
+                                                                    execution_id = %execution.id,
+                                                                    "failed to verify literal-fidelity revision for UI agent answer"
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(error) => {
+                                                        warn!(
+                                                            error = %error,
+                                                            execution_id = %execution.id,
+                                                            "literal-fidelity revision failed for UI agent answer"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        let coverage_targets =
+                                            literal_inventory_coverage_revision_targets(
+                                                &agent_result.answer,
+                                                &conversation_context.grounded_answer_tool_history,
+                                                &agent_result.assistant_grounding,
+                                            );
+                                        if !coverage_targets.is_empty() {
+                                            let revision_context =
+                                                literal_inventory_revision_context(
+                                                    &agent_result.assistant_grounding,
+                                                );
+                                            let revision_started = Instant::now();
+                                            match tokio::time::timeout(
+                                                ASSISTANT_LITERAL_INVENTORY_REVISION_TIMEOUT,
+                                                run_literal_inventory_coverage_revision_turn(
+                                                    state,
+                                                    library.id,
+                                                    &content_text,
+                                                    &conversation_context.prompt_history_messages,
+                                                    &agent_result.answer,
+                                                    &coverage_targets,
+                                                    &revision_context,
+                                                ),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(revision)) => {
+                                                    match verify_agent_answer_against_tool_evidence(
+                                                        state,
+                                                        &execution,
+                                                        execution_context_bundle_id,
+                                                        &revision.answer,
+                                                        &agent_result.assistant_grounding,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(revised_verification)
+                                                            if revised_verification.state
+                                                                == QueryVerificationState::Verified =>
+                                                        {
+                                                            tracing::info!(
+                                                                stage = "literal_inventory_coverage_revision",
+                                                                execution_id = %execution.id,
+                                                                required_literal_count =
+                                                                    coverage_targets.len(),
+                                                                elapsed_ms = revision_started
+                                                                    .elapsed()
+                                                                    .as_millis(),
+                                                                revised_answer_chars =
+                                                                    revision.answer.chars().count(),
+                                                                "accepted literal-inventory coverage revision for UI agent answer"
+                                                            );
+                                                            crate::services::query::agent_loop::merge_usage_into(
+                                                                &mut agent_result.usage_json,
+                                                                &revision.usage_json,
+                                                            );
+                                                            agent_result
+                                                                .debug_iterations
+                                                                .extend(revision.debug_iterations);
+                                                            agent_result.answer = revision.answer;
+                                                            revised_agent_answer_for_snapshot =
+                                                                true;
+                                                        }
+                                                        Ok(revised_verification) => {
+                                                            tracing::info!(
+                                                                stage = "literal_inventory_coverage_revision",
+                                                                execution_id = %execution.id,
+                                                                revised_state = ?revised_verification.state,
+                                                                revised_warnings =
+                                                                    revised_verification.warnings.len(),
+                                                                required_literal_count =
+                                                                    coverage_targets.len(),
+                                                                "literal-inventory coverage revision for UI agent answer was not verified"
+                                                            );
+                                                        }
+                                                        Err(error) => {
+                                                            warn!(
+                                                                stage = "literal_inventory_coverage_revision",
+                                                                error = %error,
+                                                                execution_id = %execution.id,
+                                                                "failed to verify literal-inventory coverage revision for UI agent answer"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Ok(Err(error)) => {
+                                                    warn!(
+                                                        stage = "literal_inventory_coverage_revision",
+                                                        error = %error,
+                                                        execution_id = %execution.id,
+                                                        "literal-inventory coverage revision failed for UI agent answer"
+                                                    );
+                                                }
+                                                Err(_) => {
+                                                    warn!(
+                                                        stage = "literal_inventory_coverage_revision",
+                                                        execution_id = %execution.id,
+                                                        timeout_ms = ASSISTANT_LITERAL_INVENTORY_REVISION_TIMEOUT.as_millis(),
+                                                        elapsed_ms = revision_started.elapsed().as_millis(),
+                                                        "literal-inventory coverage revision timed out for UI agent answer"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        verify_failure = Some(make_query_answer_failure(
+                                            "query_agent_verify_failed",
+                                            format!(
+                                                "failed to verify UI agent answer against MCP tool evidence: {error}"
+                                            ),
+                                        ));
+                                    }
+                                }
                             }
                             if let Some(failure) = verify_failure {
                                 record_query_runtime_stage(
@@ -485,6 +702,33 @@ impl QueryService {
                                 None
                             }
                         };
+
+                        if verification_outcome.is_none() && revised_agent_answer_for_snapshot {
+                            if let Err(error) =
+                                crate::services::query::llm_context_debug::upsert_snapshot(
+                                    &state.persistence.postgres,
+                                    &crate::services::query::llm_context_debug::LlmContextSnapshot {
+                                        execution_id: execution.id,
+                                        library_id: library.id,
+                                        question: content_text.clone(),
+                                        iterations: agent_result.debug_iterations.clone(),
+                                        total_iterations: agent_result.debug_iterations.len(),
+                                        final_answer: Some(agent_result.answer.clone()),
+                                        captured_at: Utc::now(),
+                                        query_ir: None,
+                                        agent_loop: agent_result.agent_loop.clone(),
+                                        spans: Vec::new(),
+                                    },
+                                )
+                                .await
+                            {
+                                warn!(
+                                    error = %error,
+                                    execution_id = %execution.id,
+                                    "failed to update UI agent LLM context snapshot after revision"
+                                );
+                            }
+                        }
 
                         if let Some(outcome) = verification_outcome {
                             outcome
@@ -999,7 +1243,14 @@ impl QueryService {
                 )
                 .await
                 {
-                    Ok(result) => {
+                    Ok(mut result) => {
+                        // Hand the captured retrieval spans to the snapshot
+                        // writer for this execution so the inspector can show
+                        // where time went (DB queries, lanes).
+                        crate::services::query::turn_spans::stash_execution_spans(
+                            execution.id,
+                            std::mem::take(&mut result.retrieval_spans),
+                        );
                         record_query_runtime_stage(
                             state.agent_runtime.executor(),
                             &mut runtime_session,
@@ -1915,12 +2166,16 @@ impl QueryService {
         };
 
         let query_text = execution.query_text.clone();
+        let has_prepared_bundle_refs = prepared_reference_context.bundle_refs.is_some();
         let mut graph_node_references = prepared_reference_context
             .bundle_refs
             .as_ref()
             .map_or_else(Vec::new, map_entity_references);
 
-        if graph_node_references.is_empty() {
+        if should_backfill_graph_entity_references(
+            has_prepared_bundle_refs,
+            graph_node_references.is_empty(),
+        ) {
             graph_node_references = search_runtime_graph_entity_references(
                 &state.persistence.postgres,
                 execution.library_id,
@@ -2200,6 +2455,13 @@ fn query_detail_has_grounding_references(detail: &QueryExecutionDetail) -> bool 
         || !detail.graph_edge_references.is_empty()
 }
 
+fn should_backfill_graph_entity_references(
+    has_prepared_bundle_refs: bool,
+    graph_node_references_empty: bool,
+) -> bool {
+    graph_node_references_empty && !has_prepared_bundle_refs
+}
+
 fn context_reference_set_grounding_count(
     reference_set: &KnowledgeContextBundleReferenceSetRow,
 ) -> usize {
@@ -2379,7 +2641,7 @@ async fn verify_agent_answer_against_tool_evidence(
     context_bundle_id: Uuid,
     answer_text: &str,
     assistant_grounding: &AssistantGroundingEvidence,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RuntimeAnswerVerification> {
     ensure_agent_tool_context_bundle(
         state,
         execution,
@@ -2417,7 +2679,7 @@ async fn verify_agent_answer_against_tool_evidence(
         assistant_grounding,
     )
     .await?;
-    Ok(())
+    Ok(verification)
 }
 
 async fn ensure_agent_tool_context_bundle(
@@ -2498,6 +2760,152 @@ fn no_agent_tool_evidence_warnings() -> serde_json::Value {
     .unwrap_or_else(|_| serde_json::json!([]))
 }
 
+fn literal_inventory_revision_context(assistant_grounding: &AssistantGroundingEvidence) -> String {
+    let mut sections = assistant_grounding.verification_corpus.clone();
+    sections.extend(assistant_grounding.document_references.iter().map(|reference| {
+        format!("Document reference: {}\n{}", reference.document_title, reference.excerpt)
+    }));
+    sections.join("\n\n")
+}
+
+fn literal_inventory_coverage_revision_targets(
+    answer: &str,
+    history: &[ExternalConversationTurn],
+    assistant_grounding: &AssistantGroundingEvidence,
+) -> Vec<String> {
+    const MIN_HISTORY_LITERALS: usize = 4;
+    const MIN_PRESENT_LITERALS: usize = 2;
+    const MAX_REVISION_TARGETS: usize = 16;
+
+    let inventory = latest_dense_history_identifier_literals(history);
+    if inventory.len() < MIN_HISTORY_LITERALS {
+        return Vec::new();
+    }
+    let present = inventory
+        .iter()
+        .filter(|literal| text_contains_literal(answer, literal))
+        .cloned()
+        .collect::<Vec<_>>();
+    if present.len() < MIN_PRESENT_LITERALS {
+        return Vec::new();
+    }
+    inventory
+        .into_iter()
+        .filter(|literal| !text_contains_literal(answer, literal))
+        .filter(|literal| {
+            assistant_grounding_contains_literal_with_present_inventory(
+                assistant_grounding,
+                literal,
+                &present,
+                MIN_PRESENT_LITERALS,
+            )
+        })
+        .take(MAX_REVISION_TARGETS)
+        .collect()
+}
+
+fn latest_dense_history_identifier_literals(history: &[ExternalConversationTurn]) -> Vec<String> {
+    let mut literals = history
+        .iter()
+        .rev()
+        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+        .map(|turn| dense_history_literals(&turn.content_text))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|literal| literal_text_is_identifier_shaped(literal))
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::<String>::new();
+    literals.retain(|literal| seen.insert(literal.clone()));
+    literals
+}
+
+fn dense_history_literals(text: &str) -> Vec<String> {
+    let literal_line =
+        text.lines().map(str::trim).find(|line| line.starts_with("literals:")).unwrap_or("");
+    extract_backtick_literals(literal_line)
+}
+
+fn extract_backtick_literals(text: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(start) = text[search_from..].find('`') {
+        let abs_start = search_from + start + 1;
+        if abs_start >= text.len() {
+            break;
+        }
+        let Some(end) = text[abs_start..].find('`') else {
+            break;
+        };
+        let literal = text[abs_start..abs_start + end].trim();
+        if !literal.is_empty() && !literal.contains('\n') {
+            literals.push(literal.to_string());
+        }
+        search_from = abs_start + end + 1;
+    }
+    literals
+}
+
+fn assistant_grounding_contains_literal_with_present_inventory(
+    assistant_grounding: &AssistantGroundingEvidence,
+    literal: &str,
+    present_literals: &[String],
+    required_present_count: usize,
+) -> bool {
+    assistant_grounding.verification_corpus.iter().any(|fragment| {
+        grounding_fragment_supports_inventory_literal(
+            fragment,
+            literal,
+            present_literals,
+            required_present_count,
+        )
+    }) || assistant_grounding.document_references.iter().any(|reference| {
+        let fragment = format!("{}\n{}", reference.document_title, reference.excerpt);
+        grounding_fragment_supports_inventory_literal(
+            &fragment,
+            literal,
+            present_literals,
+            required_present_count,
+        )
+    })
+}
+
+fn grounding_fragment_supports_inventory_literal(
+    fragment: &str,
+    literal: &str,
+    present_literals: &[String],
+    required_present_count: usize,
+) -> bool {
+    text_contains_literal(fragment, literal)
+        && present_literals
+            .iter()
+            .filter(|present| text_contains_literal(fragment, present))
+            .take(required_present_count)
+            .count()
+            >= required_present_count
+}
+
+fn text_contains_literal(text: &str, literal: &str) -> bool {
+    if literal.is_empty() {
+        return true;
+    }
+    let mut search_from = 0usize;
+    while let Some(relative) = text[search_from..].find(literal) {
+        let start = search_from + relative;
+        let end = start + literal.len();
+        let before = text[..start].chars().next_back();
+        let after = text[end..].chars().next();
+        if !literal_boundary_continues(before) && !literal_boundary_continues(after) {
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
+fn literal_boundary_continues(ch: Option<char>) -> bool {
+    ch.is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
 fn context_reference_set_has_grounding(
     reference_set: &KnowledgeContextBundleReferenceSetRow,
 ) -> bool {
@@ -2525,20 +2933,14 @@ fn agent_has_verifiable_tool_evidence(
 
 fn agent_answer_requires_parent_tool_evidence_verification(
     has_verifiable_tool_evidence: bool,
-    adopted_verified_grounded_answer_passthrough: bool,
 ) -> bool {
-    has_verifiable_tool_evidence && !adopted_verified_grounded_answer_passthrough
+    has_verifiable_tool_evidence
 }
 
-fn agent_verified_grounded_answer_passthrough_adopted(
-    verified_grounded_answer_passthrough_execution_id: Option<Uuid>,
-    materialized: MaterializedAgentGrounding,
-) -> bool {
-    // Skip parent verification only when the materialized grounding is dominated
-    // by the same verified child answer that the agent returned verbatim.
-    verified_grounded_answer_passthrough_execution_id == Some(materialized.source_execution_id)
-        && verified_grounded_answer_passthrough_execution_id
-            == Some(materialized.primary_execution_id)
+fn agent_verification_needs_literal_revision(verification: &RuntimeAnswerVerification) -> bool {
+    verification.warnings.iter().any(|warning| {
+        warning.code == "unsupported_literal" || warning.code == "unsupported_canonical_claim"
+    })
 }
 
 fn verification_fragment_is_verifier_grade_tool_evidence(fragment: &str) -> bool {
@@ -2877,6 +3279,7 @@ async fn persist_failed_agent_debug_snapshot(
             captured_at: Utc::now(),
             query_ir: None,
             agent_loop: failure.agent_loop.clone(),
+            spans: Vec::new(),
         },
     )
     .await
@@ -3103,13 +3506,17 @@ fn truncate_failure_code(message: &str) -> &str {
 mod tests {
     use uuid::Uuid;
 
+    use crate::domains::query::QueryTurnKind;
     use crate::services::query::assistant_grounding::AssistantGroundingEvidence;
+    use crate::services::query::service::ExternalConversationTurn;
 
     use super::{
         ASSISTANT_AGENT_LOOP_DEADLINE_MS, ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS,
-        MaterializedAgentGrounding, agent_answer_requires_parent_tool_evidence_verification,
-        agent_has_verifiable_tool_evidence, agent_verified_grounded_answer_passthrough_adopted,
-        is_query_vector_source_mismatch, no_agent_tool_evidence_warnings, ui_agent_iteration_cap,
+        agent_answer_requires_parent_tool_evidence_verification,
+        agent_has_verifiable_tool_evidence, is_query_vector_source_mismatch,
+        latest_dense_history_identifier_literals, literal_inventory_coverage_revision_targets,
+        no_agent_tool_evidence_warnings, should_backfill_graph_entity_references,
+        text_contains_literal, ui_agent_iteration_cap,
     };
 
     #[test]
@@ -3141,6 +3548,13 @@ mod tests {
     }
 
     #[test]
+    fn graph_entity_reference_backfill_only_runs_without_prepared_bundle_refs() {
+        assert!(should_backfill_graph_entity_references(false, true));
+        assert!(!should_backfill_graph_entity_references(true, true));
+        assert!(!should_backfill_graph_entity_references(false, false));
+    }
+
+    #[test]
     fn ui_agent_child_execution_is_verifiable_tool_evidence() {
         let grounding = AssistantGroundingEvidence::default();
         let child_query_execution_ids = [Uuid::nil()];
@@ -3149,38 +3563,9 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_verified_grounded_answer_passthrough_skips_parent_reverification() {
-        assert!(!agent_answer_requires_parent_tool_evidence_verification(true, true));
-        assert!(agent_answer_requires_parent_tool_evidence_verification(true, false));
-        assert!(!agent_answer_requires_parent_tool_evidence_verification(false, false));
-    }
-
-    #[test]
-    fn ui_agent_verified_grounded_answer_passthrough_requires_primary_source_match() {
-        let passthrough_id = Uuid::now_v7();
-        let older_id = Uuid::now_v7();
-
-        assert!(agent_verified_grounded_answer_passthrough_adopted(
-            Some(passthrough_id),
-            MaterializedAgentGrounding {
-                source_execution_id: passthrough_id,
-                primary_execution_id: passthrough_id,
-            },
-        ));
-        assert!(!agent_verified_grounded_answer_passthrough_adopted(
-            Some(passthrough_id),
-            MaterializedAgentGrounding {
-                source_execution_id: passthrough_id,
-                primary_execution_id: older_id,
-            },
-        ));
-        assert!(!agent_verified_grounded_answer_passthrough_adopted(
-            None,
-            MaterializedAgentGrounding {
-                source_execution_id: passthrough_id,
-                primary_execution_id: passthrough_id,
-            },
-        ));
+    fn ui_agent_tool_evidence_always_requires_parent_verification() {
+        assert!(agent_answer_requires_parent_tool_evidence_verification(true));
+        assert!(!agent_answer_requires_parent_tool_evidence_verification(false));
     }
 
     #[test]
@@ -3193,6 +3578,97 @@ mod tests {
         };
 
         assert!(agent_has_verifiable_tool_evidence(&[], &grounding));
+    }
+
+    #[test]
+    fn literal_inventory_coverage_targets_missing_identifier_literals() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "literals: `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`\nProvider Alpha setup.".to_string(),
+        }];
+        let grounding = AssistantGroundingEvidence {
+            verification_corpus: vec![
+                "Current evidence supports `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, and `sendDetails`.".to_string(),
+            ],
+            document_references: Vec::new(),
+        };
+        let answer = "Configure `endpointUrl`, `partnerId`, `secretKey`, and `sendDetails`.";
+
+        let targets = literal_inventory_coverage_revision_targets(answer, &history, &grounding);
+
+        assert_eq!(targets, vec!["alphaPackage".to_string(), "retryTimeout".to_string()]);
+    }
+
+    #[test]
+    fn literal_inventory_coverage_waits_until_answer_enumerates_inventory() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "literals: `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`".to_string(),
+        }];
+        let grounding = AssistantGroundingEvidence {
+            verification_corpus: vec![
+                "Current evidence supports `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, and `sendDetails`.".to_string(),
+            ],
+            document_references: Vec::new(),
+        };
+
+        assert!(
+            literal_inventory_coverage_revision_targets(
+                "Use `endpointUrl` for this one setting.",
+                &history,
+                &grounding,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn literal_inventory_coverage_requires_current_grounding() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text:
+                "literals: `alphaPackage`, `endpointUrl`, `secretKey`, `/opt/alpha.conf`, `retryTimeout`"
+                    .to_string(),
+        }];
+        let grounding = AssistantGroundingEvidence {
+            verification_corpus: vec![
+                "Current evidence supports `alphaPackage`, `endpointUrl`, and `retryTimeout`."
+                    .to_string(),
+            ],
+            document_references: Vec::new(),
+        };
+        let answer = "Configure `endpointUrl` and `alphaPackage`.";
+
+        let targets = literal_inventory_coverage_revision_targets(answer, &history, &grounding);
+
+        assert_eq!(targets, vec!["retryTimeout".to_string()]);
+    }
+
+    #[test]
+    fn literal_inventory_presence_uses_identifier_boundaries() {
+        assert!(text_contains_literal("Set `retryTimeout`.", "retryTimeout"));
+        assert!(!text_contains_literal("Set `retryTimeoutMs`.", "retryTimeout"));
+        assert!(!text_contains_literal("Set `alpha.retryTimeout`.", "retryTimeout"));
+        assert!(!text_contains_literal("Set `retry-timeout`.", "timeout"));
+    }
+
+    #[test]
+    fn literal_inventory_dedup_preserves_case_sensitive_literals() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "literals: `retryTimeout`, `RetryTimeout`, `endpointUrl`, `secretKey`"
+                .to_string(),
+        }];
+
+        assert_eq!(
+            latest_dense_history_identifier_literals(&history),
+            vec![
+                "retryTimeout".to_string(),
+                "RetryTimeout".to_string(),
+                "endpointUrl".to_string(),
+                "secretKey".to_string()
+            ]
+        );
     }
 
     #[test]

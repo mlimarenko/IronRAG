@@ -229,7 +229,7 @@ fn verify_answer_accepts_literals_grounded_by_runtime_corpus() {
 fn verify_answer_rejects_source_uri_literals_without_source_excerpt_support() {
     let verification = verify_answer_against_canonical_evidence(
         "Which source was cited?",
-        "Источник: `https://example.test/docs/alpha`.",
+        "Source: `https://example.test/docs/alpha`.",
         &QueryIntentProfile::default(),
         &CanonicalAnswerEvidence {
             bundle: None,

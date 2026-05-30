@@ -14,6 +14,7 @@ this directory is the entry point for deeper technical material.
 | [CLI.md](./CLI.md) | `ironrag-cli` reference for backfills, GC, password reset, and migration helpers. |
 | [FRONTEND.md](./FRONTEND.md) | React 19 + Vite app architecture, vertical feature folders, generated SDK, server-state contract. |
 | [WEBHOOK.md](./WEBHOOK.md) | Outbound webhook subsystem: events, payload contract, signing, retry policy. |
+| [AI-BINDINGS.md](./AI-BINDINGS.md) | AI binding model: 10 purposes, scope ladder, wire-level prompt layout, model-choice tradeoffs, prompt-cache pitfalls. |
 | [BENCHMARKS.md](./BENCHMARKS.md) | Performance baselines for retrieval, ingest, graph render, MCP-UI parity. |
 
 ## Pipeline at a glance

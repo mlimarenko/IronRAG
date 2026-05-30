@@ -3,7 +3,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
 };
 
-use anyhow::Context;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
@@ -21,7 +20,7 @@ use crate::{
             select_related_overlap_tokens_from_candidates, token_sequence_exact_or_contains_tokens,
         },
         vector_dimensions::{
-            require_current_vector_index_dimensions, validate_embedding_vector_dimensions,
+            library_vector_index_dimensions, validate_embedding_vector_dimensions,
         },
     },
     shared::text_tokens::literal_wildcard_prefixes,
@@ -62,23 +61,39 @@ async fn retrieve_entity_hit_lanes_with_relevance(
         resolve_runtime_vector_search_context(state, library_id, provider_profile).await?
     {
         let _vector_guard = state.canonical_services.search.vector_plane_read_guard(state).await?;
-        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        let library_dim = library_vector_index_dimensions(state, library_id).await?;
         validate_embedding_vector_dimensions(
-            expected_dimensions,
+            library_dim,
             question_embedding,
             "runtime entity search",
         )?;
-        state
+        let entity_vector_result = state
             .arango_search_store
             .search_entity_vectors_by_similarity(
+                library_dim,
                 library_id,
                 &context.model_catalog_id.to_string(),
                 question_embedding,
                 limit.max(1),
                 None,
             )
-            .await
-            .context("failed to search canonical entity vectors for runtime query")?
+            .await;
+        let raw_hits = match entity_vector_result {
+            Ok(hits) => hits,
+            Err(ref err) if is_arango_collection_not_found(err) => {
+                tracing::info!(
+                    library_id = %library_id,
+                    "entity vector search: empty layer, returning no graph evidence"
+                );
+                Vec::new()
+            }
+            Err(err) => {
+                return Err(
+                    err.context("failed to search canonical entity vectors for runtime query")
+                );
+            }
+        };
+        raw_hits
             .into_iter()
             .filter_map(|hit| {
                 let node = graph_index.node(hit.entity_id)?;
@@ -636,7 +651,7 @@ fn graph_relevance_keywords(plan: &RuntimeQueryPlan, query_ir: Option<&QueryIR>)
 }
 
 struct GraphNodeRelevance<'a> {
-    node: &'a crate::infra::repositories::RuntimeGraphNodeRow,
+    node: &'a crate::infra::repositories::RuntimeGraphQueryNodeRow,
     score: f32,
 }
 
@@ -975,7 +990,7 @@ fn should_use_inventory_support_fallback(query_ir: Option<&QueryIR>) -> bool {
 }
 
 fn graph_node_relevance<'a>(
-    node: &'a crate::infra::repositories::RuntimeGraphNodeRow,
+    node: &'a crate::infra::repositories::RuntimeGraphQueryNodeRow,
     relevance_profile: &GraphQueryRelevanceProfile,
     target_entity_profiles: &[GraphTargetEntityProfile],
 ) -> Option<GraphNodeRelevance<'a>> {
@@ -1228,7 +1243,7 @@ fn associative_candidate_edges(
 }
 
 fn associative_candidate_edge(
-    edge: &crate::infra::repositories::RuntimeGraphEdgeRow,
+    edge: &crate::infra::repositories::RuntimeGraphQueryEdgeRow,
     graph_index: &QueryGraphIndex,
     relevance_profile: &GraphQueryRelevanceProfile,
     seed_scores: &BTreeMap<Uuid, f32>,
@@ -1328,7 +1343,7 @@ fn propagate_associative_node_scores(
 }
 
 fn graph_edge_text_relevance(
-    edge: &crate::infra::repositories::RuntimeGraphEdgeRow,
+    edge: &crate::infra::repositories::RuntimeGraphQueryEdgeRow,
     graph_index: &QueryGraphIndex,
     relevance_profile: &GraphQueryRelevanceProfile,
 ) -> f32 {
@@ -1389,6 +1404,15 @@ pub(crate) fn entities_from_relationships(
     entities
 }
 
+/// Returns `true` when an ArangoDB error indicates the target collection or
+/// view does not exist (errorNum 1203). This is a valid no-data state for
+/// libraries whose entity layer has not been extracted yet; callers should
+/// treat it as an empty result rather than a fatal infrastructure failure.
+fn is_arango_collection_not_found(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("1203")
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -1408,7 +1432,7 @@ mod tests {
             ComparisonSpec, DocumentHint, EntityMention, EntityRole, QueryAct, QueryIR,
             QueryLanguage, QueryScope,
         },
-        infra::repositories::{RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+        infra::repositories::{RuntimeGraphQueryEdgeRow, RuntimeGraphQueryNodeRow},
         services::{
             knowledge::runtime_read::ActiveRuntimeGraphProjection,
             query::{
@@ -1418,7 +1442,7 @@ mod tests {
         },
     };
 
-    fn graph_index_with_nodes(nodes: Vec<RuntimeGraphNodeRow>) -> QueryGraphIndex {
+    fn graph_index_with_nodes(nodes: Vec<RuntimeGraphQueryNodeRow>) -> QueryGraphIndex {
         let positions =
             nodes.iter().enumerate().map(|(position, node)| (node.id, position)).collect();
         QueryGraphIndex::new(
@@ -1429,8 +1453,8 @@ mod tests {
     }
 
     fn graph_index_with_projection(
-        nodes: Vec<RuntimeGraphNodeRow>,
-        edges: Vec<RuntimeGraphEdgeRow>,
+        nodes: Vec<RuntimeGraphQueryNodeRow>,
+        edges: Vec<RuntimeGraphQueryEdgeRow>,
     ) -> QueryGraphIndex {
         let node_positions =
             nodes.iter().enumerate().rev().map(|(position, node)| (node.id, position)).collect();
@@ -1443,8 +1467,8 @@ mod tests {
         )
     }
 
-    fn node(label: &str, node_type: &str, summary: Option<&str>) -> RuntimeGraphNodeRow {
-        RuntimeGraphNodeRow {
+    fn node(label: &str, node_type: &str, summary: Option<&str>) -> RuntimeGraphQueryNodeRow {
+        RuntimeGraphQueryNodeRow {
             id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
             canonical_key: format!("{node_type}:{}", label.to_lowercase()),
@@ -1452,7 +1476,6 @@ mod tests {
             node_type: node_type.to_string(),
             aliases_json: json!([]),
             summary: summary.map(str::to_string),
-            metadata_json: json!({}),
             support_count: 1,
             projection_version: 1,
             created_at: Utc::now(),
@@ -1465,18 +1488,16 @@ mod tests {
         to_node_id: Uuid,
         relation_type: &str,
         summary: Option<&str>,
-    ) -> RuntimeGraphEdgeRow {
-        RuntimeGraphEdgeRow {
+    ) -> RuntimeGraphQueryEdgeRow {
+        RuntimeGraphQueryEdgeRow {
             id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
             from_node_id,
             to_node_id,
             relation_type: relation_type.to_string(),
-            canonical_key: format!("{from_node_id}:{relation_type}:{to_node_id}"),
             summary: summary.map(str::to_string),
             weight: None,
             support_count: 1,
-            metadata_json: json!({}),
             projection_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1507,6 +1528,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }
@@ -1538,6 +1560,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }
@@ -1584,6 +1607,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.86,
         }
     }
@@ -1612,6 +1636,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }

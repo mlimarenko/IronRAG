@@ -3,15 +3,17 @@ use std::process::Command;
 const CHILD_MODE_ENV: &str = "IRONRAG_OBSERVABILITY_SMOKE_CHILD";
 
 #[test]
-fn init_tracing_without_endpoint_succeeds() -> anyhow::Result<()> {
+fn init_tracing_disabled_by_flag_succeeds() -> anyhow::Result<()> {
     let status = Command::new(std::env::current_exe()?)
         .arg("--exact")
-        .arg("init_tracing_child_without_endpoint")
-        .env(CHILD_MODE_ENV, "without_endpoint")
+        .arg("init_tracing_child_disabled_by_flag")
+        .env(CHILD_MODE_ENV, "disabled_by_flag")
+        .env("IRONRAG_OTEL_ENABLED", "false")
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
         .status()?;
 
-    assert!(status.success(), "observability no-endpoint smoke child failed: {status}");
+    assert!(status.success(), "observability disabled-flag smoke child failed: {status}");
     Ok(())
 }
 
@@ -22,6 +24,7 @@ fn init_tracing_with_fake_endpoint_succeeds() -> anyhow::Result<()> {
         .arg("init_tracing_child_with_fake_endpoint")
         .env(CHILD_MODE_ENV, "with_fake_endpoint")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:0")
+        .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .status()?;
 
     assert!(status.success(), "observability fake-endpoint smoke child failed: {status}");
@@ -29,8 +32,8 @@ fn init_tracing_with_fake_endpoint_succeeds() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn init_tracing_child_without_endpoint() -> anyhow::Result<()> {
-    if std::env::var(CHILD_MODE_ENV).as_deref() != Ok("without_endpoint") {
+async fn init_tracing_child_disabled_by_flag() -> anyhow::Result<()> {
+    if std::env::var(CHILD_MODE_ENV).as_deref() != Ok("disabled_by_flag") {
         return Ok(());
     }
 

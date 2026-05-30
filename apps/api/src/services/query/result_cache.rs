@@ -54,7 +54,7 @@ const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
     ("execution/fact_lookup.rs", include_str!("execution/fact_lookup.rs")),
     ("execution/focused_document_answer.rs", include_str!("execution/focused_document_answer.rs")),
     ("execution/graph_retrieval.rs", include_str!("execution/graph_retrieval.rs")),
-    ("execution/hyde_crag.rs", include_str!("execution/hyde_crag.rs")),
+    ("execution/hyde.rs", include_str!("execution/hyde.rs")),
     ("execution/port_answer.rs", include_str!("execution/port_answer.rs")),
     ("execution/preflight.rs", include_str!("execution/preflight.rs")),
     ("execution/question_intent.rs", include_str!("execution/question_intent.rs")),

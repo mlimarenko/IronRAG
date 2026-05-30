@@ -64,7 +64,7 @@ export function mapAssistantTurnToEvidence(
       totalRelations: resp.relationReferences.length,
       stages: resp.runtimeStageSummaries.map((s) => ({
         stage: s.stageKind,
-        durationMs: 0,
+        durationMs: s.durationMs ?? 0,
         itemCount: 0,
       })),
       policyInterventions: [],

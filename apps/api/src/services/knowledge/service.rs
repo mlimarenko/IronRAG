@@ -889,7 +889,13 @@ fn derive_library_generation_id(
 const LIBRARY_GENERATION_SIGNALS_CACHE_TTL_SECONDS: u64 = 30;
 
 fn library_generation_signals_cache_key(library_id: Uuid) -> String {
-    format!("lib_generation_signals:v1:{library_id}")
+    // Bumped v1→v2 when the underlying AQL stopped reading the legacy
+    // `knowledge_chunk_vector` collection (always empty after the per-dim
+    // migration, so v1 always cached `has_ready_vector=false`) and
+    // started deriving `vector_ready_max` from
+    // `knowledge_revision.vector_state == "ready"`. The bump invalidates
+    // the stale v1 entries on first read after deploy.
+    format!("lib_generation_signals:v2:{library_id}")
 }
 
 /// Redis-cached wrapper around `ArangoDocumentStore::aggregate_library_generation_signals`.

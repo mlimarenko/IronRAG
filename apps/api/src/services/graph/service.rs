@@ -344,7 +344,7 @@ impl GraphService {
         let vector_rebuild = state
             .canonical_services
             .search
-            .rebuild_vector_plane_from_library_binding(state, library_id)
+            .rebuild_vector_plane_for_library(state, library_id)
             .await?;
         Ok(ArangoGraphRebuildOutcome {
             target: Some(ArangoGraphRebuildTarget::Vector),

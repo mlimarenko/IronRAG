@@ -25,6 +25,8 @@ use crate::infra::arangodb::{
         KNOWLEDGE_RELATION_SUBJECT_EDGE, KNOWLEDGE_REVISION_BLOCK_EDGE,
         KNOWLEDGE_REVISION_CHUNK_EDGE, KNOWLEDGE_REVISION_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
         KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION, KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
+        VectorShardKind, chunk_vector_index_for_dim, chunk_vector_index_for_library,
+        entity_vector_index_for_dim, parse_library_vector_shard,
     },
 };
 
@@ -256,9 +258,150 @@ pub async fn bootstrap_knowledge_plane(
                 );
             }
         }
+
+        // Ensure vector indexes on every per-dim shard that already exists in
+        // the database.  The legacy single-dim collections above are handled by
+        // the match block; these shards are the post-migration per-dim layout.
+        // `ensure_vector_index` is idempotent: if the index is already present
+        // with an adequate nLists it returns immediately.
+        let chunk_shards = client
+            .list_per_dim_chunk_vector_collections()
+            .await
+            .context("failed to list per-dim chunk vector collections")?;
+        for shard in &chunk_shards {
+            // `list_per_dim_chunk_vector_collections` matches on the
+            // `knowledge_chunk_vector_d` prefix, which also covers the
+            // per-(library, dim) shards (`..._d{dim}_l{lib}`). Those are
+            // ensured by the per-library loop below; skip them here so
+            // `parse_per_dim_suffix` only sees true per-dim names.
+            if parse_library_vector_shard(shard).is_some() {
+                continue;
+            }
+            let dim = parse_per_dim_suffix(shard).with_context(|| {
+                format!("unexpected per-dim chunk vector collection name: {shard}")
+            })?;
+            let index_name = chunk_vector_index_for_dim(dim);
+            tracing::info!(collection = shard, dim, "ensuring per-dim chunk vector index");
+            client
+                .ensure_vector_index(
+                    shard,
+                    &index_name,
+                    "vector",
+                    dim,
+                    options.vector_index_n_lists,
+                    options.vector_index_default_n_probe,
+                    options.vector_index_training_iterations,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to ensure chunk vector index on per-dim shard {shard}")
+                })?;
+        }
+
+        // Ensure IVF indexes on every per-(library, dim) chunk shard. Each
+        // shard holds one library's chunk vectors, so nLists is sized from
+        // that shard's own (small) row count — IVF training fails if nLists
+        // exceeds the available sample points. `ensure_vector_index` further
+        // clamps to the live row count and seeds synthetic training rows for
+        // an empty shard, so a brand-new shard never aborts bootstrap.
+        let per_library_chunk_shards = client
+            .list_per_library_chunk_vector_collections()
+            .await
+            .context("failed to list per-library chunk vector collections")?;
+        for shard in &per_library_chunk_shards {
+            let parsed = parse_library_vector_shard(shard).with_context(|| {
+                format!("unexpected per-library chunk vector collection name: {shard}")
+            })?;
+            anyhow::ensure!(
+                parsed.kind == VectorShardKind::Chunk,
+                "per-library chunk shard listing returned a non-chunk shard: {shard}",
+            );
+            let row_count = client
+                .count_chunk_vector_rows(shard)
+                .await
+                .with_context(|| format!("failed to count rows in per-library shard {shard}"))?;
+            let n_lists = per_library_shard_index_n_lists(options.vector_index_n_lists, row_count);
+            let index_name = chunk_vector_index_for_library(parsed.dim, parsed.library_id);
+            tracing::info!(
+                collection = shard,
+                dim = parsed.dim,
+                row_count,
+                n_lists,
+                "ensuring per-library chunk vector index"
+            );
+            client
+                .ensure_vector_index(
+                    shard,
+                    &index_name,
+                    "vector",
+                    parsed.dim,
+                    n_lists,
+                    options.vector_index_default_n_probe,
+                    options.vector_index_training_iterations,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to ensure chunk vector index on per-library shard {shard}")
+                })?;
+        }
+
+        let entity_shards = client
+            .list_per_dim_entity_vector_collections()
+            .await
+            .context("failed to list per-dim entity vector collections")?;
+        for shard in &entity_shards {
+            let dim = parse_per_dim_suffix(shard).with_context(|| {
+                format!("unexpected per-dim entity vector collection name: {shard}")
+            })?;
+            let index_name = entity_vector_index_for_dim(dim);
+            tracing::info!(collection = shard, dim, "ensuring per-dim entity vector index");
+            client
+                .ensure_vector_index(
+                    shard,
+                    &index_name,
+                    "vector",
+                    dim,
+                    options.vector_index_n_lists,
+                    options.vector_index_default_n_probe,
+                    options.vector_index_training_iterations,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to ensure entity vector index on per-dim shard {shard}")
+                })?;
+        }
     }
 
     Ok(())
+}
+
+/// Extract the numeric dimension suffix from a per-dim shard collection name.
+///
+/// Examples:
+/// - `"knowledge_chunk_vector_d3072"` → `Some(3072)`
+/// - `"knowledge_entity_vector_d1536"` → `Some(1536)`
+/// - `"knowledge_chunk_vector"` (legacy) → `None`
+/// - `"something_else_d42"` → `None`
+fn parse_per_dim_suffix(name: &str) -> Option<u64> {
+    // Both per-dim prefixes end with `_d` before the decimal digits.
+    let after_d = name
+        .strip_prefix("knowledge_chunk_vector_d")
+        .or_else(|| name.strip_prefix("knowledge_entity_vector_d"))?;
+    // Must be a non-empty all-digit suffix.
+    if after_d.is_empty() || !after_d.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    after_d.parse().ok()
+}
+
+/// Rows-per-IVF-list target for a per-library chunk shard's index, mirroring
+/// the write-path sizing in `search_store`. A per-library shard is small, so
+/// nLists is `min(configured, rows / 40)` floored at 1: IVF training needs at
+/// least as many sample points as lists.
+const PER_LIBRARY_CHUNK_SHARD_ROWS_PER_LIST: u64 = 40;
+fn per_library_shard_index_n_lists(configured: u64, row_count: u64) -> u64 {
+    let by_rows = row_count / PER_LIBRARY_CHUNK_SHARD_ROWS_PER_LIST;
+    configured.min(by_rows).max(1)
 }
 
 fn knowledge_text_analyzers() -> serde_json::Value {
@@ -342,4 +485,36 @@ fn knowledge_search_view_links() -> serde_json::Value {
             "includeAllFields": true
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_per_dim_suffix;
+
+    #[test]
+    fn parse_per_dim_suffix_chunk() {
+        assert_eq!(parse_per_dim_suffix("knowledge_chunk_vector_d3072"), Some(3072));
+        assert_eq!(parse_per_dim_suffix("knowledge_chunk_vector_d1536"), Some(1536));
+        assert_eq!(parse_per_dim_suffix("knowledge_chunk_vector_d768"), Some(768));
+    }
+
+    #[test]
+    fn parse_per_dim_suffix_entity() {
+        assert_eq!(parse_per_dim_suffix("knowledge_entity_vector_d3072"), Some(3072));
+        assert_eq!(parse_per_dim_suffix("knowledge_entity_vector_d1536"), Some(1536));
+    }
+
+    #[test]
+    fn parse_per_dim_suffix_legacy_returns_none() {
+        // Legacy single-dim collections have no _d<N> suffix.
+        assert_eq!(parse_per_dim_suffix("knowledge_chunk_vector"), None);
+        assert_eq!(parse_per_dim_suffix("knowledge_entity_vector"), None);
+    }
+
+    #[test]
+    fn parse_per_dim_suffix_unrelated_returns_none() {
+        assert_eq!(parse_per_dim_suffix("something_else_d42"), None);
+        assert_eq!(parse_per_dim_suffix("knowledge_chunk_vector_d"), None);
+        assert_eq!(parse_per_dim_suffix("knowledge_chunk_vector_dabc"), None);
+    }
 }

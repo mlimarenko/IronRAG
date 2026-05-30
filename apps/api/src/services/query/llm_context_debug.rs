@@ -31,6 +31,11 @@ pub struct LlmIterationDebug {
     pub response_text: Option<String>,
     pub response_tool_calls: Vec<ResponseToolCallDebug>,
     pub usage: serde_json::Value,
+    /// Wall-clock the model spent on this iteration — request sent to
+    /// response received ("model think time"). `None` on records written
+    /// before timing capture existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// Runtime execution IDs spawned by tool calls in this iteration.
     /// Populated on tool-use turns when a tool such as
     /// `grounded_answer` creates its own query execution and debug
@@ -38,6 +43,13 @@ pub struct LlmIterationDebug {
     /// query executions and on single-shot grounded-answer turns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_runtime_execution_ids: Vec<Uuid>,
+    /// Query-execution IDs of the child executions spawned by this
+    /// iteration's tool calls. These are the IDs the execution-detail /
+    /// llm-context endpoints accept, so the debug inspector can drill
+    /// into a child `grounded_answer` execution. (The runtime IDs above
+    /// key a different table and are not directly fetchable.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_query_execution_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -56,6 +68,10 @@ pub struct ResponseToolCallDebug {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_json: Option<serde_json::Value>,
     pub is_error: bool,
+    /// Wall-clock the tool ran ("tool wait time" the model blocked on).
+    /// `None` on records written before timing capture existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Metadata describing the tool-use loop that produced this snapshot.
@@ -104,6 +120,12 @@ pub struct LlmContextSnapshot {
     /// `Some` when tool-use execution drove this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_loop: Option<AgentLoopMetadata>,
+    /// Fine-grained timed sub-operations recorded during this execution
+    /// (individual DB/Arango queries, retrieval lanes, …) so the inspector can
+    /// surface where time went and operators can catch heavy sections. Empty
+    /// on records written before span capture existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<crate::services::query::turn_spans::TurnSpan>,
 }
 
 impl LlmContextSnapshot {
@@ -125,9 +147,19 @@ pub async fn upsert_snapshot(
     postgres: &PgPool,
     snapshot: &LlmContextSnapshot,
 ) -> Result<(), sqlx::Error> {
-    let snapshot_json = serde_json::to_value(snapshot).map_err(|error| {
+    let mut snapshot_json = serde_json::to_value(snapshot).map_err(|error| {
         sqlx::Error::Protocol(format!("failed to serialize LLM context snapshot: {error}"))
     })?;
+    // Attach the fine-grained timed spans stashed for this execution (DB
+    // queries, retrieval lanes) unless the snapshot already carries them.
+    if snapshot.spans.is_empty() {
+        let spans = crate::services::query::turn_spans::take_execution_spans(snapshot.execution_id);
+        if !spans.is_empty() {
+            if let Ok(spans_value) = serde_json::to_value(&spans) {
+                snapshot_json["spans"] = spans_value;
+            }
+        }
+    }
     sqlx::query(
         "insert into query_llm_context_snapshot (
             execution_id, snapshot_json, captured_at
@@ -184,6 +216,7 @@ mod tests {
             captured_at: Utc::now(),
             query_ir: None,
             agent_loop: None,
+            spans: Vec::new(),
         }
     }
 
@@ -196,7 +229,9 @@ mod tests {
             response_text: None,
             response_tool_calls: Vec::new(),
             usage: serde_json::Value::Null,
+            duration_ms: None,
             child_runtime_execution_ids: Vec::new(),
+            child_query_execution_ids: Vec::new(),
         }
     }
 

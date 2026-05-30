@@ -440,6 +440,7 @@ pub enum McpAuditActionKind {
     ListLibraries,
     SearchDocuments,
     ReadDocument,
+    ViewDocumentImage,
     ListDocuments,
     DeleteDocument,
     CreateWorkspace,

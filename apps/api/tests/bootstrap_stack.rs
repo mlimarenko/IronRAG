@@ -10,7 +10,8 @@ use ironrag_backend::{
             DOCUMENT_COLLECTIONS, EDGE_COLLECTIONS, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
             KNOWLEDGE_CHUNK_VECTOR_INDEX, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
             KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_PERSISTENT_INDEXES,
-            KNOWLEDGE_SEARCH_VIEW,
+            KNOWLEDGE_SEARCH_VIEW, chunk_vector_collection_for_dim,
+            entity_vector_collection_for_dim,
         },
         persistence::{canonical_ai_catalog_seeded, canonical_baseline_present},
     },
@@ -363,6 +364,27 @@ async fn fresh_startup_bootstraps_postgres_catalog_and_arango_knowledge_plane() 
                 .has_index(KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_INDEX)
                 .await?
         );
+
+        // Per-dim vector shards (`knowledge_chunk_vector_d<dim>` /
+        // `knowledge_entity_vector_d<dim>`) are lazy-created on the first
+        // write for that dim. A fresh bootstrap has never written a vector,
+        // so for any sample dim the per-dim shard must not exist yet —
+        // only the legacy single-dim collection is materialised at
+        // bootstrap. Sample two dims to make the assertion robust to
+        // future default-binding changes.
+        for sample_dim in [3u64, 1536u64] {
+            let chunk_shard = chunk_vector_collection_for_dim(sample_dim);
+            let entity_shard = entity_vector_collection_for_dim(sample_dim);
+            assert!(
+                !collections.iter().any(|candidate| candidate == &chunk_shard),
+                "per-dim chunk vector shard {chunk_shard} must not exist before any write"
+            );
+            assert!(
+                !collections.iter().any(|candidate| candidate == &entity_shard),
+                "per-dim entity vector shard {entity_shard} must not exist before any write"
+            );
+        }
+
         for index in KNOWLEDGE_PERSISTENT_INDEXES {
             assert!(
                 fixture

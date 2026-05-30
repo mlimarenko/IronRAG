@@ -417,6 +417,159 @@ fn build_canonical_answer_context_filters_only_explicit_document_reference() {
 }
 
 #[test]
+fn build_canonical_answer_context_uses_query_ir_focus_for_follow_up_document_scope() {
+    let focused_document_id = Uuid::now_v7();
+    let other_document_id = Uuid::now_v7();
+    let focused_revision_id = Uuid::now_v7();
+    let other_revision_id = Uuid::now_v7();
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["package", "configuration_file", "config_key"],
+    );
+    query_ir.document_focus = Some(DocumentHint { hint: "Alpha".to_string() });
+    query_ir.target_entities =
+        vec![EntityMention { label: "Alpha".to_string(), role: EntityRole::Object }];
+    query_ir.conversation_refs = vec![crate::domains::query_ir::UnresolvedRef {
+        surface: "that setup".to_string(),
+        kind: crate::domains::query_ir::ConversationRefKind::Elliptic,
+    }];
+
+    let context = build_canonical_answer_context(
+        "show the setup instructions",
+        &query_ir,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![
+                KnowledgeStructuredBlockRow {
+                    normalized_text:
+                        "Alpha connector uses /opt/alpha/connector.conf with apiUrl and retryTimeout."
+                            .to_string(),
+                    text:
+                        "Alpha connector uses /opt/alpha/connector.conf with apiUrl and retryTimeout."
+                            .to_string(),
+                    heading_trail: vec!["Alpha setup".to_string()],
+                    ..sample_structured_block_row(
+                        Uuid::now_v7(),
+                        focused_document_id,
+                        focused_revision_id,
+                    )
+                },
+                KnowledgeStructuredBlockRow {
+                    normalized_text: "Beta connector uses beta-adapter.pkg and beta.conf."
+                        .to_string(),
+                    text: "Beta connector uses beta-adapter.pkg and beta.conf.".to_string(),
+                    heading_trail: vec!["Beta setup".to_string()],
+                    ..sample_structured_block_row(
+                        Uuid::now_v7(),
+                        other_document_id,
+                        other_revision_id,
+                    )
+                },
+            ],
+            technical_facts: Vec::new(),
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: focused_revision_id,
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: focused_document_id,
+                document_label: "Provider Alpha setup.md".to_string(),
+                excerpt:
+                    "Install alpha-adapter.pkg, then edit /opt/alpha/connector.conf.".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+                score: Some(1.0),
+                source_text:
+                    "Install alpha-adapter.pkg, then edit /opt/alpha/connector.conf.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: other_revision_id,
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: other_document_id,
+                document_label: "Provider Beta setup.md".to_string(),
+                excerpt: "Install beta-adapter.pkg, then edit /opt/beta/connector.conf.".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::GraphEvidence,
+                score: Some(2.0),
+                source_text:
+                    "Install beta-adapter.pkg, then edit /opt/beta/connector.conf.".to_string(),
+            },
+        ],
+        &[
+            "[graph-evidence target=\"Provider Beta setup\"] Install beta-adapter.pkg".to_string(),
+            "[graph-evidence target=\"Provider Alpha setup\"] apiUrl is required".to_string(),
+        ],
+    );
+
+    assert!(context.contains("Focused grounded document\n- Provider Alpha setup.md"));
+    assert!(context.contains("alpha-adapter.pkg"));
+    assert!(context.contains("/opt/alpha/connector.conf"));
+    assert!(context.contains("apiUrl is required"));
+    assert!(!context.contains("beta-adapter.pkg"), "{context}");
+    assert!(!context.contains("/opt/beta/connector.conf"), "{context}");
+}
+
+#[test]
+fn build_canonical_answer_context_does_not_lock_ir_focus_on_tied_documents() {
+    let first_document_id = Uuid::now_v7();
+    let second_document_id = Uuid::now_v7();
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["configuration_file"],
+    );
+    query_ir.document_focus = Some(DocumentHint { hint: "Alpha".to_string() });
+
+    let context = build_canonical_answer_context(
+        "show the setup instructions",
+        &query_ir,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: first_document_id,
+                document_label: "Provider Alpha setup.md".to_string(),
+                excerpt: "Alpha setup package is alpha-adapter.pkg.".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(1.0),
+                source_text: "Alpha setup package is alpha-adapter.pkg.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: second_document_id,
+                document_label: "Provider Alpha appendix.md".to_string(),
+                excerpt: "Alpha appendix parameter is retryTimeout.".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.9),
+                source_text: "Alpha appendix parameter is retryTimeout.".to_string(),
+            },
+        ],
+        &[],
+    );
+
+    assert!(!context.contains("Focused grounded document"), "{context}");
+    assert!(context.contains("alpha-adapter.pkg"));
+    assert!(context.contains("retryTimeout"));
+}
+
+#[test]
 fn build_canonical_answer_context_keeps_typed_runtime_graph_evidence() {
     let document_id = Uuid::now_v7();
     let context = build_canonical_answer_context(
@@ -516,6 +669,40 @@ fn apply_runtime_chunk_overlays_preserves_shorter_authoritative_graph_evidence()
 }
 
 #[test]
+fn merge_runtime_context_chunks_keeps_companions_missing_from_bundle_refs() {
+    let mut chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id: Uuid::now_v7(),
+        document_label: "overview.md".to_string(),
+        excerpt: "General overview.".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(0.2),
+        source_text: "General overview.".to_string(),
+    }];
+    let companion_id = Uuid::now_v7();
+    let runtime_chunks = vec![RuntimeMatchedChunk {
+        chunk_id: companion_id,
+        revision_id: Uuid::now_v7(),
+        chunk_index: 7,
+        chunk_kind: None,
+        document_id: Uuid::now_v7(),
+        document_label: "settings.md".to_string(),
+        excerpt: "terminalErrorCodes = 101, 202".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+        score: Some(0.9),
+        source_text: "[Main]\nterminalErrorCodes = 101, 202".to_string(),
+    }];
+
+    merge_runtime_context_chunks(&mut chunks, &runtime_chunks);
+
+    assert!(chunks.iter().any(|chunk| chunk.chunk_id == companion_id));
+    assert_eq!(chunks.len(), 2);
+}
+
+#[test]
 fn build_canonical_answer_context_promotes_query_matching_prepared_segments_before_truncation() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();
@@ -578,6 +765,106 @@ fn build_canonical_answer_context_promotes_query_matching_prepared_segments_befo
     );
     assert!(context.contains("controlled footwear"));
     assert!(!context.contains("Generic filler segment 15"));
+}
+
+#[test]
+fn render_prepared_segment_section_preserves_bounded_code_blocks() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let code = format!(
+        "[Main]\n{}\nlateConfigKey = verified-value",
+        (0..40)
+            .map(|index| format!("fillerKey{index} = filler-value-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let block = KnowledgeStructuredBlockRow {
+        block_kind: "code_block".to_string(),
+        normalized_text: code.clone(),
+        text: code,
+        heading_trail: vec!["Configuration".to_string(), "Example".to_string()],
+        section_path: vec!["configuration".to_string(), "example".to_string()],
+        ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
+    };
+
+    let section = render_prepared_segment_section(
+        "Show the lateConfigKey configuration example",
+        Some(&generic_query_ir()),
+        &[block],
+        false,
+    );
+
+    assert!(section.contains("code_block > Configuration > Example (coverage=full):"));
+    assert!(section.contains("```text"));
+    assert!(section.contains("lateConfigKey = verified-value"));
+}
+
+#[test]
+fn render_prepared_segment_section_focuses_long_code_blocks_on_question_literals() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let code = format!(
+        "[Main]\n{}\nrareTargetKey = expected-value\n{}",
+        (0..140)
+            .map(|index| format!("earlyFillerKey{index} = early-filler-value-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        (0..140)
+            .map(|index| format!("lateFillerKey{index} = late-filler-value-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let block = KnowledgeStructuredBlockRow {
+        block_kind: "code_block".to_string(),
+        normalized_text: code.clone(),
+        text: code,
+        heading_trail: vec!["Configuration".to_string(), "Example".to_string()],
+        section_path: vec!["configuration".to_string(), "example".to_string()],
+        ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
+    };
+
+    let section = render_prepared_segment_section(
+        "Which value should rareTargetKey use?",
+        Some(&generic_query_ir()),
+        &[block],
+        false,
+    );
+
+    assert!(section.contains("coverage=excerpt"));
+    assert!(section.contains("rareTargetKey = expected-value"));
+}
+
+#[test]
+fn render_canonical_chunk_section_preserves_bounded_code_block_chunks() {
+    let source_text = format!(
+        "[Main]\n{}\nlateConfigKey = verified-value",
+        (0..48)
+            .map(|index| format!("fillerKey{index} = filler-value-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 5,
+        chunk_kind: Some("code_block".to_string()),
+        document_id: Uuid::now_v7(),
+        document_label: "settings.md".to_string(),
+        excerpt: "short preview".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+        score: Some(0.9),
+        source_text,
+    };
+
+    let section = render_canonical_chunk_section(
+        "Show the lateConfigKey configuration example",
+        &generic_query_ir(),
+        &[chunk],
+        false,
+    );
+
+    assert!(section.contains("scope=code_block"));
+    assert!(section.contains("lateConfigKey = verified-value"));
 }
 
 #[test]

@@ -1,6 +1,15 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::LazyLock};
 
 use super::technical_literals::trim_literal_token;
+
+static PACKAGE_COMMAND_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    #[allow(clippy::expect_used)]
+    regex::RegexBuilder::new(
+        r"(?im)(?:^|[\s:;])(?:aptitude\s+install|apt(?:-get)?\s+install|dpkg-reconfigure)\s+([A-Za-z0-9][A-Za-z0-9_.+-]{1,160})(?:$|[\s.,;:)])",
+    )
+    .build()
+    .expect("package command regex must compile")
+});
 
 pub(super) fn push_unique_limited(
     target: &mut Vec<String>,
@@ -82,6 +91,21 @@ pub(super) fn extract_explicit_path_literals(text: &str, limit: usize) -> Vec<St
     }
 
     paths
+}
+
+pub(super) fn extract_package_command_literals(text: &str, limit: usize) -> Vec<String> {
+    let mut packages = Vec::new();
+    let mut seen = HashSet::new();
+    for capture in PACKAGE_COMMAND_REGEX.captures_iter(text) {
+        let Some(package) = capture
+            .get(1)
+            .map(|value| value.as_str().trim().trim_end_matches(['.', ',', ';', ':', ')']))
+        else {
+            continue;
+        };
+        push_unique_limited(&mut packages, &mut seen, package.to_string(), limit);
+    }
+    packages
 }
 
 pub(super) fn extract_prefix_literals(text: &str, limit: usize) -> Vec<String> {

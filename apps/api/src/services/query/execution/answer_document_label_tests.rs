@@ -3,9 +3,13 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::domains::query_ir::{
-    QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceSpec,
+    QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceFilter,
+    SourceSliceSpec,
 };
 use crate::infra::arangodb::document_store::KnowledgeDocumentRow;
+use crate::services::query::effective_query::{
+    EFFECTIVE_QUERY_QUESTION_PREFIX, EFFECTIVE_QUERY_SCOPE_PREFIX,
+};
 use crate::services::query::execution::types::RuntimeMatchedChunk;
 use crate::shared::extraction::table_summary::{
     build_table_column_summaries, render_table_column_summary,
@@ -16,6 +20,10 @@ use super::super::{
     build_table_summary_grounded_answer, concise_document_subject_label,
     document_focus_marker_hits, focused_answer_document_id, render_table_summary_chunk_section,
 };
+
+fn effective_query_text(scope: &str, question: &str) -> String {
+    format!("{EFFECTIVE_QUERY_SCOPE_PREFIX} {scope}\n{EFFECTIVE_QUERY_QUESTION_PREFIX} {question}")
+}
 
 fn describe_query_ir() -> QueryIR {
     QueryIR {
@@ -31,6 +39,7 @@ fn describe_query_ir() -> QueryIR {
         conversation_refs: Vec::new(),
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.0,
     }
 }
@@ -49,6 +58,7 @@ fn initial_table_rows_ir(row_count: u16) -> QueryIR {
         source_slice: Some(SourceSliceSpec {
             direction: SourceSliceDirection::Head,
             count: Some(row_count),
+            filter: SourceSliceFilter::None,
         }),
         ..describe_query_ir()
     }
@@ -132,6 +142,49 @@ fn focused_answer_document_id_prefers_explicit_extension_match() {
             &chunks,
         ),
         Some(csv_id)
+    );
+}
+
+#[test]
+fn focused_answer_document_id_prefers_current_question_segment() {
+    let focused_id = Uuid::now_v7();
+    let stale_id = Uuid::now_v7();
+    let chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: stale_id,
+            document_label: "Provider Alpha Admin Guide".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(10.0),
+            source_text: String::new(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 1,
+            chunk_kind: None,
+            document_id: focused_id,
+            document_label: "Provider Alpha".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(1.0),
+            source_text: String::new(),
+        },
+    ];
+
+    assert_eq!(
+        focused_answer_document_id(
+            &effective_query_text(
+                "Prior assistant listed Provider Alpha Admin Guide.",
+                "Provider Alpha setup",
+            ),
+            &chunks,
+        ),
+        Some(focused_id)
     );
 }
 

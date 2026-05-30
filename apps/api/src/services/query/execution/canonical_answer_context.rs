@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::query_ir::QueryIR,
+    domains::query_ir::{QueryIR, QueryScope},
     infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
+    services::query::text_match::{near_token_match, normalized_alnum_tokens},
     shared::extraction::text_render::repair_technical_layout_noise,
 };
 
@@ -114,9 +115,9 @@ pub(crate) async fn load_canonical_answer_chunks(
     fallback_chunks: &[RuntimeMatchedChunk],
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
-    let explicit_targeted_document_ids = explicit_target_document_ids_from_values(
-        question,
-        document_index.values().flat_map(|document| {
+    let document_values = document_index
+        .values()
+        .flat_map(|document| {
             [
                 document.file_name.as_deref(),
                 document.title.as_deref(),
@@ -125,11 +126,14 @@ pub(crate) async fn load_canonical_answer_chunks(
             .into_iter()
             .flatten()
             .map(move |value| (document.document_id, value))
-        }),
-    );
+        })
+        .collect::<Vec<_>>();
+    let explicit_targeted_document_ids =
+        explicit_target_document_ids_from_values(question, document_values.iter().copied());
     let focused_document_id = (explicit_targeted_document_ids.len() == 1)
         .then(|| explicit_targeted_document_ids.iter().next().copied())
-        .flatten();
+        .flatten()
+        .or_else(|| query_ir_canonical_context_document_id(query_ir, document_values));
     let aggregation_summary_chunks = if question_asks_table_aggregation(question, Some(query_ir))
         && let Some(document_id) = focused_document_id
     {
@@ -251,7 +255,7 @@ pub(crate) async fn load_canonical_answer_chunks(
         .into_iter()
         .filter_map(|chunk| map_chunk_hit(chunk, 1.0, document_index, &plan_keywords))
         .collect();
-    apply_runtime_chunk_overlays(&mut chunks, fallback_chunks);
+    merge_runtime_context_chunks(&mut chunks, fallback_chunks);
     if question_asks_table_aggregation(question, Some(query_ir))
         && let Some(document_id) = focused_document_id
     {
@@ -304,7 +308,9 @@ pub(crate) async fn load_canonical_answer_chunks(
         chunks,
     )
     .await?;
-    apply_runtime_chunk_overlays(&mut chunks, fallback_chunks);
+    merge_runtime_context_chunks(&mut chunks, fallback_chunks);
+    let image_revision_ids = load_image_revision_ids(state, &chunks).await.unwrap_or_default();
+    deprioritize_image_source_chunks(&mut chunks, &image_revision_ids);
     chunks.sort_by(score_desc_chunks);
     Ok(chunks)
 }
@@ -351,6 +357,24 @@ pub(crate) fn apply_runtime_chunk_overlays(
     }
 }
 
+pub(crate) fn merge_runtime_context_chunks(
+    chunks: &mut Vec<RuntimeMatchedChunk>,
+    runtime_chunks: &[RuntimeMatchedChunk],
+) {
+    apply_runtime_chunk_overlays(chunks, runtime_chunks);
+    let mut seen_chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
+    for runtime_chunk in runtime_chunks {
+        if !matches!(
+            runtime_chunk.score_kind,
+            RuntimeChunkScoreKind::GraphEvidence | RuntimeChunkScoreKind::SourceContext
+        ) || !seen_chunk_ids.insert(runtime_chunk.chunk_id)
+        {
+            continue;
+        }
+        chunks.push(runtime_chunk.clone());
+    }
+}
+
 async fn augment_with_source_coverage_chunks(
     state: &AppState,
     query_ir: &QueryIR,
@@ -360,8 +384,15 @@ async fn augment_with_source_coverage_chunks(
     mut chunks: Vec<RuntimeMatchedChunk>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
     if !should_request_source_coverage_chunks(query_ir) {
+        tracing::debug!(
+            stage = "source_coverage_skip",
+            reason = "predicate_false",
+            ?query_ir.act,
+            "source coverage augmentation skipped"
+        );
         return Ok(chunks);
     }
+    let initial_chunk_count = chunks.len();
     let mut document_ids = Vec::<Uuid>::new();
     let mut seen_document_ids = HashSet::<Uuid>::new();
     if let Some(document_id) = focused_document_id
@@ -416,11 +447,64 @@ async fn augment_with_source_coverage_chunks(
             }
         }
     }
+    tracing::info!(
+        stage = "source_coverage_augmented",
+        initial_chunk_count,
+        final_chunk_count = chunks.len(),
+        added_chunk_count = chunks.len().saturating_sub(initial_chunk_count),
+        focused_document_id = ?focused_document_id,
+        coverage_rank,
+        "source coverage augmentation finished"
+    );
     Ok(chunks)
 }
 
 fn should_request_source_coverage_chunks(query_ir: &QueryIR) -> bool {
-    query_ir.requests_source_coverage_context() || query_ir.is_exact_literal_technical()
+    query_ir.requests_source_coverage_context()
+        || query_ir.is_exact_literal_technical()
+        || query_ir_requests_setup_source_coverage(query_ir)
+}
+
+fn query_ir_requests_setup_source_coverage(query_ir: &QueryIR) -> bool {
+    let act_signals_setup = matches!(
+        query_ir.act,
+        crate::domains::query_ir::QueryAct::ConfigureHow
+            | crate::domains::query_ir::QueryAct::Describe
+            | crate::domains::query_ir::QueryAct::RetrieveValue
+    );
+    if !act_signals_setup {
+        return false;
+    }
+
+    let has_config_target = query_ir.target_types.iter().any(|target_type| {
+        matches!(
+            target_type.trim().to_ascii_lowercase().as_str(),
+            "configuration_file" | "config_key"
+        )
+    });
+    let has_package_or_parameter_target = query_ir.target_types.iter().any(|target_type| {
+        matches!(target_type.trim().to_ascii_lowercase().as_str(), "package" | "parameter")
+    });
+
+    // Original gate: configuration_file/config_key + package/parameter
+    // both present (matches a high-confidence "configure this parameter
+    // inside this config file" intent).
+    if has_config_target && has_package_or_parameter_target {
+        return true;
+    }
+
+    // Relaxed gate for ConfigureHow alone: when the IR confidently
+    // identifies a setup intent, the answer pipeline benefits from
+    // contiguous chunk coverage of the focused source document even
+    // when the compiler did not tag the more granular config_key /
+    // configuration_file target type. This catches the typical
+    // "how do I configure <module>?" shape where the user has not
+    // named an INI file or a specific parameter, and the underlying
+    // document is one continuous configuration walkthrough whose
+    // canonical block sits beyond the first few chunks. Cost is
+    // bounded by `SOURCE_COVERAGE_DOCUMENT_LIMIT` × per-doc cap, so
+    // the broader trigger does not unbound the context bundle.
+    matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow)
 }
 
 fn select_source_coverage_chunk_rows(
@@ -452,13 +536,50 @@ fn select_source_coverage_chunk_rows(
         selected.insert(rows.len() - 2);
         selected.insert(rows.len() - 1);
     }
-    if selected.len() < limit && rows.len() > 1 {
-        for slot in 0..limit {
-            let index = slot * (rows.len() - 1) / (limit - 1);
-            selected.insert(index);
-            if selected.len() >= limit {
-                break;
+    // Greedy max-min coverage fill: after the forced anchors (head,
+    // middle, tail), the remaining slots used to come from a fixed
+    // `slot * (rows.len()-1) / (limit-1)` stride. That stride enumerated
+    // candidate indices from 0 upward and stopped on the first
+    // `selected.len() >= limit`, which on long documents produced a
+    // tight cluster of head-side indices and an arbitrary gap somewhere
+    // in the middle or tail.
+    //
+    // Worked example for a 27-chunk source document at limit=12:
+    // forced anchors select indices {0, 1, 12, 13, 25, 26}; the old
+    // stride then added {2, 4, 7, 9, 11, 14} and stopped, leaving
+    // indices 15-24 entirely unrepresented. For configuration-style
+    // documents whose canonical content sits in that range, that
+    // gap pushed the answering model into honest-but-incomplete
+    // responses.
+    //
+    // The greedy fill below picks the unused index that is farthest
+    // from any already-selected index, breaking ties toward the smaller
+    // index. Each addition shrinks the largest remaining gap, so the
+    // final selection covers the document's full index range — the
+    // canonical "maximum dispersion" sampler. Pure data-driven, no
+    // language or dataset assumptions; deterministic for unit tests.
+    while selected.len() < limit && selected.len() < rows.len() {
+        let mut best_index: Option<usize> = None;
+        let mut best_distance: usize = 0;
+        for candidate in 0..rows.len() {
+            if selected.contains(&candidate) {
+                continue;
             }
+            let nearest = selected
+                .iter()
+                .map(|chosen| candidate.abs_diff(*chosen))
+                .min()
+                .unwrap_or(usize::MAX);
+            if nearest > best_distance || best_index.is_none() {
+                best_distance = nearest;
+                best_index = Some(candidate);
+            }
+        }
+        match best_index {
+            Some(index) => {
+                selected.insert(index);
+            }
+            None => break,
         }
     }
 
@@ -607,7 +728,7 @@ pub(crate) fn build_canonical_answer_context(
     graph_evidence_context_lines: &[String],
 ) -> String {
     let focused_document_id =
-        explicit_canonical_context_document_id(question, canonical_answer_chunks);
+        canonical_context_document_id(question, query_ir, canonical_answer_chunks);
     let focused_document_label = focused_document_id.and_then(|document_id| {
         canonical_answer_chunks
             .iter()
@@ -662,7 +783,11 @@ pub(crate) fn build_canonical_answer_context(
         );
     }
 
-    let graph_evidence_section = render_graph_evidence_context_lines(graph_evidence_context_lines);
+    let graph_evidence_section = render_graph_evidence_context_lines_for_focus(
+        graph_evidence_context_lines,
+        focused_document_label.as_deref(),
+        query_ir,
+    );
     if !graph_evidence_section.is_empty() {
         sections.push(graph_evidence_section);
     }
@@ -735,15 +860,159 @@ fn render_graph_evidence_context_lines(graph_evidence_context_lines: &[String]) 
     }
 }
 
-fn explicit_canonical_context_document_id(
+fn render_graph_evidence_context_lines_for_focus(
+    graph_evidence_context_lines: &[String],
+    focused_document_label: Option<&str>,
+    query_ir: &QueryIR,
+) -> String {
+    let Some(focused_document_label) = focused_document_label else {
+        return render_graph_evidence_context_lines(graph_evidence_context_lines);
+    };
+    if !matches!(query_ir.scope, QueryScope::SingleDocument) {
+        return render_graph_evidence_context_lines(graph_evidence_context_lines);
+    }
+    let focus_tokens = query_ir_document_focus_tokens(query_ir)
+        .unwrap_or_else(|| normalized_alnum_tokens(focused_document_label, 3));
+    if focus_tokens.is_empty() {
+        return render_graph_evidence_context_lines(graph_evidence_context_lines);
+    }
+    let focused_lines = graph_evidence_context_lines
+        .iter()
+        .filter(|line| {
+            let line_tokens = normalized_alnum_tokens(line, 3);
+            focus_token_overlap_count(&focus_tokens, &line_tokens) > 0
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    render_graph_evidence_context_lines(&focused_lines)
+}
+
+fn canonical_context_document_id(
     question: &str,
+    query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<Uuid> {
     let document_ids = explicit_target_document_ids_from_values(
         question,
         chunks.iter().map(|chunk| (chunk.document_id, chunk.document_label.as_str())),
     );
-    (document_ids.len() == 1).then(|| document_ids.iter().next().copied()).flatten()
+    (document_ids.len() == 1).then(|| document_ids.iter().next().copied()).flatten().or_else(|| {
+        query_ir_canonical_context_document_id(
+            query_ir,
+            chunks.iter().map(|chunk| (chunk.document_id, chunk.document_label.as_str())),
+        )
+    })
+}
+
+fn query_ir_canonical_context_document_id<'a, I>(
+    query_ir: &QueryIR,
+    document_values: I,
+) -> Option<Uuid>
+where
+    I: IntoIterator<Item = (Uuid, &'a str)>,
+{
+    if !matches!(query_ir.scope, QueryScope::SingleDocument) || query_ir.document_focus.is_none() {
+        return None;
+    }
+    let focus_tokens = query_ir_document_focus_tokens(query_ir)?;
+
+    let mut best_scores = HashMap::<Uuid, usize>::new();
+    for (document_id, value) in document_values {
+        let value_tokens = normalized_alnum_tokens(value, 3);
+        let overlap = focus_token_overlap_count(&focus_tokens, &value_tokens);
+        if overlap == 0 {
+            continue;
+        }
+        best_scores
+            .entry(document_id)
+            .and_modify(|score| *score = (*score).max(overlap))
+            .or_insert(overlap);
+    }
+    let max_score = best_scores.values().copied().max().unwrap_or_default();
+    if max_score == 0 {
+        return None;
+    }
+    let best_document_ids = best_scores
+        .into_iter()
+        .filter_map(|(document_id, score)| (score == max_score).then_some(document_id))
+        .collect::<BTreeSet<_>>();
+    (best_document_ids.len() == 1).then(|| best_document_ids.iter().next().copied()).flatten()
+}
+
+pub(crate) fn query_ir_document_focus_tokens(query_ir: &QueryIR) -> Option<BTreeSet<String>> {
+    let tokens = query_ir
+        .document_focus
+        .as_ref()
+        .map(|document_focus| normalized_alnum_tokens(document_focus.hint.trim(), 3))
+        .unwrap_or_default();
+    (!tokens.is_empty()).then_some(tokens)
+}
+
+pub(crate) fn focus_token_overlap_count(
+    focus_tokens: &BTreeSet<String>,
+    value_tokens: &BTreeSet<String>,
+) -> usize {
+    focus_tokens
+        .iter()
+        .filter(|focus_token| {
+            value_tokens.iter().any(|value_token| {
+                focus_token == &value_token
+                    || near_token_match(focus_token, value_token)
+                    || focus_token_is_value_prefix(focus_token, value_token)
+            })
+        })
+        .count()
+}
+
+fn focus_token_is_value_prefix(focus_token: &str, value_token: &str) -> bool {
+    let focus_len = focus_token.chars().count();
+    let value_len = value_token.chars().count();
+    focus_len >= 3 && value_len > focus_len && value_token.starts_with(focus_token)
+}
+
+/// Collect the set of revision_ids that belong to image-source documents
+/// (`source_format == "image"`) by batch-fetching the structured revision
+/// records for every distinct revision referenced by the given chunks.
+async fn load_image_revision_ids(
+    state: &AppState,
+    chunks: &[RuntimeMatchedChunk],
+) -> anyhow::Result<HashSet<Uuid>> {
+    let revision_ids: Vec<Uuid> = {
+        let mut seen = HashSet::new();
+        chunks.iter().filter(|c| seen.insert(c.revision_id)).map(|c| c.revision_id).collect()
+    };
+    if revision_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let revisions = state
+        .arango_document_store
+        .list_structured_revisions_by_revision_ids(&revision_ids)
+        .await
+        .context("failed to load structured revisions for image deprioritization")?;
+    Ok(revisions
+        .into_iter()
+        .filter(|r| r.source_format == "image")
+        .map(|r| r.revision_id)
+        .collect())
+}
+
+/// Push chunks whose revision is an image-source document to the tail of the
+/// list, preserving relative order within each group.  If every chunk in the
+/// list is an image-source chunk (e.g. an image-only document query), the
+/// order is left unchanged so image OCR stubs still surface.
+pub(crate) fn deprioritize_image_source_chunks(
+    chunks: &mut [RuntimeMatchedChunk],
+    image_revision_ids: &HashSet<Uuid>,
+) {
+    if image_revision_ids.is_empty() {
+        return;
+    }
+    let all_image = chunks.iter().all(|c| image_revision_ids.contains(&c.revision_id));
+    if all_image {
+        return;
+    }
+    // stable_partition: non-image first, image last
+    chunks.sort_by_key(|c| image_revision_ids.contains(&c.revision_id));
 }
 
 #[cfg(test)]
@@ -807,6 +1076,7 @@ mod source_coverage_tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 1.0,
         }
     }
@@ -814,6 +1084,26 @@ mod source_coverage_tests {
     #[test]
     fn source_coverage_is_enabled_for_exact_literal_queries() {
         assert!(should_request_source_coverage_chunks(&exact_literal_query_ir()));
+        assert!(should_request_source_coverage_chunks(&QueryIR {
+            act: QueryAct::ConfigureHow,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![
+                "package".to_string(),
+                "configuration_file".to_string(),
+                "config_key".to_string(),
+            ],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 1.0,
+        }));
         assert!(!should_request_source_coverage_chunks(&QueryIR {
             act: QueryAct::Compare,
             scope: QueryScope::MultiDocument,
@@ -827,6 +1117,7 @@ mod source_coverage_tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 1.0,
         }));
     }
@@ -853,5 +1144,170 @@ mod source_coverage_tests {
         assert!(selected_indexes.contains(&8));
         assert!(selected_indexes.contains(&9));
         assert!(selected.iter().any(is_source_profile_chunk));
+    }
+
+    /// Regression guard for the long-document configuration retrieval
+    /// gap. A 27-chunk source document at limit=12 used to produce a
+    /// gap from index 14 to index 25 because the stride fill stopped
+    /// once it accumulated 12 indices counting the forced head/middle/
+    /// tail anchors. On real data this skipped exactly the chunk
+    /// holding the canonical INI block, so the model truthfully
+    /// reported the context as incomplete.
+    ///
+    /// With greedy max-min coverage the selector must hit at least
+    /// one index in every quartile of the document, so a long-doc
+    /// config query covers the full index range.
+    #[test]
+    fn select_source_coverage_chunk_rows_covers_long_document_without_quartile_gap() {
+        let total = 27_usize;
+        let limit = 12;
+        let rows = (0..total)
+            .map(|index| chunk_row(i32::try_from(index).expect("index in i32 range"), "body"))
+            .collect::<Vec<_>>();
+
+        let selected = select_source_coverage_chunk_rows(rows, limit);
+        let mut selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
+        selected_indexes.sort();
+
+        assert_eq!(selected_indexes.len(), limit);
+
+        let quartile = total / 4;
+        let in_q1 = selected_indexes.iter().any(|index| (*index as usize) < quartile);
+        let in_q2 = selected_indexes
+            .iter()
+            .any(|index| (*index as usize) >= quartile && (*index as usize) < 2 * quartile);
+        let in_q3 = selected_indexes
+            .iter()
+            .any(|index| (*index as usize) >= 2 * quartile && (*index as usize) < 3 * quartile);
+        let in_q4 = selected_indexes.iter().any(|index| (*index as usize) >= 3 * quartile);
+
+        assert!(in_q1, "first quartile must be represented: {selected_indexes:?}");
+        assert!(in_q2, "second quartile must be represented: {selected_indexes:?}");
+        assert!(
+            in_q3,
+            "third quartile must be represented (regression of stride-fill gap that skipped this range): {selected_indexes:?}"
+        );
+        assert!(in_q4, "fourth quartile must be represented: {selected_indexes:?}");
+
+        // Maximum gap between consecutive selected indices must stay
+        // bounded — on a 27-chunk document at limit=12 no run of
+        // unselected indices should exceed `total / (limit - 1) + 2`
+        // which is roughly the spacing of an even partition.
+        let max_gap = selected_indexes.windows(2).map(|pair| pair[1] - pair[0]).max().unwrap_or(0);
+        let upper_bound = (total / (limit - 1) + 2) as i32;
+        assert!(
+            max_gap <= upper_bound,
+            "max gap {max_gap} must stay within {upper_bound} for total={total} limit={limit}: {selected_indexes:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod image_deprioritization_tests {
+    use super::*;
+
+    fn make_chunk(revision_id: Uuid, chunk_index: i32) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index,
+            chunk_kind: Some("paragraph".to_string()),
+            document_label: "doc".to_string(),
+            excerpt: "excerpt".to_string(),
+            score_kind: RuntimeChunkScoreKind::Relevance,
+            score: Some(1.0),
+            source_text: "text".to_string(),
+        }
+    }
+
+    /// Case 1: document has 1 text chunk + 5 image stubs → text chunk ends up
+    /// before all image-source chunks in the output.
+    #[test]
+    fn text_chunk_before_image_stubs_when_mixed() {
+        let text_revision = Uuid::now_v7();
+        let image_revision = Uuid::now_v7();
+        let mut image_revision_ids = HashSet::new();
+        image_revision_ids.insert(image_revision);
+
+        let mut chunks = vec![
+            make_chunk(image_revision, 0),
+            make_chunk(image_revision, 1),
+            make_chunk(text_revision, 2),
+            make_chunk(image_revision, 3),
+            make_chunk(image_revision, 4),
+            make_chunk(image_revision, 5),
+        ];
+
+        deprioritize_image_source_chunks(&mut chunks, &image_revision_ids);
+
+        // Text chunk must appear before all image chunks
+        let text_pos = chunks.iter().position(|c| c.revision_id == text_revision).unwrap();
+        let all_image_after = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.revision_id == image_revision)
+            .all(|(pos, _)| pos > text_pos);
+        assert!(all_image_after, "all image chunks should follow the text chunk");
+        // All 6 chunks must still be present
+        assert_eq!(chunks.len(), 6);
+    }
+
+    /// Case 2: document has ONLY image stubs → order is unchanged (all survive).
+    #[test]
+    fn image_only_context_is_not_reordered() {
+        let image_revision = Uuid::now_v7();
+        let mut image_revision_ids = HashSet::new();
+        image_revision_ids.insert(image_revision);
+
+        let original_chunk_indices: Vec<i32> = (0..5).collect();
+        let mut chunks: Vec<RuntimeMatchedChunk> =
+            original_chunk_indices.iter().map(|&i| make_chunk(image_revision, i)).collect();
+
+        deprioritize_image_source_chunks(&mut chunks, &image_revision_ids);
+
+        let result_indices: Vec<i32> = chunks.iter().map(|c| c.chunk_index).collect();
+        assert_eq!(result_indices, original_chunk_indices, "image-only list must not be reordered");
+        assert_eq!(chunks.len(), 5);
+    }
+
+    /// Case 3: two documents — one with text+image stubs, one with only image
+    /// stubs.  The second document's image chunks should be preserved
+    /// (deprioritized relative to the first doc's text chunk, not dropped).
+    #[test]
+    fn image_only_doc_preserved_alongside_mixed_doc() {
+        let text_revision = Uuid::now_v7();
+        let mixed_image_revision = Uuid::now_v7();
+        let pure_image_revision = Uuid::now_v7();
+        let mut image_revision_ids = HashSet::new();
+        image_revision_ids.insert(mixed_image_revision);
+        image_revision_ids.insert(pure_image_revision);
+
+        let mut chunks = vec![
+            make_chunk(mixed_image_revision, 0), // image stub from mixed doc
+            make_chunk(text_revision, 1),        // text chunk from mixed doc
+            make_chunk(pure_image_revision, 2),  // image from image-only doc
+            make_chunk(pure_image_revision, 3),  // image from image-only doc
+        ];
+
+        deprioritize_image_source_chunks(&mut chunks, &image_revision_ids);
+
+        // Text chunk must come before all image chunks
+        let text_pos = chunks.iter().position(|c| c.revision_id == text_revision).unwrap();
+        let image_positions: Vec<usize> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| image_revision_ids.contains(&c.revision_id))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            image_positions.iter().all(|&p| p > text_pos),
+            "all image chunks should follow the text chunk"
+        );
+        // Pure-image doc's chunks are still present (not dropped)
+        let pure_image_count =
+            chunks.iter().filter(|c| c.revision_id == pure_image_revision).count();
+        assert_eq!(pure_image_count, 2, "image-only doc chunks must not be dropped");
+        assert_eq!(chunks.len(), 4);
     }
 }

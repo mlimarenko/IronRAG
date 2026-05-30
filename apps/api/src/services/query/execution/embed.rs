@@ -12,7 +12,7 @@ use crate::{
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
         query::vector_dimensions::{
-            require_current_vector_index_dimensions, validate_embedding_vector_dimensions,
+            library_vector_index_dimensions, validate_embedding_vector_dimensions,
         },
     },
 };
@@ -50,6 +50,7 @@ pub(super) async fn embed_question(
     _provider_profile: &EffectiveProviderProfile,
     question: &str,
 ) -> anyhow::Result<QuestionEmbeddingResult> {
+    let span_started = std::time::Instant::now();
     let embedding_binding = state
         .canonical_services
         .ai_catalog
@@ -66,12 +67,19 @@ pub(super) async fn embed_question(
         EMBEDDING_CACHE.lock().ok().and_then(|cache| cache.get(&cache_key).cloned());
     if let Some(cached_embedding) = cached_embedding {
         let _vector_guard = state.canonical_services.search.vector_plane_read_guard(state).await?;
-        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        let expected_dimensions = library_vector_index_dimensions(state, library_id).await?;
         validate_embedding_vector_dimensions(
             expected_dimensions,
             &cached_embedding,
             format!("cached runtime query {}", embedding_binding.model_name),
         )?;
+        crate::services::query::turn_spans::record_span(
+            "embed.question.cache_hit",
+            "llm",
+            span_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            None,
+            None,
+        );
         return Ok(QuestionEmbeddingResult {
             embedding: cached_embedding,
             provider_kind: embedding_binding.provider_kind,
@@ -94,7 +102,7 @@ pub(super) async fn embed_question(
         .context("failed to embed runtime query")?;
     {
         let _vector_guard = state.canonical_services.search.vector_plane_read_guard(state).await?;
-        let expected_dimensions = require_current_vector_index_dimensions(state).await?;
+        let expected_dimensions = library_vector_index_dimensions(state, library_id).await?;
         validate_embedding_vector_dimensions(
             expected_dimensions,
             &response.embedding,
@@ -112,6 +120,13 @@ pub(super) async fn embed_question(
         cache.insert(cache_key, response.embedding.clone());
     }
 
+    crate::services::query::turn_spans::record_span(
+        "embed.question",
+        "llm",
+        span_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        None,
+        None,
+    );
     Ok(QuestionEmbeddingResult {
         embedding: response.embedding,
         provider_kind: response.provider_kind,

@@ -39,6 +39,10 @@ pub async fn run() -> anyhow::Result<()> {
     let worker_handle = role.runs_ingestion_workers().then(|| {
         crate::services::ingest::worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe())
     });
+    let maintenance_handle = crate::services::maintenance::scheduler::spawn_maintenance_scheduler(
+        state.clone(),
+        shutdown.subscribe(),
+    );
 
     let run_result = match role {
         ServiceRole::Startup => {
@@ -71,6 +75,9 @@ pub async fn run() -> anyhow::Result<()> {
     if let Some(worker_handle) = worker_handle {
         let _ = worker_handle.await;
     }
+    if let Some(maintenance_handle) = maintenance_handle {
+        let _ = maintenance_handle.await;
+    }
     crate::observability::shutdown_tracing().await;
     run_result
 }
@@ -95,6 +102,7 @@ async fn run_http_api(
     shutdown: shutdown::ShutdownSignal,
 ) -> anyhow::Result<()> {
     spawn_boot_arango_healthcheck(state.clone(), shutdown.subscribe());
+    spawn_runtime_graph_projection_prewarm(state.clone());
     let router = build_router(state.clone());
     let addr: SocketAddr = config.bind_addr.parse()?;
     info!(
@@ -326,5 +334,121 @@ fn spawn_boot_arango_healthcheck(
                 _ = shutdown_rx.recv() => return,
             }
         }
+    });
+}
+
+/// Detached startup task that pre-loads the in-memory runtime graph
+/// projection for every active library on the backend role.
+///
+/// Without prewarm the first turn against a populated library incurs
+/// a ~30+ s `plan.load_graph_index` cache miss while
+/// `load_active_runtime_graph_projection` pulls hundreds of thousands
+/// of edges and tens of thousands of nodes from Postgres. The miss
+/// recurs after every backend restart and any time the 3-minute idle
+/// TTL evicts an entry, even though steady-state queries hit a warm
+/// cache cheaply.
+///
+/// Runs in `tokio::spawn` so the backend reports Ready immediately —
+/// prewarm fills the cache in the background, not on the critical
+/// path. Libraries are warmed with bounded concurrency
+/// (`PREWARM_CONCURRENCY`) to cut total prewarm wall-time while
+/// keeping the startup Postgres connection-pool footprint small; the
+/// canonical query handlers stay responsive throughout. Per-library
+/// errors are logged but never fail the whole task, since one missing
+/// snapshot or empty library should not block prewarm for the rest.
+fn spawn_runtime_graph_projection_prewarm(state: state::AppState) {
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        let prewarm_started = std::time::Instant::now();
+        let libraries = match crate::infra::repositories::catalog_repository::list_libraries(
+            &state.persistence.postgres,
+            None,
+        )
+        .await
+        {
+            Ok(libraries) => libraries,
+            Err(error) => {
+                warn!(
+                    error = format!("{error:#}"),
+                    "runtime graph projection prewarm aborted: failed to list libraries"
+                );
+                return;
+            }
+        };
+        info!(
+            stage = "graph_projection_prewarm_start",
+            library_count = libraries.len(),
+            "runtime graph projection prewarm starting"
+        );
+        const PREWARM_CONCURRENCY: usize = 4;
+        enum PrewarmOutcome {
+            Warmed,
+            Skipped,
+            Failed,
+        }
+        let outcomes = futures::stream::iter(libraries.into_iter().map(|library| {
+            let state = &state;
+            async move {
+                let library_id = library.id;
+                let library_started = std::time::Instant::now();
+                match crate::services::knowledge::runtime_read::load_active_runtime_graph_projection(
+                    state, library_id,
+                )
+                .await
+                {
+                    Ok(projection) => {
+                        let node_count = projection.nodes.len();
+                        let edge_count = projection.edges.len();
+                        if node_count == 0 && edge_count == 0 {
+                            tracing::debug!(
+                                stage = "graph_projection_prewarm_skip",
+                                %library_id,
+                                "runtime graph projection prewarm skipped empty library"
+                            );
+                            PrewarmOutcome::Skipped
+                        } else {
+                            info!(
+                                stage = "graph_projection_prewarm_library",
+                                %library_id,
+                                node_count,
+                                edge_count,
+                                elapsed_ms = library_started.elapsed().as_millis() as u64,
+                                "runtime graph projection prewarmed"
+                            );
+                            PrewarmOutcome::Warmed
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            %library_id,
+                            error = format!("{error:#}"),
+                            "runtime graph projection prewarm failed for library"
+                        );
+                        PrewarmOutcome::Failed
+                    }
+                }
+            }
+        }))
+        .buffer_unordered(PREWARM_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        let mut warmed = 0_usize;
+        let mut skipped = 0_usize;
+        let mut failed = 0_usize;
+        for outcome in outcomes {
+            match outcome {
+                PrewarmOutcome::Warmed => warmed += 1,
+                PrewarmOutcome::Skipped => skipped += 1,
+                PrewarmOutcome::Failed => failed += 1,
+            }
+        }
+        info!(
+            stage = "graph_projection_prewarm_done",
+            warmed,
+            skipped,
+            failed,
+            elapsed_ms = prewarm_started.elapsed().as_millis() as u64,
+            "runtime graph projection prewarm complete"
+        );
     });
 }

@@ -9,6 +9,7 @@ publish = false
 
 [features]
 default = []
+heap-profile = ["dep:dhat"]
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -56,7 +57,7 @@ regex = "1.12.3"
 semver = "1"
 opentelemetry = { version = "0.31", features = ["logs", "metrics", "trace"] }
 opentelemetry_sdk = { version = "0.31", features = ["logs", "metrics", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "logs", "grpc-tonic", "http-proto", "http-json", "reqwest-blocking-client", "internal-logs"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "logs", "grpc-tonic", "tls-webpki-roots", "http-proto", "http-json", "reqwest-blocking-client", "reqwest-rustls-webpki-roots", "internal-logs"] }
 opentelemetry-http = "0.31"
 opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
 opentelemetry-appender-tracing = "0.31"
@@ -122,6 +123,7 @@ url = "2"
 ironrag-contracts = { path = "../../crates/contracts" }
 clap = { version = "4", features = ["derive"] }
 rand = "0.10.1"
+dhat = { version = "0.3", optional = true }
 percent-encoding = "2"
 
 [[bin]]
@@ -129,24 +131,12 @@ name = "ironrag-cli"
 path = "src/bin/ironrag_cli.rs"
 
 [[bin]]
-name = "ironrag-vector-rebuild"
-path = "src/bin/vector_rebuild.rs"
-
-[[bin]]
-name = "ironrag-promote-null-heads"
-path = "src/bin/promote_null_heads.rs"
-
-[[bin]]
-name = "ironrag-gc-stale-chunks"
-path = "src/bin/gc_stale_chunks.rs"
-
-[[bin]]
-name = "ironrag-backfill-chunk-temporal-bounds"
-path = "src/bin/backfill_chunk_temporal_bounds.rs"
-
-[[bin]]
 name = "ironrag-emit-openapi"
 path = "src/bin/emit_openapi.rs"
+
+[[bin]]
+name = "ironrag-maintenance"
+path = "src/bin/ironrag_maintenance.rs"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

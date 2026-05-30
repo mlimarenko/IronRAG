@@ -187,7 +187,7 @@ impl AuditService {
         }
 
         // Billing rows for this execution (query_compile + question
-        // embedding + answer generation + any HyDE / CRAG retries)
+        // embedding + answer generation + any HyDE retries)
         // are already persisted by the answer pipeline by the time we
         // reach this point. Pulling the summary here keeps the audit
         // log self-describing: the `internal_message` says how much

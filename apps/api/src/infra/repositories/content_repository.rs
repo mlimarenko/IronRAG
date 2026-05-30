@@ -1,4 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use sqlx::{Executor, FromRow, PgPool, Postgres, QueryBuilder, Transaction};
@@ -557,11 +559,27 @@ pub async fn update_document_summary(
     Ok(())
 }
 
+const FINGERPRINT_CACHE_TTL: Duration = Duration::from_secs(30);
+
+fn fingerprint_cache() -> &'static Mutex<HashMap<Uuid, (Instant, String)>> {
+    static CACHE: OnceLock<Mutex<HashMap<Uuid, (Instant, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub async fn get_library_readable_content_fingerprint(
     postgres: &PgPool,
     library_id: Uuid,
 ) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar::<_, String>(
+    {
+        let guard = fingerprint_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_at, cached_value)) = guard.get(&library_id) {
+            if cached_at.elapsed() < FINGERPRINT_CACHE_TTL {
+                return Ok(cached_value.clone());
+            }
+        }
+    }
+
+    let result = sqlx::query_scalar::<_, String>(
         "with readable_heads as (
             select
                 document.id as document_id,
@@ -637,7 +655,15 @@ pub async fn get_library_readable_content_fingerprint(
     )
     .bind(library_id)
     .fetch_one(postgres)
-    .await
+    .await?;
+
+    {
+        let mut guard = fingerprint_cache().lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, (at, _)| at.elapsed() < FINGERPRINT_CACHE_TTL);
+        guard.insert(library_id, (Instant::now(), result.clone()));
+    }
+
+    Ok(result)
 }
 
 pub async fn list_revisions_by_document(

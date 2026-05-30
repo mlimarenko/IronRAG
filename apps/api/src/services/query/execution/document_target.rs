@@ -6,6 +6,9 @@ use crate::domains::query_ir::{
     LiteralKind, QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped,
 };
 use crate::infra::arangodb::document_store::KnowledgeDocumentRow;
+use crate::services::query::effective_query::{
+    current_question_segment, structured_current_question_segment,
+};
 use crate::services::query::text_match::{
     build_related_token_candidates, common_prefix_char_count, near_token_match,
     near_token_overlap_count, normalized_alnum_tokens,
@@ -49,6 +52,7 @@ pub(crate) fn explicit_target_document_ids_from_values<'a, I>(
 where
     I: IntoIterator<Item = (Uuid, &'a str)>,
 {
+    let question = current_question_segment(question);
     let normalized_question = normalize_document_target_text(question);
     if normalized_question.is_empty() {
         return BTreeSet::new();
@@ -77,8 +81,14 @@ where
     let mut best_match_scores = HashMap::<Uuid, (usize, usize)>::new();
     for (document_id, raw_value) in concrete_values {
         for candidate in ranked_document_target_candidates([raw_value]) {
-            if candidate.text.len() >= 4 && normalized_question.contains(candidate.text.as_str()) {
-                let score = (candidate.text.len(), candidate.priority);
+            if document_candidate_is_matchable_for_surface(&candidate.text, &normalized_question)
+                && normalized_question_contains_document_candidate(
+                    &normalized_question,
+                    candidate.text.as_str(),
+                    "",
+                )
+            {
+                let score = (document_candidate_length_score(&candidate.text), candidate.priority);
                 best_match_scores
                     .entry(document_id)
                     .and_modify(|best| *best = (*best).max(score))
@@ -95,6 +105,32 @@ where
     }
 
     BTreeSet::new()
+}
+
+fn explicit_document_reference_target_ids_from_values<'a, I>(
+    question: &str,
+    values: I,
+) -> BTreeSet<Uuid>
+where
+    I: IntoIterator<Item = (Uuid, &'a str)>,
+{
+    let question = current_question_segment(question);
+    let concrete_values = values.into_iter().collect::<Vec<_>>();
+    let explicit_literals = explicit_document_reference_literals(question);
+    if !explicit_literals.is_empty() {
+        return explicit_document_reference_matching_document_ids(
+            &explicit_literals,
+            concrete_values.iter().copied(),
+        );
+    }
+
+    let normalized_question = normalize_document_target_text(question);
+    let format_markers = explicit_document_format_markers(&normalized_question, &concrete_values);
+    if format_markers.is_empty() {
+        BTreeSet::new()
+    } else {
+        explicit_document_format_matches(&normalized_question, &concrete_values, &format_markers)
+    }
 }
 
 fn explicit_document_format_markers<'a>(
@@ -181,16 +217,34 @@ fn normalized_question_contains_document_candidate(
     candidate: &str,
     ignored_marker: &str,
 ) -> bool {
-    if normalized_question.contains(candidate) {
+    if normalized_surface_contains_token_sequence(normalized_question, candidate) {
         return true;
     }
 
-    normalized_question
+    let marker_stripped = normalized_question
         .split_whitespace()
         .filter(|token| *token != ignored_marker)
         .collect::<Vec<_>>()
-        .join(" ")
-        .contains(candidate)
+        .join(" ");
+    normalized_surface_contains_token_sequence(&marker_stripped, candidate)
+}
+
+fn normalized_surface_contains_token_sequence(surface: &str, candidate: &str) -> bool {
+    let surface_tokens = document_candidate_match_tokens(surface);
+    let candidate_tokens = document_candidate_match_tokens(candidate);
+    if candidate_tokens.is_empty() || candidate_tokens.len() > surface_tokens.len() {
+        return false;
+    }
+    surface_tokens.windows(candidate_tokens.len()).any(|window| window == candidate_tokens)
+}
+
+fn document_candidate_match_tokens(value: &str) -> Vec<String> {
+    value
+        .split_whitespace()
+        .map(|token| token.trim_matches('.'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn explicit_document_reference_matching_document_ids<'a, I>(
@@ -309,11 +363,16 @@ pub(crate) fn normalize_document_target_text(value: &str) -> String {
         .trim()
         .to_lowercase()
         .chars()
+        .map(|ch| if ch.is_whitespace() || ch == ':' { ' ' } else { ch })
         .filter(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' '))
         .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn explicit_document_reference_literals(question: &str) -> Vec<String> {
+    let question = current_question_segment(question);
     let normalized = normalize_document_target_text(question);
     let mut seen = BTreeSet::new();
     normalized
@@ -349,7 +408,17 @@ pub(crate) fn resolve_scoped_target_document_ids(
 ) -> BTreeSet<Uuid> {
     let document_values = flattened_document_candidate_values(document_index);
 
-    let explicit_targets = explicit_target_document_ids_from_values(
+    let is_follow_up = query_ir.is_some_and(QueryIR::is_follow_up);
+    if let Some(current_question) = structured_current_question_segment(question) {
+        let current_explicit_targets = explicit_document_reference_target_ids_from_values(
+            current_question,
+            document_values.iter().map(|(document_id, value)| (*document_id, value.as_str())),
+        );
+        if current_explicit_targets.len() == 1 {
+            return current_explicit_targets;
+        }
+    }
+    let explicit_targets = explicit_document_reference_target_ids_from_values(
         question,
         document_values.iter().map(|(document_id, value)| (*document_id, value.as_str())),
     );
@@ -362,6 +431,28 @@ pub(crate) fn resolve_scoped_target_document_ids(
     };
     if !query_ir_allows_document_focus_scope(ir) {
         return BTreeSet::new();
+    }
+
+    if query_ir_has_explicit_document_focus_target(ir) {
+        if let Some(current_question) = structured_current_question_segment(question)
+            && !is_follow_up
+        {
+            let current_focus_targets =
+                document_ids_matching_focus_values(&[current_question], &document_values);
+            if current_focus_targets.len() == 1 {
+                return current_focus_targets;
+            }
+        }
+
+        if !is_follow_up {
+            let title_targets = explicit_target_document_ids_from_values(
+                question,
+                document_values.iter().map(|(document_id, value)| (*document_id, value.as_str())),
+            );
+            if !title_targets.is_empty() {
+                return title_targets;
+            }
+        }
     }
 
     if let Some(document_focus) = &ir.document_focus {
@@ -406,6 +497,9 @@ pub(crate) fn resolve_scoped_target_document_ids(
 
 pub(crate) fn query_ir_allows_document_focus_scope(ir: &QueryIR) -> bool {
     if !matches!(ir.scope, QueryScope::SingleDocument) {
+        return false;
+    }
+    if ir.is_follow_up() {
         return false;
     }
     if query_ir_has_explicit_document_focus_target(ir) {
@@ -497,11 +591,99 @@ fn document_ids_matching_focus_hint(
     hint: &str,
     document_values: &[(Uuid, String)],
 ) -> BTreeSet<Uuid> {
+    let exact_value_targets = document_ids_matching_exact_focus_value(hint, document_values);
+    if !exact_value_targets.is_empty() {
+        return exact_value_targets;
+    }
+    let contained_value_targets =
+        document_ids_with_focus_value_contained_in_hint(hint, document_values);
+    if !contained_value_targets.is_empty() {
+        return contained_value_targets;
+    }
     let exact_targets = document_ids_matching_focus_values(&[hint], document_values);
     if !exact_targets.is_empty() {
         return exact_targets;
     }
     document_ids_matching_related_focus_hint(hint, document_values)
+}
+
+fn document_ids_matching_exact_focus_value(
+    hint: &str,
+    document_values: &[(Uuid, String)],
+) -> BTreeSet<Uuid> {
+    let normalized_hint = normalize_document_target_text(hint);
+    if normalized_hint.is_empty() {
+        return BTreeSet::new();
+    }
+    document_values
+        .iter()
+        .filter_map(|(document_id, value)| {
+            normalized_document_target_candidates([value.as_str()])
+                .into_iter()
+                .any(|candidate| candidate == normalized_hint)
+                .then_some(*document_id)
+        })
+        .collect()
+}
+
+fn document_ids_with_focus_value_contained_in_hint(
+    hint: &str,
+    document_values: &[(Uuid, String)],
+) -> BTreeSet<Uuid> {
+    let normalized_hint = normalize_document_target_text(hint);
+    if normalized_hint.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut scores = HashMap::<Uuid, (usize, usize, usize)>::new();
+    for (document_id, value) in document_values {
+        for candidate in ranked_document_target_candidates([value.as_str()]) {
+            if !document_candidate_is_matchable_for_surface(&candidate.text, &normalized_hint) {
+                continue;
+            }
+            if normalized_question_contains_document_candidate(
+                &normalized_hint,
+                &candidate.text,
+                "",
+            ) {
+                let starts_hint =
+                    document_candidate_starts_normalized_surface(&normalized_hint, &candidate.text)
+                        as usize;
+                let score = (
+                    document_candidate_length_score(&candidate.text),
+                    starts_hint,
+                    candidate.priority,
+                );
+                scores
+                    .entry(*document_id)
+                    .and_modify(|best| *best = (*best).max(score))
+                    .or_insert(score);
+            }
+        }
+    }
+    let Some(best_score) = scores.values().copied().max() else {
+        return BTreeSet::new();
+    };
+    scores
+        .into_iter()
+        .filter_map(|(document_id, score)| (score == best_score).then_some(document_id))
+        .collect()
+}
+
+fn document_candidate_meets_minimum_length(candidate: &str) -> bool {
+    document_candidate_length_score(candidate) >= 4
+}
+
+fn document_candidate_is_matchable_for_surface(candidate: &str, surface: &str) -> bool {
+    document_candidate_meets_minimum_length(candidate) || surface == candidate
+}
+
+fn document_candidate_length_score(candidate: &str) -> usize {
+    candidate.chars().count()
+}
+
+fn document_candidate_starts_normalized_surface(surface: &str, candidate: &str) -> bool {
+    surface == candidate
+        || surface.strip_prefix(candidate).is_some_and(|suffix| suffix.starts_with(' '))
 }
 
 fn document_ids_matching_related_focus_hint(
@@ -602,6 +784,7 @@ pub(crate) fn focused_answer_document_id(
     question: &str,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<Uuid> {
+    let question = current_question_segment(question);
     if chunks.is_empty() || question_requests_multi_document_scope(question, None) {
         return None;
     }
@@ -690,7 +873,7 @@ pub(crate) fn focused_answer_document_id(
 }
 
 pub(crate) fn document_focus_marker_hits(question: &str, document_label: &str) -> usize {
-    let lowered_question = question.to_lowercase();
+    let lowered_question = current_question_segment(question).to_lowercase();
     document_label_focus_markers(document_label)
         .into_iter()
         .filter(|marker| question_mentions_document_marker(&lowered_question, marker))
@@ -816,14 +999,24 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
+        document_ids_with_focus_value_contained_in_hint,
         explicit_document_reference_literal_is_present, explicit_document_reference_literals,
-        explicit_target_document_ids_from_values, query_ir_allows_document_focus_scope,
-        resolve_scoped_target_document_ids,
+        explicit_target_document_ids_from_values, normalize_document_target_text,
+        query_ir_allows_document_focus_scope, resolve_scoped_target_document_ids,
     };
     use crate::domains::query_ir::{
-        DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct, QueryIR,
-        QueryLanguage, QueryScope,
+        ConversationRefKind, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan,
+        QueryAct, QueryIR, QueryLanguage, QueryScope, UnresolvedRef,
     };
+    use crate::services::query::effective_query::{
+        EFFECTIVE_QUERY_QUESTION_PREFIX, EFFECTIVE_QUERY_SCOPE_PREFIX,
+    };
+
+    fn effective_query_text(scope: &str, question: &str) -> String {
+        format!(
+            "{EFFECTIVE_QUERY_SCOPE_PREFIX} {scope}\n{EFFECTIVE_QUERY_QUESTION_PREFIX} {question}"
+        )
+    }
 
     fn scoped_query_ir(
         scope: QueryScope,
@@ -849,6 +1042,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 1.0,
         }
     }
@@ -905,6 +1099,70 @@ mod tests {
     }
 
     #[test]
+    fn resolve_scoped_target_document_ids_keeps_explicit_reference_for_follow_up() {
+        let scoped_document_id = Uuid::now_v7();
+        let other_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (scoped_document_id, "alpha-guide.pdf", Some("Alpha Guide"), "alpha-guide.pdf"),
+            (other_document_id, "beta-guide.pdf", Some("Beta Guide"), "beta-guide.pdf"),
+        ]);
+
+        let mut ir = scoped_query_ir(QueryScope::SingleDocument, Some("Beta Guide"), &["beta"]);
+        ir.act = QueryAct::FollowUp;
+        ir.conversation_refs.push(UnresolvedRef {
+            surface: "that document".to_string(),
+            kind: ConversationRefKind::Deictic,
+        });
+        let target_ids = resolve_scoped_target_document_ids(
+            "Use alpha-guide.pdf for the setup details",
+            Some(&ir),
+            &index,
+        );
+
+        assert_eq!(target_ids, BTreeSet::from([scoped_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_does_not_hard_scope_follow_up_focus() {
+        let alpha_document_id = Uuid::now_v7();
+        let beta_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (alpha_document_id, "alpha-guide.md", Some("alpha service handbook"), "alpha-guide.md"),
+            (beta_document_id, "beta-guide.md", Some("beta service handbook"), "beta-guide.md"),
+        ]);
+
+        let mut ir = scoped_query_ir(QueryScope::SingleDocument, Some("alpha service"), &["alpha"]);
+        ir.conversation_refs.push(UnresolvedRef {
+            surface: "that one".to_string(),
+            kind: ConversationRefKind::Deictic,
+        });
+        let target_ids =
+            resolve_scoped_target_document_ids("What about that one?", Some(&ir), &index);
+
+        assert!(target_ids.is_empty());
+        assert!(!query_ir_allows_document_focus_scope(&ir));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_does_not_treat_follow_up_subject_as_document_literal() {
+        let alpha_document_id = Uuid::now_v7();
+        let beta_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (alpha_document_id, "alpha-guide.md", Some("Alpha Provider Guide"), "alpha-guide.md"),
+            (beta_document_id, "beta-guide.md", Some("Beta Provider Guide"), "beta-guide.md"),
+        ]);
+
+        let mut ir = scoped_query_ir(QueryScope::SingleDocument, Some("Beta Provider"), &["Beta"]);
+        ir.conversation_refs.push(UnresolvedRef {
+            surface: "Beta".to_string(),
+            kind: ConversationRefKind::Elliptic,
+        });
+        let target_ids = resolve_scoped_target_document_ids("Beta", Some(&ir), &index);
+
+        assert!(target_ids.is_empty());
+    }
+
+    #[test]
     fn resolve_scoped_target_document_ids_selects_single_match_from_query_ir_scope() {
         let alpha_document_id = Uuid::now_v7();
         let beta_document_id = Uuid::now_v7();
@@ -921,6 +1179,130 @@ mod tests {
         );
 
         assert_eq!(target_ids, BTreeSet::from([alpha_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_prefers_exact_focus_title_over_prefixed_variants() {
+        let focused_document_id = Uuid::now_v7();
+        let image_document_id = Uuid::now_v7();
+        let appendix_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (focused_document_id, "provider-alpha.md", Some("Provider Alpha"), "provider-alpha.md"),
+            (
+                image_document_id,
+                "provider-alpha-screen.png",
+                Some("Provider Alpha: payment screen.png"),
+                "provider-alpha-screen.png",
+            ),
+            (
+                appendix_document_id,
+                "provider-alpha-appendix.md",
+                Some("Provider Alpha appendix"),
+                "provider-alpha-appendix.md",
+            ),
+        ]);
+        let ir = scoped_query_ir(QueryScope::SingleDocument, Some("Provider Alpha"), &["Alpha"]);
+
+        let target_ids = resolve_scoped_target_document_ids(
+            "How do I configure Provider Alpha?",
+            Some(&ir),
+            &index,
+        );
+
+        assert_eq!(target_ids, BTreeSet::from([focused_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_prefers_focus_title_inside_longer_hint() {
+        let focused_document_id = Uuid::now_v7();
+        let image_document_id = Uuid::now_v7();
+        let appendix_document_id = Uuid::now_v7();
+        let tangential_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (focused_document_id, "provider-alpha.md", Some("Provider Alpha"), "provider-alpha.md"),
+            (
+                image_document_id,
+                "provider-alpha-screen.png",
+                Some("Provider Alpha: payment screen.png"),
+                "provider-alpha-screen.png",
+            ),
+            (
+                appendix_document_id,
+                "provider-alpha-appendix.md",
+                Some("Provider Alpha appendix"),
+                "provider-alpha-appendix.md",
+            ),
+            (
+                tangential_document_id,
+                "alpha-suite.md",
+                Some("Alpha in Retail Suite"),
+                "alpha-suite.md",
+            ),
+        ]);
+        let ir = scoped_query_ir(
+            QueryScope::SingleDocument,
+            Some("Provider Alpha in Retail Suite"),
+            &[],
+        );
+        let mut ir = ir;
+        ir.target_types = vec!["document".to_string()];
+
+        let target_ids = resolve_scoped_target_document_ids(
+            "How do I configure Provider Alpha?",
+            Some(&ir),
+            &index,
+        );
+
+        assert_eq!(target_ids, BTreeSet::from([focused_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_prefers_current_question_over_scope_history() {
+        let focused_document_id = Uuid::now_v7();
+        let stale_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (focused_document_id, "provider-alpha.md", Some("Provider Alpha"), "provider-alpha.md"),
+            (
+                stale_document_id,
+                "provider-beta-deprecated.md",
+                Some("Provider Beta Deprecated"),
+                "provider-beta-deprecated.md",
+            ),
+        ]);
+        let ir = scoped_query_ir(QueryScope::SingleDocument, Some("Provider Alpha"), &["Alpha"]);
+
+        let target_ids = resolve_scoped_target_document_ids(
+            &effective_query_text(
+                "How do I configure payments?\nOptions: Provider Alpha; Provider Beta Deprecated.",
+                "Alpha Provider setup",
+            ),
+            Some(&ir),
+            &index,
+        );
+
+        assert_eq!(target_ids, BTreeSet::from([focused_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_keeps_follow_up_subject_out_of_fast_path() {
+        let focused_document_id = Uuid::now_v7();
+        let index = scoped_document_index([(
+            focused_document_id,
+            "provider-alpha.md",
+            Some("Provider Alpha"),
+            "provider-alpha.md",
+        )]);
+        let mut ir =
+            scoped_query_ir(QueryScope::SingleDocument, Some("Provider Alpha"), &["Alpha"]);
+        ir.act = QueryAct::FollowUp;
+
+        let target_ids = resolve_scoped_target_document_ids(
+            &effective_query_text("Prior answer discussed Provider Alpha.", "Provider Alpha"),
+            Some(&ir),
+            &index,
+        );
+
+        assert!(target_ids.is_empty());
     }
 
     #[test]
@@ -1421,6 +1803,34 @@ mod tests {
     }
 
     #[test]
+    fn normalize_document_target_text_splits_colon_boundaries_canonically() {
+        assert_eq!(normalize_document_target_text("Provider:Alpha"), "provider alpha");
+        assert_eq!(normalize_document_target_text("Provider : Alpha"), "provider alpha");
+        assert_eq!(
+            normalize_document_target_text("Provider:Alpha:Guide.md"),
+            "provider alpha guide.md"
+        );
+        assert_eq!(normalize_document_target_text("Provider\tAlpha"), "provider alpha");
+    }
+
+    #[test]
+    fn focus_value_contained_in_hint_prefers_longer_document_candidate() {
+        let short_id = Uuid::now_v7();
+        let long_id = Uuid::now_v7();
+        let unrelated_prefix_id = Uuid::now_v7();
+        let matched = document_ids_with_focus_value_contained_in_hint(
+            "Open guide for Provider Alpha Configuration",
+            &[
+                (short_id, "Provider Alpha".to_string()),
+                (long_id, "Provider Alpha Configuration".to_string()),
+                (unrelated_prefix_id, "Open guide".to_string()),
+            ],
+        );
+
+        assert_eq!(matched, [long_id].into_iter().collect());
+    }
+
+    #[test]
     fn explicit_target_document_ids_keep_longest_separator_match_canonical() {
         let generic_id = Uuid::now_v7();
         let specific_id = Uuid::now_v7();
@@ -1432,6 +1842,20 @@ mod tests {
             ],
         );
         assert_eq!(matched, [specific_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_prefers_current_question_segment() {
+        let focused_id = Uuid::now_v7();
+        let stale_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            &effective_query_text(
+                "Prior assistant listed Provider Alpha Admin Guide.",
+                "Provider Alpha setup",
+            ),
+            [(focused_id, "Provider Alpha"), (stale_id, "Provider Alpha Admin Guide")],
+        );
+        assert_eq!(matched, [focused_id].into_iter().collect());
     }
 
     #[test]
@@ -1466,12 +1890,70 @@ mod tests {
     }
 
     #[test]
+    fn explicit_target_document_ids_measure_unicode_title_length_in_chars() {
+        let short_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values(
+            "How do I configure αλφα checkout?",
+            [(short_id, "αλφ")],
+        );
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_keep_exact_short_unicode_title_match() {
+        let short_id = Uuid::now_v7();
+        let matched = explicit_target_document_ids_from_values("αλφ", [(short_id, "αλφ")]);
+        assert_eq!(matched, [short_id].into_iter().collect());
+    }
+
+    #[test]
+    fn explicit_target_document_ids_require_token_boundaries() {
+        let short_id = Uuid::now_v7();
+        let matched =
+            explicit_target_document_ids_from_values("Explain storage setup.", [(short_id, "RAG")]);
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_keeps_broad_configure_query_unscoped() {
+        let generic_document_id = Uuid::now_v7();
+        let index = scoped_document_index([(
+            generic_document_id,
+            "configure.md",
+            Some("Configure"),
+            "configure.md",
+        )]);
+        let mut ir = scoped_query_ir(QueryScope::SingleDocument, None, &["checkout setup"]);
+        ir.act = QueryAct::ConfigureHow;
+        ir.target_types = vec!["procedure".to_string()];
+
+        let target_ids = resolve_scoped_target_document_ids(
+            "How do I configure checkout setup?",
+            Some(&ir),
+            &index,
+        );
+
+        assert!(target_ids.is_empty());
+    }
+
+    #[test]
     fn extracts_explicit_document_reference_literals_from_question() {
         assert_eq!(
             explicit_document_reference_literals(
                 "What is Shelby Terrell's job title in people-100.csv and what is in sample-heavy-1.xls?"
             ),
             vec!["people-100.csv".to_string(), "sample-heavy-1.xls".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_document_reference_literals_ignore_scope_history() {
+        assert_eq!(
+            explicit_document_reference_literals(&effective_query_text(
+                "Prior assistant cited report.pdf.",
+                "open the other one"
+            )),
+            Vec::<String>::new()
         );
     }
 

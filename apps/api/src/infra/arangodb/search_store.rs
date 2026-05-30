@@ -19,6 +19,8 @@ use crate::infra::arangodb::{
     collections::{
         KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
         KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_NGRAM_ANALYZER, KNOWLEDGE_SEARCH_VIEW,
+        chunk_vector_collection_for_dim, chunk_vector_collection_for_library,
+        entity_vector_collection_for_dim,
     },
 };
 
@@ -38,6 +40,17 @@ const VECTOR_OVER_FETCH_DEFAULT_FLOOR: usize = 64;
 /// keeps a 256 GB Arango heap-budget headroom even on the temporal lane.
 const VECTOR_OVER_FETCH_MAX: usize = 8_192;
 const KNOWLEDGE_CHUNK_VECTOR_UPSERT_BATCH_ROWS: usize = 8;
+
+/// Rows-per-IVF-list target for the (small) per-library chunk shards. A
+/// per-library shard holds one library's chunk vectors — tens to a few
+/// thousand rows — so the instance-wide configured `nLists` (sized for the
+/// shared multi-library shard) would exceed the available training points and
+/// fail IVF training. Sizing `nLists ≈ rows / 40` keeps ~40 sample points per
+/// list, with the value floored at 1 for an empty/first-write shard. The
+/// shared `ensure_vector_index` clamps further to the live row count and seeds
+/// synthetic training rows when needed, so this is a safe pre-clamp, not the
+/// sole guard.
+const PER_LIBRARY_CHUNK_SHARD_ROWS_PER_LIST: u64 = 40;
 
 pub const KNOWLEDGE_CHUNK_VECTOR_KIND: &str = "chunk_embedding";
 pub const KNOWLEDGE_ENTITY_VECTOR_KIND: &str = "entity_embedding";
@@ -197,15 +210,27 @@ pub struct KnowledgeEntityVectorSearchRow {
     pub score: f64,
 }
 
+/// ANN-index parameters needed when lazy-creating a per-dim shard.
+/// Mirrors the three knobs already in `Settings` so the search store can
+/// materialize a new `knowledge_chunk_vector_d<dim>` collection without
+/// reaching back through `AppState`.
+#[derive(Debug, Clone, Copy)]
+pub struct VectorIndexParams {
+    pub n_lists: u64,
+    pub default_n_probe: u64,
+    pub training_iterations: u64,
+}
+
 #[derive(Clone)]
 pub struct ArangoSearchStore {
     client: Arc<ArangoClient>,
+    vector_index_params: VectorIndexParams,
 }
 
 impl ArangoSearchStore {
     #[must_use]
-    pub fn new(client: Arc<ArangoClient>) -> Self {
-        Self { client }
+    pub fn new(client: Arc<ArangoClient>, vector_index_params: VectorIndexParams) -> Self {
+        Self { client, vector_index_params }
     }
 
     #[must_use]
@@ -213,10 +238,114 @@ impl ArangoSearchStore {
         &self.client
     }
 
+    #[must_use]
+    pub fn vector_index_params(&self) -> VectorIndexParams {
+        self.vector_index_params
+    }
+
+    /// Idempotently ensure the per-dim chunk-vector shard exists for `dim`.
+    /// Called by every chunk-vector write path before the upsert lands, so
+    /// switching a library to a previously-unseen embedding model materializes
+    /// the right shard on first ingest with no operator action.
+    pub async fn ensure_chunk_vector_shard(&self, dim: u64) -> anyhow::Result<()> {
+        let params = self.vector_index_params;
+        self.client
+            .ensure_chunk_vector_collection_for_dim(
+                dim,
+                params.n_lists,
+                params.default_n_probe,
+                params.training_iterations,
+            )
+            .await
+    }
+
+    /// Idempotently ensure the per-(library, dim) chunk-vector shard exists.
+    /// `nLists` is sized from the shard's current live row count so IVF
+    /// training never asks for more lists than it has sample points; an
+    /// empty/first-write shard falls back to a single list. Called by every
+    /// chunk-vector write path before the per-library UPSERT lands.
+    pub async fn ensure_chunk_vector_shard_for_library(
+        &self,
+        dim: u64,
+        library_id: Uuid,
+    ) -> anyhow::Result<()> {
+        let params = self.vector_index_params;
+        let collection = chunk_vector_collection_for_library(dim, library_id);
+        let row_count = self.client.count_chunk_vector_rows(&collection).await?;
+        let n_lists = per_library_shard_n_lists(params.n_lists, row_count);
+        self.client
+            .ensure_chunk_vector_collection_for_library(
+                dim,
+                library_id,
+                n_lists,
+                params.default_n_probe,
+                params.training_iterations,
+            )
+            .await
+    }
+
+    /// Choose the physical chunk-vector collection a `(library, dim)` write
+    /// lands in, keeping each library wholly on ONE shard so an upgrade never
+    /// strands its pre-migration vectors across the shared shard and a
+    /// half-filled per-library shard:
+    /// - the per-library shard already exists -> use it (library is born
+    ///   sharded, or already migrated);
+    /// - else the shared per-dim shard still holds this library's legacy rows ->
+    ///   keep writing there until the per-library migration moves them, so reads
+    ///   (which fall back to the shared shard while the per-library shard is
+    ///   absent) stay coherent — this is what makes a per-library rollout safe
+    ///   on an instance whose libraries were ingested before sharding existed;
+    /// - else (no per-library shard, no legacy rows) -> a brand-new library:
+    ///   ensure and use its own per-library shard so it is born sharded.
+    async fn resolve_chunk_vector_write_collection(
+        &self,
+        dim: u64,
+        library_id: Uuid,
+    ) -> anyhow::Result<String> {
+        let per_library = chunk_vector_collection_for_library(dim, library_id);
+        let per_library_exists = self.client.collection_exists(&per_library).await?;
+        let shared = chunk_vector_collection_for_dim(dim);
+        let shared_has_rows = if per_library_exists {
+            false
+        } else {
+            self.client.chunk_vector_collection_has_library_rows(&shared, library_id).await?
+        };
+        match choose_chunk_vector_write_target(per_library_exists, shared_has_rows) {
+            ChunkVectorWriteTarget::PerLibraryExisting => Ok(per_library),
+            ChunkVectorWriteTarget::SharedLegacy => Ok(shared),
+            ChunkVectorWriteTarget::PerLibraryNew => {
+                self.ensure_chunk_vector_shard_for_library(dim, library_id).await?;
+                Ok(per_library)
+            }
+        }
+    }
+
+    /// Idempotently ensure the per-dim entity-vector shard exists for `dim`.
+    pub async fn ensure_entity_vector_shard(&self, dim: u64) -> anyhow::Result<()> {
+        let params = self.vector_index_params;
+        self.client
+            .ensure_entity_vector_collection_for_dim(
+                dim,
+                params.n_lists,
+                params.default_n_probe,
+                params.training_iterations,
+            )
+            .await
+    }
+
     pub async fn upsert_chunk_vector(
         &self,
         row: &KnowledgeChunkVectorRow,
     ) -> anyhow::Result<KnowledgeChunkVectorRow> {
+        let dim =
+            u64::try_from(row.vector.len()).context("chunk vector dimension overflowed u64")?;
+        anyhow::ensure!(dim > 0, "chunk vector for {} must not be empty", row.chunk_id);
+        // Each library's chunk vectors live in their own per-(library, dim)
+        // shard so the read-side ANN scans one library's vectors, not every
+        // library's. Routing keeps a library wholly on one shard so an upgrade
+        // never strands its pre-migration vectors (see
+        // `resolve_chunk_vector_write_collection`).
+        let collection = self.resolve_chunk_vector_write_collection(dim, row.library_id).await?;
         let cursor = self
             .client
             .query_json(
@@ -253,7 +382,7 @@ impl ArangoSearchStore {
                  IN @@collection
                  RETURN NEW",
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "@collection": collection,
                     "key": row.key,
                     "vector_id": row.vector_id,
                     "workspace_id": row.workspace_id,
@@ -287,15 +416,25 @@ impl ArangoSearchStore {
         if rows.is_empty() {
             return Ok(());
         }
-        for batch in rows.chunks(KNOWLEDGE_CHUNK_VECTOR_UPSERT_BATCH_ROWS) {
-            self.upsert_chunk_vectors_batch(batch).await?;
+        // Group rows by `(dim, library_id)` so each per-(library, dim) shard
+        // receives exactly its own batch. The dim component keeps the AQL
+        // collection's vector length consistent (mixed-dim libraries appear
+        // mid-rebuild); the library component routes each row into its own
+        // physical shard so the read-side ANN stays library-sized.
+        let groups = group_chunk_vector_rows_by_library_dim(rows)?;
+        for ((dim, library_id), group_rows) in groups {
+            let collection = self.resolve_chunk_vector_write_collection(dim, library_id).await?;
+            for batch in group_rows.chunks(KNOWLEDGE_CHUNK_VECTOR_UPSERT_BATCH_ROWS) {
+                self.upsert_chunk_vectors_batch(&collection, batch).await?;
+            }
         }
         Ok(())
     }
 
     async fn upsert_chunk_vectors_batch(
         &self,
-        rows: &[KnowledgeChunkVectorRow],
+        collection: &str,
+        rows: &[&KnowledgeChunkVectorRow],
     ) -> anyhow::Result<()> {
         // Note on field names: `KnowledgeChunkVectorRow` serialises its
         // key column as `_key` (serde rename) to match Arango's
@@ -341,7 +480,7 @@ impl ArangoSearchStore {
                  IN @@collection
                  RETURN NEW._key",
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "@collection": collection,
                     "rows": rows,
                 }),
             )
@@ -364,102 +503,155 @@ impl ArangoSearchStore {
         embedding_model_key: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<Option<KnowledgeChunkVectorRow>> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.chunk_id == @chunk_id
-                   AND vector.embedding_model_key == @embedding_model_key
-                   AND vector.freshness_generation == @freshness_generation
-                 LIMIT 1
-                 REMOVE vector IN @@collection
-                 RETURN OLD",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    "chunk_id": chunk_id,
-                    "embedding_model_key": embedding_model_key,
-                    "freshness_generation": freshness_generation,
-                }),
-            )
-            .await
-            .context("failed to delete knowledge chunk vector")?;
-        decode_optional_single_result(cursor)
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.chunk_id == @chunk_id
+                       AND vector.embedding_model_key == @embedding_model_key
+                       AND vector.freshness_generation == @freshness_generation
+                     LIMIT 1
+                     REMOVE vector IN @@collection
+                     RETURN OLD",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "chunk_id": chunk_id,
+                        "embedding_model_key": embedding_model_key,
+                        "freshness_generation": freshness_generation,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to delete knowledge chunk vector from {collection}")
+                })?;
+            if let Some(row) = decode_optional_single_result::<KnowledgeChunkVectorRow>(cursor)? {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn delete_chunk_vectors_by_revision(&self, revision_id: Uuid) -> anyhow::Result<u64> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.revision_id == @revision_id
-                 REMOVE vector IN @@collection
-                 RETURN OLD._key",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    "revision_id": revision_id,
-                }),
-            )
-            .await
-            .context("failed to delete knowledge chunk vectors by revision")?;
-        let deleted: Vec<String> = decode_many_results(cursor)?;
-        u64::try_from(deleted.len()).context("deleted chunk vector count overflowed u64")
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        let mut total: u64 = 0;
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.revision_id == @revision_id
+                     REMOVE vector IN @@collection
+                     RETURN OLD._key",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "revision_id": revision_id,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to delete knowledge chunk vectors by revision from {collection}"
+                    )
+                })?;
+            let deleted: Vec<String> = decode_many_results(cursor)?;
+            total = total
+                .checked_add(u64::try_from(deleted.len()).unwrap_or(0))
+                .context("deleted chunk vector count overflowed u64")?;
+        }
+        Ok(total)
     }
 
     pub async fn delete_chunk_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<u64> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.library_id == @library_id
-                 REMOVE vector IN @@collection
-                 RETURN OLD._key",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    "library_id": library_id,
-                }),
-            )
-            .await
-            .context("failed to delete knowledge chunk vectors by library")?;
-        let deleted: Vec<String> = decode_many_results(cursor)?;
-        u64::try_from(deleted.len()).context("deleted chunk vector count overflowed u64")
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        let mut total: u64 = 0;
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.library_id == @library_id
+                     REMOVE vector IN @@collection
+                     RETURN OLD._key",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "library_id": library_id,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to delete knowledge chunk vectors by library from {collection}")
+                })?;
+            let deleted: Vec<String> = decode_many_results(cursor)?;
+            total = total
+                .checked_add(u64::try_from(deleted.len()).unwrap_or(0))
+                .context("deleted chunk vector count overflowed u64")?;
+        }
+        Ok(total)
     }
 
     pub async fn delete_all_chunk_vectors(&self) -> anyhow::Result<u64> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 REMOVE vector IN @@collection
-                 RETURN OLD._key",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                }),
-            )
-            .await
-            .context("failed to delete all knowledge chunk vectors")?;
-        let deleted: Vec<String> = decode_many_results(cursor)?;
-        u64::try_from(deleted.len()).context("deleted chunk vector count overflowed u64")
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        let mut total: u64 = 0;
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     REMOVE vector IN @@collection
+                     RETURN OLD._key",
+                    serde_json::json!({"@collection": collection}),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to delete all knowledge chunk vectors from {collection}")
+                })?;
+            let deleted: Vec<String> = decode_many_results(cursor)?;
+            total = total
+                .checked_add(u64::try_from(deleted.len()).unwrap_or(0))
+                .context("deleted chunk vector count overflowed u64")?;
+        }
+        Ok(total)
     }
 
     pub async fn list_chunk_vectors_by_chunk(
         &self,
         chunk_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeChunkVectorRow>> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.chunk_id == @chunk_id
-                 SORT vector.freshness_generation DESC, vector.created_at DESC
-                 RETURN vector",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    "chunk_id": chunk_id,
-                }),
-            )
-            .await
-            .context("failed to list knowledge chunk vectors")?;
-        decode_many_results(cursor)
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        let mut merged: Vec<KnowledgeChunkVectorRow> = Vec::new();
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.chunk_id == @chunk_id
+                     SORT vector.freshness_generation DESC, vector.created_at DESC
+                     RETURN vector",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "chunk_id": chunk_id,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to list knowledge chunk vectors from {collection}")
+                })?;
+            merged.extend(decode_many_results::<KnowledgeChunkVectorRow>(cursor)?);
+        }
+        merged.sort_by(|left, right| {
+            right
+                .freshness_generation
+                .cmp(&left.freshness_generation)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+        });
+        Ok(merged)
     }
 
     pub async fn list_chunk_vectors_by_chunks(
@@ -471,25 +663,41 @@ impl ArangoSearchStore {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.chunk_id IN @chunk_ids
-                   AND vector.embedding_model_key == @embedding_model_key
-                   AND vector.vector_kind == @vector_kind
-                 SORT vector.chunk_id ASC, vector.freshness_generation DESC, vector.created_at DESC
-                 RETURN vector",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    "chunk_ids": chunk_ids,
-                    "embedding_model_key": embedding_model_key,
-                    "vector_kind": vector_kind,
-                }),
-            )
-            .await
-            .context("failed to list knowledge chunk vectors by chunk batch")?;
-        decode_many_results(cursor)
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        let mut merged: Vec<KnowledgeChunkVectorRow> = Vec::new();
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.chunk_id IN @chunk_ids
+                       AND vector.embedding_model_key == @embedding_model_key
+                       AND vector.vector_kind == @vector_kind
+                     SORT vector.chunk_id ASC, vector.freshness_generation DESC, vector.created_at DESC
+                     RETURN vector",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "chunk_ids": chunk_ids,
+                        "embedding_model_key": embedding_model_key,
+                        "vector_kind": vector_kind,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to list knowledge chunk vectors by chunk batch from {collection}"
+                    )
+                })?;
+            merged.extend(decode_many_results::<KnowledgeChunkVectorRow>(cursor)?);
+        }
+        merged.sort_by(|left, right| {
+            left.chunk_id
+                .cmp(&right.chunk_id)
+                .then_with(|| right.freshness_generation.cmp(&left.freshness_generation))
+                .then_with(|| right.created_at.cmp(&left.created_at))
+        });
+        Ok(merged)
     }
 
     pub async fn count_chunk_vectors_by_revision(
@@ -499,34 +707,49 @@ impl ArangoSearchStore {
         vector_kind: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<usize> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.revision_id == @revision_id
-                   AND vector.embedding_model_key == @embedding_model_key
-                   AND vector.vector_kind == @vector_kind
-                   AND vector.freshness_generation == @freshness_generation
-                 COLLECT WITH COUNT INTO vector_count
-                 RETURN vector_count",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    "revision_id": revision_id,
-                    "embedding_model_key": embedding_model_key,
-                    "vector_kind": vector_kind,
-                    "freshness_generation": freshness_generation,
-                }),
-            )
-            .await
-            .context("failed to count chunk vectors by revision")?;
-        let count: i64 = decode_single_result(cursor)?;
-        usize::try_from(count).context("chunk vector count overflowed usize")
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        let mut total: i64 = 0;
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.revision_id == @revision_id
+                       AND vector.embedding_model_key == @embedding_model_key
+                       AND vector.vector_kind == @vector_kind
+                       AND vector.freshness_generation == @freshness_generation
+                     COLLECT WITH COUNT INTO vector_count
+                     RETURN vector_count",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "revision_id": revision_id,
+                        "embedding_model_key": embedding_model_key,
+                        "vector_kind": vector_kind,
+                        "freshness_generation": freshness_generation,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to count chunk vectors by revision from {collection}")
+                })?;
+            let count: i64 = decode_single_result(cursor)?;
+            total = total
+                .checked_add(count)
+                .context("chunk vector count summed across shards overflowed i64")?;
+        }
+        usize::try_from(total).context("chunk vector count overflowed usize")
     }
 
     pub async fn upsert_entity_vector(
         &self,
         row: &KnowledgeEntityVectorRow,
     ) -> anyhow::Result<KnowledgeEntityVectorRow> {
+        let dim =
+            u64::try_from(row.vector.len()).context("entity vector dimension overflowed u64")?;
+        anyhow::ensure!(dim > 0, "entity vector for {} must not be empty", row.entity_id);
+        self.ensure_entity_vector_shard(dim).await?;
+        let collection = entity_vector_collection_for_dim(dim);
         let cursor = self
             .client
             .query_json(
@@ -557,7 +780,7 @@ impl ArangoSearchStore {
                  IN @@collection
                  RETURN NEW",
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+                    "@collection": collection,
                     "key": row.key,
                     "vector_id": row.vector_id,
                     "workspace_id": row.workspace_id,
@@ -582,84 +805,124 @@ impl ArangoSearchStore {
         embedding_model_key: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<Option<KnowledgeEntityVectorRow>> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.entity_id == @entity_id
-                   AND vector.embedding_model_key == @embedding_model_key
-                   AND vector.freshness_generation == @freshness_generation
-                 LIMIT 1
-                 REMOVE vector IN @@collection
-                 RETURN OLD",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-                    "entity_id": entity_id,
-                    "embedding_model_key": embedding_model_key,
-                    "freshness_generation": freshness_generation,
-                }),
-            )
-            .await
-            .context("failed to delete knowledge entity vector")?;
-        decode_optional_single_result(cursor)
+        let mut targets = vec![KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_entity_vector_collections().await?);
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.entity_id == @entity_id
+                       AND vector.embedding_model_key == @embedding_model_key
+                       AND vector.freshness_generation == @freshness_generation
+                     LIMIT 1
+                     REMOVE vector IN @@collection
+                     RETURN OLD",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "entity_id": entity_id,
+                        "embedding_model_key": embedding_model_key,
+                        "freshness_generation": freshness_generation,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to delete knowledge entity vector from {collection}")
+                })?;
+            if let Some(row) = decode_optional_single_result::<KnowledgeEntityVectorRow>(cursor)? {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn delete_entity_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<()> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.library_id == @library_id
-                 REMOVE vector IN @@collection
-                 RETURN OLD._key",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-                    "library_id": library_id,
-                }),
-            )
-            .await
-            .context("failed to delete knowledge entity vectors by library")?;
-        let _: Vec<String> = decode_many_results(cursor)?;
+        let mut targets = vec![KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_entity_vector_collections().await?);
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.library_id == @library_id
+                     REMOVE vector IN @@collection
+                     RETURN OLD._key",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "library_id": library_id,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to delete knowledge entity vectors by library from {collection}"
+                    )
+                })?;
+            let _: Vec<String> = decode_many_results(cursor)?;
+        }
         Ok(())
     }
 
     pub async fn delete_all_entity_vectors(&self) -> anyhow::Result<u64> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 REMOVE vector IN @@collection
-                 RETURN OLD._key",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-                }),
-            )
-            .await
-            .context("failed to delete all knowledge entity vectors")?;
-        let deleted: Vec<String> = decode_many_results(cursor)?;
-        u64::try_from(deleted.len()).context("deleted entity vector count overflowed u64")
+        let mut targets = vec![KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_entity_vector_collections().await?);
+        let mut total: u64 = 0;
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     REMOVE vector IN @@collection
+                     RETURN OLD._key",
+                    serde_json::json!({"@collection": collection}),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to delete all knowledge entity vectors from {collection}")
+                })?;
+            let deleted: Vec<String> = decode_many_results(cursor)?;
+            total = total
+                .checked_add(u64::try_from(deleted.len()).unwrap_or(0))
+                .context("deleted entity vector count overflowed u64")?;
+        }
+        Ok(total)
     }
 
     pub async fn list_entity_vectors_by_entity(
         &self,
         entity_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeEntityVectorRow>> {
-        let cursor = self
-            .client
-            .query_json(
-                "FOR vector IN @@collection
-                 FILTER vector.entity_id == @entity_id
-                 SORT vector.freshness_generation DESC, vector.created_at DESC
-                 LIMIT 1000
-                 RETURN vector",
-                serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-                    "entity_id": entity_id,
-                }),
-            )
-            .await
-            .context("failed to list knowledge entity vectors")?;
-        decode_many_results(cursor)
+        let mut targets = vec![KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_entity_vector_collections().await?);
+        let mut merged: Vec<KnowledgeEntityVectorRow> = Vec::new();
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.entity_id == @entity_id
+                     SORT vector.freshness_generation DESC, vector.created_at DESC
+                     LIMIT 1000
+                     RETURN vector",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "entity_id": entity_id,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to list knowledge entity vectors from {collection}")
+                })?;
+            merged.extend(decode_many_results::<KnowledgeEntityVectorRow>(cursor)?);
+        }
+        merged.sort_by(|left, right| {
+            right
+                .freshness_generation
+                .cmp(&left.freshness_generation)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+        });
+        merged.truncate(1000);
+        Ok(merged)
     }
 
     pub async fn search_chunks(
@@ -1351,6 +1614,7 @@ impl ArangoSearchStore {
     /// `map_chunk_hit`.
     pub async fn search_chunk_vectors_by_similarity(
         &self,
+        dim: u64,
         library_id: Uuid,
         embedding_model_key: &str,
         query_vector: &[f32],
@@ -1377,6 +1641,18 @@ impl ArangoSearchStore {
             .clamp(VECTOR_OVER_FETCH_DEFAULT_FLOOR, VECTOR_OVER_FETCH_MAX);
         let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
         let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
+        // Prefer the library's own shard: its ANN scans only this library's
+        // vectors. Fall back to the shared per-dim shard for libraries whose
+        // rows have not been drained into a per-library shard yet (the
+        // `migrate chunk-vector-per-library` window). The library_id +
+        // embedding_model_key post-filters below are a no-op on the
+        // per-library shard but stay required on the shared fallback.
+        let per_library = chunk_vector_collection_for_library(dim, library_id);
+        let collection = if self.client.collection_exists(&per_library).await? {
+            per_library
+        } else {
+            chunk_vector_collection_for_dim(dim)
+        };
         let cursor = self
             .client
             .query_json(
@@ -1417,7 +1693,7 @@ impl ArangoSearchStore {
                      LIMIT @limit
                      RETURN c",
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
+                    "@collection": collection,
                     "library_id": library_id,
                     "embedding_model_key": embedding_model_key,
                     "query_vector": query_vector,
@@ -1437,6 +1713,7 @@ impl ArangoSearchStore {
     /// before FILTER and why we over-fetch.
     pub async fn search_entity_vectors_by_similarity(
         &self,
+        dim: u64,
         library_id: Uuid,
         embedding_model_key: &str,
         query_vector: &[f32],
@@ -1471,7 +1748,7 @@ impl ArangoSearchStore {
                      LIMIT @limit
                      RETURN c",
                 serde_json::json!({
-                    "@collection": KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
+                    "@collection": entity_vector_collection_for_dim(dim),
                     "library_id": library_id,
                     "embedding_model_key": embedding_model_key,
                     "query_vector": query_vector,
@@ -1484,6 +1761,68 @@ impl ArangoSearchStore {
             .context("failed to search knowledge entity vectors by similarity")?;
         decode_many_results(cursor)
     }
+}
+
+/// Which physical shard a chunk-vector write for a `(library, dim)` lands in.
+/// Keeping a library on a single shard avoids an upgrade split-brain where a
+/// new write would strand the library's pre-migration vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkVectorWriteTarget {
+    /// The per-library shard already exists — write there.
+    PerLibraryExisting,
+    /// No per-library shard yet, but the shared per-dim shard still holds this
+    /// library's legacy rows — keep the library coherent there until migration.
+    SharedLegacy,
+    /// Brand-new library with no rows anywhere — born sharded.
+    PerLibraryNew,
+}
+
+/// Pure routing decision (see `resolve_chunk_vector_write_collection`): an
+/// existing per-library shard wins; otherwise legacy rows on the shared shard
+/// keep the library there until migration; otherwise the library is new and is
+/// born sharded.
+fn choose_chunk_vector_write_target(
+    per_library_exists: bool,
+    shared_has_library_rows: bool,
+) -> ChunkVectorWriteTarget {
+    if per_library_exists {
+        ChunkVectorWriteTarget::PerLibraryExisting
+    } else if shared_has_library_rows {
+        ChunkVectorWriteTarget::SharedLegacy
+    } else {
+        ChunkVectorWriteTarget::PerLibraryNew
+    }
+}
+
+/// Size IVF `nLists` for a per-library chunk shard from its live row count.
+/// IVF training needs at least as many sample points as lists, and a
+/// per-library shard is small, so we target ~`PER_LIBRARY_CHUNK_SHARD_ROWS_PER_LIST`
+/// rows per list, never exceeding the instance-wide `configured` value and
+/// always floored at 1 (an empty/first-write shard trains a single list, and
+/// `ensure_vector_index` seeds synthetic points for it).
+fn per_library_shard_n_lists(configured: u64, row_count: u64) -> u64 {
+    let by_rows = row_count / PER_LIBRARY_CHUNK_SHARD_ROWS_PER_LIST;
+    configured.min(by_rows).max(1)
+}
+
+/// Group chunk-vector rows by their `(dim, library_id)` so each
+/// per-(library, dim) shard receives exactly its own rows. Extracted as a
+/// pure function so the routing invariant (right rows land in the right
+/// shard, across multiple dims and libraries) is unit-testable without a live
+/// Arango. Errors on a zero-length vector — the same guard the write path
+/// applies before the shard ensure.
+fn group_chunk_vector_rows_by_library_dim(
+    rows: &[KnowledgeChunkVectorRow],
+) -> anyhow::Result<std::collections::BTreeMap<(u64, Uuid), Vec<&KnowledgeChunkVectorRow>>> {
+    let mut groups: std::collections::BTreeMap<(u64, Uuid), Vec<&KnowledgeChunkVectorRow>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let dim =
+            u64::try_from(row.vector.len()).context("chunk vector dimension overflowed u64")?;
+        anyhow::ensure!(dim > 0, "chunk vector for {} must not be empty", row.chunk_id);
+        groups.entry((dim, row.library_id)).or_default().push(row);
+    }
+    Ok(groups)
 }
 
 fn vector_search_options(n_probe: Option<u64>) -> serde_json::Value {
@@ -1590,11 +1929,33 @@ where
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::{
-        KNOWLEDGE_CHUNK_VECTOR_KIND, KNOWLEDGE_ENTITY_VECTOR_KIND, KnowledgeChunkVectorRow,
-        KnowledgeEntityVectorRow, lexical_query_terms, numeric_title_literals,
-        title_identity_terms, title_ngram_terms, title_soft_raw_enabled,
+        ChunkVectorWriteTarget, KNOWLEDGE_CHUNK_VECTOR_KIND, KNOWLEDGE_ENTITY_VECTOR_KIND,
+        KnowledgeChunkVectorRow, KnowledgeEntityVectorRow, choose_chunk_vector_write_target,
+        group_chunk_vector_rows_by_library_dim, lexical_query_terms, numeric_title_literals,
+        per_library_shard_n_lists, title_identity_terms, title_ngram_terms, title_soft_raw_enabled,
     };
+    use crate::infra::arangodb::collections::chunk_vector_collection_for_library;
+
+    fn chunk_vector_row(library_id: Uuid, dim: usize, key: &str) -> KnowledgeChunkVectorRow {
+        serde_json::from_value(serde_json::json!({
+            "_key": key,
+            "vector_id": Uuid::new_v4(),
+            "workspace_id": Uuid::new_v4(),
+            "library_id": library_id,
+            "chunk_id": Uuid::new_v4(),
+            "revision_id": Uuid::new_v4(),
+            "embedding_model_key": "model",
+            "vector_kind": KNOWLEDGE_CHUNK_VECTOR_KIND,
+            "dimensions": dim,
+            "vector": vec![0.1_f32; dim],
+            "freshness_generation": 1,
+            "created_at": "2026-04-01T00:00:00Z"
+        }))
+        .expect("chunk vector row fixture should deserialize")
+    }
 
     #[test]
     fn lexical_query_terms_deduplicate_repeated_tokens() {
@@ -1722,5 +2083,82 @@ mod tests {
         .expect("entity vector row should deserialize");
 
         assert_eq!(row.key, "entity-vector");
+    }
+
+    #[test]
+    fn group_chunk_vectors_routes_each_library_dim_to_its_own_shard() {
+        // Two libraries × two dims (384 + 3072): every (dim, library) pair
+        // must form its own group so each lands in its own per-library shard.
+        let lib_a = Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap();
+        let lib_b = Uuid::parse_str("00000000-0000-4000-8000-00000000000b").unwrap();
+        let rows = vec![
+            chunk_vector_row(lib_a, 384, "a-384-1"),
+            chunk_vector_row(lib_a, 384, "a-384-2"),
+            chunk_vector_row(lib_a, 3072, "a-3072-1"),
+            chunk_vector_row(lib_b, 384, "b-384-1"),
+            chunk_vector_row(lib_b, 3072, "b-3072-1"),
+            chunk_vector_row(lib_b, 3072, "b-3072-2"),
+        ];
+
+        let groups = group_chunk_vector_rows_by_library_dim(&rows).expect("grouping succeeds");
+
+        assert_eq!(groups.len(), 4, "two libraries × two dims = four shards");
+        assert_eq!(groups[&(384, lib_a)].len(), 2);
+        assert_eq!(groups[&(3072, lib_a)].len(), 1);
+        assert_eq!(groups[&(384, lib_b)].len(), 1);
+        assert_eq!(groups[&(3072, lib_b)].len(), 2);
+
+        // The grouping key maps 1:1 to the per-library shard name, and the
+        // names are distinct across both dims and both libraries.
+        let mut shard_names: Vec<String> = groups
+            .keys()
+            .map(|&(dim, library_id)| chunk_vector_collection_for_library(dim, library_id))
+            .collect();
+        shard_names.sort();
+        shard_names.dedup();
+        assert_eq!(shard_names.len(), 4, "every (dim, library) pair yields a distinct shard name");
+    }
+
+    #[test]
+    fn group_chunk_vectors_rejects_empty_vector() {
+        let lib = Uuid::new_v4();
+        let rows = vec![chunk_vector_row(lib, 0, "empty")];
+        assert!(group_chunk_vector_rows_by_library_dim(&rows).is_err());
+    }
+
+    #[test]
+    fn per_library_shard_n_lists_sizes_from_row_count_and_floors_at_one() {
+        // Empty / first-write shard → a single list.
+        assert_eq!(per_library_shard_n_lists(60, 0), 1);
+        assert_eq!(per_library_shard_n_lists(60, 39), 1);
+        // ~40 rows per list, capped by the configured instance-wide value.
+        assert_eq!(per_library_shard_n_lists(60, 400), 10);
+        assert_eq!(per_library_shard_n_lists(60, 4000), 60);
+        // Configured value is the ceiling even for a very large shard.
+        assert_eq!(per_library_shard_n_lists(60, 1_000_000), 60);
+    }
+
+    #[test]
+    fn chunk_vector_write_target_keeps_library_on_one_shard() {
+        // An existing per-library shard always wins (migrated / born sharded).
+        assert_eq!(
+            choose_chunk_vector_write_target(true, false),
+            ChunkVectorWriteTarget::PerLibraryExisting
+        );
+        assert_eq!(
+            choose_chunk_vector_write_target(true, true),
+            ChunkVectorWriteTarget::PerLibraryExisting
+        );
+        // No per-library shard but legacy rows on the shared shard -> keep the
+        // library there until migration (prevents the upgrade split-brain).
+        assert_eq!(
+            choose_chunk_vector_write_target(false, true),
+            ChunkVectorWriteTarget::SharedLegacy
+        );
+        // Brand-new library, nothing anywhere -> born sharded.
+        assert_eq!(
+            choose_chunk_vector_write_target(false, false),
+            ChunkVectorWriteTarget::PerLibraryNew
+        );
     }
 }

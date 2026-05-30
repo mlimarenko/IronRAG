@@ -117,6 +117,7 @@ fn build_lexical_queries_uses_query_ir_focus_spans_before_broad_keywords() {
         conversation_refs: vec![],
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.8,
     };
 
@@ -214,6 +215,7 @@ fn build_graph_evidence_text_queries_prioritize_focused_queries_before_raw_quest
         conversation_refs: vec![],
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.8,
     };
     let question =
@@ -302,6 +304,7 @@ fn query_ir_focus_queries_start_with_adjacent_typed_compounds() {
         conversation_refs: vec![],
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.8,
     };
 
@@ -335,6 +338,7 @@ fn query_ir_focus_queries_do_not_compound_primary_entities_with_modifiers() {
         conversation_refs: Vec::new(),
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.9,
     };
 
@@ -380,6 +384,7 @@ fn query_ir_focus_queries_anchor_focused_compare_facets_to_document_focus() {
         conversation_refs: Vec::new(),
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.86,
     };
 
@@ -431,6 +436,7 @@ fn graph_evidence_db_probes_keep_primary_object_before_modifier_tail() {
         conversation_refs: Vec::new(),
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.9,
     };
 
@@ -478,6 +484,7 @@ fn query_ir_focus_queries_order_compounds_by_structural_specificity() {
         conversation_refs: vec![],
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.8,
     };
 
@@ -511,6 +518,7 @@ fn query_ir_focus_queries_include_iso_temporal_prefixes() {
         conversation_refs: vec![],
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.8,
     };
 
@@ -538,6 +546,7 @@ fn query_ir_focus_queries_prefer_day_prefix_for_single_day_ranges() {
         conversation_refs: vec![],
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.8,
     };
 

@@ -812,10 +812,19 @@ pub(super) async fn ensure_bootstrap_model_preset(
         preset_input.model_catalog_id,
         &preset_input.preset_name,
     ) {
+        // Preserve an operator-set output budget across reboots. The startup
+        // seed must NOT clobber an explicit `max_output_tokens_override` back to
+        // the catalog default on every boot: doing so silently reverted, e.g.,
+        // an operator-raised extract_graph budget to a truncating value and
+        // broke graph extraction after each restart. Only adopt the descriptor
+        // budget when the preset has none yet (matching 0017's documented
+        // contract: "existing explicit values are preserved").
+        let preserved_max_output_tokens =
+            existing.max_output_tokens_override.or(preset_input.max_output_tokens_override);
         let needs_update = existing.system_prompt != preset_input.system_prompt
             || existing.temperature != preset_input.temperature
             || existing.top_p != preset_input.top_p
-            || existing.max_output_tokens_override != preset_input.max_output_tokens_override
+            || existing.max_output_tokens_override != preserved_max_output_tokens
             || existing.extra_parameters_json != preset_input.extra_parameters_json;
         if !needs_update {
             return Ok(existing);
@@ -830,7 +839,7 @@ pub(super) async fn ensure_bootstrap_model_preset(
                     system_prompt: preset_input.system_prompt.clone(),
                     temperature: preset_input.temperature,
                     top_p: preset_input.top_p,
-                    max_output_tokens_override: preset_input.max_output_tokens_override,
+                    max_output_tokens_override: preserved_max_output_tokens,
                     extra_parameters_json: preset_input.extra_parameters_json.clone(),
                 },
             )

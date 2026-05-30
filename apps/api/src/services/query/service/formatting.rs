@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     domains::agent_runtime::{
-        RuntimeExecutionSummary, RuntimePolicyDecision, RuntimePolicySummary,
+        RuntimeExecutionSummary, RuntimePolicyDecision, RuntimePolicySummary, RuntimeStageKind,
     },
     domains::query::{
         PreparedSegmentReference, QueryChunkReference, QueryGraphEdgeReference,
@@ -578,6 +578,19 @@ pub(crate) fn map_execution_runtime_stage_summaries(
     runtime_stage_records: &[runtime_repository::RuntimeStageRecordRow],
 ) -> Vec<QueryRuntimeStageSummary> {
     if !runtime_stage_records.is_empty() {
+        // Sum completed wall-clock per stage kind across attempts so the
+        // debug inspector can show where a turn actually spent its time.
+        let mut duration_ms_by_stage: HashMap<RuntimeStageKind, u64> = HashMap::new();
+        for record in runtime_stage_records {
+            if let Some(completed_at) = record.completed_at {
+                let elapsed_ms = (completed_at - record.started_at)
+                    .num_milliseconds()
+                    .max(0)
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                *duration_ms_by_stage.entry(record.stage_kind).or_insert(0) += elapsed_ms;
+            }
+        }
         let mut seen = BTreeSet::new();
         return runtime_stage_records
             .iter()
@@ -586,6 +599,7 @@ pub(crate) fn map_execution_runtime_stage_summaries(
             .map(|stage_kind| QueryRuntimeStageSummary {
                 stage_kind,
                 stage_label: query_runtime_stage_label(stage_kind).to_string(),
+                duration_ms: duration_ms_by_stage.get(&stage_kind).copied(),
             })
             .collect();
     }
@@ -595,6 +609,7 @@ pub(crate) fn map_execution_runtime_stage_summaries(
             vec![QueryRuntimeStageSummary {
                 stage_kind,
                 stage_label: query_runtime_stage_label(stage_kind).to_string(),
+                duration_ms: None,
             }]
         })
         .unwrap_or_default()

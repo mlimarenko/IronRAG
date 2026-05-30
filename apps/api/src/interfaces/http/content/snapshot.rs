@@ -125,15 +125,33 @@ pub async fn export_library_snapshot(
     let exporter_state = state.clone();
     let lib_id = library.id;
     let include_clone = include.clone();
+    // Wrap the export in a JoinHandle observer so a panic inside the
+    // exporter does not silently terminate the writer half with the
+    // client still receiving HTTP 200 on a half-written archive. On
+    // the failure path the exporter itself appends an
+    // EXPORT_FAILED.json sentinel tar entry before finalizing — this
+    // observer is the second line of defense for genuine panics.
+    let join = tokio::spawn(async move {
+        export_library_archive(exporter_state, lib_id, include_clone, writer).await
+    });
+    let observer_lib_id = lib_id;
     tokio::spawn(async move {
-        if let Err(error) =
-            export_library_archive(exporter_state, lib_id, include_clone, writer).await
-        {
-            tracing::error!(
-                library_id = %lib_id,
-                error = format!("{error:#}"),
-                "library snapshot export failed",
-            );
+        match join.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(
+                    library_id = %observer_lib_id,
+                    error = format!("{error:#}"),
+                    "library snapshot export failed",
+                );
+            }
+            Err(join_error) => {
+                tracing::error!(
+                    library_id = %observer_lib_id,
+                    error = format!("{join_error}"),
+                    "library snapshot export task panicked or was cancelled",
+                );
+            }
         }
     });
 

@@ -17,9 +17,11 @@ use super::{
     MCP_ANSWER_TOOL_NAMES, McpJsonRpcResponse, McpToolCallParams, McpToolDescriptor, McpToolResult,
     McpToolSurface, audit::record_canonical_mcp_audit, success_response, tool_error_result,
 };
+use document_image::VIEW_DOCUMENT_IMAGE_TOOL_NAME;
 use documents::{READ_DOCUMENT_TOOL_NAME, SEARCH_DOCUMENTS_TOOL_NAME};
 
 pub(crate) mod catalog;
+pub(crate) mod document_image;
 pub(crate) mod documents;
 pub(crate) mod graph;
 pub(crate) mod grounded;
@@ -34,14 +36,36 @@ pub(crate) struct ToolCallContext<'a> {
     pub surface_kind: RuntimeSurfaceKind,
 }
 
+/// Capability inputs the listing predicate cannot derive purely from
+/// the auth grants. Right now the only one is `agent_vision_available`,
+/// computed by the async caller via
+/// [`document_image::any_agent_binding_supports_vision`]. Per-call
+/// enforcement still happens inside the tool handler regardless of the
+/// listing-time flag.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ToolVisibilityCapabilities {
+    pub agent_vision_available: bool,
+}
+
 pub(crate) fn visible_tool_names(auth: &AuthContext, surface: McpToolSurface) -> Vec<String> {
+    visible_tool_names_with_capabilities(auth, surface, ToolVisibilityCapabilities::default())
+}
+
+pub(crate) fn visible_tool_names_with_capabilities(
+    auth: &AuthContext,
+    surface: McpToolSurface,
+    capabilities: ToolVisibilityCapabilities,
+) -> Vec<String> {
     match surface {
-        McpToolSurface::Answer => visible_answer_tool_names(auth),
-        McpToolSurface::Diagnostics => visible_diagnostics_tool_names(auth),
+        McpToolSurface::Answer => visible_answer_tool_names(auth, capabilities),
+        McpToolSurface::Diagnostics => visible_diagnostics_tool_names(auth, capabilities),
     }
 }
 
-fn visible_answer_tool_names(auth: &AuthContext) -> Vec<String> {
+fn visible_answer_tool_names(
+    auth: &AuthContext,
+    capabilities: ToolVisibilityCapabilities,
+) -> Vec<String> {
     let mut tools = vec!["list_workspaces".to_string(), "list_libraries".to_string()];
     if auth.can_read_any_library_memory(POLICY_QUERY_RUN) {
         tools.push("grounded_answer".to_string());
@@ -56,6 +80,9 @@ fn visible_answer_tool_names(auth: &AuthContext) -> Vec<String> {
     }
     if auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ) {
         tools.push(READ_DOCUMENT_TOOL_NAME.to_string());
+        if capabilities.agent_vision_available {
+            tools.push(VIEW_DOCUMENT_IMAGE_TOOL_NAME.to_string());
+        }
     }
     if auth.can_read_any_document_memory(POLICY_RUNTIME_READ) {
         tools.push("get_runtime_execution".to_string());
@@ -69,7 +96,10 @@ fn visible_answer_tool_names(auth: &AuthContext) -> Vec<String> {
     tools
 }
 
-fn visible_diagnostics_tool_names(auth: &AuthContext) -> Vec<String> {
+fn visible_diagnostics_tool_names(
+    auth: &AuthContext,
+    capabilities: ToolVisibilityCapabilities,
+) -> Vec<String> {
     let mut tools = vec!["list_workspaces".to_string(), "list_libraries".to_string()];
     if auth.can_read_any_library_memory(POLICY_QUERY_RUN) {
         tools.push("grounded_answer".to_string());
@@ -85,6 +115,9 @@ fn visible_diagnostics_tool_names(auth: &AuthContext) -> Vec<String> {
     }
     if auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ) {
         tools.push(READ_DOCUMENT_TOOL_NAME.to_string());
+        if capabilities.agent_vision_available {
+            tools.push(VIEW_DOCUMENT_IMAGE_TOOL_NAME.to_string());
+        }
     }
     if auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ) {
         tools.push("list_documents".to_string());
@@ -123,7 +156,11 @@ pub(super) async fn handle_tools_list(
     id: Option<Value>,
     surface: McpToolSurface,
 ) -> McpJsonRpcResponse {
-    let tools = visible_tool_names(auth, surface)
+    let capabilities = ToolVisibilityCapabilities {
+        agent_vision_available: document_image::any_agent_binding_supports_vision(auth, state)
+            .await,
+    };
+    let tools = visible_tool_names_with_capabilities(auth, surface, capabilities)
         .into_iter()
         .filter_map(|name| descriptor_for(&name))
         .collect::<Vec<_>>();
@@ -163,7 +200,14 @@ pub(super) async fn handle_tools_call(
             );
         }
     };
-    if !visible_tool_names(auth, surface).iter().any(|tool_name| tool_name == &parsed.name) {
+    let capabilities = ToolVisibilityCapabilities {
+        agent_vision_available: document_image::any_agent_binding_supports_vision(auth, state)
+            .await,
+    };
+    if !visible_tool_names_with_capabilities(auth, surface, capabilities)
+        .iter()
+        .any(|tool_name| tool_name == &parsed.name)
+    {
         return success_response(
             id,
             json!(tool_error_result(ApiError::invalid_mcp_tool_call(format!(
@@ -193,6 +237,7 @@ pub(super) async fn handle_tools_call(
 pub(crate) fn descriptor_for(name: &str) -> Option<McpToolDescriptor> {
     catalog::descriptor(name)
         .or_else(|| documents::descriptor(name))
+        .or_else(|| document_image::descriptor(name))
         .or_else(|| grounded::descriptor(name))
         .or_else(|| runtime::descriptor(name))
         .or_else(|| web_ingest::descriptor(name))
@@ -207,6 +252,8 @@ pub(crate) async fn call_named_tool(
     if let Some(result) = catalog::call_tool(name, context, arguments).await {
         Some(result)
     } else if let Some(result) = documents::call_tool(name, context, arguments).await {
+        Some(result)
+    } else if let Some(result) = document_image::call_tool(name, context, arguments).await {
         Some(result)
     } else if let Some(result) = grounded::call_tool(name, context, arguments).await {
         Some(result)
@@ -234,7 +281,7 @@ mod tests {
             },
             mcp::{
                 McpToolSurface,
-                tools::{READ_DOCUMENT_TOOL_NAME, documents, visible_tool_names},
+                tools::{READ_DOCUMENT_TOOL_NAME, documents, grounded, visible_tool_names},
             },
         },
     };
@@ -308,8 +355,11 @@ mod tests {
 
     #[test]
     fn answer_surface_exposes_read_only_agent_tools() {
-        let tools =
-            visible_tool_names(&auth_with_query_and_memory_access(), McpToolSurface::Answer);
+        let tools = super::visible_tool_names_with_capabilities(
+            &auth_with_query_and_memory_access(),
+            McpToolSurface::Answer,
+            super::ToolVisibilityCapabilities { agent_vision_available: true },
+        );
         let canonical = crate::interfaces::http::mcp::MCP_ANSWER_TOOL_NAMES;
 
         for expected in [
@@ -338,7 +388,43 @@ mod tests {
             assert!(!tools.iter().any(|name| name == forbidden), "forbidden {forbidden}");
         }
         assert!(canonical.contains(&"list_documents"));
+        assert!(canonical.contains(&"view_document_image"));
         assert_eq!(canonical.len(), tools.len());
+    }
+
+    #[test]
+    fn view_document_image_only_visible_when_agent_vision_available() {
+        let auth = auth_with_query_and_memory_access();
+        let no_vision = super::visible_tool_names_with_capabilities(
+            &auth,
+            McpToolSurface::Answer,
+            super::ToolVisibilityCapabilities { agent_vision_available: false },
+        );
+        assert!(
+            !no_vision.iter().any(|name| name == "view_document_image"),
+            "view_document_image must be hidden when the Agent binding is not multimodal"
+        );
+
+        let with_vision = super::visible_tool_names_with_capabilities(
+            &auth,
+            McpToolSurface::Answer,
+            super::ToolVisibilityCapabilities { agent_vision_available: true },
+        );
+        assert!(
+            with_vision.iter().any(|name| name == "view_document_image"),
+            "view_document_image must surface when the Agent binding is multimodal"
+        );
+
+        // Diagnostics surface mirrors the gating.
+        let diag_with_vision = super::visible_tool_names_with_capabilities(
+            &auth,
+            McpToolSurface::Diagnostics,
+            super::ToolVisibilityCapabilities { agent_vision_available: true },
+        );
+        assert!(
+            diag_with_vision.iter().any(|name| name == "view_document_image"),
+            "diagnostics surface must also expose view_document_image when vision is available"
+        );
     }
 
     #[test]
@@ -348,5 +434,31 @@ mod tests {
         assert!(descriptor.description.contains("versioned change-summary questions"));
         assert!(descriptor.description.contains("use `grounded_answer`"));
         assert!(descriptor.description.contains("not as the final absence check"));
+    }
+
+    #[test]
+    fn grounded_answer_descriptor_guides_content_and_setup_probes() {
+        let descriptor = grounded::descriptor("grounded_answer").expect("grounded_answer");
+
+        assert!(descriptor.description.contains("best first candidate"));
+        assert!(descriptor.description.contains("setup/how-to questions"));
+        assert!(descriptor.description.contains("then follow up if the result is incomplete"));
+        assert!(descriptor.description.contains("sourced package/module"));
+        assert!(descriptor.description.contains("parameter names/defaults"));
+        assert!(
+            descriptor.description.contains("preserve the tool result's visible item coverage")
+        );
+    }
+
+    #[test]
+    fn document_descriptors_do_not_make_search_a_content_answer() {
+        let search = documents::descriptor("search_documents").expect("search_documents");
+        let read = documents::descriptor(READ_DOCUMENT_TOOL_NAME).expect("read_document");
+
+        assert!(search.description.contains("grounded_answer"));
+        assert!(search.description.contains("search response alone is NOT enough"));
+        assert!(search.description.contains("Follow relevant hits with `read_document`"));
+        assert!(read.description.contains("after a `grounded_answer` result"));
+        assert!(read.description.contains("package/module, path, and parameter/default/example"));
     }
 }

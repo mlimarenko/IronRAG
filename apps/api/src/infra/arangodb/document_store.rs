@@ -5,7 +5,10 @@
     clippy::too_many_arguments
 )]
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -28,9 +31,9 @@ use crate::{
     infra::arangodb::{
         client::ArangoClient,
         collections::{
-            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-            KNOWLEDGE_DOCUMENT_COLLECTION, KNOWLEDGE_REVISION_COLLECTION,
-            KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION, KNOWLEDGE_STRUCTURED_REVISION_COLLECTION,
+            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_DOCUMENT_COLLECTION,
+            KNOWLEDGE_REVISION_COLLECTION, KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
+            KNOWLEDGE_STRUCTURED_REVISION_COLLECTION,
         },
         search_store::KNOWLEDGE_CHUNK_VECTOR_KIND,
     },
@@ -43,6 +46,11 @@ const KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT: usize = 2_000;
 const KNOWLEDGE_CHUNK_WINDOW_FETCH_CONCURRENCY: usize = 4;
 const KNOWLEDGE_CHUNK_REVISION_TERM_LIMIT: usize = 24;
 const KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS: usize = 128;
+const CODE_PATTERN_ASSIGNMENT_REGEX: &str =
+    r"(^|[^[:alnum:]_])[a-z][a-z0-9_.-]{2,160}\s*=\s*-?[0-9]{2,}([,.;]\s*-?[0-9]{2,})*";
+const CODE_PATTERN_NUMERIC_MAPPING_REGEX: &str =
+    r"(^|[\r\n])\s*-?[0-9]{2,}([.][0-9]{2,})?\s*=\s*[^\r\n]{2,}";
+const CODE_PATTERN_SECTION_REGEX: &str = r"(^|[\r\n])\s*\[[^\]\r\n]{2,80}\]";
 
 /// Slim projection for the documents-page inspector counts.
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize, utoipa::ToSchema)]
@@ -527,6 +535,19 @@ impl ArangoDocumentStore {
         &self,
         library_id: Uuid,
     ) -> anyhow::Result<LibraryGenerationSignals> {
+        // Source of truth for "is vector ready for revision N" is
+        // `knowledge_revision.vector_state == "ready"`, same as text and
+        // graph. The previous implementation queried
+        // `knowledge_chunk_vector` for `freshness_generation`, but after
+        // the per-dim migration the chunk vectors live in
+        // `knowledge_chunk_vector_d<dim>` shards and the legacy
+        // collection is empty — so `vector_ready_max` always came back
+        // null, `has_ready_vector` was always false, and the runtime
+        // vector lane was silently skipped on every query (the lexical
+        // lane covered, masking the bug in answer quality but dropping
+        // ~5–8 s of cold-turn p95 on the floor). Pulling the signal from
+        // the revision row removes that coupling entirely and keeps the
+        // three signals symmetric.
         let cursor = self
             .client
             .query_json(
@@ -547,10 +568,9 @@ impl ArangoDocumentStore {
                          RETURN r.revision_number
                  )
                  LET vector_ready_max = MAX(
-                     FOR vector IN @@chunk_vector_collection
-                         FILTER vector.library_id == @library_id
-                           AND vector.vector_kind == @chunk_vector_kind
-                         RETURN vector.freshness_generation
+                     FOR r IN rows
+                         FILTER r.vector_state == \"ready\"
+                         RETURN r.revision_number
                  )
                  LET graph_ready_max = MAX(
                      FOR r IN rows
@@ -569,9 +589,7 @@ impl ArangoDocumentStore {
                  }",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_REVISION_COLLECTION,
-                    "@chunk_vector_collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
                     "library_id": library_id.to_string(),
-                    "chunk_vector_kind": KNOWLEDGE_CHUNK_VECTOR_KIND,
                     "readable_text_states": READABLE_TEXT_STATES,
                 }),
             )
@@ -589,13 +607,40 @@ impl ArangoDocumentStore {
         &self,
         library_id: Uuid,
     ) -> anyhow::Result<i64> {
+        let ready_revision_ids = self
+            .vector_ready_revisions_with_chunks(library_id)
+            .await
+            .context("failed to list vector-ready revisions with chunks")?;
+        if ready_revision_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut vector_revision_ids = HashSet::new();
+        for collection in self.client.list_per_dim_chunk_vector_collections().await? {
+            vector_revision_ids.extend(
+                self.chunk_vector_revision_ids_in_collection(
+                    &collection,
+                    library_id,
+                    &ready_revision_ids,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to count vector-ready revision inventory in {collection}")
+                })?,
+            );
+        }
+        Ok(Self::count_missing_revision_vectors(&ready_revision_ids, &vector_revision_ids))
+    }
+
+    async fn vector_ready_revisions_with_chunks(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<Vec<Uuid>> {
         let cursor = self
             .client
             .query_json(
                 "FOR revision IN @@revision_collection
                      FILTER revision.library_id == @library_id
                        AND revision.vector_state == \"ready\"
-                       AND revision.revision_state == \"active\"
                        AND revision.superseded_by_revision_id == null
                      LET has_chunks = LENGTH(
                          FOR chunk IN @@chunk_collection
@@ -603,27 +648,58 @@ impl ArangoDocumentStore {
                              LIMIT 1
                              RETURN 1
                      ) > 0
-                     LET has_vectors = LENGTH(
-                         FOR vector IN @@chunk_vector_collection
-                             FILTER vector.revision_id == revision.revision_id
-                               AND vector.vector_kind == @chunk_vector_kind
-                             LIMIT 1
-                             RETURN 1
-                     ) > 0
-                     FILTER has_chunks AND !has_vectors
-                     COLLECT WITH COUNT INTO stale_count
-                     RETURN stale_count",
+                     FILTER has_chunks
+                     RETURN revision.revision_id",
                 serde_json::json!({
                     "@revision_collection": KNOWLEDGE_REVISION_COLLECTION,
                     "@chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,
-                    "@chunk_vector_collection": KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
                     "library_id": library_id.to_string(),
+                }),
+            )
+            .await
+            .context("failed to list vector-ready revisions with chunks")?;
+        decode_many_results(cursor)
+    }
+
+    async fn chunk_vector_revision_ids_in_collection(
+        &self,
+        collection: &str,
+        library_id: Uuid,
+        revision_ids: &[Uuid],
+    ) -> anyhow::Result<Vec<Uuid>> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@chunk_vector_collection
+                     FILTER vector.library_id == @library_id
+                       AND vector.revision_id IN @revision_ids
+                       AND vector.vector_kind == @chunk_vector_kind
+                     COLLECT revision_id = vector.revision_id
+                     RETURN revision_id",
+                serde_json::json!({
+                    "@chunk_vector_collection": collection,
+                    "library_id": library_id.to_string(),
+                    "revision_ids": revision_ids,
                     "chunk_vector_kind": KNOWLEDGE_CHUNK_VECTOR_KIND,
                 }),
             )
             .await
-            .context("failed to count vector-ready revisions missing chunk vectors")?;
-        decode_single_result(cursor)
+            .with_context(|| {
+                format!("failed to list chunk vector revision ids from {collection}")
+            })?;
+        decode_many_results(cursor)
+    }
+
+    fn count_missing_revision_vectors(
+        ready_revision_ids: &[Uuid],
+        vector_revision_ids: &HashSet<Uuid>,
+    ) -> i64 {
+        ready_revision_ids
+            .iter()
+            .filter(|revision_id| !vector_revision_ids.contains(revision_id))
+            .count()
+            .try_into()
+            .unwrap_or(i64::MAX)
     }
 
     pub async fn update_revision_readiness(
@@ -961,6 +1037,37 @@ impl ArangoDocumentStore {
         decode_many_results(cursor)
     }
 
+    /// Fetch the first `limit` chunks of a revision in reading order.
+    /// Used for short document previews that only consume the head
+    /// chunks — avoids scanning the entire revision (a large document
+    /// can hold thousands of chunks, of which a preview needs ~3).
+    pub async fn list_head_chunks_by_revision(
+        &self,
+        revision_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.revision_id == @revision_id
+                 SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT @limit
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_id": revision_id,
+                    "limit": limit as i64,
+                }),
+            )
+            .await
+            .context("failed to list head knowledge chunks by revision")?;
+        decode_many_results(cursor)
+    }
+
     pub async fn count_chunks_by_revision(&self, revision_id: Uuid) -> anyhow::Result<i64> {
         let cursor = self
             .client
@@ -1197,6 +1304,7 @@ impl ArangoDocumentStore {
         limit: usize,
         temporal_start: Option<chrono::DateTime<chrono::Utc>>,
         temporal_end: Option<chrono::DateTime<chrono::Utc>>,
+        release_marker_required: bool,
     ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1216,6 +1324,8 @@ impl ArangoDocumentStore {
                 "FOR block IN @@collection
                  FILTER block.revision_id == @revision_id
                  FILTER block.block_kind == 'source_unit'
+                 FILTER !@release_marker_required
+                     OR REGEX_TEST(block.normalized_text, '(^|[^0-9.])[0-9]+\\\\.[0-9]+(\\\\.[0-9]+)?([^0-9.]|$)')
                  LET occurred_match = (@temporal_start_iso == null AND @temporal_end_iso == null)
                      ? null
                      : REGEX_EXTRACT(block.normalized_text, 'occurred_at=([0-9T:+\\\\-]+)')
@@ -1235,6 +1345,7 @@ impl ArangoDocumentStore {
                     "limit": limit,
                     "temporal_start_iso": temporal_start_iso,
                     "temporal_end_iso": temporal_end_iso,
+                    "release_marker_required": release_marker_required,
                 }),
             )
             .await
@@ -1248,6 +1359,7 @@ impl ArangoDocumentStore {
         limit: usize,
         temporal_start: Option<chrono::DateTime<chrono::Utc>>,
         temporal_end: Option<chrono::DateTime<chrono::Utc>>,
+        release_marker_required: bool,
     ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1263,6 +1375,8 @@ impl ArangoDocumentStore {
                    FOR block IN @@collection
                      FILTER block.revision_id == @revision_id
                      FILTER block.block_kind == 'source_unit'
+                     FILTER !@release_marker_required
+                         OR REGEX_TEST(block.normalized_text, '(^|[^0-9.])[0-9]+\\\\.[0-9]+(\\\\.[0-9]+)?([^0-9.]|$)')
                      LET occurred_match = (@temporal_start_iso == null AND @temporal_end_iso == null)
                          ? null
                          : REGEX_EXTRACT(block.normalized_text, 'occurred_at=([0-9T:+\\\\-]+)')
@@ -1286,6 +1400,7 @@ impl ArangoDocumentStore {
                     "limit": limit,
                     "temporal_start_iso": temporal_start_iso,
                     "temporal_end_iso": temporal_end_iso,
+                    "release_marker_required": release_marker_required,
                 }),
             )
             .await
@@ -1332,6 +1447,126 @@ impl ArangoDocumentStore {
             )
             .await
             .context("failed to list knowledge chunks by ids")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn search_code_pattern_chunks_by_terms(
+        &self,
+        library_id: Uuid,
+        terms: &[String],
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let min_terms = terms.len().clamp(1, 3);
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.library_id == @library_id
+                   AND chunk.chunk_state == 'ready'
+                 LET text = LOWER(CONCAT_SEPARATOR(
+                   ' ',
+                   chunk.normalized_text,
+                   chunk.content_text,
+                   chunk.window_text
+                 ))
+                 LET matched_terms = UNIQUE(
+                   FOR term IN @terms
+                     FILTER CONTAINS(text, term)
+                     RETURN term
+                 )
+                 FILTER LENGTH(matched_terms) >= @min_terms
+                 LET assignment_shape = REGEX_TEST(text, @assignment_regex, true)
+                 FILTER assignment_shape
+                 LET numeric_mapping_shape = REGEX_TEST(text, @numeric_mapping_regex, true)
+                 LET section_shape = REGEX_TEST(text, @section_regex, true)
+                 LET score = LENGTH(matched_terms) * 3000
+                   + 5000
+                   + (numeric_mapping_shape ? 3500 : 0)
+                   + (section_shape ? 800 : 0)
+                 SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT @limit
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "library_id": library_id,
+                    "terms": terms,
+                    "min_terms": min_terms,
+                    "assignment_regex": CODE_PATTERN_ASSIGNMENT_REGEX,
+                    "numeric_mapping_regex": CODE_PATTERN_NUMERIC_MAPPING_REGEX,
+                    "section_regex": CODE_PATTERN_SECTION_REGEX,
+                    "limit": limit,
+                }),
+            )
+            .await
+            .context("failed to search code-pattern knowledge chunks")?;
+        decode_many_results(cursor)
+    }
+
+    pub async fn search_transport_pattern_chunks_by_terms(
+        &self,
+        library_id: Uuid,
+        terms: &[String],
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR chunk IN @@collection
+                 FILTER chunk.library_id == @library_id
+                   AND chunk.chunk_state == 'ready'
+                 LET text = LOWER(CONCAT_SEPARATOR(
+                   ' ',
+                   chunk.normalized_text,
+                   chunk.content_text,
+                   chunk.window_text
+                 ))
+                 LET matched_terms = UNIQUE(
+                   FOR term IN @terms
+                     FILTER CONTAINS(text, term)
+                     RETURN term
+                 )
+                 FILTER LENGTH(matched_terms) >= 1
+                 LET url_assignment_shape = CONTAINS(text, '=http://')
+                   OR CONTAINS(text, '= http://')
+                   OR CONTAINS(text, '=https://')
+                   OR CONTAINS(text, '= https://')
+                 LET port_assignment_shape = CONTAINS(text, 'port=')
+                   OR CONTAINS(text, 'port =')
+                   OR CONTAINS(text, '.port')
+                   OR CONTAINS(text, '_port')
+                   OR CONTAINS(text, '-port')
+                 LET media_reference_shape = CONTAINS(text, 'data:image')
+                   OR CONTAINS(text, '.svg')
+                   OR CONTAINS(text, '.png')
+                   OR CONTAINS(text, '.jpg')
+                   OR CONTAINS(text, '.jpeg')
+                 LET section_shape = CONTAINS(text, '[') AND CONTAINS(text, ']')
+                 LET config_assignment_shape = CONTAINS(text, '=')
+                 FILTER (url_assignment_shape OR port_assignment_shape)
+                   AND !media_reference_shape
+                 LET score = LENGTH(matched_terms) * 3000
+                   + (url_assignment_shape ? 4500 : 0)
+                   + (port_assignment_shape ? 2200 : 0)
+                   + (section_shape ? 900 : 0)
+                   + (config_assignment_shape ? 600 : 0)
+                 SORT score DESC, chunk.revision_id DESC, chunk.chunk_index ASC, chunk.chunk_id ASC
+                 LIMIT @limit
+                 RETURN chunk",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "library_id": library_id,
+                    "terms": terms,
+                    "limit": limit,
+                }),
+            )
+            .await
+            .context("failed to search transport-pattern knowledge chunks")?;
         decode_many_results(cursor)
     }
 
@@ -1778,5 +2013,45 @@ mod tests {
         assert_eq!(terms[0].chars().count(), KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS);
         assert!(terms.contains(&"alpha".to_string()));
         assert!(terms.contains(&"beta".to_string()));
+    }
+
+    #[test]
+    fn vector_inventory_mismatch_counts_ready_revisions_missing_per_dim_vectors() {
+        let revision_a = Uuid::from_u128(1);
+        let revision_b = Uuid::from_u128(2);
+        let revision_c = Uuid::from_u128(3);
+        let ready_revisions = vec![revision_a, revision_b, revision_c];
+        let vector_revisions = HashSet::from([revision_a, revision_c]);
+
+        assert_eq!(
+            ArangoDocumentStore::count_missing_revision_vectors(
+                &ready_revisions,
+                &vector_revisions
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn code_pattern_assignment_regex_targets_identifier_numeric_lists() {
+        let assignment =
+            regex::RegexBuilder::new(CODE_PATTERN_ASSIGNMENT_REGEX).case_insensitive(true).build();
+        let mapping = regex::RegexBuilder::new(CODE_PATTERN_NUMERIC_MAPPING_REGEX)
+            .case_insensitive(true)
+            .build();
+        let Ok(assignment) = assignment else {
+            panic!("code pattern assignment regex must compile");
+        };
+        let Ok(mapping) = mapping else {
+            panic!("code pattern numeric mapping regex must compile");
+        };
+        let text = "[Main]\nterminalErrorCodes = 101, 202, 303\n101 = Retry payment";
+
+        assert!(assignment.is_match(text));
+        assert!(mapping.is_match(text));
+        assert!(
+            !assignment.is_match("101 = Retry payment"),
+            "mapping rows are a companion signal, not the primary code-pattern assignment"
+        );
     }
 }

@@ -1220,6 +1220,86 @@ fn build_deterministic_grounded_answer_uses_parameter_meaning_from_structured_bl
 }
 
 #[test]
+fn build_deterministic_grounded_answer_extracts_error_code_assignment_mapping() {
+    let document_id = Uuid::now_v7();
+    let answer = build_deterministic_grounded_answer(
+        "Which error codes can the card processor return?",
+        &query_ir_with_act_scope_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["error_code"],
+        ),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "payment_terminal_config.md".to_string(),
+            excerpt: "customerVisibleErrorCodes = 101, 202".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+            score: Some(100_000.0),
+            source_text: repair_technical_layout_noise(
+                "[Terminal]\ncustomerVisibleErrorCodes = 101, 202\n[ErrorMessages]\n101 = Card unreadable\n202 = Cancelled by customer",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.starts_with("`customerVisibleErrorCodes`"), "{answer}");
+    assert!(answer.contains("`customerVisibleErrorCodes`"), "{answer}");
+    assert!(answer.contains("`101`"), "{answer}");
+    assert!(answer.contains("Card unreadable"), "{answer}");
+    assert!(answer.contains("`202`"), "{answer}");
+    assert!(answer.contains("Cancelled by customer"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_extracts_transport_config_assignments() {
+    let document_id = Uuid::now_v7();
+    let answer = build_deterministic_grounded_answer(
+        "Which ports and connections does the checkout service require?",
+        &query_ir_with_act_scope_and_target_types(
+            QueryAct::RetrieveValue,
+            QueryScope::SingleDocument,
+            ["port", "connection"],
+        ),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "checkout_service_config.md".to_string(),
+            excerpt: "Example connection settings.".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+            score: Some(100_000.0),
+            source_text: repair_technical_layout_noise(
+                "Example settings [Connector] ;serviceUrl = http://localhost:8080 ;requestTimeout = 30 ;ignoreConnectionErrors = false",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.starts_with("`checkout_service_config.md`"), "{answer}");
+    assert!(answer.contains("`serviceUrl` = `http://localhost:8080`"), "{answer}");
+    assert!(answer.contains("`requestTimeout` = `30`"), "{answer}");
+    assert!(answer.contains("`ignoreConnectionErrors` = `false`"), "{answer}");
+}
+
+#[test]
 fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despite_foreign_noise() {
     let document_id = Uuid::now_v7();
     let foreign_document_id = Uuid::now_v7();

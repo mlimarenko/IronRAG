@@ -80,13 +80,56 @@ pub fn build_task_query_plan(
 #[must_use]
 pub fn extract_keywords(question: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
-    question
+    strip_leading_question_marker(question)
         .split_whitespace()
         .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric()))
         .filter(|token| token.chars().count() >= TOKEN_MIN_LEN)
         .map(str::to_lowercase)
         .filter(|token| seen.insert(token.clone()))
         .collect()
+}
+
+#[must_use]
+pub fn strip_leading_question_marker(question: &str) -> &str {
+    let trimmed = question.trim_start();
+    let Some((marker, rest)) = trimmed.split_once(char::is_whitespace) else {
+        return trimmed;
+    };
+    let marker = marker.trim_matches(|ch: char| matches!(ch, '(' | '[' | '{'));
+    if !marker.ends_with(|ch: char| matches!(ch, '.' | ')' | ']' | '}' | ':' | '-')) {
+        return trimmed;
+    }
+    let marker =
+        marker.trim_end_matches(|ch: char| matches!(ch, '.' | ')' | ']' | '}' | ':' | '-'));
+    if is_leading_question_marker(marker) { rest.trim_start() } else { trimmed }
+}
+
+fn is_leading_question_marker(marker: &str) -> bool {
+    let chars = marker.chars().collect::<Vec<_>>();
+    if chars.is_empty() || chars.len() > 4 || !chars.iter().all(|ch| ch.is_ascii_alphanumeric()) {
+        return false;
+    }
+
+    if chars.iter().all(|ch| ch.is_ascii_digit()) {
+        return true;
+    }
+
+    if chars.first().is_some_and(|ch| ch.is_ascii_digit()) {
+        let digit_len = chars.iter().take_while(|ch| ch.is_ascii_digit()).count();
+        return digit_len + 1 == chars.len()
+            && chars.last().is_some_and(|ch| ch.is_ascii_alphabetic());
+    }
+
+    if chars.first().is_some_and(|ch| ch.eq_ignore_ascii_case(&'q')) {
+        let tail = &chars[1..];
+        let digit_len = tail.iter().take_while(|ch| ch.is_ascii_digit()).count();
+        return digit_len >= 2
+            && (digit_len == tail.len()
+                || (digit_len + 1 == tail.len()
+                    && tail.last().is_some_and(|ch| ch.is_ascii_alphabetic())));
+    }
+
+    false
 }
 
 #[must_use]
@@ -202,7 +245,7 @@ fn is_multi_document_technical_question(question: &str) -> bool {
 #[must_use]
 pub fn extract_keywords_preserving_case(question: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
-    question
+    strip_leading_question_marker(question)
         .split_whitespace()
         .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.'))
         .filter(|token| token.chars().count() >= TOKEN_MIN_LEN)
@@ -278,6 +321,54 @@ mod tests {
         assert!(keywords.contains(&"café".to_string()));
         assert!(keywords.contains(&"δelta".to_string()));
         assert!(keywords.contains(&"alphakey".to_string()));
+    }
+
+    #[test]
+    fn extract_keywords_strips_leading_question_markers() {
+        let keywords = extract_keywords("Q16. Which ports should a terminal use?");
+        assert!(!keywords.contains(&"q16".to_string()));
+        assert!(keywords.contains(&"which".to_string()));
+        assert!(keywords.contains(&"ports".to_string()));
+
+        let numbered = extract_keywords("10b) Which ports should a terminal use?");
+        assert!(!numbered.contains(&"10b".to_string()));
+        assert!(numbered.contains(&"terminal".to_string()));
+    }
+
+    #[test]
+    fn extract_keywords_keeps_embedded_identifier_tokens() {
+        let keywords = extract_keywords("HTTP2 routing settings");
+        assert!(keywords.contains(&"http2".to_string()));
+        assert!(keywords.contains(&"routing".to_string()));
+    }
+
+    #[test]
+    fn extract_keywords_keeps_leading_identifier_without_marker_separator() {
+        let keywords = extract_keywords("H2O sampling routine");
+        assert!(keywords.contains(&"h2o".to_string()));
+        assert!(keywords.contains(&"sampling".to_string()));
+
+        let robot = extract_keywords("R2D2 deployment notes");
+        assert!(robot.contains(&"r2d2".to_string()));
+        assert!(robot.contains(&"deployment".to_string()));
+    }
+
+    #[test]
+    fn leading_question_marker_strip_preserves_short_structural_prefixes() {
+        assert_eq!(
+            strip_leading_question_marker("Q16. Which ports should a terminal use?"),
+            "Which ports should a terminal use?"
+        );
+        assert_eq!(
+            strip_leading_question_marker("10b) Which ports should a terminal use?"),
+            "Which ports should a terminal use?"
+        );
+        assert_eq!(strip_leading_question_marker("RFC. connection notes"), "RFC. connection notes");
+        assert_eq!(strip_leading_question_marker("ISO. export profile"), "ISO. export profile");
+        assert_eq!(strip_leading_question_marker("API: request shape"), "API: request shape");
+        assert_eq!(strip_leading_question_marker("v1. migration notes"), "v1. migration notes");
+        assert_eq!(strip_leading_question_marker("H2: sampling routine"), "H2: sampling routine");
+        assert_eq!(strip_leading_question_marker("Q4: rollout plan"), "Q4: rollout plan");
     }
 
     #[test]

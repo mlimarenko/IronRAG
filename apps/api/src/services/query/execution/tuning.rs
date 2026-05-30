@@ -8,7 +8,7 @@
 //! `agent_loop.rs`, and friends.
 //!
 //! Low-level implementation knobs that do not affect visible behaviour
-//! (CRAG score threshold, lexical-query fan-out cap, etc.) deliberately
+//! (HyDE passage toggle, lexical-query fan-out cap, etc.) deliberately
 //! stay next to the code that uses them — centralising those here
 //! would just add indirection without operator value.
 

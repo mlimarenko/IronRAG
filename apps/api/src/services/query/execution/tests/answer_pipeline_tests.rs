@@ -156,6 +156,10 @@ fn build_answer_prompt_prioritizes_library_context() {
     assert!(prompt.contains("Do not ask the user to upload"));
     assert!(prompt.contains("Exact technical literals section"));
     assert!(prompt.contains("copy those literals verbatim from Context"));
+    assert!(prompt.contains("preserve every visible matching row"));
+    assert!(prompt.contains("do not mention the retrieval machinery"));
+    assert!(prompt.contains("combined aggregate label"));
+    assert!(prompt.contains("module's own configuration path"));
     assert!(prompt.contains("grouped by document"));
     assert!(prompt.contains("matched excerpt"));
     assert!(prompt.contains("Do not combine parts from different snippets"));

@@ -1,5 +1,286 @@
 # Changelog
 
+## 0.4.20 — 2026-05-30
+
+### Changed
+
+- Container memory caps for the API backend and ingest worker are
+  rebalanced for host-level OOM containment. Both now run with a 4 GiB
+  limit, which resolves the docling ingest auto-concurrency to 1 (see
+  `auto_docling_max_concurrency_for_limits`) so a docling/python memory
+  spike is bounded to — and cgroup-OOM-killed inside — the worker's own
+  limit (the job then retries) instead of exhausting host pages and
+  letting the kernel OOM-killer pick the larger-RSS API backend as the
+  victim. The worker additionally carries an `oom_score_adj` bias so the
+  kernel prefers it over the backend when the host is genuinely out of
+  memory. ArangoDB keeps its dedicated 6 GiB tier, sized for the IVF
+  build of the largest active per-(library,dim) vector shard. The
+  `docker-compose.yml` resource anchors and the Helm chart
+  (`charts/ironrag/values.yaml`) are updated in lockstep.
+
+### Fixed
+
+- Graph-extraction failure no longer discards already-embedded chunk
+  vectors or blocks a document from becoming searchable. Graph
+  entities/relations are an enrichment layer over chunk-vector
+  retrieval; previously a terminal graph-extraction failure on a single
+  chunk marked the whole revision's vector state failed, deleted the
+  chunk vectors that were already embedded, and failed the document so
+  it was unsearchable even via pure vector/lexical retrieval — and the
+  idle self-healing loop could never recover it because the failed
+  revision was never promoted to active. Now, when the chunk vectors
+  already exist, a graph-extraction failure degrades gracefully: the
+  vectors are kept, the document is promoted to readable, the graph
+  layer is marked `graph_degraded`, and the idle graph re-extract loop
+  backfills the graph on a later tick. Only a genuine embedding failure
+  (no vectors to preserve) still fails the revision. Both the async
+  ingest worker and the inline mutation pipeline share this behavior.
+- Graph-extraction JSON parsing tolerates provider output that wraps the
+  JSON in a markdown code fence or surrounds it with prose. The
+  normalizer previously required the entire provider response to be a
+  single clean JSON document (`serde_json::from_str` on the whole
+  string), so an intermittently chatty model response failed extraction
+  outright. Parsing now keeps the fast path for clean JSON and adds
+  structural fallbacks — strip a wrapping code fence, then scan for the
+  first balanced top-level JSON object/array (honoring string literals)
+  — without inspecting the natural language of any surrounding text, so
+  it stays language-agnostic.
+- Library snapshot export no longer silently returns HTTP 200 with a
+  truncated archive when an upstream stage (e.g. arango vector
+  collection export) fails. The tar `Builder` and zstd stream are now
+  finalized on every code path, and the failure path writes a sentinel
+  `EXPORT_FAILED.json` tar entry so clients can detect failure even
+  when the response status has already been committed. The underlying
+  panic (`Builder dropped without finalizing` from `async-tar`) is
+  eliminated, and the per-dim chunk/entity vector shards are exported
+  with a smaller AQL cursor `batchSize` to keep Arango cursor and
+  in-process memory bounded on libraries up to ~117k chunk vectors.
+- Library snapshot export, v2: large libraries no longer produce
+  silently-truncated archives when the underlying ArangoDB cursor
+  errors deep into a multi-batch vector collection. Vector
+  collections (per-dim chunk/entity shards plus the legacy single-dim
+  `knowledge_chunk_vector` / `knowledge_entity_vector` collections)
+  now stream each AQL cursor batch directly into its own tar part
+  instead of buffering up to 64 MiB before flushing, and a per-
+  collection 30-minute wall-clock budget aborts hung cursor stages
+  with a clear error message instead of letting the exporter hang.
+- Library / workspace deletion: the sync delete path now cascades the
+  Postgres delete into ArangoDB. Previously `delete_library` and
+  `delete_workspace` removed only the Postgres row; knowledge vertex
+  collections, every per-dim vector shard, and the edge collections
+  in Arango have no FK back to PG and were left behind as orphans.
+  Both code paths now call the canonical snapshot-restore replace
+  sweep (`clear_library_arango_footprint`) after the PG cascade so
+  every knowledge_* row tied to the library is removed in the same
+  request. `delete_workspace` enumerates the workspace's libraries
+  before the PG cascade and sweeps each one's Arango footprint after
+  the PG transaction commits.
+- Library snapshot import: bulk inserts into Arango vector collections
+  use a smaller batch size (100 rows vs 1000) to stay within the
+  ArangoDB document-bulk HTTP request size limits. Combined with the
+  earlier streaming-cursor export fix, libraries with >100k chunk
+  vectors can now snapshot+restore end-to-end. Full anyhow error
+  chain is also logged at the import entrypoint so future failures
+  surface their underlying cause instead of a top-level wrapper.
+- The deterministic module-configuration answer renderer no longer
+  embeds hardcoded natural-language section labels. The fallback now
+  emits only the grounded values (source document, package commands,
+  configuration paths, parameter rows) as language-neutral markdown,
+  leaving all phrasing and language to the model. This removes a
+  per-language label dictionary from the answer path, in line with the
+  project's no-hardcoded-language policy.
+- The startup AI-catalog preset seed no longer overwrites an operator-set
+  `max_output_tokens_override` on every boot. An operator-raised model
+  output budget now persists across restarts instead of silently reverting
+  to the catalog default, which previously could truncate output and fail
+  ingest stages after a restart.
+
+### Added
+
+- `ironrag-audit-orphan-data` one-shot binary scans every ArangoDB
+  knowledge_* collection (vertex collections, every per-dim vector
+  shard, and edge collections) for rows whose `library_id` does not
+  match a live PostgreSQL `catalog_library` row, reports per-library
+  per-collection orphan counts as JSON, and — with `--purge --yes` —
+  deletes the orphan rows through the same canonical sweep snapshot
+  restore uses. Useful for cleaning up deployments that predate the
+  delete cascade fix.
+
+#### Debug inspector & per-turn observability
+
+- The assistant debug inspector is redesigned into one cohesive panel: a
+  per-turn timeline (pipeline stages with time-share bars), the model
+  calls with generation time and tool-wait split plus token counts, and a
+  drill-down into each `grounded_answer` child execution. Hovering any row
+  reveals the exact figures in a styled tooltip rather than a delayed
+  native title; conversational filler was removed from labels.
+- Per-execution span capture: DB queries, retrieval lanes
+  (vector / lexical / companion loaders), question embedding, and HyDE are
+  recorded as timed spans on the turn's debug snapshot and shown in the
+  inspector grouped by kind and sorted by duration, so operators can see
+  the heaviest sections of a turn and catch regressions over time. Spans
+  propagate across the same-task concurrency the retrieval path uses.
+- Arango query spans now resolve the real collection name (e.g. the active
+  per-dim vector shard) instead of a generic placeholder.
+- The pipeline-stage view in the debug inspector is now a compact
+  interactive stacked bar with a wrapping legend and instant hover
+  tooltips (stage name, duration, share of total). The "total time" stat
+  reflects the real end-to-end turn wall-clock (matching the chat's
+  reply-latency badge), and the LLM-iteration stat reflects the actual
+  model call count — removing the earlier inconsistency where the
+  header, the stat card, and the rendered list showed different values.
+- Chat messages show a timestamp and, on assistant replies, the response
+  latency, so answer speed is visible at a glance.
+- Diagnostics (OTLP traces, metrics, logs) ship by default to the
+  configured collector and carry canonical resource labels; disable with
+  `IRONRAG_OTEL_ENABLED=false` or repoint with `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+#### Per-library vector dimensions
+
+- ArangoDB chunk and entity vector storage is now sharded by embedding
+  dimension. Each library writes into the collection whose dim equals
+  its active `embed_chunk` binding's vector length
+  (`knowledge_chunk_vector_d<dim>` and `knowledge_entity_vector_d<dim>`),
+  with its own ANN index per shard. Libraries on different embedding
+  models coexist without dropping each other's vectors.
+- `ironrag-vector-rebuild <library-uuid>` rebuilds **only** that
+  library — the previous cross-library precondition check that forced
+  every library to agree on dim is removed. Other libraries on
+  different dims keep running.
+- New binary `ironrag-vector-migrate-to-per-dim` moves rows from the
+  legacy single-dim `knowledge_chunk_vector` / `knowledge_entity_vector`
+  collections into the per-dim shards. Idempotent: a second run with
+  the legacy collection empty is a no-op.
+- Snapshot export/restore enumerates per-dim shards at runtime instead
+  of from a static collection list; the snapshot envelope carries a
+  vector-shard manifest so restore on a fresh deployment lazy-ensures
+  the same shape.
+- `gc-stale-chunks` now walks every per-dim chunk and entity vector
+  shard in addition to the legacy collection.
+
+#### Per-library vector shards
+
+- Building on the per-dim sharding above, chunk vectors are now stored
+  in and searched from a per-`(library, dim)` shard
+  (`knowledge_chunk_vector_d{dim}_l{library}`) so an approximate-
+  nearest-neighbour scan covers only one library's vectors instead of
+  the whole instance's. New libraries are born sharded. A library that
+  still has rows in the shared per-dim shard keeps its new chunk-vector
+  writes on that shared shard as well — so the whole library stays on a
+  single shard and an upgrade never strands its older vectors — while
+  reads fall back to the shared shard until the migration moves the
+  library. Entity vectors remain on the shared per-dim shard
+  (`knowledge_entity_vector_d{dim}`).
+- New idempotent maintenance command
+  `ironrag-maintenance migrate chunk-vector-per-library` drains the
+  shared per-dim shard into per-library shards. Re-runs after
+  interruption are safe.
+
+#### Rate-limited null-head auto-recovery
+
+- New `repair null-heads-auto` subcommand performs the same head
+  promotion as the existing `repair null-heads`, but each per-document
+  outcome is recorded on `content_document_head` so the recovery
+  budget is bounded. Three consecutive same-error failures stamp
+  `dead_letter_at`; documents touched in the last hour are skipped.
+  A different error code resets the consecutive-failure counter so a
+  flaky upstream that produces multiple error shapes still consumes
+  one attempt per shape.
+- New `repair clear-recovery-dead-letter --document <uuid>` operator
+  knob to resume auto-recovery on a single document after the
+  underlying failure has been diagnosed and fixed.
+
+#### Maintenance scheduler + PG sweepers
+
+- New durable scheduler loop runs in the worker role and walks the
+  canonical maintenance classes on a rolling cadence (default 30 s
+  tick, 1 hour between successful runs of the same scope per class).
+  Each tick reaps stale leases, bootstraps missing
+  `maintenance_job_run` rows, and atomically picks the
+  oldest-pending due row per enabled class. Currently dispatches
+  `gc.stale-chunks`; the new evidence and retention sweepers below
+  ship as operator-CLI first and graduate to the scheduler after
+  burn-in. Settings: `IRONRAG_MAINTENANCE_ENABLED` (default `true` for
+  worker role), `IRONRAG_MAINTENANCE_TICK_INTERVAL_SECONDS` (`30`),
+  `IRONRAG_MAINTENANCE_CLASS_INTERVAL_SECONDS` (`3600`),
+  `IRONRAG_MAINTENANCE_STALE_LEASE_SECONDS` (`300`).
+- New `gc stale-evidence` sweeper deletes `runtime_graph_evidence`
+  rows whose revision is no longer the readable or active head of
+  the document, plus rows whose `chunk_id` points at a chunk that
+  has already been swept. Holds the per-library graph advisory lock
+  and refuses to run while ingest is in flight on the library.
+- New `retention stage-events` sweeper issues batched DELETEs (10 000
+  rows / 100 ms pause) on `ingest_stage_event` older than
+  `--older-than-days` (default 90 days when called from the
+  scheduler). Migration 0017 adds the matching
+  `idx_ingest_stage_event_recorded_at` so the predicate compiles to
+  an index range scan instead of a sequential scan.
+
+#### Maintenance binary consolidation
+
+- The per-task maintenance binaries that previously shipped alongside
+  `ironrag-backend` are removed and their behaviour moved into
+  `ironrag-maintenance` subcommands. Canonical surface is one CLI with
+  one `--help` tree, one init path, and one `--dry-run` / `--json` /
+  `--library` flag style. The legacy binary names are dropped without
+  shim aliases.
+
+  | Removed binary | Replacement subcommand |
+  |---|---|
+  | `ironrag-gc-stale-chunks` | `ironrag-maintenance gc stale-chunks` |
+  | `ironrag-audit-orphan-data` | `ironrag-maintenance audit orphan-libraries` (read-only) + `ironrag-maintenance gc orphan-libraries --yes` (destructive) |
+  | `ironrag-promote-null-heads` | `ironrag-maintenance repair null-heads` |
+  | `ironrag-vector-migrate-to-per-dim` | `ironrag-maintenance migrate vector-per-dim` |
+  | `ironrag-vector-rebuild` | `ironrag-maintenance rebuild vector-plane --source-library <uuid>` |
+  | `ironrag-backfill-chunk-temporal-bounds` | `ironrag-maintenance migrate chunk-temporal-bounds` |
+  | `rebuild_runtime_graph` | `ironrag-maintenance rebuild runtime-graph` |
+
+  Each old binary's logic now lives under the corresponding
+  `services::maintenance::{audit,gc,repair,migrate,rebuild}` module so
+  the same canonical code path is used by the operator CLI and by the
+  scheduler tick. Docker image installs only `ironrag-backend`,
+  `ironrag-cli`, `ironrag-emit-openapi`, and `ironrag-maintenance` —
+  the previous bin clutter (10 binaries) is reduced to 4.
+
+#### Maintenance pipeline foundation
+
+- New canonical operator binary `ironrag-maintenance` with grouped
+  subcommands: `audit storage-summary`, `audit index-bloat`,
+  `audit null-head-docs`, `gc stale-chunks`, `lease show`,
+  `lease summary`, `lease clear-failure`, `lease reap-stale`. All
+  subcommands share a single init path, a uniform `--dry-run` /
+  `--json` / `--library` flag style, and a stable `--help` tree;
+  future sweepers (retention, repair, index reindex, …) plug into
+  this layout without renames.
+- New migration `0017_maintenance_baseline.sql` adds the durable
+  `maintenance_job_run` lease table (per-(class, scope) lifecycle
+  row carrying state, cursor, attempts, heartbeat, dead-letter and
+  next-due timestamps) plus indexes for the scheduler tick and the
+  stale-lease reaper. Idempotent: `CREATE … IF NOT EXISTS`, enum
+  via DO block, safe to re-apply.
+- The same migration adds `recovery_attempts_count`,
+  `last_recovery_error_code`, `last_recovery_attempt_at` and
+  `dead_letter_at` columns to `content_document_head`, plus a
+  partial recovery-candidate index. These back a bounded null-head
+  retry contract that the ingest worker will use to rate-limit
+  recovery attempts before marking a document dead-letter.
+- New module `services::maintenance::lease` exposes the canonical
+  lease primitives (`acquire_next_due`, `heartbeat`, `update_cursor`,
+  `complete`, `fail`, `clear_dead_letter`, `reap_stale_leases`,
+  `count_by_state`). The scheduler tick and the operator CLI both
+  depend on the same surface — there is one source of truth for
+  "what is currently running, what failed, what to retry next".
+- New module `services::maintenance::gc` houses the canonical
+  implementation of `gc.stale-chunks`. The sweeper now acquires the
+  per-library graph advisory lock and refuses to run while any
+  `ingest_job` for the library is `queued` / `leased` / `paused` —
+  closing a race where a concurrent ingest could write chunks the
+  sweeper had already classified as stale. Optional
+  `--include-null-head` flag opts in to deleting chunks and vectors
+  for failed-ingest documents whose head is null on both pointers
+  (off by default; the conservative path keeps recoverable docs
+  intact).
+
 ## 0.4.19 — 2026-05-22
 
 ### Connectors

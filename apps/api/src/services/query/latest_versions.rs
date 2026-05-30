@@ -5,8 +5,15 @@ const LATEST_VERSION_MAX_COUNT: usize = 10;
 pub(crate) const LATEST_VERSION_CHUNKS_PER_DOCUMENT: usize = 4;
 
 pub(crate) fn query_requests_latest_versions(ir: &QueryIR) -> bool {
+    let has_version_literal =
+        ir.literal_constraints.iter().any(|literal| matches!(literal.kind, LiteralKind::Version));
+    let has_explicit_tail_slice = ir
+        .source_slice
+        .as_ref()
+        .is_some_and(|slice| matches!(slice.direction, SourceSliceDirection::Tail));
     matches!(ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
-        && ir_target_types_include(ir, &["version"])
+        && ir_target_types_include(ir, &["version", "release"])
+        && (!has_version_literal || has_explicit_tail_slice)
         && ir
             .source_slice
             .as_ref()
@@ -67,11 +74,7 @@ pub(crate) fn latest_version_scope_terms(ir: &QueryIR) -> Vec<String> {
             })
             .flat_map(|literal| lexical_tokens(&literal.text)),
     );
-    terms
-        .into_iter()
-        .filter(|token| token.chars().count() >= 3)
-        .filter(|token| !token.chars().any(|ch| ch.is_ascii_digit()))
-        .collect()
+    terms.into_iter().filter(|token| token.chars().count() >= 3).collect()
 }
 
 pub(crate) fn latest_version_family_key(text: &str) -> String {
@@ -133,6 +136,12 @@ pub(crate) fn extract_semver_like_version(text: &str) -> Option<Vec<u32>> {
         if !ch.is_ascii_digit() {
             continue;
         }
+        if index > 0 {
+            let previous = chars[index - 1].1;
+            if previous.is_ascii_digit() || previous == '.' {
+                continue;
+            }
+        }
         let mut end = start + ch.len_utf8();
         for &(_, next) in chars.iter().skip(index + 1) {
             if next.is_ascii_digit() || next == '.' {
@@ -148,11 +157,15 @@ pub(crate) fn extract_semver_like_version(text: &str) -> Option<Vec<u32>> {
             .map(str::parse::<u32>)
             .collect::<Result<Vec<_>, _>>()
             .ok()?;
-        if parts.len() >= 2 {
+        if version_parts_are_release_like(&parts) {
             return Some(parts);
         }
     }
     None
+}
+
+fn version_parts_are_release_like(parts: &[u32]) -> bool {
+    parts.len() >= 2 && parts.first().copied().is_some_and(|major| !(1900..=2100).contains(&major))
 }
 
 pub(crate) fn compare_version_desc(left: &[u32], right: &[u32]) -> std::cmp::Ordering {

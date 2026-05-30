@@ -68,6 +68,25 @@ export default function AssistantPage() {
     return null;
   }, [assistant.messages]);
 
+  const latestTurnWallClockMs = useMemo(() => {
+    const messages = assistant.messages;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const msg = messages[i];
+      if (msg.role === 'assistant' && msg.timestamp) {
+        const assistantMs = Date.parse(msg.timestamp);
+        for (let j = i - 1; j >= 0; j -= 1) {
+          const prev = messages[j];
+          if (prev?.role === 'user' && prev.timestamp) {
+            const delta = assistantMs - Date.parse(prev.timestamp);
+            return Number.isFinite(delta) && delta > 0 ? delta : undefined;
+          }
+        }
+        return undefined;
+      }
+    }
+    return undefined;
+  }, [assistant.messages]);
+
   const { openDebugFor, setDebugContext, debugContext, debugLoadingId } = assistant;
 
   const handleToggleDebug = useCallback(() => {
@@ -160,6 +179,7 @@ export default function AssistantPage() {
         error={assistant.debugError}
         evidence={assistant.latestEvidence ?? null}
         loading={Boolean(debugLoadingId)}
+        turnWallClockMs={latestTurnWallClockMs}
         onClose={handleCloseDebug}
         onWidthChange={setDebugPanelWidth}
       />

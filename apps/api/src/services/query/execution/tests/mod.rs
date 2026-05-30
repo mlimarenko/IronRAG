@@ -49,6 +49,7 @@ fn generic_query_ir() -> QueryIR {
         conversation_refs: Vec::new(),
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 0.0,
     }
 }

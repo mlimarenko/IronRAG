@@ -5,6 +5,7 @@ pub mod graph;
 pub mod iam;
 pub mod ingest;
 pub mod knowledge;
+pub mod maintenance;
 pub mod mcp;
 pub mod ops;
 pub mod query;

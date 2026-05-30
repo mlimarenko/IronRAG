@@ -1,6 +1,5 @@
 ---
 source: apps/api/tests/mcp_grounded_answer_contract.rs
-assertion_line: 77
 expression: shapes
 ---
 [
@@ -90,6 +89,7 @@ expression: shapes
     "shortcutMatchesExecutionDetail": {
       "conversationId": true,
       "executionId": true,
+      "finalAnswerReady": true,
       "libraryId": true,
       "lifecycleState": true,
       "runtimeExecutionId": true,
@@ -99,6 +99,7 @@ expression: shapes
       "conversationId",
       "executionDetail",
       "executionId",
+      "finalAnswerReady",
       "libraryId",
       "lifecycleState",
       "runtimeExecutionId",
@@ -132,6 +133,7 @@ expression: shapes
       ]
     },
     "verifier": {
+      "finalAnswerReady": true,
       "state": "verified",
       "warningCount": 0,
       "warningShapes": []
@@ -241,6 +243,7 @@ expression: shapes
     "shortcutMatchesExecutionDetail": {
       "conversationId": true,
       "executionId": true,
+      "finalAnswerReady": true,
       "libraryId": true,
       "lifecycleState": true,
       "runtimeExecutionId": true,
@@ -250,6 +253,7 @@ expression: shapes
       "conversationId",
       "executionDetail",
       "executionId",
+      "finalAnswerReady",
       "libraryId",
       "lifecycleState",
       "runtimeExecutionId",
@@ -283,6 +287,7 @@ expression: shapes
       ]
     },
     "verifier": {
+      "finalAnswerReady": true,
       "state": "verified",
       "warningCount": 0,
       "warningShapes": []
@@ -341,6 +346,7 @@ expression: shapes
     "shortcutMatchesExecutionDetail": {
       "conversationId": true,
       "executionId": true,
+      "finalAnswerReady": true,
       "libraryId": true,
       "lifecycleState": true,
       "runtimeExecutionId": true,
@@ -350,6 +356,7 @@ expression: shapes
       "conversationId",
       "executionDetail",
       "executionId",
+      "finalAnswerReady",
       "libraryId",
       "lifecycleState",
       "runtimeExecutionId",
@@ -383,6 +390,7 @@ expression: shapes
       ]
     },
     "verifier": {
+      "finalAnswerReady": false,
       "state": "insufficient_evidence",
       "warningCount": 1,
       "warningShapes": [
@@ -495,6 +503,7 @@ expression: shapes
     "shortcutMatchesExecutionDetail": {
       "conversationId": true,
       "executionId": true,
+      "finalAnswerReady": true,
       "libraryId": true,
       "lifecycleState": true,
       "runtimeExecutionId": true,
@@ -504,6 +513,7 @@ expression: shapes
       "conversationId",
       "executionDetail",
       "executionId",
+      "finalAnswerReady",
       "libraryId",
       "lifecycleState",
       "runtimeExecutionId",
@@ -537,6 +547,7 @@ expression: shapes
       ]
     },
     "verifier": {
+      "finalAnswerReady": false,
       "state": "conflicting",
       "warningCount": 1,
       "warningShapes": [
@@ -641,6 +652,7 @@ expression: shapes
     "shortcutMatchesExecutionDetail": {
       "conversationId": true,
       "executionId": true,
+      "finalAnswerReady": true,
       "libraryId": true,
       "lifecycleState": true,
       "runtimeExecutionId": true,
@@ -650,6 +662,7 @@ expression: shapes
       "conversationId",
       "executionDetail",
       "executionId",
+      "finalAnswerReady",
       "libraryId",
       "lifecycleState",
       "runtimeExecutionId",
@@ -683,6 +696,7 @@ expression: shapes
       ]
     },
     "verifier": {
+      "finalAnswerReady": true,
       "state": "verified",
       "warningCount": 0,
       "warningShapes": []
@@ -782,6 +796,7 @@ expression: shapes
     "shortcutMatchesExecutionDetail": {
       "conversationId": true,
       "executionId": true,
+      "finalAnswerReady": true,
       "libraryId": true,
       "lifecycleState": true,
       "runtimeExecutionId": true,
@@ -791,6 +806,7 @@ expression: shapes
       "conversationId",
       "executionDetail",
       "executionId",
+      "finalAnswerReady",
       "libraryId",
       "lifecycleState",
       "runtimeExecutionId",
@@ -824,6 +840,7 @@ expression: shapes
       ]
     },
     "verifier": {
+      "finalAnswerReady": false,
       "state": "partially_supported",
       "warningCount": 1,
       "warningShapes": [

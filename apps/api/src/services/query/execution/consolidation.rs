@@ -652,6 +652,19 @@ pub(crate) fn decide_focus(
     }
     let aggregates = aggregate_by_document(&bundle.chunks, question);
 
+    for (i, a) in aggregates.iter().take(3).enumerate() {
+        tracing::info!(
+            stage = "consolidation.decide_focus_inputs",
+            rank = i,
+            document_id = %a.document_id,
+            best_score = a.best_score,
+            evidence_count = a.evidence_count,
+            aggregate_count = aggregates.len(),
+            top_k,
+            "decide_focus aggregate snapshot"
+        );
+    }
+
     // Priority order: explicit hint → single-doc subject → only
     // retrieved document → evidence dominance. The first match wins;
     // later branches do not run.
@@ -911,6 +924,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }

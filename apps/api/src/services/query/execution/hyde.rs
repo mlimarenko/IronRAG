@@ -9,6 +9,7 @@ pub(super) async fn generate_hyde_passage(
     library_id: Uuid,
     question: &str,
 ) -> anyhow::Result<String> {
+    let span_started = std::time::Instant::now();
     let binding = state
         .canonical_services
         .ai_catalog
@@ -46,6 +47,13 @@ pub(super) async fn generate_hyde_passage(
         }
     };
 
+    crate::services::query::turn_spans::record_span(
+        "hyde.generate",
+        "llm",
+        span_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        None,
+        None,
+    );
     normalize_hyde_passage(&response.output_text)
 }
 

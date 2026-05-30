@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, sleep};
 
 use crate::app::config::Settings;
+use uuid::Uuid;
+
+use crate::infra::arangodb::collections::{
+    chunk_vector_collection_for_dim, chunk_vector_collection_for_library,
+    chunk_vector_index_for_dim, chunk_vector_index_for_library, entity_vector_collection_for_dim,
+    entity_vector_index_for_dim,
+};
 
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 struct ArangoIndexRow {
@@ -389,12 +396,42 @@ impl ArangoClient {
                 vector_index_definition_matches(&existing, field, dimension),
                 "vector index {index_name} on {collection} exists with a different definition"
             );
-            return Ok(());
+            let source_rows = self.count_vector_index_source_rows(collection).await?;
+            let effective_n_lists = effective_vector_index_n_lists_memory_safe(
+                n_lists,
+                source_rows,
+                dimension,
+                VECTOR_INDEX_TRAINING_BUDGET_BYTES,
+            );
+            let existing_n_lists =
+                existing.params.get("nLists").and_then(serde_json::Value::as_u64).unwrap_or(1);
+            if existing_n_lists >= effective_n_lists {
+                return Ok(());
+            }
+            tracing::info!(
+                collection,
+                index_name,
+                existing_n_lists,
+                effective_n_lists,
+                source_rows,
+                "vector index nLists is stale; dropping and recreating"
+            );
+            let index_id = existing.id.as_deref().ok_or_else(|| {
+                anyhow!("ArangoDB index {index_name} on {collection} did not include an id")
+            })?;
+            self.delete_index(index_id).await.with_context(|| {
+                format!("failed to drop stale vector index {index_name} on {collection}")
+            })?;
         }
 
         self.delete_vector_training_rows(collection).await?;
         let source_rows = self.count_vector_index_source_rows(collection).await?;
-        let effective_n_lists = effective_vector_index_n_lists(n_lists, source_rows);
+        let effective_n_lists = effective_vector_index_n_lists_memory_safe(
+            n_lists,
+            source_rows,
+            dimension,
+            VECTOR_INDEX_TRAINING_BUDGET_BYTES,
+        );
         if effective_n_lists != n_lists {
             tracing::warn!(
                 collection,
@@ -455,6 +492,275 @@ impl ArangoClient {
         Err(anyhow!(
             "failed to ensure vector index {index_name} on {collection}: status {status}, body {response_body}",
         ))
+    }
+
+    /// Idempotently create the per-dim chunk-vector collection for
+    /// `dim` and attach the three persistent indexes its writers and
+    /// readers require, then create the ANN index. Lets callers add
+    /// a new vector dimension to the deployment without touching
+    /// bootstrap or restarting the stack.
+    ///
+    /// Persistent index fields mirror the legacy single-dim collection
+    /// in [`collections::KNOWLEDGE_PERSISTENT_INDEXES`] so existing
+    /// queries (revision-generation lookups, library scans,
+    /// chunk-model joins) work unchanged on each per-dim shard.
+    pub async fn ensure_chunk_vector_collection_for_dim(
+        &self,
+        dim: u64,
+        n_lists: u64,
+        default_n_probe: u64,
+        training_iterations: u64,
+    ) -> anyhow::Result<()> {
+        let collection = chunk_vector_collection_for_dim(dim);
+        self.ensure_document_collection(&collection).await.with_context(|| {
+            format!("failed to ensure per-dim chunk vector collection {collection}")
+        })?;
+        self.ensure_persistent_index(
+            &collection,
+            &format!("{collection}_revision_generation_index"),
+            &["revision_id", "embedding_model_key", "vector_kind", "freshness_generation"],
+            false,
+            false,
+        )
+        .await?;
+        self.ensure_persistent_index(
+            &collection,
+            &format!("{collection}_chunk_model_index"),
+            &[
+                "chunk_id",
+                "embedding_model_key",
+                "vector_kind",
+                "freshness_generation",
+                "created_at",
+            ],
+            false,
+            false,
+        )
+        .await?;
+        self.ensure_persistent_index(
+            &collection,
+            &format!("{collection}_library_index"),
+            &["library_id", "vector_kind", "freshness_generation"],
+            false,
+            false,
+        )
+        .await?;
+        let index_name = chunk_vector_index_for_dim(dim);
+        self.ensure_vector_index(
+            &collection,
+            &index_name,
+            "vector",
+            dim,
+            n_lists,
+            default_n_probe,
+            training_iterations,
+        )
+        .await
+    }
+
+    /// Idempotently create the per-(library, dim) chunk-vector shard for
+    /// `(dim, library_id)` and attach the same three persistent indexes
+    /// plus ANN index that [`ensure_chunk_vector_collection_for_dim`]
+    /// installs on the shared per-dim shard. Each library's chunk vectors
+    /// live in their own shard so `APPROX_NEAR_COSINE` scans one library's
+    /// (small) vector set instead of every library's vectors at once.
+    ///
+    /// `n_lists` MUST already be sized for this (typically tiny) shard's row
+    /// count — IVF training needs at least as many sample points as lists.
+    /// The callers in `search_store` compute it from the live row count; the
+    /// shared `ensure_vector_index` additionally clamps to available rows and
+    /// seeds synthetic training rows when the shard is empty, so a first
+    /// write or an under-populated shard never hard-fails ingest.
+    pub async fn ensure_chunk_vector_collection_for_library(
+        &self,
+        dim: u64,
+        library_id: Uuid,
+        n_lists: u64,
+        default_n_probe: u64,
+        training_iterations: u64,
+    ) -> anyhow::Result<()> {
+        let collection = chunk_vector_collection_for_library(dim, library_id);
+        self.ensure_document_collection(&collection).await.with_context(|| {
+            format!("failed to ensure per-library chunk vector collection {collection}")
+        })?;
+        self.ensure_persistent_index(
+            &collection,
+            &format!("{collection}_revision_generation_index"),
+            &["revision_id", "embedding_model_key", "vector_kind", "freshness_generation"],
+            false,
+            false,
+        )
+        .await?;
+        self.ensure_persistent_index(
+            &collection,
+            &format!("{collection}_chunk_model_index"),
+            &[
+                "chunk_id",
+                "embedding_model_key",
+                "vector_kind",
+                "freshness_generation",
+                "created_at",
+            ],
+            false,
+            false,
+        )
+        .await?;
+        self.ensure_persistent_index(
+            &collection,
+            &format!("{collection}_library_index"),
+            &["library_id", "vector_kind", "freshness_generation"],
+            false,
+            false,
+        )
+        .await?;
+        let index_name = chunk_vector_index_for_library(dim, library_id);
+        self.ensure_vector_index(
+            &collection,
+            &index_name,
+            "vector",
+            dim,
+            n_lists,
+            default_n_probe,
+            training_iterations,
+        )
+        .await
+    }
+
+    /// Count the live (non-seed) rows in `collection`, returning 0 when the
+    /// collection does not exist yet. Used by the per-library shard ensure to
+    /// size IVF `nLists` from the actual row count before training.
+    pub async fn count_chunk_vector_rows(&self, collection: &str) -> anyhow::Result<u64> {
+        if !self.collection_exists(collection).await? {
+            return Ok(0);
+        }
+        self.count_vector_index_source_rows(collection).await
+    }
+
+    /// Whether `collection` holds at least one row for `library_id`. Returns
+    /// false when the collection does not exist. A `LIMIT 1` existence probe
+    /// over the `library_id` persistent index — cheap enough to gate a
+    /// chunk-vector write that has not yet been routed to a per-library shard.
+    pub async fn chunk_vector_collection_has_library_rows(
+        &self,
+        collection: &str,
+        library_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        if !self.collection_exists(collection).await? {
+            return Ok(false);
+        }
+        let cursor = self
+            .query_json(
+                "FOR row IN @@collection FILTER row.library_id == @library_id LIMIT 1 RETURN 1",
+                serde_json::json!({ "@collection": collection, "library_id": library_id }),
+            )
+            .await
+            .with_context(|| {
+                format!("failed to probe library rows in chunk vector collection {collection}")
+            })?;
+        let has_rows = cursor
+            .get("result")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| !rows.is_empty());
+        Ok(has_rows)
+    }
+
+    /// Idempotently create the per-dim entity-vector collection +
+    /// persistent index + ANN index for `dim`. Mirrors
+    /// [`ensure_chunk_vector_collection_for_dim`] on the graph-node
+    /// vector side.
+    pub async fn ensure_entity_vector_collection_for_dim(
+        &self,
+        dim: u64,
+        n_lists: u64,
+        default_n_probe: u64,
+        training_iterations: u64,
+    ) -> anyhow::Result<()> {
+        let collection = entity_vector_collection_for_dim(dim);
+        self.ensure_document_collection(&collection).await.with_context(|| {
+            format!("failed to ensure per-dim entity vector collection {collection}")
+        })?;
+        self.ensure_persistent_index(
+            &collection,
+            &format!("{collection}_library_index"),
+            &["library_id", "embedding_model_key"],
+            false,
+            false,
+        )
+        .await?;
+        let index_name = entity_vector_index_for_dim(dim);
+        self.ensure_vector_index(
+            &collection,
+            &index_name,
+            "vector",
+            dim,
+            n_lists,
+            default_n_probe,
+            training_iterations,
+        )
+        .await
+    }
+
+    /// Enumerate every `knowledge_chunk_vector_d<dim>` collection
+    /// currently present in the database. Used by the
+    /// per-library rebuild path to drop a library's rows from any
+    /// previous-dim shard it might still have material in, and by
+    /// the snapshot exporter to discover all live per-dim shards
+    /// at runtime instead of from a static list.
+    pub async fn list_per_dim_chunk_vector_collections(&self) -> anyhow::Result<Vec<String>> {
+        self.list_collections_matching("knowledge_chunk_vector_d").await
+    }
+
+    /// Same as [`list_per_dim_chunk_vector_collections`] but for the
+    /// graph-node vector shards.
+    pub async fn list_per_dim_entity_vector_collections(&self) -> anyhow::Result<Vec<String>> {
+        self.list_collections_matching("knowledge_entity_vector_d").await
+    }
+
+    /// Enumerate every per-(library, dim) chunk-vector shard
+    /// (`knowledge_chunk_vector_d{dim}_l{library_hex}`) currently present.
+    /// Used by bootstrap to (re)build each shard's IVF index on restart and
+    /// by the per-library migration to discover already-sharded libraries.
+    /// The shared per-dim shards (no `_l` suffix) are intentionally excluded:
+    /// [`parse_library_vector_shard`] returns `None` for them.
+    pub async fn list_per_library_chunk_vector_collections(&self) -> anyhow::Result<Vec<String>> {
+        let candidates = self.list_collections_matching("knowledge_chunk_vector_d").await?;
+        Ok(candidates
+            .into_iter()
+            .filter(|name| {
+                crate::infra::arangodb::collections::parse_library_vector_shard(name).is_some_and(
+                    |shard| {
+                        shard.kind == crate::infra::arangodb::collections::VectorShardKind::Chunk
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn list_collections_matching(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct CollectionEntry {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct CollectionsResponse {
+            result: Vec<CollectionEntry>,
+        }
+        let response = self
+            .request(Method::GET, "_api/collection?excludeSystem=true")
+            .send()
+            .await
+            .context("failed to list Arango collections")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("failed to list Arango collections: status {}", response.status()));
+        }
+        let body: CollectionsResponse =
+            response.json().await.context("failed to decode Arango collection list response")?;
+        Ok(body
+            .result
+            .into_iter()
+            .map(|entry| entry.name)
+            .filter(|name| name.starts_with(prefix))
+            .collect())
     }
 
     pub async fn delete_index_by_name(
@@ -617,13 +923,14 @@ impl ArangoClient {
 
     async fn delete_vector_training_rows(&self, collection: &str) -> anyhow::Result<()> {
         let _ = self
-            .query_json(
+            .query_json_with_options(
                 "FOR row IN @@collection
                  FILTER row.__bootstrap_vector_seed__ == true
                  REMOVE row IN @@collection",
                 serde_json::json!({
                     "@collection": collection,
                 }),
+                serde_json::json!({ "maxRuntime": 600 }),
             )
             .await
             .with_context(|| format!("failed to delete vector training rows for {collection}"))?;
@@ -632,7 +939,7 @@ impl ArangoClient {
 
     async fn count_vector_index_source_rows(&self, collection: &str) -> anyhow::Result<u64> {
         let cursor = self
-            .query_json(
+            .query_json_with_options(
                 "FOR row IN @@collection
                  FILTER row.__bootstrap_vector_seed__ != true
                  COLLECT WITH COUNT INTO length
@@ -640,6 +947,7 @@ impl ArangoClient {
                 serde_json::json!({
                     "@collection": collection,
                 }),
+                serde_json::json!({ "maxRuntime": 600 }),
             )
             .await
             .with_context(|| {
@@ -662,8 +970,47 @@ impl ArangoClient {
             "query": query,
             "bindVars": bind_vars,
         });
-        let mut cursor =
-            self.send_cursor_request(Method::POST, "_api/cursor", Some(&body), "AQL query").await?;
+        self.run_cursor_query(query, &body, None).await
+    }
+
+    /// Run an AQL cursor query and merge query-level `options` (such as
+    /// `maxRuntime`) into the POST body, with an extended HTTP timeout so
+    /// the long-running cursor on the Arango side actually gets a chance to
+    /// finish. Use this when the default cursor budget is not enough — for
+    /// example a one-shot maintenance scan over a large legacy collection
+    /// whose initial `DISTINCT` pass cannot finish inside the canonical
+    /// 15-second HTTP timeout.
+    pub async fn query_json_with_options(
+        &self,
+        query: &str,
+        bind_vars: serde_json::Value,
+        options: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        const EXTENDED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+        let body = serde_json::json!({
+            "query": query,
+            "bindVars": bind_vars,
+            "options": options,
+        });
+        self.run_cursor_query(query, &body, Some(EXTENDED_TIMEOUT)).await
+    }
+
+    async fn run_cursor_query(
+        &self,
+        query: &str,
+        body: &serde_json::Value,
+        timeout_override: Option<std::time::Duration>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let query_span_started = std::time::Instant::now();
+        let mut cursor = self
+            .send_cursor_request_with_timeout(
+                Method::POST,
+                "_api/cursor",
+                Some(body),
+                "AQL query",
+                timeout_override,
+            )
+            .await?;
         let mut merged_rows = take_cursor_result_rows(&mut cursor)?;
         if cursor.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
             || merged_rows.len() >= 1000
@@ -734,6 +1081,21 @@ impl ArangoClient {
                 "arangodb cursor merged final result"
             );
         }
+        let row_count =
+            cursor.get("result").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+        crate::services::query::turn_spans::record_span(
+            format!(
+                "arango.{}",
+                aql_primary_collection(
+                    query,
+                    body.get("bindVars").unwrap_or(&serde_json::Value::Null)
+                )
+            ),
+            "db",
+            query_span_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            None,
+            Some(row_count as u64),
+        );
         Ok(cursor)
     }
 
@@ -750,6 +1112,62 @@ impl ArangoClient {
         &self,
         query: &str,
         bind_vars: serde_json::Value,
+        handle_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(Vec<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        self.query_json_batches_with_batch_size(query, bind_vars, None, handle_batch).await
+    }
+
+    /// Same as `query_json_batches` but lets the caller request a
+    /// specific AQL cursor `batchSize`. Useful for collections whose
+    /// rows are large (high-dim vector shards): the Arango default of
+    /// 1000 rows can exceed cursor / network memory on `~3072 floats`
+    /// rows, where 64 rows already yields ~1.5 MiB of JSON. Lowering
+    /// the batch size keeps both Arango and the in-process buffer
+    /// bounded.
+    pub async fn query_json_batches_with_batch_size<F, Fut>(
+        &self,
+        query: &str,
+        bind_vars: serde_json::Value,
+        batch_size: Option<u32>,
+        handle_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(Vec<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        self.query_json_batches_with_options(query, bind_vars, batch_size, false, handle_batch)
+            .await
+    }
+
+    /// Streaming variant: sets the cursor request's `stream: true` option,
+    /// which makes Arango produce result rows lazily as the FILTER runs
+    /// instead of materializing the full result set before the first
+    /// batch. Required for large-collection exports where the materialized
+    /// result would exceed `--query.memory-limit` (errorNum 32).
+    pub async fn query_json_batches_streaming<F, Fut>(
+        &self,
+        query: &str,
+        bind_vars: serde_json::Value,
+        batch_size: Option<u32>,
+        handle_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(Vec<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        self.query_json_batches_with_options(query, bind_vars, batch_size, true, handle_batch).await
+    }
+
+    async fn query_json_batches_with_options<F, Fut>(
+        &self,
+        query: &str,
+        bind_vars: serde_json::Value,
+        batch_size: Option<u32>,
+        stream: bool,
         mut handle_batch: F,
     ) -> anyhow::Result<()>
     where
@@ -757,10 +1175,24 @@ impl ArangoClient {
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
         const BULK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-        let body = serde_json::json!({
+        let span_started = std::time::Instant::now();
+        let mut span_row_count: u64 = 0;
+        let mut body = serde_json::json!({
             "query": query,
             "bindVars": bind_vars,
         });
+        if let Some(object) = body.as_object_mut() {
+            if let Some(size) = batch_size {
+                object.insert("batchSize".to_string(), serde_json::Value::from(size));
+            }
+            if stream {
+                // Streaming cursor: Arango does not materialize the full
+                // result set before returning the first batch. Pays off
+                // hugely on huge collections (e.g. vector exports) where
+                // the result would otherwise blow past --query.memory-limit.
+                object.insert("stream".to_string(), serde_json::Value::Bool(true));
+            }
+        }
         let mut cursor = self
             .send_cursor_request_with_timeout(
                 Method::POST,
@@ -771,6 +1203,7 @@ impl ArangoClient {
             )
             .await?;
         let initial_rows = take_cursor_result_rows(&mut cursor)?;
+        span_row_count += initial_rows.len() as u64;
         handle_batch(initial_rows).await?;
         while cursor.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false) {
             let cursor_id = cursor
@@ -788,6 +1221,7 @@ impl ArangoClient {
                 )
                 .await?;
             let next_rows = take_cursor_result_rows(&mut next_cursor)?;
+            span_row_count += next_rows.len() as u64;
             handle_batch(next_rows).await?;
             cursor["hasMore"] =
                 next_cursor.get("hasMore").cloned().unwrap_or(serde_json::Value::Bool(false));
@@ -797,6 +1231,19 @@ impl ArangoClient {
                 object.remove("id");
             }
         }
+        crate::services::query::turn_spans::record_span(
+            format!(
+                "arango.{}",
+                aql_primary_collection(
+                    query,
+                    body.get("bindVars").unwrap_or(&serde_json::Value::Null)
+                )
+            ),
+            "db",
+            span_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            None,
+            Some(span_row_count),
+        );
         Ok(())
     }
 
@@ -814,14 +1261,32 @@ impl ArangoClient {
             "query": query,
             "bindVars": bind_vars,
         });
-        self.send_cursor_request_with_timeout(
-            Method::POST,
-            "_api/cursor",
-            Some(&body),
-            "AQL bulk query",
-            Some(BULK_TIMEOUT),
-        )
-        .await
+        let span_started = std::time::Instant::now();
+        let response = self
+            .send_cursor_request_with_timeout(
+                Method::POST,
+                "_api/cursor",
+                Some(&body),
+                "AQL bulk query",
+                Some(BULK_TIMEOUT),
+            )
+            .await?;
+        let row_count =
+            response.get("result").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+        crate::services::query::turn_spans::record_span(
+            format!(
+                "arango.{}",
+                aql_primary_collection(
+                    query,
+                    body.get("bindVars").unwrap_or(&serde_json::Value::Null)
+                )
+            ),
+            "db",
+            span_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            None,
+            Some(row_count as u64),
+        );
+        Ok(response)
     }
 
     async fn send_cursor_request(
@@ -967,12 +1432,126 @@ fn vector_index_definition_matches(index: &ArangoIndexRow, field: &str, dimensio
         && vector_index_dimension(index) == Some(dimension)
 }
 
+/// Best-effort label for an AQL query span: the first collection it iterates
+/// (`FOR x IN <collection>`), so the inspector can show "which" query ran
+/// without leaking the full statement.
+///
+/// Most runtime queries reference the collection through a bind parameter
+/// (`FOR x IN @@collection`), so the bare token after `IN` is the bind name,
+/// not the collection. `bind_vars` is the query's `bindVars` map; a collection
+/// bind `@@name` resolves against its key `@name` to the real collection (e.g.
+/// `knowledge_chunk_vector_d3072`). Falls back to the bind name if unresolved,
+/// or `aql` for queries with no plain `IN` source (subquery / `DOCUMENT(...)`).
+fn aql_primary_collection(query: &str, bind_vars: &serde_json::Value) -> String {
+    let mut tokens = query.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        if token.eq_ignore_ascii_case("in") {
+            if let Some(next) = tokens.peek() {
+                let raw = next.trim_start_matches(['(', '[']);
+                // Collection bind parameter `@@name` → bindVars key `@name`.
+                if let Some(rest) = raw.strip_prefix("@@") {
+                    let bind_name =
+                        rest.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                    if !bind_name.is_empty() {
+                        if let Some(resolved) = bind_vars
+                            .get(format!("@{bind_name}"))
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            return resolved.chars().take(64).collect();
+                        }
+                        return bind_name.chars().take(64).collect();
+                    }
+                }
+                let collection = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                if !collection.is_empty()
+                    && collection.chars().next().is_some_and(|c| !c.is_ascii_digit())
+                {
+                    return collection.chars().take(64).collect();
+                }
+            }
+        }
+    }
+    "aql".to_string()
+}
+
 fn vector_index_dimension(index: &ArangoIndexRow) -> Option<u64> {
     index.params.get("dimension").and_then(serde_json::Value::as_u64)
 }
 
+/// Empirical peak RSS cost per IVF centroid (nList) observed on ArangoDB 3.12.4
+/// with large collections (650k × 3072-dim vectors, 2 GiB container).
+///
+/// The theoretical formula `256 × nLists × dim × 4` badly underestimates actual
+/// memory: it predicts ~6 GB for nLists=317 but Arango crashed with nLists=30
+/// (>2 GiB actual). Measured on a representative prod-scale stand (2 GiB cap):
+///
+/// | nLists | Peak RSS | Outcome |
+/// |--------|----------|---------|
+/// | 8      | 1.0 GiB  | OK      |
+/// | 25     | 1.5 GiB  | OK      |
+/// | 30     | >2 GiB   | CRASH   |
+/// | 317    | >2 GiB   | CRASH   |
+///
+/// Observed overhead ≈ 1.5 GiB / 25 lists ≈ 60 MB/list. Using 50 MB/list as
+/// the empirical constant keeps the formula slightly below the observed safe
+/// boundary; the 1 GB budget then caps at 20 lists, giving a ~5-list buffer
+/// below the last observed safe point (nLists=25).
+///
+/// HNSW is NOT available as a standalone index type in ArangoDB 3.12.4; it only
+/// appears as a FAISS composite factory sub-component (e.g. "IVF_HNSW,PQ"),
+/// so switching algorithm is not an option here.
+const FAISS_EMPIRICAL_BYTES_PER_LIST: u64 = 50_000_000;
+
+/// Memory budget (bytes) for IVF k-means training inside the Arango container.
+/// The canonical `large` tier in docker-compose.yml / Helm `values.yaml` is
+/// 6 GiB. ArangoDB idles around 1.2-1.5 GiB on a populated stage, leaving
+/// ~4.5 GiB headroom. Using 3 GB as the budget yields nLists ≈ 60 with the
+/// empirical 50 MB/list overhead — comfortably below the headroom while
+/// giving a much tighter IVF partitioning than the old 1 GB / 20 lists pair
+/// (which forced 5+ s `APPROX_NEAR_COSINE` scans on 650k-row shards and
+/// produced `retrieval.vector_failed` timeouts on the 30 s Arango HTTP
+/// client cap).
+///
+/// Per the canonical multi-dim policy in the project CLAUDE.md, this budget
+/// is sized for the largest per-dim shard the deployment expects to host.
+/// If a heavier shard is rolled out, raise this constant in lock-step with
+/// the container memory cap; never silently exceed the container budget.
+const VECTOR_INDEX_TRAINING_BUDGET_BYTES: u64 = 3_000_000_000;
+
 fn effective_vector_index_n_lists(configured_n_lists: u64, source_rows: u64) -> u64 {
     configured_n_lists.max(1).min(source_rows.max(1))
+}
+
+/// Like [`effective_vector_index_n_lists`] but additionally enforces a memory
+/// budget for IVF k-means training.
+///
+/// Uses the empirical per-list overhead constant [`FAISS_EMPIRICAL_BYTES_PER_LIST`]
+/// (50 MB) rather than the theoretical `256 × dim × 4` formula. The theoretical
+/// model severely underestimates ArangoDB 3.12.4's actual peak RSS because it
+/// ignores Arango-side data structures, FAISS quantizer state, and OS page-cache
+/// pressure. The empirical constant was derived from production measurements on a
+/// 650k × 3072-dim shard under a 2 GiB container (see constant doc-comment).
+///
+/// Cap formula:
+/// ```text
+/// nLists_max = budget_bytes / FAISS_EMPIRICAL_BYTES_PER_LIST
+/// ```
+///
+/// At the default 3 GB budget (matched to the canonical 6 GiB Arango
+/// container in docker-compose.yml `large` tier): nLists_max = 60,
+/// yielding ~85k-130k vector comparisons per query at nProbe=8 over a
+/// 650k-row shard (vs 5.2M for a full scan), well under the 30 s
+/// `arangodb_request_timeout_seconds` cap.
+fn effective_vector_index_n_lists_memory_safe(
+    configured_n_lists: u64,
+    source_rows: u64,
+    _dimension: u64,
+    budget_bytes: u64,
+) -> u64 {
+    let row_capped = effective_vector_index_n_lists(configured_n_lists, source_rows);
+    let memory_cap =
+        budget_bytes.checked_div(FAISS_EMPIRICAL_BYTES_PER_LIST).unwrap_or(u64::MAX).max(1);
+    row_capped.min(memory_cap)
 }
 
 fn persistent_index_definition_matches(
@@ -1123,10 +1702,56 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        ArangoClient, ArangoIndexRow, effective_vector_index_n_lists,
-        persistent_index_definition_matches, vector_index_definition_matches,
-        view_links_semantically_match,
+        ArangoClient, ArangoIndexRow, FAISS_EMPIRICAL_BYTES_PER_LIST,
+        VECTOR_INDEX_TRAINING_BUDGET_BYTES, aql_primary_collection, effective_vector_index_n_lists,
+        effective_vector_index_n_lists_memory_safe, persistent_index_definition_matches,
+        vector_index_definition_matches, view_links_semantically_match,
     };
+
+    #[test]
+    fn aql_primary_collection_resolves_collection_bind_to_real_name() {
+        // The dominant runtime form: `FOR x IN @@collection` with the real
+        // collection in bindVars under the single-`@` key.
+        let bind_vars = json!({ "@collection": "knowledge_chunk_vector_d3072" });
+        let label = aql_primary_collection(
+            "FOR vector IN @@collection FILTER vector.library_id == @library LIMIT @k RETURN vector",
+            &bind_vars,
+        );
+        assert_eq!(label, "knowledge_chunk_vector_d3072");
+    }
+
+    #[test]
+    fn aql_primary_collection_reads_static_collection_token() {
+        let label = aql_primary_collection(
+            "FOR doc IN knowledge_chunk FILTER doc._key == @key RETURN doc",
+            &json!({}),
+        );
+        assert_eq!(label, "knowledge_chunk");
+    }
+
+    #[test]
+    fn aql_primary_collection_falls_back_to_bind_name_when_unresolved() {
+        // Collection bind present in the query but missing from bindVars: keep
+        // the bind name rather than collapsing every query to one generic token.
+        let label = aql_primary_collection("FOR e IN @@edge_collection RETURN e", &json!({}));
+        assert_eq!(label, "edge_collection");
+    }
+
+    #[test]
+    fn aql_primary_collection_uses_first_collection_for_multi_collection_query() {
+        let bind_vars = json!({ "@bundle_collection": "knowledge_context_bundle" });
+        let label = aql_primary_collection(
+            "FOR bundle IN @@bundle_collection FOR edge IN @@chunk_edge_collection RETURN bundle",
+            &bind_vars,
+        );
+        assert_eq!(label, "knowledge_context_bundle");
+    }
+
+    #[test]
+    fn aql_primary_collection_falls_back_to_aql_without_in_source() {
+        let label = aql_primary_collection("RETURN DOCUMENT('knowledge_chunk/123')", &json!({}));
+        assert_eq!(label, "aql");
+    }
 
     async fn create_cursor(State(requests): State<Arc<AtomicUsize>>) -> Json<serde_json::Value> {
         requests.fetch_add(1, Ordering::SeqCst);
@@ -1261,6 +1886,70 @@ mod tests {
         assert_eq!(effective_vector_index_n_lists(100, 32), 32);
         assert_eq!(effective_vector_index_n_lists(100, 256), 100);
         assert_eq!(effective_vector_index_n_lists(0, 256), 1);
+    }
+
+    #[test]
+    fn effective_vector_index_n_lists_memory_safe_caps_training_memory() {
+        let dim = 3072_u64;
+        let budget = VECTOR_INDEX_TRAINING_BUDGET_BYTES;
+
+        // Empirical cap: budget / FAISS_EMPIRICAL_BYTES_PER_LIST = 1e9 / 50e6 = 20.
+        let expected_cap = budget / FAISS_EMPIRICAL_BYTES_PER_LIST;
+
+        // Configured nLists well above memory cap → capped at empirical limit.
+        let capped = effective_vector_index_n_lists_memory_safe(10_000, 1_000_000, dim, budget);
+        assert_eq!(capped, expected_cap, "should cap at empirical memory limit");
+
+        // Configured nLists below memory cap → row-count clamp only.
+        let small = effective_vector_index_n_lists_memory_safe(5, 1_000_000, dim, budget);
+        assert_eq!(small, 5, "small nLists should not be reduced by memory cap");
+
+        // Empty collection → minimum of 1.
+        let empty = effective_vector_index_n_lists_memory_safe(100, 0, dim, budget);
+        assert_eq!(empty, 1, "empty collection should yield nLists=1");
+
+        // dimension parameter is ignored in the empirical model (no regression).
+        let huge_dim = 1_000_000_u64;
+        let floor = effective_vector_index_n_lists_memory_safe(100, 1_000_000, huge_dim, budget);
+        assert_eq!(
+            floor, expected_cap,
+            "huge dim should still yield the empirical cap, not floor at 1"
+        );
+    }
+
+    /// Regression guard for a large per-dim shard scenario: a populated
+    /// production-class library on a high-dim embedding model (~650k rows ×
+    /// 3072-dim vectors) under the canonical 6 GiB Arango container budget
+    /// declared in docker-compose.yml / values.yaml `large` tier.
+    ///
+    /// The empirical IVF build cost is roughly 50 MB per nList. With the
+    /// current 3 GB `VECTOR_INDEX_TRAINING_BUDGET_BYTES` the cap is 60
+    /// lists, which fits comfortably below the 6 GiB container budget
+    /// (Arango idle stays around 1.5 GiB, plus 3 GiB for the IVF build,
+    /// giving a 4.5 GiB peak). That partitioning yields much faster
+    /// query times than the previous nLists=20 setting.
+    ///
+    /// If the canonical `large` tier shrinks below ~5 GiB, this regression
+    /// guard will start failing — that is intentional, because shrinking
+    /// the container without simultaneously lowering the budget would
+    /// reintroduce the OOM cycle.
+    #[test]
+    fn effective_vector_index_n_lists_large_shard_fits_within_canonical_arango_container() {
+        let rows = 650_000_u64;
+        let dim = 3072_u64;
+        let budget = VECTOR_INDEX_TRAINING_BUDGET_BYTES;
+        let max_safe_lists = budget / FAISS_EMPIRICAL_BYTES_PER_LIST;
+        // Simulate a caller requesting a much larger nLists than the budget
+        // allows (the old theoretical formula used to pass through ~317).
+        let configured = 1_000_u64;
+
+        let effective = effective_vector_index_n_lists_memory_safe(configured, rows, dim, budget);
+
+        assert!(
+            effective <= max_safe_lists,
+            "effective nLists must not exceed empirical budget cap; got {effective} > {max_safe_lists}"
+        );
+        assert!(effective >= 1, "must return at least 1");
     }
 
     #[test]

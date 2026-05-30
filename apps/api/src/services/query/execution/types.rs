@@ -11,7 +11,7 @@ use crate::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow,
         KnowledgeTechnicalFactRow,
     },
-    infra::repositories::{RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+    infra::repositories::{RuntimeGraphQueryEdgeRow, RuntimeGraphQueryNodeRow},
     services::knowledge::runtime_read::ActiveRuntimeGraphProjection,
     services::query::assistant_grounding::AssistantGroundingEvidence,
     services::query::planner::{QueryIntentProfile, RuntimeQueryPlan},
@@ -317,6 +317,11 @@ pub(crate) struct PreparedAnswerQueryResult {
     /// (`QueryCompile` vs `ExtractText`), different models, and
     /// different per-call costs.
     pub(crate) query_compile_usage: Option<QueryCompileUsage>,
+    /// Fine-grained timed sub-operations (DB queries, retrieval lanes, …)
+    /// captured while preparing this query, for the debug inspector. The
+    /// caller stashes these by execution_id so the snapshot writer can attach
+    /// them to this execution's snapshot.
+    pub(crate) retrieval_spans: Vec<crate::services::query::turn_spans::TurnSpan>,
 }
 
 #[derive(Debug, Clone)]
@@ -359,27 +364,27 @@ impl QueryGraphIndex {
     }
 
     #[must_use]
-    pub(crate) fn node(&self, node_id: Uuid) -> Option<&RuntimeGraphNodeRow> {
+    pub(crate) fn node(&self, node_id: Uuid) -> Option<&RuntimeGraphQueryNodeRow> {
         self.node_positions.get(&node_id).and_then(|position| self.projection.nodes.get(*position))
     }
 
     #[must_use]
-    pub(crate) fn edge(&self, edge_id: Uuid) -> Option<&RuntimeGraphEdgeRow> {
+    pub(crate) fn edge(&self, edge_id: Uuid) -> Option<&RuntimeGraphQueryEdgeRow> {
         self.edge_positions.get(&edge_id).and_then(|position| self.projection.edges.get(*position))
     }
 
-    pub(crate) fn nodes(&self) -> impl Iterator<Item = &RuntimeGraphNodeRow> + '_ {
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &RuntimeGraphQueryNodeRow> + '_ {
         self.projection.nodes.iter().filter(|node| self.node_positions.contains_key(&node.id))
     }
 
-    pub(crate) fn edges(&self) -> impl Iterator<Item = &RuntimeGraphEdgeRow> + '_ {
+    pub(crate) fn edges(&self) -> impl Iterator<Item = &RuntimeGraphQueryEdgeRow> + '_ {
         self.projection.edges.iter().filter(|edge| self.edge_positions.contains_key(&edge.id))
     }
 
     pub(crate) fn incident_edges(
         &self,
         node_id: Uuid,
-    ) -> impl Iterator<Item = &RuntimeGraphEdgeRow> + '_ {
+    ) -> impl Iterator<Item = &RuntimeGraphQueryEdgeRow> + '_ {
         self.incident_edge_ids
             .get(&node_id)
             .into_iter()

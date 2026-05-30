@@ -2277,7 +2277,7 @@ export const getAssistantSystemPromptQueryKey = (options?: Options<GetAssistantS
 /**
  * Get the recommended MCP assistant system prompt.
  *
- * Returns the prompt text that should be installed in external MCP clients and in the built-in UI assistant setup flow. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, and avoid forwarding the raw latest user message as a hidden grounded-answer query. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
+ * Returns the exact prompt text used by the built-in UI assistant and recommended for external MCP clients. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, prefer high-signal grounded-answer probes for content questions, and avoid answering from catalog titles alone. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
  */
 export const getAssistantSystemPromptOptions = (options?: Options<GetAssistantSystemPromptData>) => queryOptions<GetAssistantSystemPromptResponse, DefaultError, GetAssistantSystemPromptResponse, ReturnType<typeof getAssistantSystemPromptQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {

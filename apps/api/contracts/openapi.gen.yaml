@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.18
+  version: 0.4.20
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -3131,7 +3131,7 @@ paths:
       tags:
       - query
       summary: Get the recommended MCP assistant system prompt.
-      description: Returns the prompt text that should be installed in external MCP clients and in the built-in UI assistant setup flow. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, and avoid forwarding the raw latest user message as a hidden grounded-answer query. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
+      description: Returns the exact prompt text used by the built-in UI assistant and recommended for external MCP clients. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, prefer high-signal grounded-answer probes for content questions, and avoid answering from catalog titles alone. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
       operationId: getAssistantSystemPrompt
       parameters:
       - name: libraryId
@@ -4240,6 +4240,15 @@ components:
       - stageKind
       - stageLabel
       properties:
+        durationMs:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Total wall-clock spent in this pipeline stage across its attempts.
+            `None` for executions recorded before stage timing existed.
+          minimum: 0
         stageKind:
           type: string
         stageLabel:
@@ -9094,6 +9103,15 @@ components:
             on records written by older code paths.
         question:
           type: string
+        spans:
+          type: array
+          items:
+            $ref: '#/components/schemas/TurnSpan'
+          description: |-
+            Fine-grained timed sub-operations recorded during this execution
+            (individual DB/Arango queries, retrieval lanes, …) so the inspector can
+            surface where time went and operators can catch heavy sections. Empty
+            on records written before span capture existed.
         totalIterations:
           type: integer
           minimum: 0
@@ -9112,6 +9130,17 @@ components:
       - responseToolCalls
       - usage
       properties:
+        childQueryExecutionIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |-
+            Query-execution IDs of the child executions spawned by this
+            iteration's tool calls. These are the IDs the execution-detail /
+            llm-context endpoints accept, so the debug inspector can drill
+            into a child `grounded_answer` execution. (The runtime IDs above
+            key a different table and are not directly fetchable.)
         childRuntimeExecutionIds:
           type: array
           items:
@@ -9123,6 +9152,16 @@ components:
             `grounded_answer` creates its own query execution and debug
             snapshot. Empty on iterations whose tools do not spawn child
             query executions and on single-shot grounded-answer turns.
+        durationMs:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Wall-clock the model spent on this iteration — request sent to
+            response received ("model think time"). `None` on records written
+            before timing capture existed.
+          minimum: 0
         iteration:
           type: integer
           minimum: 0
@@ -10128,12 +10167,31 @@ components:
       properties:
         argumentsJson:
           type: string
+          description: |-
+            Effective arguments executed after server-side defaults and
+            scope guards were applied.
+        durationMs:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Wall-clock the tool ran ("tool wait time" the model blocked on).
+            `None` on records written before timing capture existed.
+          minimum: 0
         id:
           type: string
         isError:
           type: boolean
         name:
           type: string
+        requestedArgumentsJson:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Raw arguments emitted by the model when server-side defaults or
+            guards changed the executable payload.
         resultJson: {}
         resultText:
           type:
@@ -11301,6 +11359,40 @@ components:
       enum:
       - supported
       - not_supported
+    TurnSpan:
+      type: object
+      description: One timed sub-operation within an execution.
+      required:
+      - name
+      - kind
+      - durationMs
+      - startedOffsetMs
+      properties:
+        detail:
+          type:
+          - string
+          - 'null'
+        durationMs:
+          type: integer
+          format: int64
+          minimum: 0
+        kind:
+          type: string
+          description: 'Coarse category for grouping/colour: `db` | `lane` | `stage` | `llm`.'
+        name:
+          type: string
+          description: Operator-facing label, e.g. `arango.cursor`, `retrieve.vector`.
+        rows:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        startedOffsetMs:
+          type: integer
+          format: int64
+          description: Offset from execution start, for ordering on a timeline.
+          minimum: 0
     TypedTechnicalFact:
       type: object
       required:

@@ -292,6 +292,7 @@ fn execution_detail_for(scenario: &Scenario, answer_text: &str) -> AssistantExec
             .map(|stage_kind| AssistantRuntimeStageSummary {
                 stage_kind: (*stage_kind).to_string(),
                 stage_label: stage_label(stage_kind).to_string(),
+                duration_ms: None,
             })
             .collect(),
         request_turn: Some(AssistantTurn {
@@ -476,11 +477,14 @@ fn response_shape(scenario: &Scenario, response: &Value) -> Value {
             "libraryId": structured.get("libraryId") == detail.pointer("/execution/libraryId"),
             "workspaceId": structured.get("workspaceId") == detail.pointer("/execution/workspaceId"),
             "lifecycleState": structured.get("lifecycleState") == detail.pointer("/execution/lifecycleState"),
+            "finalAnswerReady": structured.get("finalAnswerReady")
+                == Some(&json!(matches!(scenario.verification_state, AssistantVerificationState::Verified))),
         },
         "executionDetailKeys": object_keys(detail),
         "citationCounts": citation_counts,
         "verifier": {
             "state": detail.get("verificationState"),
+            "finalAnswerReady": structured.get("finalAnswerReady"),
             "warningCount": warnings.len(),
             "warningShapes": warnings.iter().map(verification_warning_shape).collect::<Vec<_>>(),
         },

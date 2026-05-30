@@ -8,6 +8,7 @@ import { VERIFICATION_CONFIG, verificationLabel } from "../model/verificationCon
 type ChatMessageProps = {
   t: TFunction;
   message: AssistantMessage;
+  responseMs?: number;
 };
 
 type AnswerSourceLink = {
@@ -22,6 +23,33 @@ function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function formatTimestamp(isoString: string): string {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return '';
+  const today = new Date();
+  const isToday =
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate();
+  const timePart = date.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  if (isToday) return timePart;
+  const datePart = date.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  });
+  return `${datePart} ${timePart}`;
+}
+
+function formatLatency(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
 }
 
 function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
@@ -231,7 +259,7 @@ const markdownComponents = {
   ),
 };
 
-function ChatMessageImpl({ t, message }: ChatMessageProps) {
+function ChatMessageImpl({ t, message, responseMs }: ChatMessageProps) {
   const isUser = message.role === 'user';
   const vcState = message.evidence?.verificationState;
   const vc = vcState && vcState !== 'not_run' ? VERIFICATION_CONFIG[vcState] : null;
@@ -244,8 +272,12 @@ function ChatMessageImpl({ t, message }: ChatMessageProps) {
       ? 'w-full max-w-[560px]'
       : 'max-w-[80%]';
 
+  const timestampFormatted = message.timestamp ? formatTimestamp(message.timestamp) : '';
+  const showTimestamp = Boolean(timestampFormatted) && !isPendingAssistant;
+  const showLatency = !isUser && !isPendingAssistant && responseMs != null && responseMs > 0;
+
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} animate-fade-in`}>
+    <div className={`flex flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'} animate-fade-in`}>
       <div
         className={`${messageWidthClass} ${
           isUser ? 'text-primary-foreground rounded-2xl rounded-br-sm px-4 py-3' : 'space-y-2'
@@ -321,6 +353,23 @@ function ChatMessageImpl({ t, message }: ChatMessageProps) {
           )}
         </div>
       </div>
+      {(showTimestamp || showLatency) && (
+        <div className={`flex items-center gap-2 px-1 ${isUser ? 'justify-end' : 'justify-start'}`}>
+          {showTimestamp && (
+            <time
+              dateTime={message.timestamp}
+              className="font-mono text-[10px] tabular-nums text-muted-foreground/60"
+            >
+              {t('assistant.messageTimestamp', { time: timestampFormatted })}
+            </time>
+          )}
+          {showLatency && responseMs != null && (
+            <span className="rounded border border-border/50 bg-background/60 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground/70">
+              {t('assistant.messageLatency', { duration: formatLatency(responseMs) })}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -351,11 +351,17 @@ fn drops_unknown_node_type() {
 }
 
 #[test]
-fn rejects_json_inside_markdown_fence() {
-    let error = parse_graph_extraction_output("```json\n{\"entities\":[],\"relations\":[]}\n```")
-        .expect_err("fenced output must fail");
+fn recovers_json_object_inside_markdown_fence() {
+    // Providers routinely wrap the extraction object in a ```json fence.
+    // Structural fence-stripping recovers the embedded object — this is the
+    // single most common real-world cause of otherwise-valid graph payloads
+    // failing to parse.
+    let normalized =
+        parse_graph_extraction_output("```json\n{\"entities\":[],\"relations\":[]}\n```")
+            .expect("fenced object must be recovered");
 
-    assert!(error.to_string().contains("invalid graph extraction json"));
+    assert!(normalized.entities.is_empty());
+    assert!(normalized.relations.is_empty());
 }
 
 #[test]
@@ -849,13 +855,18 @@ fn rejects_non_json_payloads() {
 }
 
 #[test]
-fn rejects_json_object_surrounded_by_prose() {
-    let error = parse_graph_extraction_output(
+fn recovers_json_object_surrounded_by_prose() {
+    // Recovery is purely structural — it scans for the first balanced JSON
+    // object and never inspects the surrounding text, so it stays
+    // language-agnostic. Here the embedded object is recovered; the bare
+    // string entity has no `label` field and is dropped, yielding an empty set.
+    let normalized = parse_graph_extraction_output(
         "Here is the result:\n{\"entities\":[\"Provider Alpha\"],\"relations\":[]}\nThanks.",
     )
-    .expect_err("prose wrapper must fail");
+    .expect("embedded object must be recovered");
 
-    assert!(error.to_string().contains("invalid graph extraction json"));
+    assert!(normalized.entities.is_empty());
+    assert!(normalized.relations.is_empty());
 }
 
 #[test]

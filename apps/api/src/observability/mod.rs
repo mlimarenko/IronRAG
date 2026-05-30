@@ -52,6 +52,12 @@ const IRONRAG_ENVIRONMENT: &str = "IRONRAG_ENVIRONMENT";
 const HOSTNAME_ENV: &str = "HOSTNAME";
 const IRONRAG_LOG_FILTER: &str = "IRONRAG_LOG_FILTER";
 
+/// Compiled-in diagnostics defaults. The owner telemetry endpoint lives in a
+/// TOML config rather than Rust source so the shipped default sink is
+/// configuration, not logic, and operators can override it via the standard
+/// OTLP env vars or disable it with `IRONRAG_OTEL_ENABLED=false`.
+const OWNER_TELEMETRY_DEFAULTS_TOML: &str = include_str!("../../observability.toml");
+
 static TRACER_PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
 static METER_PROVIDER: OnceLock<Mutex<Option<SdkMeterProvider>>> = OnceLock::new();
 static LOGGER_PROVIDER: OnceLock<Mutex<Option<SdkLoggerProvider>>> = OnceLock::new();
@@ -108,7 +114,8 @@ pub fn init_tracing() -> anyhow::Result<()> {
 
     let filter = env_string(IRONRAG_LOG_FILTER).unwrap_or_else(|| DEFAULT_LOG_FILTER.to_string());
     let env_filter = crate::shared::telemetry::compose_env_filter(&filter);
-    let endpoint = env_string(OTEL_EXPORTER_OTLP_ENDPOINT);
+    let endpoint = env_string(OTEL_EXPORTER_OTLP_ENDPOINT)
+        .or_else(|| owner_telemetry_defaults().endpoint.clone());
     let enabled = env_bool(IRONRAG_OTEL_ENABLED, true);
 
     let Some(endpoint) = endpoint.filter(|_| enabled) else {
@@ -118,7 +125,7 @@ pub fn init_tracing() -> anyhow::Result<()> {
             .try_init()
             .context("failed to initialize tracing subscriber")?;
         if enabled {
-            info!("observability: OTLP endpoint is not configured; exporter disabled");
+            info!("observability: no OTLP endpoint configured; exporter disabled");
         } else {
             info!("observability: disabled by IRONRAG_OTEL_ENABLED=false");
         }
@@ -180,32 +187,50 @@ pub fn init_tracing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Flushes and shuts down the OpenTelemetry provider, when one was installed.
+/// Flushes and shuts down the OpenTelemetry providers, when installed.
+///
+/// The three providers are flushed concurrently so an unreachable endpoint
+/// stalls shutdown by at most one exporter timeout (~5s), not the sum across
+/// all three signals. Each exporter's own `with_timeout` bounds the wait.
 pub async fn shutdown_tracing() {
-    if let Some(provider) = take_tracer_provider() {
+    let trace_shutdown = take_tracer_provider().map(|provider| {
         shutdown_observability_provider("trace", move || {
             let flush_result = provider.force_flush().map_err(|error| error.to_string());
             let shutdown_result = provider.shutdown().map_err(|error| error.to_string());
             vec![("force flush", flush_result), ("shutdown", shutdown_result)]
         })
-        .await;
-    }
-    if let Some(provider) = take_meter_provider() {
+    });
+    let metric_shutdown = take_meter_provider().map(|provider| {
         shutdown_observability_provider("metric", move || {
             let flush_result = provider.force_flush().map_err(|error| error.to_string());
             let shutdown_result = provider.shutdown().map_err(|error| error.to_string());
             vec![("force flush", flush_result), ("shutdown", shutdown_result)]
         })
-        .await;
-    }
-    if let Some(provider) = take_logger_provider() {
+    });
+    let log_shutdown = take_logger_provider().map(|provider| {
         shutdown_observability_provider("log", move || {
             let flush_result = provider.force_flush().map_err(|error| error.to_string());
             let shutdown_result = provider.shutdown().map_err(|error| error.to_string());
             vec![("force flush", flush_result), ("shutdown", shutdown_result)]
         })
-        .await;
-    }
+    });
+    tokio::join!(
+        async {
+            if let Some(future) = trace_shutdown {
+                future.await;
+            }
+        },
+        async {
+            if let Some(future) = metric_shutdown {
+                future.await;
+            }
+        },
+        async {
+            if let Some(future) = log_shutdown {
+                future.await;
+            }
+        },
+    );
 }
 
 async fn shutdown_observability_provider<F>(signal: &'static str, shutdown: F)
@@ -384,8 +409,33 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+struct OwnerTelemetryDefaults {
+    endpoint: Option<String>,
+    protocol: Option<String>,
+}
+
+fn owner_telemetry_defaults() -> &'static OwnerTelemetryDefaults {
+    static DEFAULTS: OnceLock<OwnerTelemetryDefaults> = OnceLock::new();
+    DEFAULTS.get_or_init(|| parse_owner_telemetry_defaults(OWNER_TELEMETRY_DEFAULTS_TOML))
+}
+
+fn parse_owner_telemetry_defaults(raw: &str) -> OwnerTelemetryDefaults {
+    let document = raw.parse::<toml_edit::DocumentMut>().unwrap_or_default();
+    let read = |key: &str| {
+        document
+            .get(key)
+            .and_then(toml_edit::Item::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    OwnerTelemetryDefaults { endpoint: read("endpoint"), protocol: read("protocol") }
+}
+
 fn resolve_otlp_protocol() -> OtlpProtocol {
-    let Some(raw_value) = env_string(OTEL_EXPORTER_OTLP_PROTOCOL) else {
+    let Some(raw_value) = env_string(OTEL_EXPORTER_OTLP_PROTOCOL)
+        .or_else(|| owner_telemetry_defaults().protocol.clone())
+    else {
         return OtlpProtocol::Grpc;
     };
     let value = raw_value.to_ascii_lowercase();
@@ -492,6 +542,11 @@ fn inferred_runtime_resource_attributes() -> Vec<(String, String)> {
     }
     if let Some(hostname) = env_string(HOSTNAME_ENV) {
         attributes.push(("host.name".to_string(), hostname));
+    }
+    if let Some(machine_id) = read_non_empty_file("/etc/machine-id")
+        .or_else(|| read_non_empty_file("/var/lib/dbus/machine-id"))
+    {
+        attributes.push(("host.id".to_string(), machine_id));
     }
     attributes.push(("process.pid".to_string(), std::process::id().to_string()));
     attributes
@@ -651,5 +706,42 @@ mod tests {
     fn sanitizes_resource_components_for_instance_id() {
         assert_eq!(sanitize_resource_component("api:worker/1"), "api_worker_1");
         assert_eq!(sanitize_resource_component(""), "unknown");
+    }
+
+    #[test]
+    fn parses_owner_telemetry_defaults_from_toml() {
+        let parsed = parse_owner_telemetry_defaults(
+            "endpoint = \"https://collector.example:4318\"\nprotocol = \"grpc\"\n",
+        );
+        assert_eq!(parsed.endpoint.as_deref(), Some("https://collector.example:4318"));
+        assert_eq!(parsed.protocol.as_deref(), Some("grpc"));
+    }
+
+    #[test]
+    fn empty_owner_telemetry_keys_resolve_to_none() {
+        let parsed = parse_owner_telemetry_defaults("endpoint = \"\"\nprotocol = \"   \"\n");
+        assert!(parsed.endpoint.is_none());
+        assert!(parsed.protocol.is_none());
+    }
+
+    #[test]
+    fn compiled_in_defaults_are_usable() {
+        let defaults = owner_telemetry_defaults();
+        let endpoint =
+            defaults.endpoint.as_deref().expect("shipped default endpoint must be present");
+        assert!(
+            endpoint.starts_with("http://") || endpoint.starts_with("https://"),
+            "shipped default endpoint must be an absolute OTLP URL, got {endpoint}",
+        );
+        // The shipped protocol must be one the resolver recognizes.
+        let protocol =
+            defaults.protocol.as_deref().expect("shipped default protocol must be present");
+        assert!(
+            matches!(
+                protocol,
+                "grpc" | "http/protobuf" | "http/proto" | "protobuf" | "http/json" | "json"
+            ),
+            "shipped default protocol must be resolvable, got {protocol}",
+        );
     }
 }

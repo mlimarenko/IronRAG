@@ -11,26 +11,27 @@ use super::super::{
 };
 use super::{
     DOCUMENT_IDENTITY_SCORE_FLOOR, RuntimeChunkScoreKind, apply_graph_evidence_texts_to_chunks,
-    canonical_document_revision_id, chunk_answer_source_text, combine_chunk_retrieval_lanes,
-    combine_lexical_query_results, combine_query_ir_focus_search_results,
-    document_identity_chunk_score, document_identity_focus_terms, entity_bio_chunk_score,
-    graph_evidence_chunk_hits_from_rows, graph_evidence_chunk_score, graph_evidence_context_line,
-    graph_evidence_source_document_ids, graph_evidence_source_document_ids_from_scored_targets,
+    build_lexical_queries, canonical_document_revision_id, chunk_answer_source_text,
+    combine_chunk_retrieval_lanes, combine_lexical_query_results,
+    combine_query_ir_focus_search_results, document_identity_chunk_score,
+    document_identity_focus_terms, entity_bio_chunk_score, graph_evidence_chunk_hits_from_rows,
+    graph_evidence_chunk_score, graph_evidence_context_line, graph_evidence_source_document_ids,
+    graph_evidence_source_document_ids_from_scored_targets,
     graph_evidence_source_document_ids_with_priority, graph_evidence_targets,
     graph_evidence_targets_for_query, latest_version_documents, linked_anchor_focus_queries,
     linked_anchor_hydration_target_filter, map_chunk_hit, merge_chunks, merge_entity_bio_chunks,
     merge_graph_evidence_chunks, merge_query_ir_focus_chunks, query_ir_focus_chunk_score,
     query_ir_focus_search_queries, query_ir_lexical_focus_queries,
     rank_graph_evidence_context_rows, retain_canonical_document_head_chunks,
-    retain_entity_bio_candidates, truncate_bundle,
+    retain_entity_bio_candidates, retain_scoped_documents, truncate_bundle,
 };
 use crate::domains::query_ir::{
     ComparisonSpec, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct,
-    QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceSpec,
+    QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceFilter, SourceSliceSpec,
 };
 use crate::infra::{
     arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
-    repositories::{RuntimeGraphEvidenceRow, RuntimeGraphNodeRow},
+    repositories::{RuntimeGraphEvidenceRow, RuntimeGraphQueryNodeRow},
 };
 use crate::services::knowledge::runtime_read::ActiveRuntimeGraphProjection;
 use crate::services::query::{
@@ -70,6 +71,7 @@ fn release_query_ir(count: Option<&str>, entity: Option<&str>) -> QueryIR {
         conversation_refs: Vec::new(),
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
         confidence: 1.0,
     }
 }
@@ -83,7 +85,8 @@ fn release_query_ir_with_source_slice(
     count: Option<u16>,
 ) -> QueryIR {
     let mut ir = release_query_ir(None, None);
-    ir.source_slice = Some(SourceSliceSpec { direction, count });
+    ir.source_slice =
+        Some(SourceSliceSpec { direction, count, filter: SourceSliceFilter::ReleaseMarker });
     ir
 }
 
@@ -104,6 +107,45 @@ fn target_entities_query_ir(target_labels: &[&str]) -> QueryIR {
         conversation_refs: Vec::new(),
         needs_clarification: None,
         source_slice: None,
+        retrieval_query: None,
+        confidence: 1.0,
+    }
+}
+
+fn exact_error_code_query_ir() -> QueryIR {
+    QueryIR {
+        act: QueryAct::RetrieveValue,
+        scope: QueryScope::SingleDocument,
+        language: QueryLanguage::Auto,
+        target_types: vec!["error_code".to_string()],
+        target_entities: Vec::new(),
+        literal_constraints: Vec::new(),
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: None,
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: None,
+        retrieval_query: None,
+        confidence: 1.0,
+    }
+}
+
+fn transport_inventory_query_ir() -> QueryIR {
+    QueryIR {
+        act: QueryAct::RetrieveValue,
+        scope: QueryScope::SingleDocument,
+        language: QueryLanguage::Auto,
+        target_types: vec!["port".to_string(), "protocol".to_string(), "connection".to_string()],
+        target_entities: Vec::new(),
+        literal_constraints: Vec::new(),
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: None,
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: None,
+        retrieval_query: None,
         confidence: 1.0,
     }
 }
@@ -334,7 +376,9 @@ fn requested_initial_table_row_count_uses_typed_source_slice() {
         source_slice: Some(SourceSliceSpec {
             direction: SourceSliceDirection::Head,
             count: Some(7),
+            filter: SourceSliceFilter::None,
         }),
+        retrieval_query: None,
         confidence: 1.0,
     };
 
@@ -348,6 +392,9 @@ fn requested_initial_table_row_count_uses_typed_source_slice() {
 fn latest_version_question_detection_uses_query_ir() {
     assert!(query_requests_latest_versions(&release_query_ir(Some("5"), None)));
     assert!(query_requests_latest_versions(&release_query_ir_with_source_slice_count(Some(5))));
+    let mut release_target_ir = release_query_ir_with_source_slice_count(Some(10));
+    release_target_ir.target_types = vec!["release".to_string()];
+    assert!(query_requests_latest_versions(&release_target_ir));
     assert!(!query_requests_latest_versions(&release_query_ir_with_source_slice(
         SourceSliceDirection::Head,
         Some(5)
@@ -356,6 +403,16 @@ fn latest_version_question_detection_uses_query_ir() {
         SourceSliceDirection::All,
         Some(5)
     )));
+    let mut exact_version_ir = release_query_ir(None, None);
+    exact_version_ir.literal_constraints =
+        vec![LiteralSpan { text: "1.2.3".to_string(), kind: LiteralKind::Version }];
+    assert!(!query_requests_latest_versions(&exact_version_ir));
+    exact_version_ir.source_slice = Some(SourceSliceSpec {
+        direction: SourceSliceDirection::Tail,
+        count: Some(3),
+        filter: SourceSliceFilter::ReleaseMarker,
+    });
+    assert!(query_requests_latest_versions(&exact_version_ir));
     let mut ir = release_query_ir(None, None);
     ir.target_types.clear();
     assert!(!query_requests_latest_versions(&ir));
@@ -382,9 +439,27 @@ fn requested_latest_version_count_defaults_and_caps() {
     assert_eq!(requested_latest_version_count(&release_query_ir_with_source_slice_count(None)), 5);
 
     let mut source_slice_ir = release_query_ir(Some("3"), None);
-    source_slice_ir.source_slice =
-        Some(SourceSliceSpec { direction: SourceSliceDirection::Tail, count: Some(8) });
+    source_slice_ir.source_slice = Some(SourceSliceSpec {
+        direction: SourceSliceDirection::Tail,
+        count: Some(8),
+        filter: SourceSliceFilter::ReleaseMarker,
+    });
     assert_eq!(requested_latest_version_count(&source_slice_ir), 8);
+}
+
+#[test]
+fn latest_version_scope_terms_keep_digit_bearing_subject_tokens() {
+    let mut ir = release_query_ir(Some("10"), Some("Alpha2 Pay"));
+    ir.document_focus = Some(DocumentHint { hint: "Release notes for Suite4".to_string() });
+    ir.literal_constraints
+        .push(LiteralSpan { text: "2024".to_string(), kind: LiteralKind::NumericCode });
+
+    let terms = latest_version_scope_terms(&ir);
+
+    assert!(terms.contains(&"alpha2".to_string()));
+    assert!(terms.contains(&"suite4".to_string()));
+    assert!(!terms.contains(&"10".to_string()));
+    assert!(!terms.contains(&"2024".to_string()));
 }
 
 #[test]
@@ -415,7 +490,10 @@ fn latest_version_chunk_score_keeps_first_chunk_for_each_version_before_second_c
 #[test]
 fn extract_semver_like_version_reads_title_versions() {
     assert_eq!(extract_semver_like_version("Version 9.8.765 - Product"), Some(vec![9, 8, 765]));
+    assert_eq!(extract_semver_like_version("Version 5.302 - Product"), Some(vec![5, 302]));
     assert_eq!(extract_semver_like_version("No release number"), None);
+    assert_eq!(extract_semver_like_version("Screenshot 2026.05.10"), None);
+    assert_eq!(extract_semver_like_version("Screenshot 2026.05"), None);
 }
 
 #[test]
@@ -503,6 +581,32 @@ fn latest_version_documents_do_not_collapse_same_version_across_titles() {
 }
 
 #[test]
+fn latest_version_documents_deduplicate_before_family_selection() {
+    let docs = [
+        sample_document_row("alpha-1.2.12-a.html", "Version 1.2.12 - Alpha Suite"),
+        sample_document_row("alpha-1.2.12-b.html", "Version 1.2.12 - Alpha Suite"),
+        sample_document_row("alpha-1.2.11.html", "Version 1.2.11 - Alpha Suite"),
+        sample_document_row("beta-9.9.999.html", "Version 9.9.999 - Beta Suite"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&index, 3, &[]);
+
+    assert_eq!(selected.len(), 3);
+    assert_eq!(
+        selected.into_iter().map(|document| document.title).collect::<Vec<_>>(),
+        vec![
+            "Version 9.9.999 - Beta Suite".to_string(),
+            "Version 1.2.12 - Alpha Suite".to_string(),
+            "Version 1.2.11 - Alpha Suite".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn latest_version_documents_choose_dominant_release_family_for_multi_release_queries() {
     let docs = [
         sample_document_row("alpha-1.2.12.html", "Version 1.2.12 - Alpha Suite"),
@@ -545,9 +649,8 @@ fn map_chunk_hit_drops_orphan_documents_without_heads() {
     // Contract update: `map_chunk_hit` no longer compares
     // `chunk.revision_id` against the canonical head — strict equality
     // dropped historical chunks for documents whose newer head revision
-    // is a subset of an older complete revision (verified on stage:
-    // ~80% of leader_lm chunks were silently hidden). Now the guard
-    // only drops chunks whose document has NO head at all (orphan).
+    // is a subset of an older complete revision. Now the guard only
+    // drops chunks whose document has NO head at all (orphan).
     // This test exercises the orphan branch — both heads null.
     let mut document = sample_document_row("orphan-doc.csv", "orphan-doc.csv");
     document.active_revision_id = None;
@@ -708,6 +811,10 @@ fn runtime_chunk(label: &str, score: f32) -> RuntimeMatchedChunk {
     }
 }
 
+fn runtime_chunk_for_document(document_id: Uuid, label: &str, score: f32) -> RuntimeMatchedChunk {
+    RuntimeMatchedChunk { document_id, ..runtime_chunk(label, score) }
+}
+
 fn latest_version_identity_chunk(
     document_id: Uuid,
     requested_count: usize,
@@ -732,6 +839,51 @@ fn latest_version_identity_chunk(
         score: Some(score),
         source_text: format!("release {document_rank} chunk {chunk_rank}"),
     }
+}
+
+#[test]
+fn latest_version_document_scope_drops_non_release_tail() {
+    let release_a = Uuid::now_v7();
+    let release_b = Uuid::now_v7();
+    let generic = Uuid::now_v7();
+    let mut chunks = vec![
+        runtime_chunk_for_document(release_a, "Version 9.8.765 Product Notes", 10.0),
+        runtime_chunk_for_document(release_b, "Version 9.8.764 Product Notes", 9.0),
+        runtime_chunk_for_document(generic, "Operator Workflow Guide", 8.0),
+    ];
+
+    retain_scoped_documents(&mut chunks, &BTreeSet::new(), &BTreeSet::from([release_a, release_b]));
+
+    assert_eq!(chunks.len(), 2);
+    assert!(chunks.iter().all(|chunk| chunk.document_id != generic));
+}
+
+#[test]
+fn latest_version_document_scope_falls_back_when_no_release_documents() {
+    let generic = Uuid::now_v7();
+    let mut chunks = vec![runtime_chunk_for_document(generic, "Operator Workflow Guide", 8.0)];
+
+    retain_scoped_documents(&mut chunks, &BTreeSet::new(), &BTreeSet::new());
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].document_id, generic);
+}
+
+#[test]
+fn latest_version_document_scope_unions_with_targeted_documents() {
+    let release = Uuid::now_v7();
+    let targeted = Uuid::now_v7();
+    let generic = Uuid::now_v7();
+    let mut chunks = vec![
+        runtime_chunk_for_document(release, "Version 9.8.765 Product Notes", 10.0),
+        runtime_chunk_for_document(targeted, "Explicitly Targeted Guide", 9.0),
+        runtime_chunk_for_document(generic, "Operator Workflow Guide", 8.0),
+    ];
+
+    retain_scoped_documents(&mut chunks, &BTreeSet::from([targeted]), &BTreeSet::from([release]));
+
+    let retained = chunks.iter().map(|chunk| chunk.document_id).collect::<BTreeSet<_>>();
+    assert_eq!(retained, BTreeSet::from([release, targeted]));
 }
 
 #[test]
@@ -786,6 +938,190 @@ fn truncate_bundle_preserves_runtime_evidence_lanes() {
 
     assert!(bundle.chunks.iter().any(|chunk| chunk.chunk_id == graph_evidence.chunk_id));
     assert_eq!(bundle.chunks[0].chunk_id, graph_evidence.chunk_id);
+}
+
+#[test]
+fn truncate_bundle_orders_same_lane_by_score_before_insertion_order() {
+    let mut chunks = (0..8)
+        .map(|index| {
+            let mut chunk = runtime_chunk(
+                &format!("identity-noise-{index}"),
+                DOCUMENT_IDENTITY_SCORE_FLOOR + index as f32,
+            );
+            chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+            chunk
+        })
+        .collect::<Vec<_>>();
+    let mut focused = runtime_chunk("focused setup parameter table", DOCUMENT_IDENTITY_SCORE_FLOOR);
+    focused.score = Some(DOCUMENT_IDENTITY_SCORE_FLOOR + 1_000.0);
+    focused.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+    let focused_id = focused.chunk_id;
+    chunks.push(focused);
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(&mut bundle, 4, None);
+
+    assert_eq!(bundle.chunks[0].chunk_id, focused_id);
+}
+
+#[test]
+fn truncate_bundle_reserves_source_context_for_exact_technical_queries() {
+    let mut chunks = (0..8)
+        .map(|index| {
+            let mut chunk = runtime_chunk(
+                &format!("identity-{index}"),
+                DOCUMENT_IDENTITY_SCORE_FLOOR + 100.0 - index as f32,
+            );
+            chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+            chunk
+        })
+        .collect::<Vec<_>>();
+    let mut source_context = runtime_chunk("owner = 100,200\n100 = first\n200 = second", 1.0);
+    source_context.score_kind = RuntimeChunkScoreKind::SourceContext;
+    source_context.score = Some(DOCUMENT_IDENTITY_SCORE_FLOOR + 1.0);
+    let source_context_id = source_context.chunk_id;
+    chunks.push(source_context);
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(&mut bundle, 4, Some(&exact_error_code_query_ir()));
+
+    assert_eq!(bundle.chunks.len(), 4);
+    assert!(bundle.chunks.iter().any(|chunk| chunk.chunk_id == source_context_id));
+}
+
+#[test]
+fn truncate_bundle_caps_error_code_source_context_reservation() {
+    let mut graph_evidence = runtime_chunk("high confidence graph evidence", 1.0);
+    graph_evidence.score_kind = RuntimeChunkScoreKind::GraphEvidence;
+    graph_evidence.score = Some(graph_evidence_chunk_score(0));
+    let graph_evidence_id = graph_evidence.chunk_id;
+
+    let mut relevance = runtime_chunk("ordinary relevance", 10_000.0);
+    relevance.score_kind = RuntimeChunkScoreKind::Relevance;
+
+    let mut chunks = vec![graph_evidence, relevance];
+    for index in 0..4 {
+        let mut source_context =
+            runtime_chunk(&format!("owner{index} = 100,200\n100 = first\n200 = second"), 1.0);
+        source_context.score_kind = RuntimeChunkScoreKind::SourceContext;
+        source_context.score = Some(DOCUMENT_IDENTITY_SCORE_FLOOR + 50.0 - index as f32);
+        chunks.push(source_context);
+    }
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(&mut bundle, 4, Some(&exact_error_code_query_ir()));
+
+    let source_context_count = bundle
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+        .count();
+    assert_eq!(source_context_count, 2);
+    assert!(bundle.chunks.iter().any(|chunk| chunk.chunk_id == graph_evidence_id));
+}
+
+fn configure_how_focus_query_ir(focus: &str) -> QueryIR {
+    QueryIR {
+        act: QueryAct::ConfigureHow,
+        scope: QueryScope::SingleDocument,
+        language: QueryLanguage::Auto,
+        target_types: vec!["procedure".to_string()],
+        target_entities: Vec::new(),
+        literal_constraints: Vec::new(),
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: Some(crate::domains::query_ir::DocumentHint { hint: focus.to_string() }),
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: None,
+        retrieval_query: None,
+        confidence: 0.95,
+    }
+}
+
+#[test]
+fn truncate_bundle_reserves_setup_focus_anchor_for_configure_how() {
+    // High-scored filler chunks from the focused document would fill the whole
+    // top_k by score, pushing the low-scored install anchor out. The reserved
+    // slot must keep the anchor (package command + config path) in context.
+    let mut chunks = (0..8)
+        .map(|index| runtime_chunk("Alpha Suite admin guide", 10_000.0 - index as f32))
+        .collect::<Vec<_>>();
+    let mut anchor = runtime_chunk("Alpha Suite admin guide", 1.0);
+    anchor.source_text =
+        "Module configuration\naptitude install alpha-connector\nSettings in the file /opt/alpha/connector/connector.conf".to_string();
+    let anchor_id = anchor.chunk_id;
+    chunks.push(anchor);
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(&mut bundle, 4, Some(&configure_how_focus_query_ir("Alpha Suite")));
+
+    assert_eq!(bundle.chunks.len(), 4);
+    assert!(
+        bundle.chunks.iter().any(|chunk| chunk.chunk_id == anchor_id),
+        "focused-document setup anchor must survive truncation"
+    );
+}
+
+#[test]
+fn truncate_bundle_does_not_reserve_anchor_without_document_focus() {
+    // Same chunks, but the query has no document_focus → no reservation, the
+    // low-scored anchor is truncated like any other chunk.
+    let mut chunks = (0..8)
+        .map(|index| runtime_chunk("Alpha Suite admin guide", 10_000.0 - index as f32))
+        .collect::<Vec<_>>();
+    let mut anchor = runtime_chunk("Alpha Suite admin guide", 1.0);
+    anchor.source_text =
+        "aptitude install alpha-connector\nSettings in the file /opt/alpha/connector/connector.conf"
+            .to_string();
+    let anchor_id = anchor.chunk_id;
+    chunks.push(anchor);
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    let mut query_ir = configure_how_focus_query_ir("Alpha Suite");
+    query_ir.document_focus = None;
+    truncate_bundle(&mut bundle, 4, Some(&query_ir));
+
+    assert_eq!(bundle.chunks.len(), 4);
+    assert!(!bundle.chunks.iter().any(|chunk| chunk.chunk_id == anchor_id));
+}
+
+#[test]
+fn truncate_bundle_reserves_source_context_for_transport_inventory_queries() {
+    let mut chunks = (0..12)
+        .map(|index| {
+            let mut chunk = runtime_chunk(
+                &format!("identity-{index}"),
+                DOCUMENT_IDENTITY_SCORE_FLOOR + 100.0 - index as f32,
+            );
+            chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+            chunk
+        })
+        .collect::<Vec<_>>();
+    let mut source_context_ids = Vec::new();
+    for index in 0..8 {
+        let mut source_context = runtime_chunk(
+            &format!("serviceUrl{index} = http://localhost:8080\nservicePort{index} = 8080"),
+            1.0,
+        );
+        source_context.score_kind = RuntimeChunkScoreKind::SourceContext;
+        source_context.score = Some(DOCUMENT_IDENTITY_SCORE_FLOOR + 8.0 - index as f32);
+        source_context_ids.push(source_context.chunk_id);
+        chunks.push(source_context);
+    }
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(&mut bundle, 10, Some(&transport_inventory_query_ir()));
+
+    let source_context_count = bundle
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+        .count();
+    assert_eq!(source_context_count, 8);
+    assert!(
+        source_context_ids.iter().all(|id| bundle.chunks.iter().any(|chunk| chunk.chunk_id == *id))
+    );
 }
 
 #[test]
@@ -1518,6 +1854,36 @@ fn query_ir_focus_ignores_weak_document_focus_when_typed_focus_exists() {
 }
 
 #[test]
+fn configure_focus_queries_do_not_inject_low_idf_configuration_markers() {
+    let mut ir = release_query_ir(None, None);
+    ir.act = QueryAct::ConfigureHow;
+    ir.scope = QueryScope::SingleDocument;
+    ir.document_focus = Some(DocumentHint { hint: "Payment Gateway".to_string() });
+    ir.target_types = vec!["procedure".to_string()];
+    ir.target_entities =
+        vec![EntityMention { label: "settlement connector".to_string(), role: EntityRole::Object }];
+
+    let focus_queries = query_ir_lexical_focus_queries(&ir);
+
+    assert!(focus_queries.contains(&"settlement connector".to_string()));
+    assert!(focus_queries.contains(&"Payment Gateway".to_string()));
+    assert!(!focus_queries.contains(&"http".to_string()));
+    assert!(!focus_queries.contains(&"settlement connector http".to_string()));
+    assert!(!focus_queries.contains(&"settlement connector .conf".to_string()));
+}
+
+#[test]
+fn lexical_queries_strip_leading_question_markers() {
+    let plan = build_query_plan("Q16. Which ports should a terminal use?", None, None, None);
+    let queries =
+        build_lexical_queries("Q16. Which ports should a terminal use?", &plan, &[], None);
+
+    assert_eq!(queries.first().map(String::as_str), Some("Which ports should a terminal use?"));
+    assert!(!queries.iter().any(|query| query.split_whitespace().any(|term| term == "Q16.")));
+    assert!(!plan.keywords.contains(&"q16".to_string()));
+}
+
+#[test]
 fn entity_bio_filter_keeps_canonical_graph_evidence_without_label_substring() {
     let evidence = runtime_chunk("configuration facts only", entity_bio_chunk_score(0));
     let lexical_false_positive = runtime_chunk("forest inventory", entity_bio_chunk_score(1));
@@ -1822,8 +2188,12 @@ fn sample_document_row(file_name: &str, title: &str) -> KnowledgeDocumentRow {
     }
 }
 
-fn runtime_graph_node(label: &str, node_type: &str, summary: Option<&str>) -> RuntimeGraphNodeRow {
-    RuntimeGraphNodeRow {
+fn runtime_graph_node(
+    label: &str,
+    node_type: &str,
+    summary: Option<&str>,
+) -> RuntimeGraphQueryNodeRow {
+    RuntimeGraphQueryNodeRow {
         id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
         canonical_key: format!("{node_type}:{}", label.to_lowercase()),
@@ -1831,7 +2201,6 @@ fn runtime_graph_node(label: &str, node_type: &str, summary: Option<&str>) -> Ru
         node_type: node_type.to_string(),
         aliases_json: json!([]),
         summary: summary.map(str::to_string),
-        metadata_json: json!({}),
         support_count: 1,
         projection_version: 1,
         created_at: Utc::now(),
@@ -1855,7 +2224,7 @@ fn runtime_graph_evidence_row(target_id: Uuid, evidence_text: &str) -> RuntimeGr
     }
 }
 
-fn graph_index_with_nodes(nodes: Vec<RuntimeGraphNodeRow>) -> QueryGraphIndex {
+fn graph_index_with_nodes(nodes: Vec<RuntimeGraphQueryNodeRow>) -> QueryGraphIndex {
     let node_positions =
         nodes.iter().enumerate().map(|(position, node)| (node.id, position)).collect();
     QueryGraphIndex::new(

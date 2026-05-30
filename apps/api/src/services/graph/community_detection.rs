@@ -1,14 +1,30 @@
 use std::collections::HashMap;
 
 use sqlx::PgPool;
-use tracing::info;
+use tracing::{info, instrument};
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{self, RuntimeGraphEdgeRow, RuntimeGraphNodeRow},
+    infra::repositories::{
+        self, RuntimeGraphEdgeAdjacencyRow, RuntimeGraphNodeIdRow, RuntimeGraphNodeRow,
+    },
     services::graph::error::GraphServiceError,
 };
+
+/// Maximum graph size at which community detection runs in-process. Above
+/// this threshold the label-propagation pass allocates an adjacency list
+/// (`HashMap<Uuid, Vec<(Uuid, i32)>>`) over every edge plus a per-iteration
+/// neighbour-tally map, which on a worker cgroup of 3 GiB has been observed
+/// to push the process past its memory ceiling and trigger an OOM kill at
+/// every scheduler tick (see ops report 2026-05-26).
+///
+/// The threshold is chosen well below the observed-bad library (106k nodes,
+/// 476k edges) and gives enough headroom for the algorithm's per-iteration
+/// tallies. Libraries above it skip the pass with a structured log so the
+/// scheduler keeps progressing and the smaller libraries still get fresh
+/// community summaries.
+const COMMUNITY_DETECTION_NODE_LIMIT: usize = 50_000;
 
 /// Stateless community detection service using label propagation.
 pub struct CommunityDetectionService;
@@ -19,6 +35,12 @@ impl CommunityDetectionService {
     /// Uses label propagation: each node starts in its own community, then
     /// iteratively adopts the most common community among its weighted
     /// neighbours. Convergence usually happens within a handful of iterations.
+    ///
+    /// Loads only the lean (id-only / triple-only) projections of nodes and
+    /// edges. The earlier full-row variant pulled `summary` / `metadata_json`
+    /// / `canonical_key` / `relation_type` for every edge, which can produce
+    /// excessive memory pressure on large libraries.
+    #[instrument(skip(self, state), fields(library_id = %library_id))]
     pub async fn detect_communities(
         &self,
         state: &AppState,
@@ -32,14 +54,31 @@ impl CommunityDetectionService {
             None => return Ok(()),
         };
 
-        let nodes =
-            repositories::list_runtime_graph_nodes_by_library(pool, library_id, projection_version)
-                .await?;
-        let edges =
-            repositories::list_runtime_graph_edges_by_library(pool, library_id, projection_version)
-                .await?;
+        let nodes = repositories::list_runtime_graph_node_ids_by_library(
+            pool,
+            library_id,
+            projection_version,
+        )
+        .await?;
+        let edges = repositories::list_runtime_graph_edges_adjacency_by_library(
+            pool,
+            library_id,
+            projection_version,
+        )
+        .await?;
 
         if nodes.is_empty() {
+            return Ok(());
+        }
+
+        if nodes.len() > COMMUNITY_DETECTION_NODE_LIMIT {
+            tracing::warn!(
+                library_id = %library_id,
+                node_count = nodes.len(),
+                edge_count = edges.len(),
+                limit = COMMUNITY_DETECTION_NODE_LIMIT,
+                "skipping community detection: library exceeds in-process size limit"
+            );
             return Ok(());
         }
 
@@ -99,9 +138,10 @@ pub async fn detect_after_ingestion(
 // Label propagation algorithm
 // ---------------------------------------------------------------------------
 
+#[instrument(skip(nodes, edges), fields(node_count = nodes.len(), edge_count = edges.len()))]
 fn run_label_propagation(
-    nodes: &[RuntimeGraphNodeRow],
-    edges: &[RuntimeGraphEdgeRow],
+    nodes: &[RuntimeGraphNodeIdRow],
+    edges: &[RuntimeGraphEdgeAdjacencyRow],
 ) -> HashMap<Uuid, usize> {
     // Build adjacency list: node_id -> [(neighbour_id, weight)]
     let mut adj: HashMap<Uuid, Vec<(Uuid, i32)>> = HashMap::new();
@@ -168,6 +208,7 @@ fn run_label_propagation(
 // Persistence helpers
 // ---------------------------------------------------------------------------
 
+#[instrument(skip(pool, community, sizes), fields(library_id = %library_id, projection_version, community_count = sizes.len()))]
 async fn persist_communities(
     pool: &PgPool,
     library_id: Uuid,
@@ -323,41 +364,13 @@ pub async fn generate_community_summaries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
-    fn make_node(id: Uuid, label: &str, support_count: i32) -> RuntimeGraphNodeRow {
-        RuntimeGraphNodeRow {
-            id,
-            library_id: Uuid::nil(),
-            canonical_key: label.to_lowercase(),
-            label: label.to_string(),
-            node_type: "concept".to_string(),
-            aliases_json: serde_json::json!([]),
-            summary: None,
-            metadata_json: serde_json::json!({}),
-            support_count,
-            projection_version: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
+    fn make_node(id: Uuid, _label: &str, _support_count: i32) -> RuntimeGraphNodeIdRow {
+        RuntimeGraphNodeIdRow { id }
     }
 
-    fn make_edge(from: Uuid, to: Uuid, support_count: i32) -> RuntimeGraphEdgeRow {
-        RuntimeGraphEdgeRow {
-            id: Uuid::new_v4(),
-            library_id: Uuid::nil(),
-            from_node_id: from,
-            to_node_id: to,
-            relation_type: "related_to".to_string(),
-            canonical_key: format!("{from}|{to}"),
-            summary: None,
-            weight: Some(1.0),
-            support_count,
-            metadata_json: serde_json::json!({}),
-            projection_version: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
+    fn make_edge(from: Uuid, to: Uuid, support_count: i32) -> RuntimeGraphEdgeAdjacencyRow {
+        RuntimeGraphEdgeAdjacencyRow { from_node_id: from, to_node_id: to, support_count }
     }
 
     #[test]
@@ -407,7 +420,7 @@ mod tests {
         let b = Uuid::new_v4();
 
         let nodes = vec![make_node(a, "Node A", 1), make_node(b, "Node B", 1)];
-        let edges: Vec<RuntimeGraphEdgeRow> = vec![];
+        let edges: Vec<RuntimeGraphEdgeAdjacencyRow> = vec![];
 
         let community = run_label_propagation(&nodes, &edges);
 

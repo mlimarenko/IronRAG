@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::domains::query_ir::QueryIR;
+use crate::domains::query_ir::{QueryIR, QueryScope};
 
 #[cfg(test)]
 use super::concise_document_subject_label;
@@ -59,6 +59,8 @@ pub(super) fn collect_technical_literal_groups(
     let literal_focus_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let pagination_requested = false;
 
+    let max_chunks_per_document = technical_literal_group_chunks_per_document(query_ir, intent);
+
     for chunk in select_document_balanced_chunks(
         question,
         Some(query_ir),
@@ -66,7 +68,7 @@ pub(super) fn collect_technical_literal_groups(
         &literal_focus_keywords,
         pagination_requested,
         8,
-        1,
+        max_chunks_per_document,
     ) {
         let group_index = groups
             .iter()
@@ -102,20 +104,40 @@ pub(super) fn collect_technical_literal_groups(
             for value in extract_url_literals(literal_source_text, 6) {
                 push_unique_limited(&mut group.urls, &mut group.url_seen, value, 6);
             }
+            if group.urls.len() < 6 {
+                for value in extract_url_literals(&chunk.source_text, 6) {
+                    push_unique_limited(&mut group.urls, &mut group.url_seen, value, 6);
+                }
+            }
         }
         if intent.wants_prefixes {
             for value in extract_prefix_literals(literal_source_text, 6) {
                 push_unique_limited(&mut group.prefixes, &mut group.prefix_seen, value, 6);
+            }
+            if group.prefixes.len() < 6 {
+                for value in extract_prefix_literals(&chunk.source_text, 6) {
+                    push_unique_limited(&mut group.prefixes, &mut group.prefix_seen, value, 6);
+                }
             }
         }
         if intent.wants_paths {
             for value in extract_explicit_path_literals(literal_source_text, 10) {
                 push_unique_limited(&mut group.paths, &mut group.path_seen, value, 10);
             }
+            if group.paths.len() < 10 {
+                for value in extract_explicit_path_literals(&chunk.source_text, 10) {
+                    push_unique_limited(&mut group.paths, &mut group.path_seen, value, 10);
+                }
+            }
         }
         if intent.wants_methods {
             for value in extract_http_methods(literal_source_text, 5) {
                 push_unique_limited(&mut group.methods, &mut group.method_seen, value, 5);
+            }
+            if group.methods.len() < 5 {
+                for value in extract_http_methods(&chunk.source_text, 5) {
+                    push_unique_limited(&mut group.methods, &mut group.method_seen, value, 5);
+                }
             }
         }
         if intent.wants_parameters {
@@ -138,6 +160,23 @@ pub(super) fn collect_technical_literal_groups(
     groups.into_iter().filter(|group| group.has_any()).collect()
 }
 
+fn technical_literal_group_chunks_per_document(
+    query_ir: &QueryIR,
+    intent: TechnicalLiteralIntent,
+) -> usize {
+    if intent.wants_parameters
+        && (matches!(query_ir.scope, QueryScope::SingleDocument)
+            || matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow))
+        && (intent.wants_paths
+            || query_ir.is_follow_up()
+            || matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow))
+    {
+        4
+    } else {
+        1
+    }
+}
+
 pub(super) fn render_exact_technical_literals_section(
     groups: &[TechnicalLiteralDocumentGroup],
 ) -> Option<String> {
@@ -151,51 +190,11 @@ pub(super) fn render_exact_technical_literals_section(
         if let Some(excerpt) = &group.matched_excerpt {
             lines.push(format!("  Matched excerpt: {excerpt}"));
         }
-        if !group.urls.is_empty() {
-            lines.push(format!(
-                "  URLs: {}",
-                group.urls.iter().map(|value| format!("`{value}`")).collect::<Vec<_>>().join(", ")
-            ));
-        }
-        if !group.prefixes.is_empty() {
-            lines.push(format!(
-                "  Prefixes: {}",
-                group
-                    .prefixes
-                    .iter()
-                    .map(|value| format!("`{value}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !group.paths.is_empty() {
-            lines.push(format!(
-                "  Paths: {}",
-                group.paths.iter().map(|value| format!("`{value}`")).collect::<Vec<_>>().join(", ")
-            ));
-        }
-        if !group.methods.is_empty() {
-            lines.push(format!(
-                "  HTTP methods: {}",
-                group
-                    .methods
-                    .iter()
-                    .map(|value| format!("`{value}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !group.parameters.is_empty() {
-            lines.push(format!(
-                "  Parameters: {}",
-                group
-                    .parameters
-                    .iter()
-                    .map(|value| format!("`{value}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
+        push_literal_inventory_lines(&mut lines, "URLs", &group.urls);
+        push_literal_inventory_lines(&mut lines, "Prefixes", &group.prefixes);
+        push_literal_inventory_lines(&mut lines, "Paths", &group.paths);
+        push_literal_inventory_lines(&mut lines, "HTTP methods", &group.methods);
+        push_literal_inventory_lines(&mut lines, "Parameters", &group.parameters);
     }
 
     if lines.is_empty() {
@@ -203,6 +202,14 @@ pub(super) fn render_exact_technical_literals_section(
     }
 
     Some(format!("Exact technical literals\n{}", lines.join("\n")))
+}
+
+fn push_literal_inventory_lines(lines: &mut Vec<String>, label: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    lines.push(format!("  {label}:"));
+    lines.extend(values.iter().map(|value| format!("    - `{value}`")));
 }
 
 #[cfg(test)]

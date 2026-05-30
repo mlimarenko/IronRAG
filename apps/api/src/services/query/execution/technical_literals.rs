@@ -2,8 +2,8 @@ use crate::domains::query_ir::{LiteralKind, QueryIR, literal_text_is_identifier_
 
 use super::question_intent::query_ir_has_focused_document_answer_intent;
 pub(super) use super::technical_literal_extractors::{
-    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
-    extract_prefix_literals, extract_url_literals, push_unique_limited,
+    extract_explicit_path_literals, extract_http_methods, extract_package_command_literals,
+    extract_parameter_literals, extract_prefix_literals, extract_url_literals, push_unique_limited,
 };
 pub(super) use super::technical_literal_focus::{
     document_local_focus_keywords, select_document_balanced_chunks,
@@ -58,17 +58,41 @@ pub(super) fn detect_technical_literal_intent_from_query_ir(
     _question: &str,
     query_ir: &QueryIR,
 ) -> TechnicalLiteralIntent {
+    detect_technical_literal_intent_from_query_ir_inner(query_ir, true)
+}
+
+pub(super) fn detect_explicit_technical_literal_intent_from_query_ir(
+    _question: &str,
+    query_ir: &QueryIR,
+) -> TechnicalLiteralIntent {
+    detect_technical_literal_intent_from_query_ir_inner(query_ir, false)
+}
+
+fn detect_technical_literal_intent_from_query_ir_inner(
+    query_ir: &QueryIR,
+    include_configure_setup: bool,
+) -> TechnicalLiteralIntent {
     if query_ir_has_focused_document_answer_intent(query_ir) {
         return TechnicalLiteralIntent::default();
     }
 
     let mut intent = TechnicalLiteralIntent::default();
+    if include_configure_setup
+        && matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow)
+        && (!query_ir.is_follow_up() || configure_follow_up_has_evidence_anchor(query_ir))
+    {
+        intent.wants_paths = true;
+        intent.wants_parameters = true;
+    }
     for tag in query_ir.target_types.iter().map(|value| value.trim().to_ascii_lowercase()) {
         match tag.as_str() {
             "endpoint" | "path" | "url" | "wsdl" => {
                 intent.wants_urls = true;
                 intent.wants_paths = true;
                 intent.wants_methods = true;
+                if tag == "path" {
+                    intent.wants_parameters = true;
+                }
             }
             "base_url" => {
                 intent.wants_urls = true;
@@ -76,12 +100,19 @@ pub(super) fn detect_technical_literal_intent_from_query_ir(
             }
             "parameter" | "config_key" | "software_module" | "package" => {
                 intent.wants_parameters = true;
+                if tag == "software_module" || tag == "package" {
+                    intent.wants_paths = true;
+                }
             }
             "configuration_file" | "filesystem_path" => {
                 intent.wants_paths = true;
                 intent.wants_parameters = true;
             }
             "http_method" => intent.wants_methods = true,
+            "port" | "protocol" | "connection" => {
+                intent.wants_urls = true;
+                intent.wants_parameters = true;
+            }
             _ => {}
         }
     }
@@ -102,6 +133,14 @@ pub(super) fn detect_technical_literal_intent_from_query_ir(
         intent.wants_parameters = true;
     }
     intent
+}
+
+fn configure_follow_up_has_evidence_anchor(query_ir: &QueryIR) -> bool {
+    matches!(query_ir.scope, crate::domains::query_ir::QueryScope::SingleDocument)
+        || query_ir.document_focus.is_some()
+        || !query_ir.target_entities.is_empty()
+        || !query_ir.literal_constraints.is_empty()
+        || !query_ir.conversation_refs.is_empty()
 }
 
 pub(super) fn trim_literal_token(token: &str) -> &str {

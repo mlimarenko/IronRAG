@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::domains::query_ir::{QueryIR, QueryScope};
+use crate::services::query::effective_query::current_question_segment;
+use crate::services::query::planner::strip_leading_question_marker;
 use crate::services::query::text_match::related_prefix_token_match;
 
 use super::retrieve::score_value;
@@ -38,7 +40,8 @@ pub(super) fn technical_literal_focus_keywords(
             }
         }
     }
-    for token in question
+    let current_question = current_question_segment(question);
+    for token in strip_leading_question_marker(current_question)
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
         .map(str::trim)
         .filter(|token| token.chars().count() >= 4)
@@ -110,13 +113,14 @@ pub(super) fn technical_literal_focus_keyword_segments(
         }
     }
 
-    let segments = question
+    let current_question = current_question_segment(question);
+    let segments = current_question
         .split([';', ',', '\n'])
         .map(|segment| technical_literal_focus_keywords(&segment, ir))
         .filter(|keywords| !keywords.is_empty())
         .collect::<Vec<_>>();
     if segments.is_empty() {
-        let fallback = technical_literal_focus_keywords(question, ir);
+        let fallback = technical_literal_focus_keywords(current_question, ir);
         if fallback.is_empty() { Vec::new() } else { vec![fallback] }
     } else {
         segments

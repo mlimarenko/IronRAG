@@ -170,6 +170,23 @@ pub struct Settings {
     pub ingestion_memory_soft_limit_mib: u64,
     pub ingestion_worker_lease_seconds: u64,
     pub ingestion_worker_heartbeat_interval_seconds: u64,
+    /// Maintenance scheduler kill switch. When `false` the worker role
+    /// boots without the recurring sweeper loop — operators can still
+    /// invoke maintenance via the `ironrag-maintenance` CLI. Defaults
+    /// to `true` so the worker container picks up garbage automatically
+    /// once a deployment is healthy enough to run it.
+    pub maintenance_enabled: bool,
+    /// Wall-clock interval between scheduler ticks. Each tick reaps
+    /// stale leases and picks at most one due (class, scope) pair per
+    /// configured class.
+    pub maintenance_tick_interval_seconds: u64,
+    /// Default cadence between successful runs of the same (class,
+    /// scope) pair. The sweeper's row is re-queued with `next_due_at =
+    /// now() + class_interval` on completion.
+    pub maintenance_class_interval_seconds: u64,
+    /// A leased row whose heartbeat is older than this is returned to
+    /// `pending` so a healthy scheduler can pick it up again.
+    pub maintenance_stale_lease_seconds: u64,
     /// Number of embedding batches sent in parallel within one job.
     /// Each batch contains EMBEDDING_BATCH_SIZE inputs. Higher values speed up
     /// long documents but may hit provider rate limits.
@@ -470,6 +487,14 @@ impl Settings {
         self.service_role_kind().ok() == Some(ServiceRole::Startup)
     }
 
+    /// `true` when this process should host the maintenance scheduler:
+    /// it runs in the worker role AND the kill switch is set.
+    #[must_use]
+    pub fn runs_maintenance_scheduler(&self) -> bool {
+        self.maintenance_enabled
+            && self.service_role_kind().ok().is_some_and(ServiceRole::runs_maintenance_scheduler)
+    }
+
     pub fn service_role_kind(&self) -> Result<ServiceRole, String> {
         self.service_role.parse()
     }
@@ -550,6 +575,10 @@ fn settings_config_builder()
         .set_default("ingestion_memory_soft_limit_mib", 0)?
         .set_default("ingestion_worker_lease_seconds", 300)?
         .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
+        .set_default("maintenance_enabled", true)?
+        .set_default("maintenance_tick_interval_seconds", 30)?
+        .set_default("maintenance_class_interval_seconds", 3600)?
+        .set_default("maintenance_stale_lease_seconds", 300)?
         .set_default("ingestion_embedding_parallelism", 2)?
         .set_default("ingestion_graph_extract_parallelism_per_doc", 4)?
         .set_default("web_ingest_http_timeout_seconds", 20)?

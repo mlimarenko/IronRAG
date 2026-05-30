@@ -190,6 +190,16 @@ pub enum SourceSliceDirection {
     All,
 }
 
+/// Optional structural filter applied before taking an ordered source slice.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceSliceFilter {
+    /// No structural filter; slice the ordered source exactly as stored.
+    None,
+    /// Keep only source units containing a version-shaped release marker.
+    ReleaseMarker,
+}
+
 /// Why the compiler is unsure and would prefer clarification from the user.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -384,6 +394,14 @@ pub struct SourceSliceSpec {
     pub direction: SourceSliceDirection,
     #[serde(default)]
     pub count: Option<u16>,
+    #[serde(default = "SourceSliceSpec::default_filter")]
+    pub filter: SourceSliceFilter,
+}
+
+impl SourceSliceSpec {
+    const fn default_filter() -> SourceSliceFilter {
+        SourceSliceFilter::None
+    }
 }
 
 /// Date/time or date-range constraint normalized by the query compiler.
@@ -500,6 +518,19 @@ pub struct QueryIR {
     #[serde(default)]
     pub source_slice: Option<SourceSliceSpec>,
 
+    /// Self-contained search string for the retrieval lanes. When the
+    /// current question already stands on its own this is the question
+    /// verbatim; when it depends on prior turns (ellipsis, anaphora, a
+    /// bare disambiguating selection) the compiler folds the recovered
+    /// subject and scope into a standalone phrasing so the vector, HyDE,
+    /// lexical, and technical-fact lanes search the resolved intent
+    /// instead of the elliptic fragment. Never a translation: preserves
+    /// the original writing system and spelling of every surfaced token.
+    /// Optional in the Rust type so golden-eval fixtures that predate the
+    /// field still deserialise; the schema requires the compiler to emit it.
+    #[serde(default)]
+    pub retrieval_query: Option<String>,
+
     /// Compiler self-assessed confidence ∈ [0.0, 1.0]. Defaults to
     /// `1.0` when omitted so the golden evaluation set (which does not
     /// carry per-row confidence) deserialises as ground-truth.
@@ -542,6 +573,20 @@ impl QueryIR {
     #[must_use]
     pub fn is_follow_up(&self) -> bool {
         matches!(self.act, QueryAct::FollowUp) || !self.conversation_refs.is_empty()
+    }
+
+    /// The search string the retrieval lanes should use: the
+    /// compiler-materialised standalone `retrieval_query` when present and
+    /// non-blank, otherwise the verbatim user turn. Centralises the
+    /// fallback so callers never branch on `Option` and never search a
+    /// blank string when a provider omits the field.
+    #[must_use]
+    pub fn effective_retrieval_query<'a>(&'a self, question: &'a str) -> &'a str {
+        self.retrieval_query
+            .as_deref()
+            .map(str::trim)
+            .filter(|resolved| !resolved.is_empty())
+            .unwrap_or(question)
     }
 
     /// Overview-style questions need source coverage, not just the
@@ -666,6 +711,7 @@ pub fn query_ir_json_schema() -> Value {
             "conversation_refs",
             "needs_clarification",
             "source_slice",
+            "retrieval_query",
             "confidence"
         ],
         "properties": {
@@ -796,7 +842,7 @@ pub fn query_ir_json_schema() -> Value {
             "source_slice": {
                 "type": ["object", "null"],
                 "additionalProperties": false,
-                "required": ["direction", "count"],
+                "required": ["direction", "count", "filter"],
                 "properties": {
                     "direction": {
                         "type": "string",
@@ -806,8 +852,15 @@ pub fn query_ir_json_schema() -> Value {
                         "type": ["integer", "null"],
                         "minimum": 1,
                         "maximum": 30
+                    },
+                    "filter": {
+                        "type": "string",
+                        "enum": ["none", "release_marker"]
                     }
                 }
+            },
+            "retrieval_query": {
+                "type": "string"
             },
             "confidence": {
                 "type": "number",
@@ -840,6 +893,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         };
         let json = serde_json::to_value(&ir).unwrap();
@@ -865,6 +919,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.95,
         };
         assert!(ir.is_exact_literal_technical());
@@ -890,6 +945,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.84,
         };
 
@@ -917,6 +973,7 @@ mod tests {
             }],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.7,
         };
         assert!(ir.is_follow_up());
@@ -938,6 +995,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.4,
         };
         assert!(!ir.should_request_clarification());
@@ -961,6 +1019,7 @@ mod tests {
                 suggestion: String::new(),
             }),
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         };
         assert!(ir.should_request_clarification());
@@ -981,6 +1040,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.8,
         };
         assert!(ir.requests_source_coverage_context());
@@ -1003,7 +1063,9 @@ mod tests {
             source_slice: Some(SourceSliceSpec {
                 direction: SourceSliceDirection::Tail,
                 count: Some(20),
+                filter: SourceSliceFilter::ReleaseMarker,
             }),
+            retrieval_query: None,
             confidence: 0.86,
         };
 
@@ -1040,6 +1102,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         };
 
@@ -1065,6 +1128,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.5,
         };
 
@@ -1090,6 +1154,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.7,
         };
         let (start, end) = ir.resolved_temporal_bounds();
@@ -1117,6 +1182,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.7,
         };
         let (start, end) = ir.resolved_temporal_bounds();
@@ -1151,6 +1217,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         };
         let (start, end) = ir.resolved_temporal_bounds();
@@ -1178,6 +1245,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.4,
         };
 
@@ -1203,6 +1271,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.86,
         };
 
@@ -1230,6 +1299,7 @@ mod tests {
             conversation_refs: vec![],
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.8,
         };
         let follow_up_ir = QueryIR {
@@ -1270,6 +1340,7 @@ mod tests {
             "conversation_refs",
             "needs_clarification",
             "source_slice",
+            "retrieval_query",
             "confidence",
         ] {
             assert!(required.iter().any(|value| value == field), "schema should require `{field}`");
@@ -1280,7 +1351,7 @@ mod tests {
 /// Canonical QueryIR cache discriminator. When compiler semantics change,
 /// obsolete cache rows are discarded instead of read through compatibility
 /// aliases or parallel cache generations.
-pub const QUERY_IR_SCHEMA_VERSION: u16 = 8;
+pub const QUERY_IR_SCHEMA_VERSION: u16 = 10;
 
 /// Maximum age of a Postgres-tier `query_ir_cache` row before it is
 /// treated as a miss. Redis already holds its own 24h hot tier; the
@@ -1344,6 +1415,7 @@ mod validation_tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }

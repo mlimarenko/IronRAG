@@ -6,7 +6,7 @@
 //! results, and then writes the final reply.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
     time::{Duration, Instant},
@@ -41,16 +41,19 @@ use crate::{
             AgentLoopMetadata, AgentStopReason, LlmIterationDebug, ResponseToolCallDebug,
         },
         service::ExternalConversationTurn,
+        text_match::normalized_alnum_token_sequence,
     },
-    shared::text_tokens::literal_wildcard_prefixes,
 };
 
 const RUNTIME_RETRIEVED_CONTEXT_TOOL: &str = "ironrag_retrieved_context";
 const RUNTIME_LITERAL_REVISION_CONTEXT_TOOL: &str = "ironrag_literal_revision_context";
 const RUNTIME_CLARIFY_VARIANTS_TOOL: &str = "ironrag_clarify_variants";
 const GROUNDED_ANSWER_TOOL_NAME: &str = "grounded_answer";
+const GROUNDED_ANSWER_LIFECYCLE_COMPLETED: &str = "completed";
+const GROUNDED_ANSWER_VERIFICATION_NOT_RUN: &str = "not_run";
+const GROUNDED_ANSWER_VERIFICATION_VERIFIED: &str = "verified";
 const TOOL_MODEL_DEFAULT_CONTENT_CHAR_LIMIT: usize = 3_000;
-const TOOL_MODEL_GROUNDED_ANSWER_CONTENT_CHAR_LIMIT: usize = 6_000;
+const TOOL_MODEL_GROUNDED_ANSWER_CONTENT_CHAR_LIMIT: usize = 12_000;
 const TOOL_MODEL_READ_DOCUMENT_CONTENT_CHAR_LIMIT: usize = 5_000;
 const TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT: usize = 8_000;
 const TOOL_VERIFICATION_CONTENT_CHAR_LIMIT: usize = 8_000;
@@ -60,7 +63,20 @@ const TOOL_DEBUG_RESULT_JSON_CHAR_LIMIT: usize = 96_000;
 const TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT: usize = 20_000;
 const TOOL_GROUNDING_TOTAL_CHAR_LIMIT: usize = 80_000;
 const SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS: usize = 4;
-const MIN_COMPOSITE_DISTINCT_SUCCESSFUL_TOOLS_BEFORE_FINAL: usize = 3;
+const VERBATIM_USER_FRAGMENT_LIMIT: usize = 6;
+const VERBATIM_USER_FRAGMENT_MIN_CHARS: usize = 4;
+const VERBATIM_USER_FRAGMENT_MAX_CHARS: usize = 400;
+const VERBATIM_USER_FRAGMENT_TOTAL_CHARS: usize = 1_200;
+const USER_FRAGMENT_QUOTE_PAIRS: [(char, char); 8] = [
+    ('«', '»'),
+    ('“', '”'),
+    ('„', '“'),
+    ('「', '」'),
+    ('『', '』'),
+    ('‹', '›'),
+    ('"', '"'),
+    ('`', '`'),
+];
 
 /// Final result of one assistant turn.
 #[derive(Debug, Clone)]
@@ -71,7 +87,6 @@ pub struct AgentTurnResult {
     pub iterations: usize,
     pub assistant_grounding: AssistantGroundingEvidence,
     pub child_query_execution_ids: Vec<Uuid>,
-    pub verified_grounded_answer_passthrough_execution_id: Option<Uuid>,
     /// Per-iteration capture of the exact LLM request/response chain,
     /// for the assistant debug panel. Populated unconditionally — the
     /// cost is a few clones and the operator toggles the UI to view.
@@ -125,6 +140,7 @@ pub struct McpToolAgentTurnInput<'a> {
     pub library_ref: &'a str,
     pub user_question: &'a str,
     pub conversation_history: &'a [ChatMessage],
+    pub follow_up_context_messages: &'a [ChatMessage],
     pub grounded_answer_tool_history: &'a [ExternalConversationTurn],
     pub request_id: &'a str,
     pub grounded_answer_top_k: usize,
@@ -171,8 +187,12 @@ struct ToolExecutionOutcome {
     result_text: Option<String>,
     result_json: Option<Value>,
     grounding_text: Option<String>,
-    verified_grounded_answer_text: Option<String>,
+    grounded_answer_ready: bool,
+    grounded_answer_needs_follow_up: bool,
     is_error: bool,
+    /// Wall-clock the tool ran. Set centrally in `execute_tool_calls`;
+    /// constructors default to 0.
+    duration_ms: u64,
     child_query_execution_ids: Vec<Uuid>,
     child_runtime_execution_ids: Vec<Uuid>,
 }
@@ -203,18 +223,14 @@ pub async fn run_mcp_tool_agent_turn(
         .state
         .canonical_services
         .ai_catalog
-        .resolve_active_runtime_binding(
-            input.state,
-            input.library_id,
-            AiBindingPurpose::QueryAnswer,
-        )
+        .resolve_active_runtime_binding(input.state, input.library_id, AiBindingPurpose::Agent)
         .await
         .map_err(|e| {
-            AgentTurnFailure::empty(anyhow::anyhow!("failed to resolve query_answer binding: {e}"))
+            AgentTurnFailure::empty(anyhow::anyhow!("failed to resolve agent binding: {e}"))
         })?
         .ok_or_else(|| {
             AgentTurnFailure::empty(anyhow::anyhow!(
-                "no active query_answer binding configured for library {}",
+                "no active agent binding configured for library {}",
                 input.library_id
             ))
         })?;
@@ -233,26 +249,33 @@ pub async fn run_mcp_tool_agent_turn(
     let iteration_cap = input.iteration_cap.max(1);
     let max_parallel_actions = input.max_parallel_actions.max(1);
     let deadline_started = Instant::now();
-    let mut messages =
-        Vec::with_capacity(input.conversation_history.len().saturating_add(iteration_cap * 3 + 2));
+    let mut messages = Vec::with_capacity(
+        input
+            .conversation_history
+            .len()
+            .saturating_add(input.follow_up_context_messages.len())
+            .saturating_add(iteration_cap * 3 + 2),
+    );
     messages.push(ChatMessage::system(super::assistant_prompt::render(input.library_ref, None)));
     messages.extend(input.conversation_history.iter().cloned());
     messages.push(ChatMessage::user(input.user_question.to_string()));
+    messages.extend(input.follow_up_context_messages.iter().cloned());
+    if let Some(reminder) = latest_user_verbatim_fragment_reminder(input.user_question) {
+        messages.push(ChatMessage::system(reminder));
+    }
 
     let mut usage_json = serde_json::json!({});
     let mut debug_iterations = Vec::new();
     let mut total_tool_call_count = 0usize;
     let mut successful_tool_call_count = 0usize;
     let mut successful_tool_names = BTreeSet::new();
-    let mut verified_grounded_answer_call_count = 0usize;
+    let mut seen_effective_tool_payloads = BTreeMap::new();
     let mut assistant_grounding = AssistantGroundingEvidence::default();
     let mut child_query_execution_ids = Vec::new();
     let mut stopped_reason = AgentStopReason::IterationCap;
     let mut last_required_tool_refusal_answer: Option<String> = None;
-    let requires_grounded_answer_tool = user_question_requires_grounded_answer_tool(
-        input.user_question,
-        input.grounded_answer_tool_history,
-    );
+    let mut verified_grounded_answer_count = 0usize;
+    let mut incomplete_grounded_answer_needs_follow_up = false;
 
     // There is no hidden post-loop synthesis pass: the model must spend
     // one of these iterations on a final answer after seeing tool results.
@@ -268,25 +291,19 @@ pub async fn run_mcp_tool_agent_turn(
             iteration_cap,
             total_tool_call_count,
             successful_tool_call_count,
+            verified_grounded_answer_count,
             &successful_tool_names,
-            verified_grounded_answer_call_count,
             deadline_started,
             input.soft_final_answer_deadline,
         );
-        let required_distinct_tool_count =
-            required_distinct_tool_count(&tool_defs, &successful_tool_names);
         let require_tool_call = should_require_tool_call_before_final(
             force_final_answer,
             &tool_defs,
             &successful_tool_names,
-            requires_grounded_answer_tool,
+            incomplete_grounded_answer_needs_follow_up,
         );
-        let tools_for_iteration = tool_defs_for_agent_iteration(
-            &tool_defs,
-            &successful_tool_names,
-            force_final_answer,
-            requires_grounded_answer_tool,
-        );
+        let tools_for_iteration =
+            tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, force_final_answer);
         let request_messages = messages.clone();
         emit_activity(
             &input.activity_tx,
@@ -296,6 +313,7 @@ pub async fn run_mcp_tool_agent_turn(
                 model_name: binding.model_name.clone(),
             },
         );
+        let model_call_started = std::time::Instant::now();
         let response = match tokio::time::timeout(
             deadline_remaining,
             input.state.llm_gateway.generate_with_tools(ToolUseRequest {
@@ -316,6 +334,14 @@ pub async fn run_mcp_tool_agent_turn(
         {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
+                tracing::warn!(
+                    provider = %binding.provider_kind,
+                    model = %binding.model_name,
+                    iteration,
+                    max_output_tokens_override = ?binding.max_output_tokens_override,
+                    error = %error,
+                    "MCP-backed assistant agent provider call failed"
+                );
                 return Err(AgentTurnFailure::with_loop(
                     error.context("MCP-backed assistant agent LLM call failed"),
                     debug_iterations.clone(),
@@ -343,6 +369,8 @@ pub async fn run_mcp_tool_agent_turn(
             }
         };
         merge_usage_into(&mut usage_json, &response.usage_json);
+        let model_call_duration_ms =
+            model_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
         if response.tool_calls.is_empty() {
             let answer = response.output_text.trim().to_string();
@@ -376,11 +404,14 @@ pub async fn run_mcp_tool_agent_turn(
                 response_text: Some(answer.clone()),
                 response_tool_calls: Vec::new(),
                 usage: response.usage_json,
+                duration_ms: Some(model_call_duration_ms),
                 child_runtime_execution_ids: Vec::new(),
+                child_query_execution_ids: Vec::new(),
             });
             if require_tool_call {
                 if last_required_tool_refusal_answer.is_some() || iteration == iteration_cap {
                     stopped_reason = AgentStopReason::FinalAnswer;
+                    let answer = ensure_user_fragments_visible(answer, input.user_question);
                     return Ok(AgentTurnResult {
                         answer,
                         provider,
@@ -388,7 +419,6 @@ pub async fn run_mcp_tool_agent_turn(
                         iterations: debug_iterations.len(),
                         assistant_grounding,
                         child_query_execution_ids,
-                        verified_grounded_answer_passthrough_execution_id: None,
                         debug_iterations,
                         agent_loop: Some(agent_loop_metadata(
                             iteration_cap,
@@ -400,13 +430,11 @@ pub async fn run_mcp_tool_agent_turn(
                 }
                 last_required_tool_refusal_answer = Some(answer.clone());
                 messages.push(ChatMessage::assistant_text(answer));
-                messages.push(ChatMessage::system(tool_requirement_reminder(
-                    successful_tool_names.len(),
-                    required_distinct_tool_count,
-                )));
+                messages.push(ChatMessage::system(tool_requirement_reminder()));
                 continue;
             }
             stopped_reason = AgentStopReason::FinalAnswer;
+            let answer = ensure_user_fragments_visible(answer, input.user_question);
             return Ok(AgentTurnResult {
                 answer,
                 provider,
@@ -414,7 +442,6 @@ pub async fn run_mcp_tool_agent_turn(
                 iterations: debug_iterations.len(),
                 assistant_grounding,
                 child_query_execution_ids,
-                verified_grounded_answer_passthrough_execution_id: None,
                 debug_iterations,
                 agent_loop: Some(agent_loop_metadata(
                     iteration_cap,
@@ -452,30 +479,35 @@ pub async fn run_mcp_tool_agent_turn(
             &tool_calls,
             max_parallel_actions,
             deadline_started,
+            &mut seen_effective_tool_payloads,
         )
         .await;
         total_tool_call_count = total_tool_call_count.saturating_add(tool_calls.len());
 
         let mut response_tool_calls = Vec::with_capacity(tool_calls.len());
         let mut child_runtime_execution_ids = Vec::new();
-        let can_return_verified_grounded_answer =
-            can_return_verified_grounded_answer_without_synthesis(&tool_calls);
-        let mut verified_grounded_answer_final: Option<(String, Option<Uuid>)> = None;
+        let mut iteration_child_query_execution_ids = Vec::new();
+        let mut iteration_had_incomplete_grounded_answer = false;
+        let mut iteration_had_follow_up_after_incomplete_grounded_answer = false;
         for (call, outcome) in tool_calls.iter().zip(outcomes.iter()) {
             child_query_execution_ids.extend(outcome.child_query_execution_ids.iter().copied());
+            iteration_child_query_execution_ids
+                .extend(outcome.child_query_execution_ids.iter().copied());
             child_runtime_execution_ids.extend(outcome.child_runtime_execution_ids.iter().copied());
             if !outcome.is_error {
                 successful_tool_call_count = successful_tool_call_count.saturating_add(1);
                 successful_tool_names.insert(call.name.clone());
-                if let Some(answer_text) = &outcome.verified_grounded_answer_text {
-                    verified_grounded_answer_call_count =
-                        verified_grounded_answer_call_count.saturating_add(1);
-                    if can_return_verified_grounded_answer {
-                        verified_grounded_answer_final = Some((
-                            answer_text.clone(),
-                            outcome.child_query_execution_ids.first().copied(),
-                        ));
-                    }
+                if incomplete_grounded_answer_needs_follow_up
+                    && tool_outcome_satisfies_incomplete_grounded_follow_up(&call.name, outcome)
+                {
+                    iteration_had_follow_up_after_incomplete_grounded_answer = true;
+                }
+                if outcome.grounded_answer_ready {
+                    verified_grounded_answer_count =
+                        verified_grounded_answer_count.saturating_add(1);
+                }
+                if outcome.grounded_answer_needs_follow_up {
+                    iteration_had_incomplete_grounded_answer = true;
                 }
                 if let Some(grounding_text) = &outcome.grounding_text {
                     push_tool_grounding_fragment(
@@ -496,12 +528,16 @@ pub async fn run_mcp_tool_agent_turn(
                 result_text: outcome.result_text.clone(),
                 result_json: outcome.result_json.clone(),
                 is_error: outcome.is_error,
+                duration_ms: Some(outcome.duration_ms),
             });
             messages.push(ChatMessage::tool_result(
                 call.id.clone(),
                 call.name.clone(),
                 outcome.message_content.clone(),
             ));
+        }
+        if let Some(reminder) = latest_user_verbatim_fragment_reminder(input.user_question) {
+            messages.push(ChatMessage::system(reminder));
         }
 
         debug_iterations.push(LlmIterationDebug {
@@ -513,27 +549,32 @@ pub async fn run_mcp_tool_agent_turn(
                 .then(|| response.output_text.trim().to_string()),
             response_tool_calls,
             usage: response.usage_json,
+            duration_ms: Some(model_call_duration_ms),
             child_runtime_execution_ids,
+            child_query_execution_ids: iteration_child_query_execution_ids,
         });
-        if let Some((answer, passthrough_execution_id)) = verified_grounded_answer_final {
-            stopped_reason = AgentStopReason::FinalAnswer;
-            return Ok(AgentTurnResult {
-                answer,
-                provider,
-                usage_json,
-                iterations: debug_iterations.len(),
-                assistant_grounding,
-                child_query_execution_ids,
-                verified_grounded_answer_passthrough_execution_id: passthrough_execution_id,
-                debug_iterations,
-                agent_loop: Some(agent_loop_metadata(
-                    iteration_cap,
-                    input.deadline,
-                    stopped_reason,
-                    total_tool_call_count,
-                )),
-            });
+        let next_incomplete_grounded_answer_needs_follow_up =
+            next_incomplete_grounded_answer_follow_up_required(
+                incomplete_grounded_answer_needs_follow_up,
+                iteration_had_incomplete_grounded_answer,
+                iteration_had_follow_up_after_incomplete_grounded_answer,
+            );
+        if next_incomplete_grounded_answer_needs_follow_up
+            != incomplete_grounded_answer_needs_follow_up
+        {
+            tracing::debug!(
+                request_id = input.request_id,
+                library_id = %input.library_id,
+                iteration,
+                previous = incomplete_grounded_answer_needs_follow_up,
+                iteration_had_incomplete_grounded_answer,
+                iteration_had_follow_up_after_incomplete_grounded_answer,
+                next = next_incomplete_grounded_answer_needs_follow_up,
+                "query.agent_loop.grounded_answer_follow_up_state"
+            );
         }
+        incomplete_grounded_answer_needs_follow_up =
+            next_incomplete_grounded_answer_needs_follow_up;
     }
 
     if matches!(stopped_reason, AgentStopReason::IterationCap)
@@ -584,15 +625,12 @@ fn force_final_answer_iteration(
     iteration_cap: usize,
     total_tool_call_count: usize,
     successful_tool_call_count: usize,
+    verified_grounded_answer_count: usize,
     successful_tool_names: &BTreeSet<String>,
-    verified_grounded_answer_call_count: usize,
     started: Instant,
     soft_final_answer_deadline: Option<Duration>,
 ) -> bool {
     if iteration == iteration_cap && total_tool_call_count > 0 {
-        return true;
-    }
-    if verified_grounded_answer_call_count > 0 {
         return true;
     }
     if successful_tool_call_count >= SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS
@@ -601,7 +639,6 @@ fn force_final_answer_iteration(
     {
         return true;
     }
-
     let Some(soft_deadline) = soft_final_answer_deadline else {
         return false;
     };
@@ -609,96 +646,74 @@ fn force_final_answer_iteration(
         return false;
     }
 
-    successful_tool_call_count >= SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS
-        && has_composite_tool_signal(successful_tool_names)
-}
-
-fn required_distinct_tool_count(
-    tool_defs: &[ChatToolDef],
-    successful_tool_names: &BTreeSet<String>,
-) -> usize {
-    if tool_defs.is_empty() {
-        return 0;
-    }
-    if successful_tool_names.is_empty()
-        || !has_composite_tool_signal(successful_tool_names)
-        || content_tool_defs(tool_defs, successful_tool_names).is_empty()
-    {
-        return 1;
-    }
-    MIN_COMPOSITE_DISTINCT_SUCCESSFUL_TOOLS_BEFORE_FINAL.min(tool_defs.len())
+    verified_grounded_answer_count > 0
+        || (successful_tool_call_count >= SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS
+            && has_composite_tool_signal(successful_tool_names))
 }
 
 fn should_require_tool_call_before_final(
     force_final_answer: bool,
     tool_defs: &[ChatToolDef],
     successful_tool_names: &BTreeSet<String>,
-    requires_grounded_answer_tool: bool,
+    incomplete_grounded_answer_needs_follow_up: bool,
 ) -> bool {
     if force_final_answer || tool_defs.is_empty() {
         return false;
     }
-    if requires_grounded_answer_tool
-        && tool_defs.iter().any(|tool| tool.name == GROUNDED_ANSWER_TOOL_NAME)
-        && !successful_tool_names.contains(GROUNDED_ANSWER_TOOL_NAME)
-    {
+    if incomplete_grounded_answer_needs_follow_up {
         return true;
     }
-    successful_tool_names.len() < required_distinct_tool_count(tool_defs, successful_tool_names)
+    successful_tool_names.is_empty()
+}
+
+fn next_incomplete_grounded_answer_follow_up_required(
+    previous_required: bool,
+    iteration_had_incomplete_grounded_answer: bool,
+    iteration_had_follow_up_after_incomplete_grounded_answer: bool,
+) -> bool {
+    iteration_had_incomplete_grounded_answer
+        || (previous_required && !iteration_had_follow_up_after_incomplete_grounded_answer)
+}
+
+fn tool_outcome_satisfies_incomplete_grounded_follow_up(
+    tool_name: &str,
+    outcome: &ToolExecutionOutcome,
+) -> bool {
+    tool_result_satisfies_incomplete_grounded_follow_up(
+        tool_name,
+        outcome.is_error,
+        outcome.grounded_answer_ready,
+        outcome.grounding_text.as_deref(),
+    )
+}
+
+fn tool_result_satisfies_incomplete_grounded_follow_up(
+    tool_name: &str,
+    is_error: bool,
+    grounded_answer_ready: bool,
+    grounding_text: Option<&str>,
+) -> bool {
+    if is_error {
+        return false;
+    }
+    if grounded_answer_ready {
+        return true;
+    }
+    if tool_name == GROUNDED_ANSWER_TOOL_NAME || !tool_result_can_ground_final_answer(tool_name) {
+        return false;
+    }
+    grounding_text.is_some_and(|text| !text.trim().is_empty())
 }
 
 fn tool_defs_for_agent_iteration(
     tool_defs: &[ChatToolDef],
-    successful_tool_names: &BTreeSet<String>,
+    _successful_tool_names: &BTreeSet<String>,
     force_final_answer: bool,
-    requires_grounded_answer_tool: bool,
 ) -> Vec<ChatToolDef> {
     if force_final_answer || tool_defs.is_empty() {
         return Vec::new();
     }
-
-    if requires_grounded_answer_tool && !successful_tool_names.contains(GROUNDED_ANSWER_TOOL_NAME) {
-        let grounded_only = tool_defs
-            .iter()
-            .filter(|tool| tool.name == GROUNDED_ANSWER_TOOL_NAME)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !grounded_only.is_empty() {
-            return grounded_only;
-        }
-    }
-
-    if successful_tool_names.is_empty() {
-        return tool_defs.to_vec();
-    }
-
-    if successful_tool_names.len() >= required_distinct_tool_count(tool_defs, successful_tool_names)
-    {
-        return tool_defs.to_vec();
-    }
-
-    let unused = tool_defs
-        .iter()
-        .filter(|tool| !successful_tool_names.contains(&tool.name))
-        .cloned()
-        .collect::<Vec<_>>();
-    let content_tools = content_tool_defs(&unused, successful_tool_names);
-    if !content_tools.is_empty() {
-        return content_tools;
-    }
-    if unused.is_empty() { tool_defs.to_vec() } else { unused }
-}
-
-fn content_tool_defs(
-    tool_defs: &[ChatToolDef],
-    successful_tool_names: &BTreeSet<String>,
-) -> Vec<ChatToolDef> {
-    tool_defs
-        .iter()
-        .filter(|tool| !successful_tool_names.contains(&tool.name))
-        .filter(|tool| !matches!(tool.name.as_str(), "list_workspaces" | "list_libraries"))
-        .cloned()
-        .collect()
+    tool_defs.to_vec()
 }
 
 fn has_composite_tool_signal(successful_tool_names: &BTreeSet<String>) -> bool {
@@ -709,14 +724,6 @@ fn has_composite_tool_signal(successful_tool_names: &BTreeSet<String>) -> bool {
         successful_tool_names.contains(GROUNDED_ANSWER_TOOL_NAME),
     ];
     categories.into_iter().filter(|present| *present).count() >= 2
-}
-
-fn user_question_requires_grounded_answer_tool(
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) -> bool {
-    text_has_wildcard_scope(user_question)
-        || grounded_answer_history_has_dense_code_literals(None, grounded_answer_tool_history)
 }
 
 fn is_document_content_tool(tool_name: &str) -> bool {
@@ -734,13 +741,327 @@ fn is_runtime_content_tool(tool_name: &str) -> bool {
     matches!(tool_name, "get_runtime_execution" | "get_runtime_execution_trace")
 }
 
-fn tool_requirement_reminder(
-    successful_distinct_tool_count: usize,
-    required_distinct_tool_count: usize,
-) -> String {
-    format!(
-        "Before writing the final answer, call MCP tools and inspect their results. Successful distinct tool types so far: {successful_distinct_tool_count}/{required_distinct_tool_count}. Use another relevant tool when one is available, and do not repeat an identical argument payload."
-    )
+fn tool_requirement_reminder() -> String {
+    "Before writing the final answer, call at least one MCP tool and inspect the result. Use any relevant visible tool, and do not repeat an identical argument payload.".to_string()
+}
+
+fn latest_user_verbatim_fragment_reminder(user_question: &str) -> Option<String> {
+    let fragments = extract_verbatim_user_fragments(user_question);
+    if fragments.is_empty() {
+        return None;
+    }
+
+    let mut reminder = String::from(
+        "Latest-user verbatim fragments that may identify a user-visible value, label, code, quoted phrase, requested output slot, or diagnostic message. These fragments come from the user; use them only to identify what the user asked about, not as evidence for external facts. If the final answer explains one of these items, keep the exact fragment visible before explaining it instead of replacing it with a paraphrase. If a fragment names requested answer slots, keep those slot labels visible when you cover them.",
+    );
+    for (index, fragment) in fragments.iter().enumerate() {
+        reminder.push_str("\n\nFragment ");
+        reminder.push_str(&(index + 1).to_string());
+        reminder.push_str(":\n```text\n");
+        reminder.push_str(fragment);
+        reminder.push_str("\n```");
+    }
+    Some(reminder)
+}
+
+fn extract_verbatim_user_fragments(user_question: &str) -> Vec<String> {
+    let mut fragments = extract_quoted_verbatim_user_fragments(user_question);
+    extend_delimited_user_fragments(user_question, &mut fragments);
+    extend_identifier_user_fragments(user_question, &mut fragments);
+    fragments
+}
+
+fn extract_quoted_verbatim_user_fragments(user_question: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
+    for (open, close) in USER_FRAGMENT_QUOTE_PAIRS {
+        extract_quoted_user_fragments(user_question, open, close, &mut fragments);
+        if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+            break;
+        }
+    }
+    fragments
+}
+
+fn ensure_user_fragments_visible(answer: String, user_question: &str) -> String {
+    let missing = extract_required_visible_user_fragments(user_question)
+        .into_iter()
+        .filter(|fragment| !fragment.is_visible_in(&answer))
+        .map(|fragment| fragment.text)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return answer;
+    }
+
+    let mut prefixed = missing.join("\n");
+    prefixed.push_str("\n\n");
+    prefixed.push_str(answer.trim_start());
+    prefixed
+}
+
+fn contains_casefolded(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RequiredVisibleUserFragment {
+    text: String,
+    match_kind: RequiredVisibleMatchKind,
+}
+
+impl RequiredVisibleUserFragment {
+    fn casefolded(text: String) -> Self {
+        Self { text, match_kind: RequiredVisibleMatchKind::CaseFolded }
+    }
+
+    fn exact(text: String) -> Self {
+        Self { text, match_kind: RequiredVisibleMatchKind::Exact }
+    }
+
+    fn is_visible_in(&self, answer: &str) -> bool {
+        match self.match_kind {
+            RequiredVisibleMatchKind::CaseFolded => contains_casefolded(answer, &self.text),
+            RequiredVisibleMatchKind::Exact => answer.contains(&self.text),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum RequiredVisibleMatchKind {
+    CaseFolded,
+    Exact,
+}
+
+fn extract_required_visible_user_fragments(
+    user_question: &str,
+) -> Vec<RequiredVisibleUserFragment> {
+    let mut raw_fragments = extract_quoted_verbatim_user_fragments(user_question);
+    for fragment in extract_delimited_verbatim_user_fragments(user_question) {
+        let ends_with_terminal =
+            fragment.chars().last().is_some_and(|ch| matches!(ch, '?' | '.' | '!'));
+        if fragment.chars().count() >= 16 && !ends_with_terminal {
+            push_verbatim_fragment(&fragment, &mut raw_fragments);
+        }
+    }
+    let mut required =
+        raw_fragments.into_iter().map(RequiredVisibleUserFragment::casefolded).collect::<Vec<_>>();
+    let mut identifier_fragments = Vec::new();
+    extend_identifier_user_fragments(user_question, &mut identifier_fragments);
+    for fragment in identifier_fragments {
+        if required.iter().any(|existing| existing.text == fragment) {
+            continue;
+        }
+        required.push(RequiredVisibleUserFragment::exact(fragment));
+        if required.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+            break;
+        }
+    }
+    required
+}
+
+fn extract_delimited_verbatim_user_fragments(user_question: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
+    extend_delimited_user_fragments(user_question, &mut fragments);
+    fragments
+}
+
+fn extract_quoted_user_fragments(
+    user_question: &str,
+    open: char,
+    close: char,
+    fragments: &mut Vec<String>,
+) {
+    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+        return;
+    }
+
+    if open == close {
+        let mut open_at: Option<usize> = None;
+        for (index, ch) in user_question.char_indices() {
+            if ch != open {
+                continue;
+            }
+            if let Some(start) = open_at.take() {
+                push_verbatim_fragment(&user_question[start + open.len_utf8()..index], fragments);
+                if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+                    return;
+                }
+            } else {
+                open_at = Some(index);
+            }
+        }
+        return;
+    }
+
+    let mut search_from = 0usize;
+    while search_from < user_question.len() && fragments.len() < VERBATIM_USER_FRAGMENT_LIMIT {
+        let Some(open_offset) = user_question[search_from..].find(open) else {
+            return;
+        };
+        let content_start = search_from + open_offset + open.len_utf8();
+        let Some(close_offset) = user_question[content_start..].find(close) else {
+            return;
+        };
+        let close_index = content_start + close_offset;
+        push_verbatim_fragment(&user_question[content_start..close_index], fragments);
+        search_from = close_index + close.len_utf8();
+    }
+}
+
+fn push_verbatim_fragment(candidate: &str, fragments: &mut Vec<String>) {
+    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+        return;
+    }
+
+    let candidate = candidate.trim();
+    let char_count = candidate.chars().count();
+    if !(VERBATIM_USER_FRAGMENT_MIN_CHARS..=VERBATIM_USER_FRAGMENT_MAX_CHARS).contains(&char_count)
+    {
+        return;
+    }
+    if fragments.iter().any(|existing| existing == candidate) {
+        return;
+    }
+    let total_chars: usize =
+        fragments.iter().map(|fragment: &String| fragment.chars().count()).sum();
+    if total_chars.saturating_add(char_count) > VERBATIM_USER_FRAGMENT_TOTAL_CHARS {
+        return;
+    }
+    fragments.push(candidate.to_string());
+}
+
+fn extend_delimited_user_fragments(user_question: &str, fragments: &mut Vec<String>) {
+    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+        return;
+    }
+
+    let mut segment_start = 0usize;
+    let mut saw_delimiter = false;
+    let mut active_quote_close: Option<char> = None;
+    for (index, ch) in user_question.char_indices() {
+        if let Some(close) = active_quote_close {
+            if ch == close {
+                active_quote_close = None;
+            }
+            continue;
+        }
+        if let Some(close) = quote_close_for_open(ch) {
+            active_quote_close = Some(close);
+            continue;
+        }
+        if !is_verbatim_fragment_delimiter(ch) {
+            continue;
+        }
+        if saw_delimiter {
+            push_verbatim_clause(&user_question[segment_start..index], fragments);
+            if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+                return;
+            }
+        }
+        saw_delimiter = true;
+        segment_start = index + ch.len_utf8();
+    }
+    if saw_delimiter && segment_start < user_question.len() {
+        push_verbatim_clause(&user_question[segment_start..], fragments);
+    }
+}
+
+fn extend_identifier_user_fragments(user_question: &str, fragments: &mut Vec<String>) {
+    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+        return;
+    }
+
+    let mut token_start: Option<usize> = None;
+    for (index, ch) in user_question.char_indices() {
+        if is_identifier_fragment_char(ch) {
+            token_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = token_start.take() {
+            push_identifier_fragment(&user_question[start..index], fragments);
+            if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
+                return;
+            }
+        }
+    }
+    if let Some(start) = token_start {
+        push_identifier_fragment(&user_question[start..], fragments);
+    }
+}
+
+fn is_identifier_fragment_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')
+}
+
+fn push_identifier_fragment(candidate: &str, fragments: &mut Vec<String>) {
+    let candidate = candidate.trim_matches(|ch: char| matches!(ch, '.' | '-' | '_' | '/'));
+    if !is_identifier_shaped_fragment(candidate) {
+        return;
+    }
+    if fragments.iter().any(|existing| existing.contains(candidate)) {
+        return;
+    }
+    push_verbatim_fragment(candidate, fragments);
+}
+
+fn is_identifier_shaped_fragment(candidate: &str) -> bool {
+    let char_count = candidate.chars().count();
+    if !(VERBATIM_USER_FRAGMENT_MIN_CHARS..=VERBATIM_USER_FRAGMENT_MAX_CHARS).contains(&char_count)
+    {
+        return false;
+    }
+    let alnum_count = candidate.chars().filter(|ch| ch.is_alphanumeric()).count();
+    if alnum_count < 2 {
+        return false;
+    }
+    let has_underscore = candidate.contains('_');
+    let has_hyphen = candidate.contains('-');
+    let has_dot = candidate.contains('.');
+    let has_slash = candidate.contains('/');
+    if !(has_underscore || has_hyphen || has_dot || has_slash) {
+        return false;
+    }
+    if has_underscore {
+        return true;
+    }
+    if has_slash {
+        return candidate.starts_with('/')
+            || has_dot
+            || candidate.chars().any(|ch| ch.is_numeric());
+    }
+    let has_digit = candidate.chars().any(|ch| ch.is_numeric());
+    let has_upper = candidate.chars().any(|ch| ch.is_uppercase());
+    let has_lower = candidate.chars().any(|ch| ch.is_lowercase());
+    let all_cased_upper = has_upper && !has_lower;
+    if has_hyphen {
+        return has_digit || all_cased_upper;
+    }
+    has_dot && (has_digit || all_cased_upper)
+}
+
+fn is_verbatim_fragment_delimiter(ch: char) -> bool {
+    matches!(ch, ',' | ';' | ':' | '(' | ')' | '[' | ']' | '\n')
+}
+
+fn quote_close_for_open(ch: char) -> Option<char> {
+    match ch {
+        '«' => Some('»'),
+        '“' => Some('”'),
+        '„' => Some('“'),
+        '「' => Some('」'),
+        '『' => Some('』'),
+        '‹' => Some('›'),
+        '"' => Some('"'),
+        '`' => Some('`'),
+        _ => None,
+    }
+}
+
+fn push_verbatim_clause(candidate: &str, fragments: &mut Vec<String>) {
+    let candidate = candidate.trim();
+    if candidate.chars().all(|ch| !ch.is_alphanumeric()) {
+        return;
+    }
+    push_verbatim_fragment(candidate, fragments);
 }
 
 async fn execute_tool_calls(
@@ -749,10 +1070,21 @@ async fn execute_tool_calls(
     tool_calls: &[ChatToolCall],
     max_parallel_actions: usize,
     deadline_started: Instant,
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
 ) -> Vec<ToolExecutionOutcome> {
     let mut outcomes: Vec<Option<ToolExecutionOutcome>> = vec![None; tool_calls.len()];
-    let pending_results = stream::iter(tool_calls.iter().cloned().enumerate())
-        .map(|(pending_index, call)| {
+    let pending_calls = prepare_agent_tool_calls(
+        tool_calls,
+        input.user_question,
+        input.grounded_answer_top_k,
+        input.library_ref,
+        input.grounded_answer_tool_history,
+        seen_effective_payloads,
+        &mut outcomes,
+    );
+
+    let pending_results = stream::iter(pending_calls)
+        .map(|pending| {
             let input = input.clone();
             async move {
                 let started_at = Instant::now();
@@ -760,35 +1092,40 @@ async fn execute_tool_calls(
                     &input.activity_tx,
                     AgentLoopActivityEvent::ToolCallStarted {
                         iteration,
-                        tool_name: call.name.clone(),
+                        tool_name: pending.call.name.clone(),
                     },
                 );
-                let outcome = match deadline_remaining(deadline_started, input.deadline) {
-                    Some(_) => execute_one_tool_call(&input, &call).await,
+                let mut outcome = match deadline_remaining(deadline_started, input.deadline) {
+                    Some(_) => execute_one_tool_call(&input, &pending.call).await,
                     None => tool_execution_error(format!(
                         "tool '{}' was not started because the assistant turn deadline expired",
-                        call.name
+                        pending.call.name
                     )),
                 };
+                let elapsed_ms = started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+                outcome.duration_ms = elapsed_ms;
                 emit_activity(
                     &input.activity_tx,
                     AgentLoopActivityEvent::ToolCallFinished {
                         iteration,
-                        tool_name: call.name.clone(),
-                        elapsed_ms: started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                        tool_name: pending.call.name.clone(),
+                        elapsed_ms,
                         is_error: outcome.is_error,
                         child_execution_id: outcome.child_query_execution_ids.first().copied(),
                         result_preview: outcome.result_text.as_deref().map(activity_result_preview),
                     },
                 );
-                (pending_index, outcome)
+                (pending.index, pending.fingerprint, outcome)
             }
         })
         .buffer_unordered(max_parallel_actions)
         .collect::<Vec<_>>()
         .await;
 
-    for (pending_index, outcome) in pending_results {
+    for (pending_index, fingerprint, outcome) in pending_results {
+        if let Some(fingerprint) = fingerprint {
+            record_effective_tool_payload_outcome(seen_effective_payloads, fingerprint, &outcome);
+        }
         outcomes[pending_index] = Some(outcome);
     }
 
@@ -800,6 +1137,73 @@ async fn execute_tool_calls(
             })
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum EffectiveToolPayloadState {
+    InFlight,
+    Completed,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAgentToolCall {
+    index: usize,
+    call: ChatToolCall,
+    fingerprint: Option<String>,
+}
+
+fn prepare_agent_tool_calls(
+    tool_calls: &[ChatToolCall],
+    user_question: &str,
+    grounded_top_k: usize,
+    library_ref: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
+    outcomes: &mut [Option<ToolExecutionOutcome>],
+) -> Vec<PendingAgentToolCall> {
+    tool_calls
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter_map(|(pending_index, call)| {
+            let fingerprint = effective_tool_call_fingerprint(
+                &call.name,
+                &call.arguments_json,
+                user_question,
+                grounded_top_k,
+                library_ref,
+                grounded_answer_tool_history,
+            );
+            if let Some(fingerprint) = &fingerprint {
+                if seen_effective_payloads.contains_key(fingerprint) {
+                    outcomes[pending_index] =
+                        Some(tool_execution_error(duplicate_tool_call_message(&call.name)));
+                    return None;
+                }
+                seen_effective_payloads
+                    .insert(fingerprint.clone(), EffectiveToolPayloadState::InFlight);
+            }
+            Some(PendingAgentToolCall { index: pending_index, call, fingerprint })
+        })
+        .collect::<Vec<_>>()
+}
+
+fn record_effective_tool_payload_outcome(
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
+    fingerprint: String,
+    outcome: &ToolExecutionOutcome,
+) {
+    if outcome.is_error {
+        seen_effective_payloads.remove(&fingerprint);
+        return;
+    }
+    seen_effective_payloads.insert(fingerprint, EffectiveToolPayloadState::Completed);
+}
+
+fn duplicate_tool_call_message(tool_name: &str) -> String {
+    format!(
+        "duplicate MCP tool call suppressed: `{tool_name}` already used the same effective arguments in this model iteration; vary the sub-question, change arguments, or choose another MCP tool"
+    )
 }
 
 fn emit_activity(sender: &Option<Sender<AgentLoopActivityEvent>>, event: AgentLoopActivityEvent) {
@@ -829,6 +1233,7 @@ async fn execute_one_tool_call(
     apply_agent_tool_argument_defaults(
         &call.name,
         &mut arguments,
+        input.user_question,
         input.grounded_answer_top_k,
         input.library_ref,
         input.grounded_answer_tool_history,
@@ -852,7 +1257,8 @@ async fn execute_one_tool_call(
     let is_error = result.is_error;
     let message_content = tool_result_model_message(&call.name, &result);
     let grounding_text = tool_result_verification_text(&call.name, &result);
-    let verified_grounded_answer_text = verified_grounded_answer_text(&call.name, &result);
+    let grounded_answer_ready = grounded_answer_ready(&call.name, &result);
+    let grounded_answer_needs_follow_up = grounded_answer_needs_follow_up(&call.name, &result);
     let result_json = Some(debug_tool_result_json(&result));
     let arguments_json = Some(arguments.to_string());
     let requested_arguments_json =
@@ -865,8 +1271,10 @@ async fn execute_one_tool_call(
         result_text,
         result_json,
         grounding_text,
-        verified_grounded_answer_text,
+        grounded_answer_ready,
+        grounded_answer_needs_follow_up,
         is_error,
+        duration_ms: 0,
         child_query_execution_ids,
         child_runtime_execution_ids,
     }
@@ -915,6 +1323,7 @@ fn validate_agent_tool_library_scope(
 fn apply_agent_tool_argument_defaults(
     tool_name: &str,
     arguments: &mut Value,
+    user_question: &str,
     grounded_top_k: usize,
     library_ref: &str,
     grounded_answer_tool_history: &[ExternalConversationTurn],
@@ -930,35 +1339,29 @@ fn apply_agent_tool_argument_defaults(
     }
     let bounded_top_k = grounded_top_k.max(1);
     if tool_name == GROUNDED_ANSWER_TOOL_NAME {
+        if let Some(query) = object.get("query").and_then(Value::as_str)
+            && should_replace_history_padded_grounded_answer_query(
+                query,
+                user_question,
+                grounded_answer_tool_history,
+            )
+        {
+            object.insert("query".to_string(), serde_json::json!(user_question.trim()));
+        }
         let requested_top_k = object
             .get("topK")
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok());
         let turns = grounded_answer_conversation_turn_defaults(grounded_answer_tool_history);
-        let has_explicit_conversation_turns = object.contains_key("conversationTurns");
-        let has_contextual_turns = has_nonempty_conversation_turns(object.get("conversationTurns"))
-            || (!has_explicit_conversation_turns && !turns.is_empty());
-        let mut effective_top_k = resolve_contextual_grounded_answer_top_k(
+        object.insert("conversationTurns".to_string(), Value::Array(turns));
+        let has_contextual_turns = !grounded_answer_tool_history.is_empty();
+        let effective_top_k = resolve_contextual_grounded_answer_top_k(
             requested_top_k,
             has_contextual_turns,
             bounded_top_k,
         );
-        if has_contextual_turns
-            && grounded_answer_history_has_dense_code_literals(
-                object.get("conversationTurns"),
-                grounded_answer_tool_history,
-            )
-        {
-            effective_top_k = effective_top_k.max(bounded_top_k);
-        }
-        if grounded_answer_query_has_wildcard_scope(object.get("query")) {
-            effective_top_k = effective_top_k.max(bounded_top_k);
-        }
         if requested_top_k != Some(effective_top_k) {
             object.insert("topK".to_string(), serde_json::json!(effective_top_k));
-        }
-        if !turns.is_empty() && !object.contains_key("conversationTurns") {
-            object.insert("conversationTurns".to_string(), Value::Array(turns));
         }
         return;
     }
@@ -981,66 +1384,116 @@ fn apply_agent_tool_argument_defaults(
     }
 }
 
-fn has_nonempty_conversation_turns(value: Option<&Value>) -> bool {
-    matches!(value, Some(Value::Array(items)) if !items.is_empty())
+fn effective_tool_call_fingerprint(
+    tool_name: &str,
+    arguments_json: &str,
+    user_question: &str,
+    grounded_top_k: usize,
+    library_ref: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) -> Option<String> {
+    let mut arguments = serde_json::from_str::<Value>(arguments_json).ok()?;
+    validate_agent_tool_library_scope(tool_name, &arguments, library_ref).ok()?;
+    apply_agent_tool_argument_defaults(
+        tool_name,
+        &mut arguments,
+        user_question,
+        grounded_top_k,
+        library_ref,
+        grounded_answer_tool_history,
+    );
+    let canonical = canonical_json_value(&arguments);
+    let serialized = serde_json::to_string(&canonical).ok()?;
+    Some(format!("{tool_name}:{serialized}"))
 }
 
-fn grounded_answer_history_has_dense_code_literals(
-    explicit_turns: Option<&Value>,
-    fallback_turns: &[ExternalConversationTurn],
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json_value).collect()),
+        Value::Object(object) => {
+            let mut sorted = serde_json::Map::new();
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                if let Some(item) = object.get(key) {
+                    sorted.insert(key.clone(), canonical_json_value(item));
+                }
+            }
+            Value::Object(sorted)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn should_replace_history_padded_grounded_answer_query(
+    query: &str,
+    user_question: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
 ) -> bool {
-    const DENSE_CODE_LITERAL_MIN_COUNT: usize = 8;
-
-    let mut literal_count = 0usize;
-    if let Some(Value::Array(turns)) = explicit_turns {
-        for turn in turns {
-            let is_assistant = turn.get("role").and_then(Value::as_str) == Some("assistant");
-            if !is_assistant {
-                continue;
-            }
-            if let Some(content) = turn.get("content").and_then(Value::as_str) {
-                literal_count += code_literal_count(content);
-            }
-        }
-    } else {
-        for turn in fallback_turns {
-            if !matches!(turn.turn_kind, QueryTurnKind::Assistant) {
-                continue;
-            }
-            literal_count += code_literal_count(&turn.content_text);
-        }
+    if grounded_answer_tool_history.is_empty() {
+        return false;
     }
-
-    literal_count >= DENSE_CODE_LITERAL_MIN_COUNT
-}
-
-fn grounded_answer_query_has_wildcard_scope(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_str).is_some_and(text_has_wildcard_scope)
-}
-
-fn text_has_wildcard_scope(value: &str) -> bool {
-    !literal_wildcard_prefixes(value, 2).is_empty()
-}
-
-fn code_literal_count(value: &str) -> usize {
-    let mut count = 0usize;
-    let mut in_literal = false;
-    let mut literal_start = 0usize;
-    for (index, ch) in value.char_indices() {
-        if ch != '`' {
-            continue;
-        }
-        if in_literal {
-            if index > literal_start {
-                count += 1;
-            }
-            in_literal = false;
-        } else {
-            in_literal = true;
-            literal_start = index + ch.len_utf8();
-        }
+    let query = query.trim();
+    let user_question = user_question.trim();
+    if query.is_empty() || user_question.is_empty() || query == user_question {
+        return false;
     }
-    count
+    if !query_mentions_user_question(query, user_question) {
+        return false;
+    }
+    let query_chars = query.chars().count();
+    let user_chars = user_question.chars().count();
+    if query_chars <= user_chars.saturating_add(80) {
+        return false;
+    }
+    let query_markers = technical_surface_marker_count(query);
+    let user_markers = technical_surface_marker_count(user_question);
+    if query_markers < user_markers.saturating_add(8) {
+        return false;
+    }
+    history_added_query_token_overlap(query, user_question, grounded_answer_tool_history) >= 3
+}
+
+fn query_mentions_user_question(query: &str, user_question: &str) -> bool {
+    if query.to_lowercase().contains(&user_question.to_lowercase()) {
+        return true;
+    }
+    let query_tokens = normalized_alnum_token_sequence(query, 3);
+    let user_tokens = normalized_alnum_token_sequence(user_question, 3);
+    if user_tokens.is_empty() || query_tokens.is_empty() {
+        return false;
+    }
+    let overlap = user_tokens.iter().filter(|token| query_tokens.contains(token)).count();
+    overlap >= user_tokens.len().min(3)
+}
+
+fn history_added_query_token_overlap(
+    query: &str,
+    user_question: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) -> usize {
+    let user_tokens =
+        normalized_alnum_token_sequence(user_question, 3).into_iter().collect::<BTreeSet<_>>();
+    let history_tokens = grounded_answer_tool_history
+        .iter()
+        .flat_map(|turn| normalized_alnum_token_sequence(&turn.content_text, 3))
+        .collect::<BTreeSet<_>>();
+
+    normalized_alnum_token_sequence(query, 3)
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|token| !user_tokens.contains(token) && history_tokens.contains(token))
+        .count()
+}
+
+fn technical_surface_marker_count(value: &str) -> usize {
+    value
+        .chars()
+        .filter(|ch| {
+            matches!(ch, '`' | '/' | '\\' | '[' | ']' | '_' | ':' | '=' | '.' | '<' | '>' | '"')
+        })
+        .count()
 }
 
 fn grounded_answer_conversation_turn_defaults(
@@ -1076,10 +1529,6 @@ fn tool_uses_single_library_scope(tool_name: &str) -> bool {
             | "list_relations"
             | "get_communities"
     )
-}
-
-fn can_return_verified_grounded_answer_without_synthesis(tool_calls: &[ChatToolCall]) -> bool {
-    tool_calls.len() == 1 && tool_calls[0].name == GROUNDED_ANSWER_TOOL_NAME
 }
 
 fn activity_result_preview(text: &str) -> String {
@@ -1156,8 +1605,10 @@ fn tool_execution_error(message: impl Into<String>) -> ToolExecutionOutcome {
             .map(ToString::to_string),
         result_json: Some(result_json),
         grounding_text: None,
-        verified_grounded_answer_text: None,
+        grounded_answer_ready: false,
+        grounded_answer_needs_follow_up: false,
         is_error: true,
+        duration_ms: 0,
         child_query_execution_ids: Vec::new(),
         child_runtime_execution_ids: Vec::new(),
     }
@@ -1310,33 +1761,71 @@ fn tool_model_content_char_limit(tool_name: &str) -> usize {
     }
 }
 
-fn verified_grounded_answer_text(
+fn grounded_answer_ready(
     tool_name: &str,
     result: &crate::interfaces::http::mcp::McpToolResult,
-) -> Option<String> {
+) -> bool {
     if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
-        return None;
+        return false;
     }
-    let verification_state = result
-        .structured_content
-        .pointer("/executionDetail/verificationState")
-        .and_then(Value::as_str)?;
-    if verification_state != "verified" {
-        return None;
+    if result.structured_content.get("finalAnswerReady").and_then(Value::as_bool) != Some(true) {
+        return false;
     }
-    let lifecycle_state =
-        result.structured_content.get("lifecycleState").and_then(Value::as_str).or_else(|| {
-            result
-                .structured_content
-                .pointer("/executionDetail/execution/lifecycleState")
-                .and_then(Value::as_str)
-        });
-    if lifecycle_state != Some("completed") {
-        return None;
+    if grounded_answer_lifecycle_state(result) != Some(GROUNDED_ANSWER_LIFECYCLE_COMPLETED)
+        || grounded_answer_verification_state(result) != Some(GROUNDED_ANSWER_VERIFICATION_VERIFIED)
+    {
+        return false;
     }
-    tool_result_full_text(&result.content)
+    true
 }
 
+fn grounded_answer_needs_follow_up(
+    tool_name: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> bool {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
+        return false;
+    }
+    if grounded_answer_ready(tool_name, result) {
+        return false;
+    }
+    if grounded_answer_lifecycle_state(result) != Some(GROUNDED_ANSWER_LIFECYCLE_COMPLETED) {
+        return false;
+    }
+    match grounded_answer_verification_state(result) {
+        Some(GROUNDED_ANSWER_VERIFICATION_VERIFIED | GROUNDED_ANSWER_VERIFICATION_NOT_RUN) => false,
+        Some(_) | None => true,
+    }
+}
+
+#[cfg(test)]
+fn grounded_answer_completed(
+    tool_name: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> bool {
+    tool_name == GROUNDED_ANSWER_TOOL_NAME
+        && !result.is_error
+        && grounded_answer_lifecycle_state(result) == Some(GROUNDED_ANSWER_LIFECYCLE_COMPLETED)
+}
+
+fn grounded_answer_lifecycle_state(
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> Option<&str> {
+    result.structured_content.get("lifecycleState").and_then(Value::as_str).or_else(|| {
+        result
+            .structured_content
+            .pointer("/executionDetail/execution/lifecycleState")
+            .and_then(Value::as_str)
+    })
+}
+
+fn grounded_answer_verification_state(
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> Option<&str> {
+    result.structured_content.pointer("/executionDetail/verificationState").and_then(Value::as_str)
+}
+
+#[cfg(test)]
 fn tool_result_full_text(
     content: &[crate::interfaces::http::mcp::McpContentBlock],
 ) -> Option<String> {
@@ -1360,6 +1849,7 @@ fn compact_grounded_answer_structured_content(value: &Value, fallback_limit: usi
         "libraryId": value.get("libraryId").cloned().unwrap_or(Value::Null),
         "workspaceId": value.get("workspaceId").cloned().unwrap_or(Value::Null),
         "lifecycleState": value.get("lifecycleState").cloned().unwrap_or(Value::Null),
+        "finalAnswerReady": value.get("finalAnswerReady").cloned().unwrap_or(Value::Bool(false)),
         "verificationState": execution_detail.get("verificationState").cloned().unwrap_or(Value::Null),
         "verificationWarnings": execution_detail.get("verificationWarnings").cloned().unwrap_or_else(|| serde_json::json!([])),
         "references": {
@@ -1523,6 +2013,7 @@ pub async fn run_single_shot_turn(
         require_tool_call: false,
     };
 
+    let llm_call_started = std::time::Instant::now();
     let response = state
         .llm_gateway
         .generate_with_tools(tool_use_request)
@@ -1538,7 +2029,9 @@ pub async fn run_single_shot_turn(
         response_text: (!answer.is_empty()).then(|| answer.clone()),
         response_tool_calls: Vec::new(),
         usage: response.usage_json.clone(),
+        duration_ms: Some(llm_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
         child_runtime_execution_ids: Vec::new(),
+        child_query_execution_ids: Vec::new(),
     };
 
     Ok(AgentTurnResult {
@@ -1551,7 +2044,6 @@ pub async fn run_single_shot_turn(
         // grounding when it records the generation stage.
         assistant_grounding: AssistantGroundingEvidence::default(),
         child_query_execution_ids: Vec::new(),
-        verified_grounded_answer_passthrough_execution_id: None,
         debug_iterations: vec![debug_iteration],
         agent_loop: None,
     })
@@ -1613,6 +2105,7 @@ pub async fn run_literal_fidelity_revision_turn(
         require_tool_call: false,
     };
 
+    let llm_call_started = std::time::Instant::now();
     let response = state
         .llm_gateway
         .generate_with_tools(tool_use_request)
@@ -1628,7 +2121,9 @@ pub async fn run_literal_fidelity_revision_turn(
         response_text: (!answer.is_empty()).then(|| answer.clone()),
         response_tool_calls: Vec::new(),
         usage: response.usage_json.clone(),
+        duration_ms: Some(llm_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
         child_runtime_execution_ids: Vec::new(),
+        child_query_execution_ids: Vec::new(),
     };
 
     Ok(AgentTurnResult {
@@ -1638,7 +2133,94 @@ pub async fn run_literal_fidelity_revision_turn(
         iterations: 1,
         assistant_grounding: AssistantGroundingEvidence::default(),
         child_query_execution_ids: Vec::new(),
-        verified_grounded_answer_passthrough_execution_id: None,
+        debug_iterations: vec![debug_iteration],
+        agent_loop: None,
+    })
+}
+
+pub async fn run_literal_inventory_coverage_revision_turn(
+    state: &AppState,
+    library_id: Uuid,
+    user_question: &str,
+    conversation_history: &[ChatMessage],
+    original_answer: &str,
+    required_literals: &[String],
+    revision_context: &str,
+) -> Result<AgentTurnResult, QueryServiceError> {
+    let binding = state
+        .canonical_services
+        .ai_catalog
+        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to resolve query_answer binding: {e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no active query_answer binding configured for library {library_id}")
+        })?;
+
+    let provider = ProviderModelSelection {
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+    };
+
+    let system_prompt = super::assistant_prompt::render_literal_inventory_coverage_revision(
+        original_answer,
+        required_literals,
+        "Provided in the `ironrag_literal_revision_context` runtime tool result.",
+    );
+    let messages = build_runtime_tool_answer_messages(
+        system_prompt,
+        conversation_history,
+        user_question,
+        RUNTIME_LITERAL_REVISION_CONTEXT_TOOL,
+        serde_json::json!({
+            "question": user_question,
+            "requiredLiterals": required_literals,
+        }),
+        revision_context,
+    );
+
+    let tool_use_request = ToolUseRequest {
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        api_key_override: binding.api_key.clone(),
+        base_url_override: binding.provider_base_url.clone(),
+        temperature: binding.temperature,
+        top_p: binding.top_p,
+        max_output_tokens_override: binding.max_output_tokens_override,
+        messages: messages.clone(),
+        tools: Vec::new(),
+        extra_parameters_json: binding.extra_parameters_json.clone(),
+        require_tool_call: false,
+    };
+
+    let llm_call_started = std::time::Instant::now();
+    let response = state
+        .llm_gateway
+        .generate_with_tools(tool_use_request)
+        .await
+        .with_context(|| "literal-inventory coverage revision LLM call failed")?;
+
+    let answer = response.output_text.trim().to_string();
+    let debug_iteration = super::llm_context_debug::LlmIterationDebug {
+        iteration: 1,
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        request_messages: messages,
+        response_text: (!answer.is_empty()).then(|| answer.clone()),
+        response_tool_calls: Vec::new(),
+        usage: response.usage_json.clone(),
+        duration_ms: Some(llm_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
+        child_runtime_execution_ids: Vec::new(),
+        child_query_execution_ids: Vec::new(),
+    };
+
+    Ok(AgentTurnResult {
+        answer,
+        provider,
+        usage_json: response.usage_json,
+        iterations: 1,
+        assistant_grounding: AssistantGroundingEvidence::default(),
+        child_query_execution_ids: Vec::new(),
         debug_iterations: vec![debug_iteration],
         agent_loop: None,
     })
@@ -1710,6 +2292,7 @@ pub async fn run_clarify_turn(
         require_tool_call: false,
     };
 
+    let llm_call_started = std::time::Instant::now();
     let response = state
         .llm_gateway
         .generate_with_tools(tool_use_request)
@@ -1725,7 +2308,9 @@ pub async fn run_clarify_turn(
         response_text: (!answer.is_empty()).then(|| answer.clone()),
         response_tool_calls: Vec::new(),
         usage: response.usage_json.clone(),
+        duration_ms: Some(llm_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
         child_runtime_execution_ids: Vec::new(),
+        child_query_execution_ids: Vec::new(),
     };
 
     Ok(AgentTurnResult {
@@ -1735,7 +2320,6 @@ pub async fn run_clarify_turn(
         iterations: 1,
         assistant_grounding: AssistantGroundingEvidence::default(),
         child_query_execution_ids: Vec::new(),
-        verified_grounded_answer_passthrough_execution_id: None,
         debug_iterations: vec![debug_iteration],
         agent_loop: None,
     })
@@ -1992,10 +2576,10 @@ mod tests {
         let started = Instant::now();
         let names = BTreeSet::new();
 
-        assert!(force_final_answer_iteration(5, 5, 1, 1, &names, 0, started, None));
-        assert!(force_final_answer_iteration(1, 1, 1, 1, &names, 0, started, None));
-        assert!(!force_final_answer_iteration(4, 5, 1, 1, &names, 0, started, None));
-        assert!(!force_final_answer_iteration(5, 5, 0, 0, &names, 0, started, None));
+        assert!(force_final_answer_iteration(5, 5, 1, 1, 0, &names, started, None));
+        assert!(force_final_answer_iteration(1, 1, 1, 1, 0, &names, started, None));
+        assert!(!force_final_answer_iteration(4, 5, 1, 1, 0, &names, started, None));
+        assert!(!force_final_answer_iteration(5, 5, 0, 0, 0, &names, started, None));
     }
 
     #[test]
@@ -2009,8 +2593,8 @@ mod tests {
             5,
             4,
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
-            &names,
             0,
+            &names,
             started,
             Some(Duration::from_secs(35)),
         ));
@@ -2026,15 +2610,15 @@ mod tests {
             5,
             4,
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
-            &names,
             0,
+            &names,
             started,
             Some(Duration::from_secs(35)),
         ));
     }
 
     #[test]
-    fn soft_deadline_waits_for_enough_successful_tools_or_verified_grounded_answer() {
+    fn soft_deadline_waits_for_enough_successful_tools() {
         let started = Instant::now() - Duration::from_secs(40);
         let names = BTreeSet::new();
 
@@ -2043,19 +2627,37 @@ mod tests {
             5,
             3,
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS - 1,
-            &names,
             0,
+            &names,
             started,
+            Some(Duration::from_secs(35)),
+        ));
+    }
+
+    #[test]
+    fn grounded_answer_success_alone_waits_until_soft_deadline() {
+        let before_deadline = Instant::now();
+        let after_deadline = Instant::now() - Duration::from_secs(40);
+        let names = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
+
+        assert!(!force_final_answer_iteration(
+            3,
+            5,
+            5,
+            SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
+            1,
+            &names,
+            before_deadline,
             Some(Duration::from_secs(35)),
         ));
         assert!(force_final_answer_iteration(
             3,
             5,
-            1,
+            5,
+            SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
             1,
             &names,
-            1,
-            started,
+            after_deadline,
             Some(Duration::from_secs(35)),
         ));
     }
@@ -2074,8 +2676,8 @@ mod tests {
             5,
             4,
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
-            &names,
             0,
+            &names,
             started,
             Some(Duration::from_secs(35)),
         ));
@@ -2091,15 +2693,15 @@ mod tests {
             5,
             4,
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
-            &names,
             0,
+            &names,
             started,
             Some(Duration::from_secs(35)),
         ));
     }
 
     #[test]
-    fn final_answer_requires_distinct_tool_evidence_until_floor() {
+    fn final_answer_requires_at_least_one_tool_result() {
         let tool_defs = [
             "list_workspaces",
             "list_libraries",
@@ -2119,15 +2721,17 @@ mod tests {
         assert!(should_require_tool_call_before_final(false, &tool_defs, &BTreeSet::new(), false));
 
         let simple_evidence = BTreeSet::from(["search_documents".to_string()]);
-        assert!(!should_require_tool_call_before_final(false, &tool_defs, &simple_evidence, false));
+        assert!(
+            !should_require_tool_call_before_final(false, &tool_defs, &simple_evidence, false,)
+        );
 
         let composite_evidence =
             BTreeSet::from(["search_documents".to_string(), "search_entities".to_string()]);
-        assert!(should_require_tool_call_before_final(
+        assert!(!should_require_tool_call_before_final(
             false,
             &tool_defs,
             &composite_evidence,
-            false
+            false,
         ));
 
         let complete_composite = BTreeSet::from([
@@ -2139,10 +2743,10 @@ mod tests {
             false,
             &tool_defs,
             &complete_composite,
-            false
+            false,
         ));
-        assert!(!should_require_tool_call_before_final(true, &tool_defs, &BTreeSet::new(), false));
-        assert!(!should_require_tool_call_before_final(false, &[], &BTreeSet::new(), false));
+        assert!(!should_require_tool_call_before_final(true, &tool_defs, &BTreeSet::new(), true,));
+        assert!(!should_require_tool_call_before_final(false, &[], &BTreeSet::new(), true,));
 
         let answer_only = [ChatToolDef {
             name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
@@ -2159,12 +2763,180 @@ mod tests {
             false,
             &answer_only,
             &BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]),
-            false
+            false,
         ));
     }
 
     #[test]
-    fn agent_iteration_prefers_unused_tools_until_distinct_floor() {
+    fn final_answer_requires_follow_up_after_incomplete_grounded_answer() {
+        let tool_defs =
+            [GROUNDED_ANSWER_TOOL_NAME, SEARCH_DOCUMENTS_TOOL_NAME, READ_DOCUMENT_TOOL_NAME]
+                .into_iter()
+                .map(|name| ChatToolDef {
+                    name: name.to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                })
+                .collect::<Vec<_>>();
+        let grounded = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
+
+        assert!(should_require_tool_call_before_final(false, &tool_defs, &grounded, true));
+    }
+
+    #[test]
+    fn complete_grounded_answer_allows_final_synthesis() {
+        let tool_defs = [GROUNDED_ANSWER_TOOL_NAME]
+            .into_iter()
+            .map(|name| ChatToolDef {
+                name: name.to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            })
+            .collect::<Vec<_>>();
+        let grounded = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
+
+        assert!(!should_require_tool_call_before_final(false, &tool_defs, &grounded, false));
+    }
+
+    #[test]
+    fn incomplete_grounded_follow_up_state_stays_required_after_repeated_incomplete_result() {
+        assert!(next_incomplete_grounded_answer_follow_up_required(false, true, false));
+        assert!(next_incomplete_grounded_answer_follow_up_required(true, true, true));
+        assert!(!next_incomplete_grounded_answer_follow_up_required(true, false, true));
+        assert!(next_incomplete_grounded_answer_follow_up_required(true, false, false));
+    }
+
+    #[test]
+    fn incomplete_grounded_follow_up_requires_grounding_evidence() {
+        assert!(!tool_result_satisfies_incomplete_grounded_follow_up(
+            "list_documents",
+            false,
+            false,
+            Some("document names only"),
+        ));
+        assert!(!tool_result_satisfies_incomplete_grounded_follow_up(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            false,
+            false,
+            Some("   "),
+        ));
+        assert!(tool_result_satisfies_incomplete_grounded_follow_up(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            false,
+            false,
+            Some("content evidence"),
+        ));
+        assert!(tool_result_satisfies_incomplete_grounded_follow_up(
+            GROUNDED_ANSWER_TOOL_NAME,
+            false,
+            true,
+            None,
+        ));
+        assert!(!tool_result_satisfies_incomplete_grounded_follow_up(
+            GROUNDED_ANSWER_TOOL_NAME,
+            false,
+            false,
+            Some("clarification without final evidence"),
+        ));
+    }
+
+    #[test]
+    fn extracts_latest_user_verbatim_fragments_from_common_quote_pairs() {
+        let fragments = extract_verbatim_user_fragments(
+            "Explain «Status: 未確認?» and \"ERR-42: retry?\" without changing the labels.",
+        );
+
+        assert_eq!(fragments, vec!["Status: 未確認?", "ERR-42: retry?"]);
+    }
+
+    #[test]
+    fn extracts_latest_user_verbatim_fragments_from_delimited_clauses() {
+        let fragments = extract_verbatim_user_fragments(
+            "What should happen if the form shows, item MARK-17 was already accepted?",
+        );
+
+        assert!(fragments.iter().any(|fragment| fragment == "item MARK-17 was already accepted?"));
+    }
+
+    #[test]
+    fn extracts_latest_user_verbatim_fragments_from_identifier_tokens() {
+        let fragments = extract_verbatim_user_fragments(
+            "Describe SYNC-AGENT topology and compare it with API_V2.",
+        );
+
+        assert!(fragments.iter().any(|fragment| fragment == "SYNC-AGENT"));
+        assert!(fragments.iter().any(|fragment| fragment == "API_V2"));
+    }
+
+    #[test]
+    fn ignores_natural_language_punctuation_as_identifier_tokens() {
+        let fragments = extract_verbatim_user_fragments(
+            "Explain set-up flow, ad-hoc about sync-agent and graph.example.com.",
+        );
+
+        assert!(!fragments.iter().any(|fragment| fragment == "set-up"));
+        assert!(!fragments.iter().any(|fragment| fragment == "ad-hoc"));
+        assert!(!fragments.iter().any(|fragment| fragment == "sync-agent"));
+        assert!(!fragments.iter().any(|fragment| fragment == "graph.example.com"));
+    }
+
+    #[test]
+    fn latest_user_verbatim_fragment_reminder_marks_fragments_as_identifiers_not_evidence() {
+        let reminder =
+            latest_user_verbatim_fragment_reminder("What does «Result: timeout?» mean?").unwrap();
+
+        assert!(reminder.contains("Result: timeout?"));
+        assert!(reminder.contains("not as evidence for external facts"));
+        assert!(reminder.contains("requested answer slots"));
+        assert!(reminder.contains("instead of replacing it with a paraphrase"));
+    }
+
+    #[test]
+    fn final_answer_keeps_missing_quoted_user_fragment_visible() {
+        let answer = ensure_user_fragments_visible(
+            "It means the workstation cannot reach the account servers.".to_string(),
+            "Explain «Cash register access to account servers: no».",
+        );
+
+        assert!(answer.starts_with("Cash register access to account servers: no\n\n"));
+    }
+
+    #[test]
+    fn final_answer_does_not_duplicate_visible_quoted_user_fragment() {
+        let answer = ensure_user_fragments_visible(
+            "cash register access to account servers: no means network access is disabled."
+                .to_string(),
+            "Explain «Cash register access to account servers: no».",
+        );
+
+        assert_eq!(
+            answer,
+            "cash register access to account servers: no means network access is disabled."
+        );
+    }
+
+    #[test]
+    fn final_answer_keeps_missing_requested_slot_fragment_visible() {
+        let answer = ensure_user_fragments_visible(
+            "Package: alpha-plugin.\nConfig path: /opt/app/config.ini.".to_string(),
+            "Configure Alpha: name package, config path and parameters, then explain defaults.",
+        );
+
+        assert!(answer.starts_with("config path and parameters\n\n"));
+    }
+
+    #[test]
+    fn final_answer_keeps_missing_identifier_fragment_with_exact_case_visible() {
+        let answer = ensure_user_fragments_visible(
+            "sync-agent exchanges data between the register and central server.".to_string(),
+            "Describe SYNC-AGENT topology.",
+        );
+
+        assert!(answer.starts_with("SYNC-AGENT\n\n"));
+    }
+
+    #[test]
+    fn agent_iteration_keeps_full_mcp_surface_until_final_answer() {
         let tool_defs = [
             "list_workspaces",
             "list_libraries",
@@ -2182,8 +2954,7 @@ mod tests {
         .collect::<Vec<_>>();
         let successful_tool_names = BTreeSet::new();
 
-        let next_tools =
-            tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false, false);
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false);
         let next_names = next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
         assert_eq!(
             next_names,
@@ -2199,8 +2970,7 @@ mod tests {
 
         let mut successful_tool_names = BTreeSet::from(["search_documents".to_string()]);
 
-        let next_tools =
-            tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false, false);
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false);
         let next_names = next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
         assert_eq!(
             next_names,
@@ -2215,16 +2985,21 @@ mod tests {
         );
 
         successful_tool_names.insert("search_entities".to_string());
-        let next_tools =
-            tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false, false);
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false);
         assert_eq!(
             next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
-            vec!["grounded_answer", "read_document"]
+            vec![
+                "list_workspaces",
+                "list_libraries",
+                "grounded_answer",
+                "search_documents",
+                "search_entities",
+                "read_document"
+            ]
         );
 
         successful_tool_names.insert("read_document".to_string());
-        let next_tools =
-            tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false, false);
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, false);
         assert_eq!(
             next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
             vec![
@@ -2237,10 +3012,7 @@ mod tests {
             ]
         );
 
-        assert!(
-            tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, true, false)
-                .is_empty()
-        );
+        assert!(tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, true).is_empty());
     }
 
     #[test]
@@ -2254,7 +3026,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &BTreeSet::new(), false, false);
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &BTreeSet::new(), false);
 
         assert_eq!(
             next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
@@ -2263,7 +3035,7 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_scope_iteration_exposes_only_grounded_answer_until_it_runs() {
+    fn wildcard_scope_keeps_full_mcp_surface() {
         let tool_defs =
             ["list_documents", "grounded_answer", "search_documents", "search_entities"]
                 .into_iter()
@@ -2274,23 +3046,42 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
-        assert!(user_question_requires_grounded_answer_tool("list alpha-* modules", &[]));
-        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &BTreeSet::new(), false, true);
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &BTreeSet::new(), false);
         assert_eq!(
             next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
-            vec![GROUNDED_ANSWER_TOOL_NAME]
+            vec!["list_documents", "grounded_answer", "search_documents", "search_entities"]
         );
 
         let listing_only = BTreeSet::from(["list_documents".to_string()]);
-        assert!(should_require_tool_call_before_final(false, &tool_defs, &listing_only, true));
-        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &listing_only, false, true);
+        assert!(!should_require_tool_call_before_final(false, &tool_defs, &listing_only, false,));
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &listing_only, false);
         assert_eq!(
             next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
-            vec![GROUNDED_ANSWER_TOOL_NAME]
+            vec!["list_documents", "grounded_answer", "search_documents", "search_entities"]
         );
 
         let grounded = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
-        assert!(!should_require_tool_call_before_final(false, &tool_defs, &grounded, true));
+        assert!(!should_require_tool_call_before_final(false, &tool_defs, &grounded, false));
+    }
+
+    #[test]
+    fn atomic_content_question_keeps_full_mcp_surface() {
+        let tool_defs =
+            ["list_documents", "grounded_answer", "search_documents", "search_entities"]
+                .into_iter()
+                .map(|name| ChatToolDef {
+                    name: name.to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                })
+                .collect::<Vec<_>>();
+
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &BTreeSet::new(), false);
+
+        assert_eq!(
+            next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            vec!["list_documents", "grounded_answer", "search_documents", "search_entities"]
+        );
     }
 
     #[test]
@@ -2351,6 +3142,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut missing,
+            "focused subquestion",
             8,
             "workspace-a/library-b",
             &[],
@@ -2366,6 +3158,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut wider,
+            "focused subquestion",
             8,
             "workspace-a/library-b",
             &[],
@@ -2381,6 +3174,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut narrower,
+            "focused subquestion",
             8,
             "workspace-a/library-b",
             &[],
@@ -2398,12 +3192,268 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "focused subquestion",
             32,
             "workspace-a/library-b",
             &[],
         );
 
         assert_eq!(arguments["topK"], 24);
+    }
+
+    #[test]
+    fn effective_tool_call_fingerprint_normalizes_defaulted_arguments() {
+        let left = effective_tool_call_fingerprint(
+            GROUNDED_ANSWER_TOOL_NAME,
+            r#"{"query":"focused subquestion"}"#,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+        )
+        .expect("fingerprint");
+        let right = effective_tool_call_fingerprint(
+            GROUNDED_ANSWER_TOOL_NAME,
+            r#"{"topK":8,"library":"workspace-a/library-b","query":"focused subquestion"}"#,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+        )
+        .expect("fingerprint");
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn effective_tool_call_fingerprint_keeps_scope_errors_authoritative() {
+        let fingerprint = effective_tool_call_fingerprint(
+            GROUNDED_ANSWER_TOOL_NAME,
+            r#"{"query":"focused subquestion","library":"workspace-x/library-y"}"#,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert!(fingerprint.is_none());
+    }
+
+    #[test]
+    fn effective_tool_call_fingerprint_detects_contextual_history_defaults() {
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::User,
+                content_text: "original question".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text: "original answer".to_string(),
+            },
+        ];
+        let first = effective_tool_call_fingerprint(
+            GROUNDED_ANSWER_TOOL_NAME,
+            r#"{"library":"workspace-a/library-b","query":"follow-up"}"#,
+            "follow-up",
+            32,
+            "workspace-a/library-b",
+            &history,
+        )
+        .expect("fingerprint");
+        let second = effective_tool_call_fingerprint(
+            GROUNDED_ANSWER_TOOL_NAME,
+            r#"{"conversationTurns":[],"topK":24,"query":"follow-up","library":"workspace-a/library-b"}"#,
+            "follow-up",
+            32,
+            "workspace-a/library-b",
+            &history,
+        )
+        .expect("fingerprint");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn duplicate_effective_tool_payload_is_suppressed_before_dispatch() {
+        let tool_calls = vec![
+            ChatToolCall {
+                id: "call-1".to_string(),
+                name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+                arguments_json: serde_json::json!({
+                    "library": "workspace-a/library-b",
+                    "query": "focused subquestion",
+                    "topK": 8
+                })
+                .to_string(),
+            },
+            ChatToolCall {
+                id: "call-2".to_string(),
+                name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+                arguments_json: serde_json::json!({
+                    "query": "focused subquestion"
+                })
+                .to_string(),
+            },
+        ];
+        let mut outcomes = vec![None; tool_calls.len()];
+        let mut seen = BTreeMap::new();
+
+        let pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut outcomes,
+        );
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].index, 0);
+        assert!(outcomes[0].is_none());
+        let duplicate = outcomes[1].as_ref().expect("duplicate outcome");
+        assert!(duplicate.is_error);
+        assert!(
+            duplicate
+                .result_text
+                .as_deref()
+                .is_some_and(|text| text.contains("duplicate MCP tool call suppressed"))
+        );
+    }
+
+    #[test]
+    fn completed_effective_tool_payload_tracking_is_turn_scoped() {
+        let tool_calls = vec![ChatToolCall {
+            id: "call-1".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({
+                "library": "workspace-a/library-b",
+                "query": "focused subquestion",
+                "topK": 8
+            })
+            .to_string(),
+        }];
+        let mut first_outcomes = vec![None; tool_calls.len()];
+        let mut seen = BTreeMap::new();
+        let first_pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut first_outcomes,
+        );
+        let fingerprint = first_pending[0].fingerprint.clone().expect("fingerprint");
+        seen.insert(fingerprint, EffectiveToolPayloadState::Completed);
+        let mut second_outcomes = vec![None; tool_calls.len()];
+        let second_pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut second_outcomes,
+        );
+
+        assert_eq!(first_pending.len(), 1);
+        assert!(second_pending.is_empty());
+        assert!(first_outcomes[0].is_none());
+        let duplicate = second_outcomes[0].as_ref().expect("duplicate outcome");
+        assert!(duplicate.is_error);
+    }
+
+    #[test]
+    fn duplicate_effective_tool_payload_can_retry_after_actual_error() {
+        let tool_calls = vec![ChatToolCall {
+            id: "call-1".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({
+                "library": "workspace-a/library-b",
+                "query": "focused subquestion",
+                "topK": 8
+            })
+            .to_string(),
+        }];
+        let mut seen = BTreeMap::new();
+        let mut first_outcomes = vec![None; tool_calls.len()];
+        let first_pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut first_outcomes,
+        );
+        let fingerprint = first_pending[0].fingerprint.clone().expect("fingerprint");
+        let error = tool_execution_error("upstream timeout");
+        record_effective_tool_payload_outcome(&mut seen, fingerprint, &error);
+        let mut second_outcomes = vec![None; tool_calls.len()];
+        let second_pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut second_outcomes,
+        );
+
+        assert_eq!(first_pending.len(), 1);
+        assert_eq!(second_pending.len(), 1);
+        assert!(first_outcomes[0].is_none());
+        assert!(second_outcomes[0].is_none());
+    }
+
+    #[test]
+    fn distinct_effective_tool_payloads_remain_allowed_in_one_turn() {
+        let tool_calls = vec![ChatToolCall {
+            id: "call-1".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({
+                "library": "workspace-a/library-b",
+                "query": "focused subquestion B",
+                "topK": 8
+            })
+            .to_string(),
+        }];
+        let mut seen = BTreeMap::new();
+        let mut first_outcomes = vec![None; tool_calls.len()];
+        let first_pending = prepare_agent_tool_calls(
+            &[ChatToolCall {
+                id: "call-0".to_string(),
+                name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+                arguments_json: serde_json::json!({
+                    "library": "workspace-a/library-b",
+                    "query": "focused subquestion A",
+                    "topK": 8
+                })
+                .to_string(),
+            }],
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut first_outcomes,
+        );
+        let mut second_outcomes = vec![None; tool_calls.len()];
+        let second_pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut second_outcomes,
+        );
+
+        assert_eq!(first_pending.len(), 1);
+        assert_eq!(second_pending.len(), 1);
+        assert!(first_outcomes[0].is_none());
+        assert!(second_outcomes[0].is_none());
     }
 
     #[test]
@@ -2421,9 +3471,19 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "follow-up subquestion",
             32,
             "workspace-a/library-b",
-            &[],
+            &[
+                ExternalConversationTurn {
+                    turn_kind: QueryTurnKind::User,
+                    content_text: "original question".to_string(),
+                },
+                ExternalConversationTurn {
+                    turn_kind: QueryTurnKind::Assistant,
+                    content_text: "original answer".to_string(),
+                },
+            ],
         );
 
         assert_eq!(arguments["topK"], 8);
@@ -2450,6 +3510,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "follow-up subquestion",
             32,
             "workspace-a/library-b",
             &history,
@@ -2466,49 +3527,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_uses_parent_grounded_answer_top_k_for_dense_literal_follow_up() {
-        let mut arguments = serde_json::json!({
-            "library": "workspace-a/library-b",
-            "query": "describe each item",
-            "topK": 4,
-            "conversationTurns": [
-                {"role": "user", "content": "which package-like modules exist"},
-                {"role": "assistant", "content": "`pkg-alpha` `pkg-beta` `pkg-gamma` `pkg-delta` `pkg-epsilon` `pkg-zeta` `pkg-eta` `pkg-theta`"}
-            ]
-        });
-
-        apply_agent_tool_argument_defaults(
-            GROUNDED_ANSWER_TOOL_NAME,
-            &mut arguments,
-            24,
-            "workspace-a/library-b",
-            &[],
-        );
-
-        assert_eq!(arguments["topK"], 24);
-    }
-
-    #[test]
-    fn ui_agent_uses_parent_grounded_answer_top_k_for_wildcard_scope() {
-        let mut arguments = serde_json::json!({
-            "library": "workspace-a/library-b",
-            "query": "list alpha-* modules",
-            "topK": 5
-        });
-
-        apply_agent_tool_argument_defaults(
-            GROUNDED_ANSWER_TOOL_NAME,
-            &mut arguments,
-            24,
-            "workspace-a/library-b",
-            &[],
-        );
-
-        assert_eq!(arguments["topK"], 24);
-    }
-
-    #[test]
-    fn ui_agent_preserves_explicit_empty_context_with_narrow_grounded_answer_top_k() {
+    fn ui_agent_overrides_explicit_empty_context_with_typed_history_top_k_floor() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "new standalone topic",
@@ -2523,13 +3542,19 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "new standalone topic",
             32,
             "workspace-a/library-b",
             &history,
         );
 
-        assert_eq!(arguments["topK"], 4);
-        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+        assert_eq!(arguments["topK"], 8);
+        assert_eq!(
+            arguments["conversationTurns"],
+            serde_json::json!([
+                {"role": "user", "content": "previous topic"}
+            ])
+        );
     }
 
     #[test]
@@ -2552,6 +3577,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "follow-up question",
             8,
             "workspace-a/library-b",
             &history,
@@ -2567,7 +3593,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_preserves_explicit_grounded_answer_conversation_turns() {
+    fn ui_agent_drops_explicit_grounded_answer_conversation_turns_without_server_history() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "follow-up question",
@@ -2575,14 +3601,46 @@ mod tests {
                 {"role": "user", "content": "model supplied context"}
             ]
         });
-        let history = vec![ExternalConversationTurn {
-            turn_kind: QueryTurnKind::User,
-            content_text: "different context".to_string(),
-        }];
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "follow-up question",
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn ui_agent_replaces_stale_explicit_grounded_answer_conversation_turns_with_server_history() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "show full ready config",
+            "conversationTurns": [
+                {"role": "user", "content": "how do I configure connector alpha"},
+                {"role": "assistant", "content": "Connector Alpha uses `alphaFlag`."},
+                {"role": "user", "content": "configure it"}
+            ]
+        });
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::User,
+                content_text: "configure it".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text:
+                    "Install `pkg-alpha`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
+                        .to_string(),
+            },
+        ];
 
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "show full ready config",
             8,
             "workspace-a/library-b",
             &history,
@@ -2591,13 +3649,44 @@ mod tests {
         assert_eq!(
             arguments["conversationTurns"],
             serde_json::json!([
-                {"role": "user", "content": "model supplied context"}
+                {"role": "user", "content": "configure it"},
+                {
+                    "role": "assistant",
+                    "content": "Install `pkg-alpha`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
+                }
             ])
         );
     }
 
     #[test]
-    fn ui_agent_preserves_explicit_empty_grounded_answer_conversation_turns() {
+    fn ui_agent_ignores_llm_supplied_literal_padding_without_server_history() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "focused subquestion",
+            "topK": 4,
+            "conversationTurns": [
+                {
+                    "role": "assistant",
+                    "content": "`fake-a` `fake-b` `fake-c` `fake-d` `fake-e` `fake-f` `fake-g` `fake-h`"
+                }
+            ]
+        });
+
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "focused subquestion",
+            24,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["topK"], 4);
+        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn ui_agent_overrides_explicit_empty_grounded_answer_conversation_turns() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "new standalone topic",
@@ -2611,16 +3700,22 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "new standalone topic",
             8,
             "workspace-a/library-b",
             &history,
         );
 
-        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+        assert_eq!(
+            arguments["conversationTurns"],
+            serde_json::json!([
+                {"role": "user", "content": "previous topic"}
+            ])
+        );
     }
 
     #[test]
-    fn ui_agent_preserves_explicit_empty_grounded_answer_conversation_turns_for_follow_up() {
+    fn ui_agent_overrides_explicit_empty_grounded_answer_conversation_turns_for_follow_up() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "follow-up question",
@@ -2640,12 +3735,110 @@ mod tests {
         apply_agent_tool_argument_defaults(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
+            "follow-up question",
             8,
             "workspace-a/library-b",
             &history,
         );
 
-        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+        assert_eq!(
+            arguments["conversationTurns"],
+            serde_json::json!([
+                {"role": "user", "content": "original user question"},
+                {"role": "assistant", "content": "original assistant answer"}
+            ])
+        );
+    }
+
+    #[test]
+    fn ui_agent_replaces_history_padded_grounded_answer_query_with_current_turn() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "explain all settings: [Main], url, https://localhost/api, [UI.AlphaForm.alphaCode], http://localhost, timeout, alphaMerchantId, alphaSecret, alpha-provider-module, staticAlphaId, staticAlphaPayload, alphaCodeLifetime, /opt/alpha/alpha.conf, /var/log/alpha.log",
+            "conversationTurns": []
+        });
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::User,
+                content_text: "how do I configure Provider Alpha".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text:
+                    "Install `alpha-provider-module`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
+                        .to_string(),
+            },
+        ];
+
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "explain all settings",
+            24,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        assert_eq!(arguments["query"], "explain all settings");
+        assert_eq!(
+            arguments["conversationTurns"],
+            serde_json::json!([
+                {"role": "user", "content": "how do I configure Provider Alpha"},
+                {
+                    "role": "assistant",
+                    "content": "Install `alpha-provider-module`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn ui_agent_keeps_user_supplied_long_grounded_answer_query() {
+        let user_question = "explain all settings: [Main], url, https://localhost/api, [UI.AlphaForm.alphaCode], http://localhost, timeout, alphaMerchantId, alphaSecret, alpha-provider-module, staticAlphaId, staticAlphaPayload, alphaCodeLifetime, /opt/alpha/alpha.conf, /var/log/alpha.log";
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": user_question
+        });
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Previous grounded answer.".to_string(),
+        }];
+
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            user_question,
+            24,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        assert_eq!(arguments["query"], user_question);
+    }
+
+    #[test]
+    fn ui_agent_keeps_current_turn_rewrite_when_literals_are_not_from_history() {
+        let user_question = "show setup steps";
+        let rewritten_query = "show setup steps: configure `/opt/beta/beta.conf`, set `[Main]`, `betaSecret`, `betaToken`, `https://beta.local/api`, `timeout = 30`, `beta-module`";
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": rewritten_query
+        });
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Previous grounded answer about Provider Alpha.".to_string(),
+        }];
+
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            user_question,
+            24,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        assert_eq!(arguments["query"], rewritten_query);
     }
 
     #[test]
@@ -2657,6 +3850,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             "search_entities",
             &mut missing,
+            "focused probe",
             8,
             "workspace-a/library-b",
             &[],
@@ -2671,6 +3865,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             "get_graph_topology",
             &mut wider,
+            "",
             12,
             "workspace-a/library-b",
             &[],
@@ -2684,6 +3879,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             "list_relations",
             &mut narrower,
+            "",
             12,
             "workspace-a/library-b",
             &[],
@@ -2701,6 +3897,7 @@ mod tests {
         apply_agent_tool_argument_defaults(
             SEARCH_DOCUMENTS_TOOL_NAME,
             &mut arguments,
+            "focused probe",
             8,
             "workspace-a/library-b",
             &[],
@@ -2748,26 +3945,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_grounded_answer_short_circuit_requires_single_tool_call() {
-        let grounded = ChatToolCall {
-            id: "call-1".to_string(),
-            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
-            arguments_json: "{}".to_string(),
-        };
-        let graph = ChatToolCall {
-            id: "call-2".to_string(),
-            name: "search_entities".to_string(),
-            arguments_json: "{}".to_string(),
-        };
-
-        assert!(can_return_verified_grounded_answer_without_synthesis(std::slice::from_ref(
-            &grounded
-        )));
-        assert!(!can_return_verified_grounded_answer_without_synthesis(&[grounded, graph]));
-    }
-
-    #[test]
-    fn verified_grounded_answer_text_extracts_full_answer_text() {
+    fn tool_result_full_text_extracts_all_content_blocks() {
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![
                 crate::interfaces::http::mcp::McpContentBlock {
@@ -2780,6 +3958,7 @@ mod tests {
                 },
             ],
             structured_content: serde_json::json!({
+                "finalAnswerReady": true,
                 "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "verified"
@@ -2788,20 +3967,20 @@ mod tests {
             is_error: false,
         };
 
-        let answer =
-            verified_grounded_answer_text(GROUNDED_ANSWER_TOOL_NAME, &result).expect("answer");
+        let answer = tool_result_full_text(&result.content).expect("answer");
 
         assert_eq!(answer, "First supported paragraph.\n\nSecond supported paragraph.");
     }
 
     #[test]
-    fn verified_grounded_answer_accepts_nested_completed_lifecycle() {
+    fn final_grounded_answer_requires_ready_flag() {
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
-                text: "Nested lifecycle answer.".to_string(),
+                text: "Verified but not explicitly final.".to_string(),
             }],
             structured_content: serde_json::json!({
+                "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "verified",
                     "execution": {
@@ -2812,20 +3991,18 @@ mod tests {
             is_error: false,
         };
 
-        let answer =
-            verified_grounded_answer_text(GROUNDED_ANSWER_TOOL_NAME, &result).expect("answer");
-
-        assert_eq!(answer, "Nested lifecycle answer.");
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
     }
 
     #[test]
-    fn unverified_grounded_answer_text_is_not_final_evidence() {
+    fn unverified_grounded_answer_is_not_final_evidence() {
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
                 text: "unsupported answer".to_string(),
             }],
             structured_content: serde_json::json!({
+                "finalAnswerReady": false,
                 "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "insufficient_evidence"
@@ -2834,17 +4011,93 @@ mod tests {
             is_error: false,
         };
 
-        assert!(verified_grounded_answer_text(GROUNDED_ANSWER_TOOL_NAME, &result).is_none());
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
     }
 
     #[test]
-    fn verified_grounded_answer_requires_completed_lifecycle() {
+    fn clarification_grounded_answer_does_not_force_follow_up() {
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
-                text: "verified but incomplete answer".to_string(),
+                text: "Several matching documents were found. Please choose one.".to_string(),
             }],
             structured_content: serde_json::json!({
+                "finalAnswerReady": false,
+                "lifecycleState": "completed",
+                "executionDetail": {
+                    "verificationState": "not_run"
+                }
+            }),
+            is_error: false,
+        };
+
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(!grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn completed_grounded_answer_without_verification_state_requires_follow_up() {
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Completed answer with no verifier state.".to_string(),
+            }],
+            structured_content: serde_json::json!({
+                "finalAnswerReady": false,
+                "lifecycleState": "completed"
+            }),
+            is_error: false,
+        };
+
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn final_grounded_answer_readiness_rejects_unverified_completed_answer() {
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Completed answer with warnings.".to_string(),
+            }],
+            structured_content: serde_json::json!({
+                "finalAnswerReady": false,
+                "lifecycleState": "completed",
+                "executionDetail": {
+                    "verificationState": "lenient"
+                }
+            }),
+            is_error: false,
+        };
+
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(grounded_answer_completed(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn final_grounded_answer_ready_flag_controls_final_readiness() {
+        let ready_without_execution_detail = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Flag-only answer.".to_string(),
+            }],
+            structured_content: serde_json::json!({
+                "finalAnswerReady": true,
+            }),
+            is_error: false,
+        };
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &ready_without_execution_detail));
+
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Ready answer.".to_string(),
+            }],
+            structured_content: serde_json::json!({
+                "finalAnswerReady": true,
+                "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "verified"
                 }
@@ -2852,7 +4105,33 @@ mod tests {
             is_error: false,
         };
 
-        assert!(verified_grounded_answer_text(GROUNDED_ANSWER_TOOL_NAME, &result).is_none());
+        assert!(grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn final_grounded_answer_with_verifier_warnings_is_ready_when_verified() {
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Warning-bearing but verified answer.".to_string(),
+            }],
+            structured_content: serde_json::json!({
+                "finalAnswerReady": true,
+                "lifecycleState": "completed",
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": [
+                        {
+                            "code": "partial_coverage",
+                            "warning": "Only part of the requested evidence was grounded."
+                        }
+                    ]
+                }
+            }),
+            is_error: false,
+        };
+
+        assert!(grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
     }
 
     #[test]

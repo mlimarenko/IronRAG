@@ -26,6 +26,7 @@ use ironrag_backend::{
         collections::{
             KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
             KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
+            chunk_vector_collection_for_dim, entity_vector_collection_for_dim,
         },
         document_store::{
             ArangoDocumentStore, KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
@@ -104,6 +105,27 @@ impl TempArangoDatabase {
         Ok(())
     }
 
+    async fn has_collection(&self, collection_name: &str) -> Result<bool> {
+        let response = self
+            .http
+            .get(format!("{}/_db/{}/_api/collection/{}", self.base_url, self.name, collection_name))
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .with_context(|| format!("failed to query collection {collection_name}"))?;
+        if response.status() == ReqwestStatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "failed to query collection {}: status {}",
+                collection_name,
+                response.status()
+            ));
+        }
+        Ok(true)
+    }
+
     async fn drop_collection(&self, collection_name: &str) -> Result<()> {
         let response = self
             .http
@@ -164,7 +186,14 @@ impl KnowledgeSearchFixture {
         Ok(Self {
             document_store: ArangoDocumentStore::new(Arc::clone(&client)),
             graph_store: ArangoGraphStore::new(Arc::clone(&client)),
-            search_store: ArangoSearchStore::new(Arc::clone(&client)),
+            search_store: ArangoSearchStore::new(
+                Arc::clone(&client),
+                ironrag_backend::infra::arangodb::search_store::VectorIndexParams {
+                    n_lists: 100,
+                    default_n_probe: 8,
+                    training_iterations: 25,
+                },
+            ),
             temp_database,
             settings,
             client,
@@ -798,6 +827,7 @@ impl KnowledgeSearchHttpFixture {
             act: ironrag_backend::domains::query_ir::QueryAct::Describe,
             scope: ironrag_backend::domains::query_ir::QueryScope::SingleDocument,
             language: ironrag_backend::domains::query_ir::QueryLanguage::Auto,
+            retrieval_query: None,
             target_types: Vec::new(),
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
@@ -2152,16 +2182,27 @@ async fn search_documents_endpoint_falls_back_to_lexical_when_vector_collections
     let fixture = KnowledgeSearchHttpFixture::create().await?;
 
     let result = async {
-        fixture
-            .temp_arango
-            .drop_collection(KNOWLEDGE_CHUNK_VECTOR_COLLECTION)
-            .await
-            .context("failed to remove chunk vector collection for fallback test")?;
-        fixture
-            .temp_arango
-            .drop_collection(KNOWLEDGE_ENTITY_VECTOR_COLLECTION)
-            .await
-            .context("failed to remove entity vector collection for fallback test")?;
+        // Per-library vector dim refactor: the fixture seeds dim-3
+        // vectors, so ANN now reads from
+        // `chunk_vector_collection_for_dim(3)` /
+        // `entity_vector_collection_for_dim(3)`. Drop both the per-dim
+        // shards and the legacy collection so the vector lane fails
+        // and the search service falls back to lexical-only — same
+        // intent the original test had before the per-dim split.
+        for collection in
+            [KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string(), chunk_vector_collection_for_dim(3)]
+        {
+            fixture.temp_arango.drop_collection(&collection).await.with_context(|| {
+                format!("failed to remove chunk vector collection {collection}")
+            })?;
+        }
+        for collection in
+            [KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string(), entity_vector_collection_for_dim(3)]
+        {
+            fixture.temp_arango.drop_collection(&collection).await.with_context(|| {
+                format!("failed to remove entity vector collection {collection}")
+            })?;
+        }
 
         let body = fixture.search_document_hit("orion").await?;
         let document_hits =
@@ -2397,6 +2438,138 @@ async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_par
         if let Some(position) = distractor_position {
             assert!(position > 0);
         }
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// Per-library vector dim refactor: two libraries on different embed
+/// dims must coexist in Arango without dropping each other's vectors.
+/// Each library writes into its own per-dim shard
+/// (`knowledge_chunk_vector_d<dim>`) and ANN search against one dim
+/// only touches that shard.
+///
+/// We go through the low-level `upsert_chunk_vector` API instead of
+/// mocking the embed-binding pipeline end-to-end, so the test stays
+/// small and focuses on the storage-layer isolation invariant.
+#[tokio::test]
+#[ignore = "requires local ArangoDB service with database create/drop access"]
+async fn test_two_libraries_different_dims_isolated() -> Result<()> {
+    let fixture = KnowledgeSearchFixture::create().await?;
+    let result = async {
+        let workspace_id = Uuid::now_v7();
+        let library_a_id = Uuid::now_v7();
+        let library_b_id = Uuid::now_v7();
+        let chunk_a_id = Uuid::now_v7();
+        let chunk_b_id = Uuid::now_v7();
+        let revision_a_id = Uuid::now_v7();
+        let revision_b_id = Uuid::now_v7();
+        let model_a_key = format!("model-a-{}", Uuid::now_v7());
+        let model_b_key = format!("model-b-{}", Uuid::now_v7());
+        let now = Utc::now();
+
+        // Library A writes a dim-3 vector.
+        fixture
+            .search_store
+            .upsert_chunk_vector(&KnowledgeChunkVectorRow {
+                key: format!("{chunk_a_id}:{model_a_key}:1"),
+                arango_id: None,
+                arango_rev: None,
+                vector_id: Uuid::now_v7(),
+                workspace_id,
+                library_id: library_a_id,
+                chunk_id: chunk_a_id,
+                revision_id: revision_a_id,
+                embedding_model_key: model_a_key.clone(),
+                vector_kind: KNOWLEDGE_CHUNK_VECTOR_KIND.to_string(),
+                dimensions: 3,
+                vector: vec![1.0, 0.0, 0.0],
+                freshness_generation: 1,
+                created_at: now,
+                occurred_at: None,
+                occurred_until: None,
+            })
+            .await
+            .context("failed to upsert library A chunk vector")?;
+
+        // Library B writes a dim-4 vector — same Arango database, but
+        // different per-dim shard, so the two writes cannot collide.
+        fixture
+            .search_store
+            .upsert_chunk_vector(&KnowledgeChunkVectorRow {
+                key: format!("{chunk_b_id}:{model_b_key}:1"),
+                arango_id: None,
+                arango_rev: None,
+                vector_id: Uuid::now_v7(),
+                workspace_id,
+                library_id: library_b_id,
+                chunk_id: chunk_b_id,
+                revision_id: revision_b_id,
+                embedding_model_key: model_b_key.clone(),
+                vector_kind: KNOWLEDGE_CHUNK_VECTOR_KIND.to_string(),
+                dimensions: 4,
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+                freshness_generation: 1,
+                created_at: now,
+                occurred_at: None,
+                occurred_until: None,
+            })
+            .await
+            .context("failed to upsert library B chunk vector")?;
+
+        // Both per-dim shards must exist after the writes.
+        let chunk_shard_3 = chunk_vector_collection_for_dim(3);
+        let chunk_shard_4 = chunk_vector_collection_for_dim(4);
+        assert!(
+            fixture.temp_database.has_collection(&chunk_shard_3).await?,
+            "per-dim chunk vector shard {chunk_shard_3} must be lazy-created on first dim-3 write"
+        );
+        assert!(
+            fixture.temp_database.has_collection(&chunk_shard_4).await?,
+            "per-dim chunk vector shard {chunk_shard_4} must be lazy-created on first dim-4 write"
+        );
+
+        // ANN against dim-3 must return library A's chunk and nothing
+        // else: library B's vector lives in a different shard.
+        let hits_a = fixture
+            .search_store
+            .search_chunk_vectors_by_similarity(
+                3,
+                library_a_id,
+                &model_a_key,
+                &[1.0, 0.0, 0.0],
+                16,
+                None,
+                None,
+                None,
+            )
+            .await
+            .context("failed ANN search against library A dim-3 shard")?;
+        assert_eq!(hits_a.len(), 1, "library A dim-3 shard must return exactly its own chunk");
+        assert_eq!(hits_a[0].chunk_id, chunk_a_id);
+
+        // ANN against dim-4 must return library B's chunk and nothing
+        // else.
+        let hits_b = fixture
+            .search_store
+            .search_chunk_vectors_by_similarity(
+                4,
+                library_b_id,
+                &model_b_key,
+                &[1.0, 0.0, 0.0, 0.0],
+                16,
+                None,
+                None,
+                None,
+            )
+            .await
+            .context("failed ANN search against library B dim-4 shard")?;
+        assert_eq!(hits_b.len(), 1, "library B dim-4 shard must return exactly its own chunk");
+        assert_eq!(hits_b[0].chunk_id, chunk_b_id);
 
         Ok(())
     }

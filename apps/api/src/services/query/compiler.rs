@@ -38,14 +38,18 @@ use crate::{
     domains::{
         ai::AiBindingPurpose,
         query_ir::{
-            ClarificationReason, QUERY_IR_SCHEMA_VERSION, QueryAct, QueryIR, VerificationLevel,
-            query_ir_json_schema,
+            ClarificationReason, ConversationRefKind, QUERY_IR_SCHEMA_VERSION, QueryAct, QueryIR,
+            SourceSliceDirection, SourceSliceFilter, SourceSliceSpec, UnresolvedRef,
+            VerificationLevel, query_ir_json_schema,
         },
     },
     infra::repositories::query_ir_cache_repository::{get_query_ir_cache, upsert_query_ir_cache},
     integrations::llm::{LlmGateway, build_structured_chat_request},
     interfaces::http::router_support::ApiError,
-    services::ai_catalog_service::ResolvedRuntimeBinding,
+    services::{
+        ai_catalog_service::ResolvedRuntimeBinding,
+        query::effective_query::current_question_segment,
+    },
 };
 
 /// Canonical Redis key prefix for the hot IR cache.
@@ -392,6 +396,7 @@ pub fn query_ir_runtime_fingerprint() -> &'static str {
     static FINGERPRINT: LazyLock<String> = LazyLock::new(|| {
         let mut hasher = Sha256::new();
         hasher.update(include_str!("compiler.rs").as_bytes());
+        hasher.update(include_str!("latest_versions.rs").as_bytes());
         hasher.update(include_str!("../../domains/query_ir.rs").as_bytes());
         hex::encode(hasher.finalize())
     });
@@ -653,6 +658,7 @@ impl QueryCompilerService {
             target_types = ?ir.target_types,
             literal_constraints_count = ir.literal_constraints.len(),
             conversation_refs_count = ir.conversation_refs.len(),
+            history_turn_count = history.len(),
             confidence = ir.confidence,
             "query compiled"
         );
@@ -694,6 +700,9 @@ fn normalize_compiled_ir(
     mut ir: QueryIR,
 ) -> QueryIR {
     repair_target_entity_labels(question, history, &mut ir);
+    repair_history_backed_elliptic_ref(question, history, &mut ir);
+    normalize_latest_version_source_slice(&mut ir);
+    normalize_source_slice_filter(&mut ir);
 
     let stateless_with_explicit_target =
         history.is_empty() && stateless_ir_has_explicit_target(&ir);
@@ -734,6 +743,36 @@ fn normalize_compiled_ir(
     ir
 }
 
+fn normalize_latest_version_source_slice(ir: &mut QueryIR) {
+    if ir.source_slice.is_some()
+        || !crate::services::query::latest_versions::query_requests_latest_versions(ir)
+    {
+        return;
+    }
+    let requested_count =
+        crate::services::query::latest_versions::requested_latest_version_count(ir)
+            .min(u16::MAX as usize) as u16;
+    ir.source_slice = Some(SourceSliceSpec {
+        direction: SourceSliceDirection::Tail,
+        count: Some(requested_count),
+        filter: SourceSliceFilter::ReleaseMarker,
+    });
+}
+
+fn normalize_source_slice_filter(ir: &mut QueryIR) {
+    if ir.source_slice.is_none() {
+        return;
+    };
+    let filter = if crate::services::query::latest_versions::query_requests_latest_versions(ir) {
+        SourceSliceFilter::ReleaseMarker
+    } else {
+        SourceSliceFilter::None
+    };
+    if let Some(slice) = ir.source_slice.as_mut() {
+        slice.filter = filter;
+    }
+}
+
 fn repair_target_entity_labels(question: &str, history: &[CompileHistoryTurn], ir: &mut QueryIR) {
     if ir.target_entities.is_empty() {
         return;
@@ -766,6 +805,57 @@ fn repair_target_entity_labels(question: &str, history: &[CompileHistoryTurn], i
         );
         mention.label = repaired;
     }
+}
+
+fn repair_history_backed_elliptic_ref(
+    question: &str,
+    history: &[CompileHistoryTurn],
+    ir: &mut QueryIR,
+) {
+    // An elliptic ref marks a follow-up whose subject is still *unresolved* and
+    // must be recovered from history. If the compiler already folded the prior
+    // turn into a concrete typed anchor (subject/object entities or an explicit
+    // document focus), the ellipsis is resolved — flagging it would flip
+    // `is_follow_up()` and wrongly disqualify focused-document scope and the
+    // single-shot coverage path for what is a resolvable single-document query.
+    if history.is_empty()
+        || !ir.conversation_refs.is_empty()
+        || ir.comparison.is_some()
+        || ir.source_slice.is_some()
+        || !ir.literal_constraints.is_empty()
+        || !ir.temporal_constraints.is_empty()
+        || !ir.target_entities.is_empty()
+        || ir.document_focus.is_some()
+    {
+        return;
+    }
+    let current_question = effective_current_question_text(question);
+    if !is_short_elliptic_question(current_question) {
+        return;
+    }
+    tracing::info!(
+        target: "ironrag::query_compile",
+        question_len = current_question.len(),
+        act = ir.act.as_str(),
+        history_turn_count = history.len(),
+        target_entities_count = ir.target_entities.len(),
+        has_document_focus = ir.document_focus.is_some(),
+        "query compile repaired history-backed elliptic reference"
+    );
+    ir.conversation_refs.push(UnresolvedRef {
+        surface: current_question.to_string(),
+        kind: ConversationRefKind::Elliptic,
+    });
+}
+
+fn effective_current_question_text(question: &str) -> &str {
+    current_question_segment(question)
+}
+
+fn is_short_elliptic_question(value: &str) -> bool {
+    let tokens = normalized_repair_tokens(value);
+    let informative_token_count = tokens.iter().filter(|token| token.chars().count() >= 4).count();
+    !tokens.is_empty() && tokens.len() <= 2 && informative_token_count <= 1
 }
 
 fn target_label_repair_sources(question: &str, history: &[CompileHistoryTurn]) -> Vec<String> {
@@ -989,7 +1079,6 @@ fn bounded_edit_distance(left: &str, right: &str, max_distance: usize) -> Option
 
 fn stateless_ir_has_explicit_target(ir: &QueryIR) -> bool {
     !ir.target_entities.is_empty()
-        || ir.document_focus.as_ref().is_some_and(|hint| !hint.hint.trim().is_empty())
         || !ir.literal_constraints.is_empty()
         || !ir.temporal_constraints.is_empty()
         || ir.source_slice.is_some()
@@ -1005,7 +1094,10 @@ code fences, or extra fields.\n\
 Guiding principles:\n\
 1. `act` captures what the user is fundamentally asking: `retrieve_value` (exact value), \
 `describe`, `configure_how` (procedure), `compare`, `enumerate`, `meta` (about the library itself), \
-or `follow_up` (refers to prior turn).\n\
+or `follow_up` (refers to prior turn). When the current question is a short disambiguating \
+selection for a prior substantive request, keep the prior request's act and use the current \
+selection as the target; do not downgrade the act to `follow_up` just because the selection needs \
+prior context.\n\
 2. `scope` is `multi_document` ONLY when the user explicitly names or clearly implies two or more \
 documents / modules / subjects; `library_meta` when the question is about the library itself. \
 Default is `single_document`.\n\
@@ -1032,7 +1124,7 @@ user-assistant turns, not to positions, ranges, neighboring units, or anchors in
 documents being searched. `act = follow_up` is typical when the question cannot stand on its own.\n\
 6. `target_types` are canonical ontology tags. Use built-in tags exactly as written when they fit: \
 endpoint, url, path, wsdl, base_url, port, parameter, http_method, protocol, config_key, \
-configuration_file, filesystem_path, software_module, package, error_code, env_var, version, \
+configuration_file, filesystem_path, software_module, package, error_code, env_var, version, release, \
 procedure, metric, table_row, table_summary, table_average, table_frequency, document, \
 primary_heading, secondary_heading, formats_under_test, concept, relationship. For graph facts, \
 use runtime node-type tags: person, organization, location, event, artifact, natural, process, \
@@ -1044,15 +1136,34 @@ snake_case tag only when no built-in tag fits.\n\
 7. `source_slice` is null for ordinary summaries, comparisons, procedures, and needle lookups. \
 Set it only when the user asks for a positional slice of a sequential source: earliest units \
 (`head`), latest units (`tail`), or a bounded representation of the whole sequence (`all`). \
-Populate `count` only when the user asks for a concrete number of units.\n\
+Populate `count` only when the user asks for a concrete number of units. Set \
+`source_slice.filter` to `release_marker` only when the slice asks for latest version/release \
+records; otherwise set it to `none`.\n\
+For ordered change-summary requests over version or release records, include the `release` or \
+`version` target type and use a `tail` source slice when the user asks for the latest records.\n\
 8. `target_entities[*].label`, `document_focus.hint`, and verbatim literal-like values must \
 preserve the exact writing system and spelling visible in the current question or prior turns. \
 When a named target appears in that user-visible text, emit that target as a verbatim substring; \
 do not translate, transliterate, normalize look-alike glyphs, or substitute visually similar \
 characters.\n\
+When a scoped follow-up includes a `literal anchors:` line, treat those values as prior-turn \
+referents for retrieval and disambiguation. They may populate `literal_constraints` when the \
+current question points back to them, but they are not source evidence by themselves.\n\
 9. `confidence` ∈ [0.0, 1.0]. Use < 0.6 only when you genuinely cannot pin the question.\n\
 10. `language` must use one of the schema enum values; prefer `auto` when the signal is mixed or \
 unclear.\n\
+11. `retrieval_query` is a self-contained search string a fresh retriever could run with no access \
+to the prior turns. When the current question already stands on its own, copy it verbatim. When it \
+depends on prior turns — a bare selection, a pronoun, an omitted subject — fold the subject and \
+scope recovered FROM THE PRIOR TURNS into one standalone phrasing while keeping the user's intent \
+and granularity. Compose it ONLY from terms that literally appear in the current question or the \
+prior turns; never invent a subject the conversation did not mention and never add words from \
+outside the transcript. Preserve the exact writing system and spelling of every carried-over term; \
+never translate, transliterate, or substitute look-alike glyphs. Mechanically: if the prior turns \
+established a subject token S and the current turn supplies only a refinement token R, then \
+`retrieval_query` is a standalone phrasing whose tokens are drawn verbatim from {S, R} in the \
+transcript; if the current turn already carries its own subject token, `retrieval_query` equals the \
+current question verbatim.\n\
 \n\
 Output nothing but the JSON object described by the schema.";
 
@@ -1204,6 +1315,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normalizes_broad_latest_release_ir_to_release_tail_slice() {
+        let ir_json = json!({
+            "act": "enumerate",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["release", "version"],
+            "target_entities": [],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.95
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "list the latest release records", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
+        let slice = outcome.ir.source_slice.expect("latest release requests need ordered context");
+        assert_eq!(slice.direction, SourceSliceDirection::Tail);
+        assert_eq!(slice.count, Some(5));
+        assert_eq!(slice.filter, SourceSliceFilter::ReleaseMarker);
+    }
+
+    #[tokio::test]
+    async fn latest_release_normalization_preserves_numeric_literal_count() {
+        let ir_json = json!({
+            "act": "enumerate",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["release", "version"],
+            "target_entities": [],
+            "literal_constraints": [{"text": "3", "kind": "numeric_code"}],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.95
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "list the latest 3 release records", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.source_slice.as_ref().and_then(|slice| slice.count), Some(3));
+        assert_eq!(
+            crate::services::query::latest_versions::requested_latest_version_count(&outcome.ir),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_version_literal_does_not_synthesize_latest_release_slice() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["release", "version"],
+            "target_entities": [{"label": "1.2.3", "role": "subject"}],
+            "literal_constraints": [{"text": "1.2.3", "kind": "version"}],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "release 1.2.3"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.95
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "what changed in release 1.2.3", &[])
+            .await
+            .expect("compile ok");
+
+        assert!(outcome.ir.source_slice.is_none());
+        assert!(!crate::services::query::latest_versions::query_requests_latest_versions(
+            &outcome.ir
+        ));
+    }
+
+    #[tokio::test]
+    async fn preserves_focused_latest_release_scope_when_normalizing_tail_slice() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["release"],
+            "target_entities": [{"label": "Alpha Suite", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.9
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "latest Alpha Suite release", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
+        assert_eq!(
+            outcome.ir.source_slice.as_ref().map(|slice| slice.direction),
+            Some(SourceSliceDirection::Tail)
+        );
+    }
+
+    #[tokio::test]
     async fn repairs_stateless_follow_up_with_explicit_target() {
         let ir_json = json!({
             "act": "follow_up",
@@ -1233,6 +1479,38 @@ mod tests {
         assert_eq!(outcome.ir.act, QueryAct::Describe);
         assert!(outcome.ir.conversation_refs.is_empty());
         assert_eq!(outcome.ir.target_entities.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn preserves_stateless_document_focus_follow_up_signal() {
+        let ir_json = json!({
+            "act": "follow_up",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": [],
+            "target_entities": [],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "Alpha Guide"},
+            "conversation_refs": [{"surface": "that one", "kind": "deictic"}],
+            "needs_clarification": "anaphora_unresolved",
+            "source_slice": null,
+            "confidence": 0.35
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "that one", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.act, QueryAct::FollowUp);
+        assert_eq!(outcome.ir.conversation_refs.len(), 1);
+        assert!(outcome.ir.document_focus.is_some());
     }
 
     #[tokio::test]
@@ -1384,6 +1662,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anchored_short_follow_up_stays_resolved_without_spurious_elliptic_ref() {
+        let ir_json = json!({
+            "act": "configure_how",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["procedure"],
+            "target_entities": [{"label": "Beta", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "Beta Setup Guide"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.8
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+        let history = vec![CompileHistoryTurn {
+            role: "user".to_string(),
+            content: "How do I configure payment providers?".to_string(),
+        }];
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "Beta", &history)
+            .await
+            .expect("compile ok");
+
+        // A short follow-up the compiler already resolved into a concrete
+        // anchor (subject entity + document focus) must NOT be flagged as an
+        // unresolved ellipsis, so it stays a resolvable single-document query
+        // and keeps focused-document scope available downstream.
+        assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
+        assert!(outcome.ir.conversation_refs.is_empty());
+        assert!(!outcome.ir.is_follow_up());
+    }
+
+    #[tokio::test]
+    async fn anchored_effective_query_short_question_stays_resolved() {
+        let ir_json = json!({
+            "act": "retrieve_value",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["parameter"],
+            "target_entities": [{"label": "Gamma", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.75
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+        let history = vec![CompileHistoryTurn {
+            role: "user".to_string(),
+            content: "Which parameters are supported?".to_string(),
+        }];
+
+        let outcome = service
+            .compile_with_gateway(
+                &gateway,
+                &binding,
+                "scope: Which parameters are supported?\nquestion: Gamma",
+                &history,
+            )
+            .await
+            .expect("compile ok");
+
+        // Subject entity is a concrete anchor: no spurious elliptic ref.
+        assert_eq!(outcome.ir.act, QueryAct::RetrieveValue);
+        assert!(outcome.ir.conversation_refs.is_empty());
+        assert!(!outcome.ir.is_follow_up());
+    }
+
+    #[tokio::test]
+    async fn anchorless_short_follow_up_still_flags_elliptic_ref() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["concept"],
+            "target_entities": [],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.7
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+        let history = vec![CompileHistoryTurn {
+            role: "user".to_string(),
+            content: "How do I configure payment providers?".to_string(),
+        }];
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "details", &history)
+            .await
+            .expect("compile ok");
+
+        // No concrete anchor was recovered, so the short follow-up remains an
+        // unresolved ellipsis that downstream stages must resolve from history.
+        assert_eq!(outcome.ir.conversation_refs.len(), 1);
+        assert_eq!(outcome.ir.conversation_refs[0].kind, ConversationRefKind::Elliptic);
+    }
+
+    #[tokio::test]
     async fn returns_provider_failure_on_provider_error() {
         let gateway = StubGateway::new(Err(anyhow::anyhow!("upstream 503")));
         let service = QueryCompilerService;
@@ -1437,6 +1834,13 @@ mod tests {
         assert!(prompt.contains("Prior conversation"));
         assert!(prompt.contains("payment module"));
         assert!(prompt.contains("how do I configure it?"));
+    }
+
+    #[test]
+    fn compiler_prompt_preserves_prior_act_for_short_disambiguator() {
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("short disambiguating selection"));
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("keep the prior request's act"));
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("do not downgrade the act to `follow_up`"));
     }
 
     // -----------------------------------------------------------------
@@ -1500,6 +1904,7 @@ mod tests {
             conversation_refs: Vec::new(),
             needs_clarification: None,
             source_slice: None,
+            retrieval_query: None,
             confidence: 0.9,
         }
     }

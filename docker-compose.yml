@@ -55,7 +55,9 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
   OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-otlp}
   OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-otlp}
-  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
+  # Empty defaults defer to the compiled-in diagnostics defaults
+  # (apps/api/observability.toml). Set either var to override the shipped sink.
+  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: ${OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE:-cumulative}
   RUST_BACKTRACE: full
@@ -82,18 +84,38 @@ x-ironrag-resources-medium: &ironrag-resources-medium
     cpus: "0.50"
     memory: 768M
 
+# ArangoDB sits alone on this tier. The 6 GiB ceiling is sized for
+# ArangoDB's IVF vector-index build path: with multi-dim per-(library,dim)
+# embedding bindings, the largest per-(library,dim) shard
+# `knowledge_chunk_vector_d{dim}_l{libhex}` can still hold hundreds of
+# thousands of rows for a big library, and Arango must be allowed to train +
+# ingest the IVF index without hitting cgroup OOM. Idle Arango RSS is
+# ~1.2 GiB; an IVF build over a large shard pushes the resident set up by
+# ~1-1.5 GiB. 6 GiB gives headroom for parallel query traffic during the
+# build. Do not lower below the largest active shard's IVF build need; see
+# the vector-layer policy in CLAUDE.md.
 x-ironrag-resources-large: &ironrag-resources-large
   limits:
     cpus: "4.00"
-    memory: 4G
+    memory: 6G
   reservations:
     cpus: "1.00"
     memory: 1G
 
-x-ironrag-resources-worker: &ironrag-resources-worker
+# Shared tier for the API backend and the ingest worker (both run the same
+# image). 4 GiB mirrors the charts `workload` tier and is the canonical
+# memory containment for docling: `auto_docling_max_concurrency_for_limits`
+# (apps/api/src/integrations/docling/mod.rs) derives the concurrency cap from
+# (mem_mib*0.9 - 2048) / 2560, so a 4 GiB worker resolves to docling
+# concurrency = 1. A runaway docling/python extraction then cgroup-OOMs the
+# worker (the job retries) instead of triggering a host-level global OOM that
+# kills the innocent API backend (the largest-RSS bystander). The API backend
+# does not spawn docling, so 4 GiB is ample for per-query IVF candidate sets.
+# The structural fix for total host oversubscription is raising VM RAM.
+x-ironrag-resources-workload: &ironrag-resources-workload
   limits:
     cpus: "6.00"
-    memory: 8G
+    memory: 4G
   reservations:
     cpus: "2.00"
     memory: 2G
@@ -229,12 +251,16 @@ services:
       start_period: 15s
     deploy:
       resources:
-        <<: *ironrag-resources-large
+        <<: *ironrag-resources-workload
   worker:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
+    # Bias the kernel OOM-killer toward the worker (and its docling/python
+    # extraction children) so a memory spike kills the retryable ingest job
+    # rather than the API backend during a host-level global OOM.
+    oom_score_adj: 500
     depends_on:
       startup:
         condition: service_completed_successfully
@@ -255,7 +281,7 @@ services:
       start_period: 15s
     deploy:
       resources:
-        <<: *ironrag-resources-worker
+        <<: *ironrag-resources-workload
   frontend:
     image: ${IRONRAG_FRONTEND_IMAGE:-pipingspace/ironrag-frontend:latest}
     restart: unless-stopped
