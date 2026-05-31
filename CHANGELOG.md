@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.21 — 2026-05-31
+
+### Changed
+
+- Container memory limits are re-sized for a 16 GiB swapless host and the
+  `docker-compose.yml` resource anchors are reorganized from generic
+  t-shirt tiers into explicit role-based tiers
+  (`frontend`/`cache`/`db`/`worker`/`backend`/`vector`). The previous caps
+  summed to more memory than a single 16 GiB host provides; on a swapless
+  host a combined resident set above physical RAM trips the kernel's
+  *global* OOM-killer, which then SIGKILLs the largest-RSS bystander
+  (typically ArangoDB mid-IVF-build, causing a crash loop) instead of a
+  rebuildable service. The new tiers keep the steady-state sum of `memory`
+  limits at ~14 GiB, leaving headroom for the OS and page cache. The API
+  backend is 3.5 GiB, the ingest worker 3 GiB (still resolving docling
+  auto-concurrency to 1 via `auto_docling_max_concurrency_for_limits`), and
+  ArangoDB keeps a dedicated 5 GiB tier sized for the IVF build of the
+  largest active per-(library,dim) vector shard. The Helm chart
+  (`charts/ironrag/values.yaml`) mirrors these tiers 1:1.
+- Every Compose service now declares an explicit `oom_score_adj` so that,
+  when the host is genuinely out of memory, the kernel sacrifices the
+  rebuildable services first (worker, then frontend, then backend) and the
+  stateful stores (PostgreSQL, Redis, ArangoDB) last. The Helm tiers use
+  Burstable QoS (requests < limits) to express the same eviction ordering.
+- The ArangoDB IVF k-means training memory budget is now overridable at
+  runtime via `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES` (default 3 GB),
+  so a larger host can widen the budget in lockstep with a raised ArangoDB
+  cap without recompiling. The builder still fail-soft-caps `nLists` to the
+  budget divided by the empirical per-list cost, so a smaller budget yields
+  a cheaper build rather than an OOM. A new `docker-compose.large.yml`
+  overlay bundles the wider caps and budget for 24-32 GiB hosts.
+
+### Fixed
+
+- The Helm `/tmp` volume on the API, worker, and startup pods is now
+  disk-backed (node ephemeral storage) instead of RAM-backed
+  (`emptyDir.medium: Memory`). The app writes uploaded and extracted file
+  bytes to `/tmp`; a RAM-backed `/tmp` charged those bytes to the pod's
+  memory cgroup and could OOM the pod on a large file. The bytes now land in
+  ephemeral storage, capped by the per-tier `ephemeral-storage` request and
+  off the memory budget.
+
+### Added
+
+- `scripts/ops/check-mem-budget.sh`, wired into `make check`, fails the
+  build if the steady-state sum of Compose `memory` limits exceeds the host
+  ceiling, preventing a future edit from silently re-oversubscribing the
+  host. The `docker-compose.large.yml` overlay is intentionally exempt.
+
 ## 0.4.20 — 2026-05-30
 
 ### Changed

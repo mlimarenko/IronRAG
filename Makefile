@@ -172,9 +172,16 @@ frontend-check: frontend-lint frontend-typecheck frontend-test frontend-build fr
 helm-chart-check:
 	scripts/minikube/render-all.sh
 
-check: backend-change-gate frontend-check helm-chart-check
+# Guard the docker-compose memory budget: fail if the steady-state sum of
+# `memory` LIMITS exceeds the swapless 16 GiB host ceiling (see the script
+# and the "Memory containment" header in docker-compose.yml). Keeps a future
+# edit from silently re-oversubscribing the host.
+mem-budget-check:
+	scripts/ops/check-mem-budget.sh
 
-check-strict: backend-change-gate backend-doc frontend-check helm-chart-check
+check: backend-change-gate frontend-check helm-chart-check mem-budget-check
+
+check-strict: backend-change-gate backend-doc frontend-check helm-chart-check mem-budget-check
 
 pre-commit-install:
 	pre-commit install --install-hooks

@@ -1,54 +1,90 @@
 nameOverride: ""
 fullnameOverride: ""
 
-# CPU/memory tiers aligned with docker-compose resource anchors (requests ≈ compose
-# reservations, limits ≈ compose limits). Override any component's `resources` to replace.
+# CPU/memory tiers mirror the docker-compose role-based resource anchors 1:1
+# (requests ≈ compose `reservations`, limits ≈ compose `limits`). The memory
+# LIMIT is the load-bearing number: it is the cgroup ceiling that decides OOM
+# behavior, and it must stay in lockstep with the matching `x-ironrag-resources-*`
+# anchor in docker-compose.yml. Override any component's `resources` to replace
+# a tier.
+#
+# QoS: every tier sets requests < limits → Burstable QoS. Under node memory
+# pressure the kubelet evicts/OOM-kills Burstable pods before Guaranteed ones
+# and ranks them by how far each exceeds its requests — mirroring the compose
+# `oom_score_adj` ladder that sacrifices the worker first and the stateful
+# stores (postgres/redis/arangodb) last.
 resourcePresets:
-  small: &ironrag-resources-small
+  # Web SPA + nginx. Mirrors x-ironrag-resources-frontend.
+  frontend: &ironrag-resources-frontend
     requests:
       cpu: 200m
-      memory: 256Mi
+      memory: 64Mi
     limits:
       cpu: "1"
-      memory: 1Gi
-  medium: &ironrag-resources-medium
+      memory: 256Mi
+  # Redis cache. Mirrors x-ironrag-resources-cache.
+  cache: &ironrag-resources-cache
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+  # Postgres relational store + one-shot startup migrator share this tier.
+  # Mirrors x-ironrag-resources-db. ephemeral-storage covers migration scratch
+  # and the migrator's /tmp.
+  db: &ironrag-resources-db
     requests:
       cpu: 500m
-      memory: 768Mi
+      memory: 256Mi
+      ephemeral-storage: 1Gi
     limits:
       cpu: "2"
-      memory: 3Gi
-  # ArangoDB sits alone on this tier (the API backend + worker use `workload`
-  # below). The 6 GiB ceiling is sized for ArangoDB's IVF vector-index build
-  # path: with multi-dim per-(library,dim) embedding bindings, the largest
-  # per-(library,dim) shard `knowledge_chunk_vector_d{dim}_l{libhex}` can
-  # still hold hundreds of thousands of rows for a big library, and Arango
-  # must be allowed to train + ingest the IVF index without hitting the pod
-  # memory cap. Do not lower below the largest active shard's IVF build need;
-  # see the vector-layer policy in CLAUDE.md and the matching anchor in
-  # docker-compose.yml.
-  large: &ironrag-resources-large
+      memory: 1536Mi
+      ephemeral-storage: 4Gi
+  # Ingest worker. Mirrors x-ironrag-resources-worker. 3 GiB is the canonical
+  # docling containment: auto_docling_max_concurrency_for_limits resolves a
+  # 3 GiB limit to docling concurrency = 1, so a docling/python spike cgroup-
+  # OOMs the worker pod (job retries) instead of starving co-scheduled pods.
+  worker: &ironrag-resources-worker
     requests:
       cpu: "1"
-      memory: 1Gi
-    limits:
-      cpu: "4"
-      memory: 6Gi
-  # API backend + ingest worker tier. 4 GiB is the canonical docling memory
-  # containment: auto_docling_max_concurrency_for_limits resolves a 4 GiB
-  # limit to docling concurrency = 1, so a docling/python spike OOMs the
-  # worker pod (job retries) rather than starving co-scheduled pods. The
-  # Burstable QoS (requests < limits) also biases the kubelet OOM-killer
-  # toward the worker over the API backend.
-  workload: &ironrag-resources-workload
-    requests:
-      cpu: "1"
-      memory: 1Gi
+      memory: 768Mi
       ephemeral-storage: 1Gi
     limits:
       cpu: "4"
-      memory: 4Gi
+      memory: 3072Mi
       ephemeral-storage: 4Gi
+  # API backend (answer path; no docling spawned here). Mirrors
+  # x-ironrag-resources-backend. 3.5 GiB covers concurrent grounded-answer
+  # turns with margin.
+  backend: &ironrag-resources-backend
+    requests:
+      cpu: "1"
+      memory: 768Mi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "4"
+      memory: 3584Mi
+      ephemeral-storage: 4Gi
+  # ArangoDB sits alone on the vector tier. Mirrors x-ironrag-resources-vector.
+  # The 5 GiB ceiling is sized for ArangoDB's IVF vector-index build: with
+  # multi-dim per-(library,dim) bindings, the largest per-(library,dim) shard
+  # `knowledge_chunk_vector_d{dim}_l{libhex}` can hold hundreds of thousands of
+  # rows, and Arango must train + ingest the IVF index under the pod cap. The
+  # builder fail-soft-caps nLists to the training budget (default 3 GB, env-
+  # overridable via IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES) ÷ the empirical
+  # 50 MB/list, so a smaller cap means a cheaper build, never an OOM. Do not
+  # lower below the largest active shard's IVF build need; raise it (and the
+  # training budget) in lockstep with a bigger model/corpus — see the vector-
+  # layer policy in CLAUDE.md and the matching docker-compose.yml anchor.
+  vector: &ironrag-resources-vector
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "4"
+      memory: 5Gi
 
 imagePullSecrets: []
 commonLabels: {}
@@ -113,7 +149,7 @@ startup:
   mode: startup_job
   backoffLimit: 3
   ttlSecondsAfterFinished: 3600
-  resources: *ironrag-resources-medium
+  resources: *ironrag-resources-db
   wait:
     image:
       repository: registry.k8s.io/kubectl
@@ -134,7 +170,7 @@ api:
   service:
     type: ClusterIP
     port: 8080
-  resources: *ironrag-resources-workload
+  resources: *ironrag-resources-backend
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -149,7 +185,7 @@ worker:
   service:
     type: ClusterIP
     port: 8080
-  resources: *ironrag-resources-workload
+  resources: *ironrag-resources-worker
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -164,7 +200,7 @@ web:
   service:
     type: ClusterIP
     port: 80
-  resources: *ironrag-resources-small
+  resources: *ironrag-resources-frontend
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -207,7 +243,7 @@ storage:
     persistence:
       size: 20Gi
       storageClassName: ""
-    resources: *ironrag-resources-medium
+    resources: *ironrag-resources-db
 
 dependencies:
   postgres:
@@ -225,7 +261,7 @@ dependencies:
     persistence:
       size: 20Gi
       storageClassName: ""
-    resources: *ironrag-resources-medium
+    resources: *ironrag-resources-db
   redis:
     mode: bundled
     url: ""
@@ -236,7 +272,7 @@ dependencies:
       tag: "8.6"
       pullPolicy: IfNotPresent
     maxMemory: 512mb
-    resources: *ironrag-resources-small
+    resources: *ironrag-resources-cache
   arangodb:
     mode: bundled
     url: ""
@@ -252,4 +288,4 @@ dependencies:
     persistence:
       size: 20Gi
       storageClassName: ""
-    resources: *ironrag-resources-large
+    resources: *ironrag-resources-vector

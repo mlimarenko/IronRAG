@@ -74,7 +74,13 @@ spec:
       volumes:
         - name: tmp
           emptyDir:
-            medium: Memory
+            # Disk-backed (node ephemeral storage), NOT medium: Memory. The
+            # app writes uploaded/extracted file bytes to /tmp via tempfile;
+            # a RAM-backed /tmp charges those bytes to the pod memory cgroup
+            # and can OOM the pod on a large file. Keeping it on disk lands
+            # the bytes in ephemeral-storage (capped by the resource preset),
+            # off the memory budget. Mirrors the host tmpfs /tmp trap fixed
+            # for docker-compose; see the OOM/vector policy in CLAUDE.md.
             sizeLimit: 1Gi
         {{- if eq .Values.storage.provider "filesystem" }}
         - name: content-storage

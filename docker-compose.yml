@@ -41,6 +41,13 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: ${IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM:-auto}
   IRONRAG_INGESTION_EMBEDDING_PARALLELISM: ${IRONRAG_INGESTION_EMBEDDING_PARALLELISM:-8}
   IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC: ${IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC:-16}
+  # IVF k-means training memory budget (bytes) for the Arango vector index.
+  # Empty defers to the compiled-in default (3 GB), sized for the 5 GiB
+  # `x-ironrag-resources-vector` cap below. Larger hosts raise this in
+  # lock-step with the Arango cap via docker-compose.large.yml; never raise
+  # it without raising the cap (see the budget header comment and CLAUDE.md
+  # multi-dim vector-layer policy).
+  IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES: ${IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES:-}
   IRONRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
   IRONRAG_DEPENDENCY_POSTGRES_MODE: bundled
   IRONRAG_DEPENDENCY_REDIS_MODE: bundled
@@ -68,57 +75,107 @@ x-ironrag-app-env: &ironrag-app-env
   IRONRAG_ARANGODB_BOOTSTRAP_GRAPH: ${IRONRAG_ARANGODB_BOOTSTRAP_GRAPH:-true}
   IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: ${IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES:-true}
 
-x-ironrag-resources-small: &ironrag-resources-small
+# ─── Memory containment (16 GiB host baseline, swap = 0) ─────────────────────
+# The steady-state sum of `memory` LIMITS is the real lever here: Compose does
+# NOT enforce `reservations` (only Swarm / k8s does), and cgroup v2 lets the
+# sum of caps exceed physical RAM. On a swapless host a combined resident set
+# above ~16 GiB trips the kernel's GLOBAL OOM killer, which then SIGKILLs the
+# largest-RSS bystander (historically arangod, mid-IVF-write → crash loop)
+# instead of the rebuildable worker. The previous anchors summed to ~21-23 GiB,
+# sized for a 24-32 GiB VM that was never provisioned; this set fits 16 GiB.
+#
+#   anchor    limit   services            counts toward steady Σ?
+#   frontend   256M   frontend            yes
+#   cache      768M   redis               yes
+#   db        1536M   postgres, startup   postgres: yes / startup: one-shot
+#   worker    3072M   worker              yes
+#   backend   3584M   backend             yes
+#   vector    5120M   arangodb            yes
+#
+# Steady Σ (repo services, one-shot startup excluded):
+#   5120 + 3584 + 3072 + 1536 + 768 + 256 = 14336 MiB ≈ 14.0 GiB.
+# Budget ceiling = 16 GiB − 1.5 GiB headroom (OS, page cache, cadvisor,
+# qemu-ga) = 14.5 GiB. The ~0.5 GiB slack absorbs the prod-only
+# confluence-connector add-on. `scripts/ops/check-mem-budget.sh` (wired into
+# `make check`) fails the build if this sum is exceeded, so a future edit
+# cannot silently re-oversubscribe the host.
+#
+# These caps plus the per-service `oom_score_adj` below make a 16 GiB host
+# correct by default. A 24-32 GiB host can layer `docker-compose.large.yml`
+# to restore the wider arango/backend/worker caps for big corpora — raise
+# `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES` in lock-step (see the multi-dim
+# vector policy in CLAUDE.md).
+x-ironrag-resources-frontend: &ironrag-resources-frontend
   limits:
     cpus: "1.00"
-    memory: 1G
+    memory: 256M
   reservations:
     cpus: "0.20"
-    memory: 256M
+    memory: 64M
 
-x-ironrag-resources-medium: &ironrag-resources-medium
+x-ironrag-resources-cache: &ironrag-resources-cache
+  limits:
+    cpus: "1.00"
+    memory: 768M
+  reservations:
+    cpus: "0.20"
+    memory: 128M
+
+# Postgres (relational store) and the one-shot startup migrator share this
+# tier. Postgres anon RSS is ~0.4 GiB (shared_buffers is shared page cache,
+# not counted here); 1.5 GiB covers work_mem spikes on complex queries.
+x-ironrag-resources-db: &ironrag-resources-db
   limits:
     cpus: "2.00"
-    memory: 3072M
+    memory: 1536M
   reservations:
     cpus: "0.50"
+    memory: 256M
+
+# Ingest worker. 3 GiB is the canonical docling memory containment:
+# `auto_docling_max_concurrency_for_limits` (apps/api/src/integrations/docling/
+# mod.rs) derives the concurrency cap from (mem_mib*0.9 - 2048) / 2560, so a
+# 3 GiB worker still resolves to docling concurrency = 1 (identical outcome to
+# the old 4 GiB). A runaway docling/python extraction then cgroup-OOMs the
+# worker — whose job simply requeues — instead of tripping a host global OOM.
+# `oom_score_adj: 800` (below) makes the worker the kernel's first sacrifice.
+x-ironrag-resources-worker: &ironrag-resources-worker
+  limits:
+    cpus: "6.00"
+    memory: 3072M
+  reservations:
+    cpus: "2.00"
     memory: 768M
 
-# ArangoDB sits alone on this tier. The 6 GiB ceiling is sized for
-# ArangoDB's IVF vector-index build path: with multi-dim per-(library,dim)
-# embedding bindings, the largest per-(library,dim) shard
-# `knowledge_chunk_vector_d{dim}_l{libhex}` can still hold hundreds of
-# thousands of rows for a big library, and Arango must be allowed to train +
-# ingest the IVF index without hitting cgroup OOM. Idle Arango RSS is
-# ~1.2 GiB; an IVF build over a large shard pushes the resident set up by
-# ~1-1.5 GiB. 6 GiB gives headroom for parallel query traffic during the
-# build. Do not lower below the largest active shard's IVF build need; see
-# the vector-layer policy in CLAUDE.md.
-x-ironrag-resources-large: &ironrag-resources-large
+# API backend. Answer path only — no docling spawned here — so 3.5 GiB covers
+# the observed 1.7-3.1 GiB peak of concurrent grounded-answer turns with a
+# margin (a future global concurrent-turn semaphore can tighten this to 3 GiB).
+x-ironrag-resources-backend: &ironrag-resources-backend
+  limits:
+    cpus: "6.00"
+    memory: 3584M
+  reservations:
+    cpus: "2.00"
+    memory: 768M
+
+# ArangoDB sits alone on the vector tier. The 5 GiB ceiling holds the IVF
+# vector-index build for the largest active per-(library,dim) shard
+# `knowledge_chunk_vector_d{dim}_l{libhex}`: idle arangod RSS is ~1.5 GiB and
+# an IVF build over a large shard adds ~1.5 GiB, leaving room for concurrent
+# query traffic. The builder fail-soft-caps its `nLists` to
+# `VECTOR_INDEX_TRAINING_BUDGET_BYTES` (default 3 GB; env-overridable via
+# `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES`) divided by the empirical
+# 50 MB/list, so a smaller cap yields a cheaper build, never a cgroup OOM. Do
+# not lower below the largest active shard's IVF build need; raise it (and the
+# training-budget env) in lock-step with a bigger model/corpus — see the
+# multi-dim vector policy in CLAUDE.md.
+x-ironrag-resources-vector: &ironrag-resources-vector
   limits:
     cpus: "4.00"
-    memory: 6G
+    memory: 5120M
   reservations:
     cpus: "1.00"
     memory: 1G
-
-# Shared tier for the API backend and the ingest worker (both run the same
-# image). 4 GiB mirrors the charts `workload` tier and is the canonical
-# memory containment for docling: `auto_docling_max_concurrency_for_limits`
-# (apps/api/src/integrations/docling/mod.rs) derives the concurrency cap from
-# (mem_mib*0.9 - 2048) / 2560, so a 4 GiB worker resolves to docling
-# concurrency = 1. A runaway docling/python extraction then cgroup-OOMs the
-# worker (the job retries) instead of triggering a host-level global OOM that
-# kills the innocent API backend (the largest-RSS bystander). The API backend
-# does not spawn docling, so 4 GiB is ample for per-query IVF candidate sets.
-# The structural fix for total host oversubscription is raising VM RAM.
-x-ironrag-resources-workload: &ironrag-resources-workload
-  limits:
-    cpus: "6.00"
-    memory: 4G
-  reservations:
-    cpus: "2.00"
-    memory: 2G
 
 services:
   postgres:
@@ -139,9 +196,12 @@ services:
       retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql
+    # Stateful relational store — strongly protected; a kill forces WAL
+    # recovery on restart. Sacrificed only after every app container.
+    oom_score_adj: -800
     deploy:
       resources:
-        <<: *ironrag-resources-medium
+        <<: *ironrag-resources-db
   redis:
     image: ${IRONRAG_REDIS_IMAGE:-redis:8.6}
     restart: unless-stopped
@@ -160,9 +220,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    # Stateful-ish cache — protected; rebuilding the graph/answer cache is
+    # costly. Sacrificed only after every app container.
+    oom_score_adj: -700
     deploy:
       resources:
-        <<: *ironrag-resources-small
+        <<: *ironrag-resources-cache
   arangodb:
     image: ${IRONRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
     restart: unless-stopped
@@ -201,9 +264,13 @@ services:
       - "8529"
     volumes:
       - arangodb_data:/var/lib/arangodb3
+    # Most-protected container: killing arangod mid-IVF-write caused the
+    # crash loops in the 0.4.20 host-OOM incident. The kernel must pick this
+    # last. Paired with the 5 GiB `vector` cap + fail-soft IVF nLists sizing.
+    oom_score_adj: -900
     deploy:
       resources:
-        <<: *ironrag-resources-large
+        <<: *ironrag-resources-vector
   startup:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
     restart: on-failure
@@ -221,16 +288,22 @@ services:
       IRONRAG_SERVICE_ROLE: startup
       IRONRAG_SERVICE_NAME: ironrag-startup
       OTEL_SERVICE_NAME: ironrag-startup
+    # One-shot migrator; neutral OOM priority — it exits before steady state
+    # so it does not co-reside under load.
+    oom_score_adj: 0
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     deploy:
       resources:
-        <<: *ironrag-resources-medium
+        <<: *ironrag-resources-db
   backend:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
+    # Restartable, but a kill drops in-flight answer turns — sacrifice after
+    # the worker and frontend, and well before any stateful store.
+    oom_score_adj: 200
     depends_on:
       startup:
         condition: service_completed_successfully
@@ -251,16 +324,17 @@ services:
       start_period: 15s
     deploy:
       resources:
-        <<: *ironrag-resources-workload
+        <<: *ironrag-resources-backend
   worker:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
-    # Bias the kernel OOM-killer toward the worker (and its docling/python
-    # extraction children) so a memory spike kills the retryable ingest job
-    # rather than the API backend during a host-level global OOM.
-    oom_score_adj: 500
+    # First sacrifice under memory pressure: the worker (and its docling/python
+    # extraction children) is the largest non-stateful consumer, and its ingest
+    # job simply requeues after a kill. +800 puts it firmly at the top of the
+    # kernel's OOM-victim list, ahead of frontend (+400) and backend (+200).
+    oom_score_adj: 800
     depends_on:
       startup:
         condition: service_completed_successfully
@@ -281,7 +355,7 @@ services:
       start_period: 15s
     deploy:
       resources:
-        <<: *ironrag-resources-workload
+        <<: *ironrag-resources-worker
   frontend:
     image: ${IRONRAG_FRONTEND_IMAGE:-pipingspace/ironrag-frontend:latest}
     restart: unless-stopped
@@ -297,9 +371,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Stateless nginx + static SPA — trivially restartable; sacrifice right
+    # after the worker and before the backend.
+    oom_score_adj: 400
     deploy:
       resources:
-        <<: *ironrag-resources-small
+        <<: *ironrag-resources-frontend
 volumes:
   postgres_data:
   arangodb_data:

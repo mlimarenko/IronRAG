@@ -401,7 +401,7 @@ impl ArangoClient {
                 n_lists,
                 source_rows,
                 dimension,
-                VECTOR_INDEX_TRAINING_BUDGET_BYTES,
+                vector_index_training_budget_bytes(),
             );
             let existing_n_lists =
                 existing.params.get("nLists").and_then(serde_json::Value::as_u64).unwrap_or(1);
@@ -430,7 +430,7 @@ impl ArangoClient {
             n_lists,
             source_rows,
             dimension,
-            VECTOR_INDEX_TRAINING_BUDGET_BYTES,
+            vector_index_training_budget_bytes(),
         );
         if effective_n_lists != n_lists {
             tracing::warn!(
@@ -1502,21 +1502,55 @@ fn vector_index_dimension(index: &ArangoIndexRow) -> Option<u64> {
 /// so switching algorithm is not an option here.
 const FAISS_EMPIRICAL_BYTES_PER_LIST: u64 = 50_000_000;
 
-/// Memory budget (bytes) for IVF k-means training inside the Arango container.
-/// The canonical `large` tier in docker-compose.yml / Helm `values.yaml` is
-/// 6 GiB. ArangoDB idles around 1.2-1.5 GiB on a populated stage, leaving
-/// ~4.5 GiB headroom. Using 3 GB as the budget yields nLists ≈ 60 with the
-/// empirical 50 MB/list overhead — comfortably below the headroom while
-/// giving a much tighter IVF partitioning than the old 1 GB / 20 lists pair
-/// (which forced 5+ s `APPROX_NEAR_COSINE` scans on 650k-row shards and
-/// produced `retrieval.vector_failed` timeouts on the 30 s Arango HTTP
-/// client cap).
+/// Default memory budget (bytes) for IVF k-means training inside the Arango
+/// container, used when `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES` is unset
+/// (see [`vector_index_training_budget_bytes`]).
 ///
-/// Per the canonical multi-dim policy in the project CLAUDE.md, this budget
-/// is sized for the largest per-dim shard the deployment expects to host.
-/// If a heavier shard is rolled out, raise this constant in lock-step with
-/// the container memory cap; never silently exceed the container budget.
+/// The canonical baseline `vector` tier in docker-compose.yml (anchor
+/// `x-ironrag-resources-vector`) / Helm `values.yaml` is 5 GiB. ArangoDB idles
+/// around 1.2-1.5 GiB on a populated stage, leaving ~3.5 GiB headroom on that
+/// cap. Using 3 GB as the budget yields nLists ≈ 60 with the empirical
+/// 50 MB/list overhead — comfortably below the headroom while giving a much
+/// tighter IVF partitioning than the old 1 GB / 20 lists pair (which forced
+/// 5+ s `APPROX_NEAR_COSINE` scans on 650k-row shards and produced
+/// `retrieval.vector_failed` timeouts on the 30 s Arango HTTP client cap).
+///
+/// Per the canonical multi-dim policy in the project CLAUDE.md, this budget is
+/// sized for the largest per-dim shard the deployment expects to host. When a
+/// heavier shard is rolled out on a larger host, the Arango container cap is
+/// raised in lock-step (e.g. the `docker-compose.large.yml` overlay) and the
+/// budget is bumped via the env override below — never recompile, never
+/// silently exceed the container budget.
 const VECTOR_INDEX_TRAINING_BUDGET_BYTES: u64 = 3_000_000_000;
+
+/// Resolve the IVF k-means training memory budget (bytes).
+///
+/// Reads `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES` so a larger-host overlay
+/// (e.g. `docker-compose.large.yml`, which also raises the Arango container
+/// cap) can widen the budget in lock-step without a recompile, satisfying the
+/// multi-dim vector-layer policy in the project CLAUDE.md. Falls back to
+/// [`VECTOR_INDEX_TRAINING_BUDGET_BYTES`] when unset, empty, or unparseable.
+fn vector_index_training_budget_bytes() -> u64 {
+    parse_vector_index_training_budget(
+        std::env::var("IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES").ok(),
+    )
+}
+
+/// Pure parser for the IVF training budget env override.
+///
+/// Split out from [`vector_index_training_budget_bytes`] so it is unit-testable
+/// without mutating process environment. A missing, blank, non-numeric, or
+/// zero value falls back to the compiled-in default
+/// [`VECTOR_INDEX_TRAINING_BUDGET_BYTES`]; zero is rejected because a zero
+/// budget would clamp nLists to 1 and defeat IVF partitioning entirely.
+fn parse_vector_index_training_budget(raw: Option<String>) -> u64 {
+    raw.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(VECTOR_INDEX_TRAINING_BUDGET_BYTES)
+}
 
 fn effective_vector_index_n_lists(configured_n_lists: u64, source_rows: u64) -> u64 {
     configured_n_lists.max(1).min(source_rows.max(1))
@@ -1537,11 +1571,11 @@ fn effective_vector_index_n_lists(configured_n_lists: u64, source_rows: u64) -> 
 /// nLists_max = budget_bytes / FAISS_EMPIRICAL_BYTES_PER_LIST
 /// ```
 ///
-/// At the default 3 GB budget (matched to the canonical 6 GiB Arango
-/// container in docker-compose.yml `large` tier): nLists_max = 60,
-/// yielding ~85k-130k vector comparisons per query at nProbe=8 over a
-/// 650k-row shard (vs 5.2M for a full scan), well under the 30 s
-/// `arangodb_request_timeout_seconds` cap.
+/// At the default 3 GB budget (matched to the canonical 5 GiB Arango
+/// container in docker-compose.yml `x-ironrag-resources-vector` tier):
+/// nLists_max = 60, yielding ~85k-130k vector comparisons per query at
+/// nProbe=8 over a 650k-row shard (vs 5.2M for a full scan), well under the
+/// 30 s `arangodb_request_timeout_seconds` cap.
 fn effective_vector_index_n_lists_memory_safe(
     configured_n_lists: u64,
     source_rows: u64,
@@ -1704,8 +1738,9 @@ mod tests {
     use super::{
         ArangoClient, ArangoIndexRow, FAISS_EMPIRICAL_BYTES_PER_LIST,
         VECTOR_INDEX_TRAINING_BUDGET_BYTES, aql_primary_collection, effective_vector_index_n_lists,
-        effective_vector_index_n_lists_memory_safe, persistent_index_definition_matches,
-        vector_index_definition_matches, view_links_semantically_match,
+        effective_vector_index_n_lists_memory_safe, parse_vector_index_training_budget,
+        persistent_index_definition_matches, vector_index_definition_matches,
+        view_links_semantically_match,
     };
 
     #[test]
@@ -1917,22 +1952,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_vector_index_training_budget_falls_back_and_overrides() {
+        // Unset / blank / whitespace-only → compiled-in default.
+        assert_eq!(parse_vector_index_training_budget(None), VECTOR_INDEX_TRAINING_BUDGET_BYTES);
+        assert_eq!(
+            parse_vector_index_training_budget(Some(String::new())),
+            VECTOR_INDEX_TRAINING_BUDGET_BYTES
+        );
+        assert_eq!(
+            parse_vector_index_training_budget(Some("   ".to_string())),
+            VECTOR_INDEX_TRAINING_BUDGET_BYTES
+        );
+
+        // Non-numeric / zero → default (zero would clamp nLists to 1).
+        assert_eq!(
+            parse_vector_index_training_budget(Some("not-a-number".to_string())),
+            VECTOR_INDEX_TRAINING_BUDGET_BYTES
+        );
+        assert_eq!(
+            parse_vector_index_training_budget(Some("0".to_string())),
+            VECTOR_INDEX_TRAINING_BUDGET_BYTES
+        );
+
+        // Valid positive value (with surrounding whitespace) → parsed override.
+        // 4 GB matches the docker-compose.large.yml overlay for bigger hosts.
+        assert_eq!(
+            parse_vector_index_training_budget(Some("  4000000000  ".to_string())),
+            4_000_000_000
+        );
+    }
+
     /// Regression guard for a large per-dim shard scenario: a populated
     /// production-class library on a high-dim embedding model (~650k rows ×
-    /// 3072-dim vectors) under the canonical 6 GiB Arango container budget
-    /// declared in docker-compose.yml / values.yaml `large` tier.
+    /// 3072-dim vectors) under the canonical 5 GiB Arango container budget
+    /// declared in docker-compose.yml (`x-ironrag-resources-vector`) /
+    /// values.yaml.
     ///
     /// The empirical IVF build cost is roughly 50 MB per nList. With the
-    /// current 3 GB `VECTOR_INDEX_TRAINING_BUDGET_BYTES` the cap is 60
-    /// lists, which fits comfortably below the 6 GiB container budget
-    /// (Arango idle stays around 1.5 GiB, plus 3 GiB for the IVF build,
-    /// giving a 4.5 GiB peak). That partitioning yields much faster
-    /// query times than the previous nLists=20 setting.
+    /// default 3 GB `VECTOR_INDEX_TRAINING_BUDGET_BYTES` the cap is 60
+    /// lists, which fits below the 5 GiB container budget (Arango idle stays
+    /// around 1.5 GiB, plus 3 GiB for the IVF build, giving a ~4.5 GiB peak
+    /// with ~0.5 GiB headroom). That partitioning yields much faster query
+    /// times than the previous nLists=20 setting.
     ///
-    /// If the canonical `large` tier shrinks below ~5 GiB, this regression
-    /// guard will start failing — that is intentional, because shrinking
-    /// the container without simultaneously lowering the budget would
-    /// reintroduce the OOM cycle.
+    /// The invariant: `idle (~1.5 GiB) + budget` must stay under the Arango
+    /// container cap. On a larger host the cap is raised (the
+    /// `docker-compose.large.yml` overlay) and the budget bumped in lock-step
+    /// via `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES`; never raise the
+    /// budget alone, or the OOM cycle returns.
     #[test]
     fn effective_vector_index_n_lists_large_shard_fits_within_canonical_arango_container() {
         let rows = 650_000_u64;
