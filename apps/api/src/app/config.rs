@@ -579,8 +579,8 @@ fn settings_config_builder()
         .set_default("maintenance_tick_interval_seconds", 30)?
         .set_default("maintenance_class_interval_seconds", 3600)?
         .set_default("maintenance_stale_lease_seconds", 300)?
-        .set_default("ingestion_embedding_parallelism", 2)?
-        .set_default("ingestion_graph_extract_parallelism_per_doc", 4)?
+        .set_default("ingestion_embedding_parallelism", 8)?
+        .set_default("ingestion_graph_extract_parallelism_per_doc", 16)?
         .set_default("web_ingest_http_timeout_seconds", 20)?
         .set_default("web_ingest_max_redirects", 10)?
         .set_default("web_ingest_user_agent", "IronRAG-WebIngest/0.1")?

@@ -5,7 +5,6 @@ metadata:
   labels:
     {{- include "ironrag.labels" . | nindent 4 }}
 data:
-  IRONRAG_BIND_ADDR: {{ .Values.app.bindAddr | quote }}
   IRONRAG_ENVIRONMENT: {{ .Values.app.environment | quote }}
   IRONRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
   IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: {{ .Values.app.queryAnswerSourceLinksEnabled | quote }}

@@ -126,6 +126,21 @@ rand = "0.10.1"
 dhat = { version = "0.3", optional = true }
 percent-encoding = "2"
 
+# Production memory allocator. The default glibc allocator retains freed
+# memory in per-thread arenas and rarely returns it to the OS, which on a
+# multi-threaded tokio worker manifested as an idle process pinned at multiple
+# GiB of RSS (allocator retention, not live heap) and recurring MEMCG OOM
+# kills. jemalloc with a background decay thread releases dirty/muzzy pages
+# back to the OS on a timer. Configured at runtime via the `_RJEM_MALLOC_CONF`
+# env var (jemalloc reads `<PREFIX>_MALLOC_CONF`; tikv builds with the `_rjem_`
+# prefix), so no `unsafe` `#[export_name]` global is needed — important because
+# this crate sets `unsafe_code = "forbid"` and edition 2024 treats
+# `#[export_name]` as unsafe. Skipped under `heap-profile`, where dhat owns the
+# global allocator. msvc is excluded (jemalloc is unsupported there); prod and
+# local docker are both Linux.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [[bin]]
 name = "ironrag-cli"
 path = "src/bin/ironrag_cli.rs"

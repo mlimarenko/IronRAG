@@ -318,7 +318,9 @@ mod tests {
 
     #[test]
     fn grounded_answer_contextual_top_k_floor_matches_ui_agent_tool_default() {
-        assert_eq!(resolve_grounded_answer_top_k(Some(4), true), 8);
+        // A contextual follow-up floors retrieval breadth to the canonical
+        // default so it never retrieves more narrowly than a fresh turn.
+        assert_eq!(resolve_grounded_answer_top_k(Some(4), true), DEFAULT_TOP_K);
         assert_eq!(resolve_grounded_answer_top_k(Some(4), false), 4);
     }
 

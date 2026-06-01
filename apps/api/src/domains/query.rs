@@ -12,7 +12,14 @@ use crate::{
 
 pub const DEFAULT_TOP_K: usize = 24;
 pub const MAX_TOP_K: usize = 32;
-pub const CONTEXTUAL_GROUNDED_ANSWER_MIN_TOP_K: usize = 8;
+/// Minimum retrieval breadth for a grounded answer on a contextual follow-up
+/// turn. Pinned to [`DEFAULT_TOP_K`] so a follow-up question retrieves as
+/// widely as a fresh one: an earlier lower floor let the UI agent lowball
+/// `topK` on follow-ups, which starved recall on how-to / configuration
+/// questions (the concrete parameter chunks never reached the answer model,
+/// so it hedged instead of listing the steps). The agent may still request a
+/// *wider* breadth up to [`MAX_TOP_K`]; it can no longer request a narrower one.
+pub const CONTEXTUAL_GROUNDED_ANSWER_MIN_TOP_K: usize = DEFAULT_TOP_K;
 
 #[must_use]
 pub fn resolve_top_k(requested_top_k: Option<usize>) -> usize {

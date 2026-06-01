@@ -582,12 +582,39 @@ pub struct RuntimeGraphEdgeCompactRow {
     pub support_count: i32,
 }
 
+/// Opens a transaction with Postgres parallel query workers disabled for
+/// its scope, used by the graph-topology scans below.
+///
+/// The topology document-link aggregate and the full edge scan are large
+/// enough that the planner picks a parallel plan. Each parallel gather
+/// allocates a dynamic-shared-memory segment in the Postgres server's
+/// `/dev/shm`. On the stock container that mount defaults to 64 MiB, and
+/// under concurrent graph loads (e.g. a browser retrying the topology
+/// endpoint while a projection republish invalidates the Redis cache)
+/// those segments exhaust it, surfacing as
+/// `could not resize shared memory segment ... No space left on device`
+/// and a HTTP 500 with no graph. Forcing a non-parallel plan keeps each
+/// scan single-process so it never touches `/dev/shm`, making the topology
+/// build robust on any deployment regardless of the configured shm size.
+/// `SET LOCAL` is scoped to the transaction, so the connection returns to
+/// the pool with the default parallel settings intact. The topology bytes
+/// are cached in Redis for 24h, so this slower single-process path runs
+/// only on cache miss / projection publish, never per UI request.
+async fn begin_topology_scan_tx(
+    pool: &PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("set local max_parallel_workers_per_gather = 0").execute(&mut *tx).await?;
+    Ok(tx)
+}
+
 pub async fn list_admitted_runtime_graph_edges_compact_by_library(
     pool: &PgPool,
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<Vec<RuntimeGraphEdgeCompactRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphEdgeCompactRow>(
+    let mut tx = begin_topology_scan_tx(pool).await?;
+    let rows = sqlx::query_as::<_, RuntimeGraphEdgeCompactRow>(
         "select from_node_id, to_node_id, relation_type, support_count
          from runtime_graph_edge
          where library_id = $1
@@ -598,8 +625,10 @@ pub async fn list_admitted_runtime_graph_edges_compact_by_library(
     )
     .bind(library_id)
     .bind(projection_version)
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
 }
 
 /// Fetches the full node rows for a pre-computed set of admitted ids
@@ -614,7 +643,8 @@ pub async fn list_runtime_graph_nodes_by_ids_or_document_type(
     projection_version: i64,
     admitted_ids: &[Uuid],
 ) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphNodeRow>(
+    let mut tx = begin_topology_scan_tx(pool).await?;
+    let rows = sqlx::query_as::<_, RuntimeGraphNodeRow>(
         "select id, library_id, canonical_key, label, node_type, aliases_json,
             summary, metadata_json, support_count, projection_version, created_at, updated_at
          from runtime_graph_node
@@ -626,8 +656,10 @@ pub async fn list_runtime_graph_nodes_by_ids_or_document_type(
     .bind(library_id)
     .bind(projection_version)
     .bind(admitted_ids)
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
 }
 
 /// Fetches runtime graph nodes by id for one projection version without
@@ -2251,7 +2283,8 @@ pub async fn list_runtime_graph_document_links_by_library(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<Vec<RuntimeGraphDocumentLinkRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphDocumentLinkRow>(
+    let mut tx = begin_topology_scan_tx(pool).await?;
+    let rows = sqlx::query_as::<_, RuntimeGraphDocumentLinkRow>(
         "with active_node_links as (
             select
                 evidence.document_id,
@@ -2302,8 +2335,10 @@ pub async fn list_runtime_graph_document_links_by_library(
     )
     .bind(library_id)
     .bind(projection_version)
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
 }
 
 /// Lists document-to-runtime-graph links for the active projection, filtered

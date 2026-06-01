@@ -159,7 +159,7 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.service_name, "ironrag-backend");
     assert_eq!(settings.environment, "local");
     assert_eq!(settings.database_max_connections, 64);
-    assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 4);
+    assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 16);
     assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
     assert_eq!(settings.arangodb_url, "http://127.0.0.1:8529");
     assert_eq!(settings.arangodb_database, "ironrag");

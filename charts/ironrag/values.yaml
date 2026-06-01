@@ -99,7 +99,6 @@ runtimeSecret:
 
 app:
   environment: production
-  bindAddr: 0.0.0.0:8080
   frontendOrigin: https://ironrag.example.com
   logFilter: info
   databaseMaxConnections: 20
@@ -254,6 +253,13 @@ dependencies:
     database: ironrag
     username: postgres
     password: postgres
+    # Size of the memory-backed /dev/shm emptyDir mounted into the postgres
+    # pod. Raises the stock 64Mi k8s default so parallel-query gathers have
+    # room for their dynamic-shared-memory segments; large graph-topology
+    # scans / concurrent graph loads otherwise exhaust 64Mi and the request
+    # fails with `No space left on device` -> HTTP 500. Counts against the
+    # pod memory limit, so keep it modest.
+    shmSize: 256Mi
     image:
       repository: postgres
       tag: 18-alpine

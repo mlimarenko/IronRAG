@@ -76,12 +76,27 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql
+            # Postgres parallel-query gathers allocate dynamic-shared-memory
+            # segments in /dev/shm. Kubernetes mounts /dev/shm as a 64Mi
+            # emptyDir by default, which large graph-topology scans or a
+            # burst of concurrent graph loads exhaust ("could not resize
+            # shared memory segment ... No space left on device" -> HTTP
+            # 500). A memory-backed emptyDir raises the ceiling; the size
+            # counts against the pod memory limit, so it is sized modestly.
+            # The app also pins the heaviest topology scans to a non-parallel
+            # plan, so correctness does not depend on this alone.
+            - name: dshm
+              mountPath: /dev/shm
           resources:
             {{- toYaml .Values.dependencies.postgres.resources | nindent 12 }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "ironrag.fullname" . }}-postgres
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.dependencies.postgres.shmSize | default "256Mi" }}
 ---
 apiVersion: v1
 kind: Service

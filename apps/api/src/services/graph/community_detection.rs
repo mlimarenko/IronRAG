@@ -49,10 +49,26 @@ impl CommunityDetectionService {
         let pool = &state.persistence.postgres;
 
         let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
-        let projection_version = match snapshot {
-            Some(s) => s.projection_version,
+        let (projection_version, snapshot_node_count) = match snapshot {
+            Some(s) => (s.projection_version, s.node_count),
             None => return Ok(()),
         };
+
+        // Guard on the snapshot's node count BEFORE loading any rows. The
+        // node-id and edge-adjacency Vecs for a large library are hundreds of
+        // MB of transient allocation; pulling them only to discard them when
+        // the library exceeds the in-process limit is exactly the spike that
+        // tipped the worker cgroup past its memory ceiling. The snapshot row
+        // already carries the authoritative node count, so skip early.
+        if snapshot_node_count as usize > COMMUNITY_DETECTION_NODE_LIMIT {
+            tracing::warn!(
+                library_id = %library_id,
+                node_count = snapshot_node_count,
+                limit = COMMUNITY_DETECTION_NODE_LIMIT,
+                "skipping community detection: library exceeds in-process size limit"
+            );
+            return Ok(());
+        }
 
         let nodes = repositories::list_runtime_graph_node_ids_by_library(
             pool,
@@ -71,13 +87,16 @@ impl CommunityDetectionService {
             return Ok(());
         }
 
+        // Defensive double-check in case the snapshot count drifted from the
+        // materialized rows (e.g. concurrent reprojection): still cheaper to
+        // bail than to run label propagation over an oversized graph.
         if nodes.len() > COMMUNITY_DETECTION_NODE_LIMIT {
             tracing::warn!(
                 library_id = %library_id,
                 node_count = nodes.len(),
                 edge_count = edges.len(),
                 limit = COMMUNITY_DETECTION_NODE_LIMIT,
-                "skipping community detection: library exceeds in-process size limit"
+                "skipping community detection: materialized node count exceeds in-process size limit"
             );
             return Ok(());
         }

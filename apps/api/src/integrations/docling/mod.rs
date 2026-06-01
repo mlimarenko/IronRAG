@@ -34,7 +34,7 @@ use crate::shared::{
 
 const DEFAULT_EXTRACT_BIN: &str = "ironrag-docling-extract";
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
-const DEFAULT_PAGE_BATCH_SIZE: u32 = 5;
+const DEFAULT_PAGE_BATCH_SIZE: u32 = 10;
 const DOCLING_AUTO_MAX_CONCURRENCY: usize = 4;
 const DOCLING_AUTO_RESERVED_MEMORY_MIB: u64 = 2048;
 const DOCLING_AUTO_MEMORY_PER_PROCESS_MIB: u64 = 2560;

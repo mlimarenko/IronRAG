@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ── Stage 1: Rust builder ──────────────────────────────────────────────
-FROM rust:1.95.0-trixie AS builder
+FROM rust:1.96.0-trixie AS builder
 WORKDIR /workspace
 ARG APP_VERSION=0.0.0-dev
 
@@ -27,7 +27,7 @@ RUN apt-get update \
 # so the build must not depend on it — the base image is the source of truth
 # for the toolchain version (kept in lockstep with the FROM tag above).
 ENV CARGO_HOME=/usr/local/cargo \
-    RUSTUP_TOOLCHAIN=1.95.0 \
+    RUSTUP_TOOLCHAIN=1.96.0 \
     RUSTFLAGS="-C linker=clang -C link-arg=--ld-path=/usr/local/bin/wild" \
     CARGO_INCREMENTAL=0 \
     APP_VERSION=${APP_VERSION}
@@ -119,6 +119,19 @@ COPY apps/api/docker/docling-extract.py /usr/local/bin/ironrag-docling-extract
 RUN chmod +x /usr/local/bin/runtime-entrypoint.sh /usr/local/bin/ironrag-docling-extract
 
 ENV HOME=/home/appuser
+
+# Baked runtime tuning (image default; override per-deployment via env if needed):
+#  - _RJEM_MALLOC_CONF: jemalloc background-decay thread returns freed pages to
+#    the OS so RSS tracks the live working set. Set here rather than in Rust
+#    source because the `malloc_conf` symbol needs `#[export_name]` (unsafe),
+#    which the crate's forbid(unsafe_code) lint rejects. tikv-jemallocator reads
+#    the `_rjem_`-prefixed name.
+#  - TOKIO_WORKER_THREADS: cap the async runtime pool so thread stacks don't
+#    scale with host core count on large machines.
+#  - RUST_BACKTRACE: full panic backtraces in logs for operator diagnosis.
+ENV _RJEM_MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:1000,muzzy_decay_ms:1000 \
+    TOKIO_WORKER_THREADS=8 \
+    RUST_BACKTRACE=full
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/runtime-entrypoint.sh"]

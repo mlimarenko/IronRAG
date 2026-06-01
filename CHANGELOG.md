@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.22 — 2026-06-02
+
+### Fixed
+
+- The knowledge-graph topology endpoint no longer intermittently returns HTTP
+  500 (`could not resize shared memory segment … No space left on device`).
+  The heaviest topology scans are pinned to a non-parallel query plan so they
+  never allocate dynamic-shared-memory segments in the PostgreSQL container's
+  `/dev/shm`, which the stock 64 MiB mount could exhaust under concurrent graph
+  loads. The bundled PostgreSQL `/dev/shm` is also raised to 256 MiB as defense
+  in depth (Compose + Helm).
+- A grounded-answer follow-up question now retrieves as widely as a fresh one.
+  A lower retrieval-breadth floor on contextual turns let the in-product agent
+  narrow `topK` on follow-ups, which starved recall on how-to / configuration
+  questions: the concrete answer chunks ranked below the cutoff and the model
+  hedged instead of answering. The contextual floor is pinned to the canonical
+  default.
+
+### Changed
+
+- Resident memory is driven down with jemalloc configured for background page
+  decay, so freed pages are returned to the OS instead of accumulating in
+  per-thread arenas (which had pinned an idle worker at multiple GiB and
+  tripped the cgroup OOM-killer in a restart loop). The community-detection
+  guard now also rejects oversized graphs before loading their rows.
+- Compose files are slimmed to operator-facing settings. Narrow runtime tuning
+  that does not change per deployment (allocator config, async-runtime pool
+  size, ingest parallelism, document batching, vector-index parameters,
+  bootstrap toggles, telemetry exporter selection) is baked into the image and
+  the compiled-in defaults and stays overridable via the matching environment
+  variable.
+
+### Build
+
+- Rust toolchain bumped to 1.96.0.
+
 ## 0.4.21 — 2026-05-31
 
 ### Changed

@@ -3486,7 +3486,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(arguments["topK"], 8);
+        assert_eq!(arguments["topK"], 24);
     }
 
     #[test]
@@ -3516,7 +3516,7 @@ mod tests {
             &history,
         );
 
-        assert_eq!(arguments["topK"], 8);
+        assert_eq!(arguments["topK"], 24);
         assert_eq!(
             arguments["conversationTurns"],
             serde_json::json!([
@@ -3548,7 +3548,7 @@ mod tests {
             &history,
         );
 
-        assert_eq!(arguments["topK"], 8);
+        assert_eq!(arguments["topK"], 24);
         assert_eq!(
             arguments["conversationTurns"],
             serde_json::json!([
