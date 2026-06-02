@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.23 — 2026-06-02
+
+### Added
+
+- feat(snapshot): workspace-level export/import
+  (`GET`/`POST /v1/catalog/workspaces/{id}/snapshot`) bundles every library in
+  a workspace into one archive, so an operator can back up a whole stack in one
+  call before the 0.5.0 manual upgrade instead of exporting each library
+  separately. The archive is a plain tar holding a `workspace-manifest.json`
+  plus one per-library `.tar.zst`; import provisions a fresh library per entry
+  and reuses the per-library restore.
+
+### Fixed
+
+- fix(snapshot): export now includes per-(library,dim) promoted vector shards
+  instead of failing with `EXPORT_FAILED`; required so operators on large
+  libraries can back up before the 0.5.0 manual upgrade.
+
 ## 0.4.22 — 2026-06-02
 
 ### Fixed

@@ -99,32 +99,39 @@ fn is_vector_collection_name(name: &str) -> bool {
         || name == KNOWLEDGE_ENTITY_VECTOR_COLLECTION
 }
 
-/// `true` if `name` is a canonical per-dim vector shard such as
-/// `knowledge_chunk_vector_d1024` or `knowledge_entity_vector_d3072`.
+/// `true` if `name` is a per-dim vector shard such as
+/// `knowledge_chunk_vector_d1024`, `knowledge_entity_vector_d3072`, or a
+/// promoted per-library variant with `_l<library_hex>` after the dim.
 /// Used by the snapshot validator to accept runtime-discovered shards
 /// alongside the static collection list.
 fn is_per_dim_vector_collection_name(name: &str) -> bool {
     parse_per_dim_vector_collection_dim(name).is_some()
 }
 
-/// Parse the dim suffix off a canonical per-dim vector shard name.
+/// Parse the dim suffix off a per-dim vector shard name.
 /// Returns `None` when the name does not match the per-dim shape.
 fn parse_per_dim_vector_collection_dim(name: &str) -> Option<u64> {
     let suffix = name
         .strip_prefix(PER_DIM_CHUNK_VECTOR_PREFIX)
         .or_else(|| name.strip_prefix(PER_DIM_ENTITY_VECTOR_PREFIX))?;
-    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+    parse_per_dim_vector_collection_suffix(suffix)
+}
+
+fn parse_per_dim_vector_collection_suffix(suffix: &str) -> Option<u64> {
+    let dim = suffix.split_once("_l").map_or(suffix, |(dim, _library_hex)| dim);
+    if dim.is_empty() || !dim.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    suffix.parse::<u64>().ok()
+    dim.parse::<u64>().ok()
 }
 
 /// `true` when `name` is a per-dim chunk-vector shard
-/// (`knowledge_chunk_vector_d<dim>`). Used to decide whether the
-/// restore path should ensure a chunk-side vs entity-side shard.
+/// (`knowledge_chunk_vector_d<dim>` or promoted `_l<library_hex>` variant).
+/// Used to decide whether the restore path should ensure a chunk-side vs
+/// entity-side shard.
 fn is_per_dim_chunk_vector_collection_name(name: &str) -> bool {
     name.strip_prefix(PER_DIM_CHUNK_VECTOR_PREFIX)
-        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+        .is_some_and(|rest| parse_per_dim_vector_collection_suffix(rest).is_some())
 }
 
 /// Manifest entry describing one per-dim vector shard the exporter
@@ -2455,9 +2462,571 @@ async fn insert_arango_rows_bulk(
     Ok(())
 }
 
+// ===========================================================================
+// Workspace snapshot — bundles every library archive into one plain tar
+// ===========================================================================
+
+/// Env var naming a scratch directory for the per-library temp files the
+/// workspace exporter materializes (one library at a time). Falls back to
+/// `std::env::temp_dir()` when unset.
+const SNAPSHOT_SCRATCH_DIR_ENV: &str = "IRONRAG_SNAPSHOT_SCRATCH_DIR";
+
+/// Manifest entry describing one library inside a workspace archive.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WorkspaceManifestLibrary {
+    pub id: Uuid,
+    pub slug: String,
+    pub display_name: String,
+}
+
+/// First entry of a workspace archive (`workspace-manifest.json`). Declares
+/// the workspace identity, the include kinds requested for every embedded
+/// library archive, and the ordered library list. Reuses the per-library
+/// [`SNAPSHOT_SCHEMA_VERSION`] so a single version gate covers both archive
+/// shapes.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WorkspaceSnapshotManifest {
+    pub schema_version: u32,
+    pub workspace_id: Uuid,
+    pub workspace_slug: String,
+    pub exported_at: chrono::DateTime<chrono::Utc>,
+    pub source_version: String,
+    pub include_kinds: Vec<IncludeKind>,
+    pub libraries: Vec<WorkspaceManifestLibrary>,
+}
+
+/// Per-library entry in a [`WorkspaceSnapshotImportReport`].
+#[derive(Debug, Default)]
+pub struct WorkspaceLibraryImportReport {
+    /// Library id minted on the target stack (NOT the source id).
+    pub library_id: Uuid,
+    /// Slug actually assigned on the target (may be suffixed `-2`, `-3`… if
+    /// the source slug collided with a sibling library).
+    pub slug: String,
+    pub postgres_rows_by_table: Vec<(String, u64)>,
+    pub arango_docs_by_collection: Vec<(String, u64)>,
+    pub arango_edges_by_collection: Vec<(String, u64)>,
+    pub skipped_arango_edges_by_collection: Vec<(String, u64)>,
+    pub blobs_restored: u64,
+}
+
+/// Aggregate report for a workspace restore. One entry per embedded library
+/// archive that was provisioned and restored.
+#[derive(Debug, Default)]
+pub struct WorkspaceSnapshotImportReport {
+    pub workspace_id: Uuid,
+    pub libraries_restored: u64,
+    pub overwrite_mode: OverwriteMode,
+    pub libraries: Vec<WorkspaceLibraryImportReport>,
+}
+
+/// Streams a plain (uncompressed) tar bundling every library in `workspace_id`
+/// into `writer`. Each embedded `libraries/{library_id}.tar.zst` entry is the
+/// EXACT byte stream [`export_library_archive`] produces for that library with
+/// the same `include` kinds — already zstd-compressed, hence the OUTER tar is
+/// not compressed again.
+///
+/// To emit a tar entry the size must be known up front, so each library is
+/// exported to a temp file first, stat-ed, appended, then deleted before the
+/// next library — peak scratch usage is one library archive.
+pub async fn export_workspace_archive<W>(
+    state: AppState,
+    workspace_id: Uuid,
+    include: Vec<IncludeKind>,
+    writer: W,
+) -> Result<(), ContentServiceError>
+where
+    W: AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    export_workspace_archive_inner(state, workspace_id, include, writer).await.map_err(|error| {
+        tracing::error!(
+            %workspace_id,
+            error_chain = format!("{error:#}"),
+            "workspace snapshot export failed with full chain",
+        );
+        ContentServiceError::from_message(error.to_string())
+    })
+}
+
+async fn export_workspace_archive_inner<W>(
+    state: AppState,
+    workspace_id: Uuid,
+    include: Vec<IncludeKind>,
+    writer: W,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    IncludeKind::validate(&include)?;
+    let pool = &state.persistence.postgres;
+
+    let workspace_slug: String =
+        sqlx::query_scalar("SELECT slug FROM catalog_workspace WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .context("load catalog_workspace slug")?
+            .ok_or_else(|| anyhow!("workspace {workspace_id} does not exist"))?;
+
+    let library_rows = sqlx::query(
+        "SELECT id, slug, display_name FROM catalog_library WHERE workspace_id = $1 ORDER BY display_name",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .context("load workspace libraries")?;
+    let libraries: Vec<WorkspaceManifestLibrary> = library_rows
+        .into_iter()
+        .map(|row| -> anyhow::Result<WorkspaceManifestLibrary> {
+            Ok(WorkspaceManifestLibrary {
+                id: row.try_get("id").context("decode catalog_library id")?,
+                slug: row.try_get("slug").context("decode catalog_library slug")?,
+                display_name: row
+                    .try_get("display_name")
+                    .context("decode catalog_library display_name")?,
+            })
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    // Plain tar over the writer — the inner library archives are already
+    // zstd-compressed, so the outer layer stays uncompressed.
+    let mut builder = Builder::new(writer);
+    builder.mode(async_tar::HeaderMode::Deterministic);
+
+    let inner_result = export_workspace_archive_body(
+        &state,
+        workspace_id,
+        &workspace_slug,
+        &include,
+        &libraries,
+        &mut builder,
+    )
+    .await;
+    finalize_workspace_archive_with_failure_sentinel(builder, workspace_id, inner_result).await
+}
+
+/// Mirrors [`finalize_archive_with_failure_sentinel`] for the plain-tar
+/// workspace builder: always finalize the tar (dropping a `Builder` without
+/// `into_inner().await` panics inside `async_tar`), append an
+/// `EXPORT_FAILED.json` sentinel on the error path, and propagate the body
+/// error in preference to a finalize error.
+async fn finalize_workspace_archive_with_failure_sentinel<W>(
+    mut builder: Builder<W>,
+    workspace_id: Uuid,
+    inner_result: anyhow::Result<()>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    if let Err(error) = &inner_result {
+        let failure = serde_json::json!({
+            "status": "export_failed",
+            "workspace_id": workspace_id.to_string(),
+            "error": format!("{error:#}"),
+        });
+        if let Err(append_err) =
+            append_json_entry(&mut builder, "EXPORT_FAILED.json", &failure).await
+        {
+            tracing::warn!(
+                %workspace_id,
+                append_error = format!("{append_err:#}"),
+                "workspace snapshot export failed to append EXPORT_FAILED.json sentinel",
+            );
+        }
+    }
+
+    let finalize_result: anyhow::Result<()> = async {
+        let mut writer = builder.into_inner().await.context("finalize workspace tar builder")?;
+        tokio::io::AsyncWriteExt::shutdown(&mut writer)
+            .await
+            .context("finalize workspace tar stream")?;
+        Ok(())
+    }
+    .await;
+
+    match (inner_result, finalize_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(finalize_err)) => Err(finalize_err),
+        (Err(primary), Err(finalize_err)) => {
+            tracing::warn!(
+                %workspace_id,
+                finalize_error = format!("{finalize_err:#}"),
+                "workspace snapshot export finalize also failed after primary export error",
+            );
+            Err(primary)
+        }
+    }
+}
+
+async fn export_workspace_archive_body<W>(
+    state: &AppState,
+    workspace_id: Uuid,
+    workspace_slug: &str,
+    include: &[IncludeKind],
+    libraries: &[WorkspaceManifestLibrary],
+    builder: &mut Builder<W>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    // 1. workspace-manifest.json — MUST be first so a reader learns the
+    //    library set before the embedded archives stream past.
+    let manifest = WorkspaceSnapshotManifest {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        workspace_id,
+        workspace_slug: workspace_slug.to_string(),
+        exported_at: chrono::Utc::now(),
+        source_version: env!("CARGO_PKG_VERSION").to_string(),
+        include_kinds: include.to_vec(),
+        libraries: libraries.to_vec(),
+    };
+    append_json_entry(builder, "workspace-manifest.json", &manifest).await?;
+
+    // 2. One library archive at a time, materialized to a temp file so the
+    //    tar header carries the exact size. Delete the temp before the next
+    //    library to bound scratch usage to a single library.
+    let scratch_dir = std::env::var_os(SNAPSHOT_SCRATCH_DIR_ENV)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    for library in libraries {
+        let temp_path = scratch_dir.join(format!("ironrag-snapshot-{}.tar.zst", Uuid::now_v7()));
+        let export_result =
+            export_one_library_to_temp(state, library.id, include, &temp_path).await;
+        let append_result = match &export_result {
+            Ok(()) => append_library_archive_entry(builder, library.id, &temp_path)
+                .await
+                .with_context(|| format!("append library {} archive entry", library.id)),
+            Err(_) => Ok(()),
+        };
+        // Always clean the temp file before moving on, regardless of outcome.
+        if let Err(remove_err) = tokio::fs::remove_file(&temp_path).await {
+            if remove_err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    %workspace_id,
+                    library_id = %library.id,
+                    error = %remove_err,
+                    "workspace snapshot export failed to remove temp library archive",
+                );
+            }
+        }
+        export_result.with_context(|| format!("export library {} archive", library.id))?;
+        append_result?;
+    }
+
+    Ok(())
+}
+
+/// Exports one library archive to `temp_path` via the canonical
+/// [`export_library_archive`], leaving the file ready for stat + tar append.
+async fn export_one_library_to_temp(
+    state: &AppState,
+    library_id: Uuid,
+    include: &[IncludeKind],
+    temp_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let file = tokio::fs::File::create(temp_path)
+        .await
+        .with_context(|| format!("create temp library archive `{}`", temp_path.display()))?;
+    export_library_archive(state.clone(), library_id, include.to_vec(), file)
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+    Ok(())
+}
+
+/// Stats `temp_path` and appends it as `libraries/{library_id}.tar.zst` with a
+/// deterministic regular-file header (mode 0o644, mtime 0).
+async fn append_library_archive_entry<W>(
+    builder: &mut Builder<W>,
+    library_id: Uuid,
+    temp_path: &std::path::Path,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    let metadata = tokio::fs::metadata(temp_path)
+        .await
+        .with_context(|| format!("stat temp library archive `{}`", temp_path.display()))?;
+    let file = tokio::fs::File::open(temp_path)
+        .await
+        .with_context(|| format!("open temp library archive `{}`", temp_path.display()))?;
+
+    let mut header = Header::new_gnu();
+    header.set_size(metadata.len());
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    header.set_entry_type(EntryType::Regular);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, format!("libraries/{library_id}.tar.zst"), file)
+        .await
+        .with_context(|| format!("append tar entry for library {library_id}"))?;
+    Ok(())
+}
+
+/// Restores a workspace plain-tar archive into `workspace_id`. For each
+/// embedded `libraries/{id}.tar.zst` entry a fresh target library is
+/// provisioned in `workspace_id` (so its runtime AI profile is created), then
+/// the embedded archive is restored into it via [`restore_library_archive`]
+/// in `OverwriteMode::Replace` (the library was just created empty). The
+/// caller-supplied `overwrite` is recorded in the report for traceability but
+/// each newly minted library is always restored with `Replace`.
+pub async fn restore_workspace_archive<R>(
+    state: &AppState,
+    workspace_id: Uuid,
+    body: R,
+    overwrite: OverwriteMode,
+) -> Result<WorkspaceSnapshotImportReport, ContentServiceError>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    restore_workspace_archive_inner(state, workspace_id, body, overwrite).await.map_err(|error| {
+        tracing::error!(
+            %workspace_id,
+            error_chain = format!("{error:#}"),
+            "workspace snapshot import failed with full chain",
+        );
+        ContentServiceError::from_message(error.to_string())
+    })
+}
+
+async fn restore_workspace_archive_inner<R>(
+    state: &AppState,
+    workspace_id: Uuid,
+    body: R,
+    overwrite: OverwriteMode,
+) -> anyhow::Result<WorkspaceSnapshotImportReport>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    // Plain tar — NO zstd decode on the OUTER layer. The embedded library
+    // entries are themselves tar.zst and `restore_library_archive` decodes
+    // each one.
+    let archive = Archive::new(BufReader::new(body));
+    let mut entries = archive.entries().context("open workspace tar archive")?;
+
+    // Stage 1 — workspace-manifest.json must be the first entry.
+    let manifest = if let Some(entry) = entries.next().await {
+        let mut entry = entry.context("read workspace tar entry")?;
+        let path =
+            entry.path().context("read workspace tar entry path")?.to_string_lossy().into_owned();
+        validate_archive_path(&path)?;
+        if path == "workspace-manifest.json" {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).await.context("read workspace-manifest.json")?;
+            let parsed: WorkspaceSnapshotManifest =
+                serde_json::from_slice(&bytes).context("parse workspace-manifest.json")?;
+            if parsed.schema_version != SNAPSHOT_SCHEMA_VERSION {
+                bail!(
+                    "workspace snapshot schema_version {} is not supported by this build (expected {})",
+                    parsed.schema_version,
+                    SNAPSHOT_SCHEMA_VERSION
+                );
+            }
+            parsed
+        } else {
+            bail!("workspace tar entry `{path}` arrived before workspace-manifest.json");
+        }
+    } else {
+        bail!("workspace snapshot archive missing workspace-manifest.json");
+    };
+
+    // Index manifest libraries by source id so we can resolve slug +
+    // display_name from each `libraries/{id}.tar.zst` path.
+    let manifest_by_id: BTreeMap<Uuid, &WorkspaceManifestLibrary> =
+        manifest.libraries.iter().map(|library| (library.id, library)).collect();
+
+    let mut report = WorkspaceSnapshotImportReport {
+        workspace_id,
+        overwrite_mode: overwrite,
+        ..Default::default()
+    };
+
+    // Stage 2 — each subsequent entry is a per-library archive.
+    while let Some(entry) = entries.next().await {
+        let mut entry = entry.context("read workspace tar entry")?;
+        let path =
+            entry.path().context("read workspace tar entry path")?.to_string_lossy().into_owned();
+        validate_archive_path(&path)?;
+        let Some(source_library_id) = parse_workspace_library_entry_path(&path)? else {
+            // Tolerate auxiliary entries (e.g. an EXPORT_FAILED.json sentinel
+            // surfaces the source export error verbatim).
+            if path == "EXPORT_FAILED.json" {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).await.context("read EXPORT_FAILED.json")?;
+                bail!(
+                    "workspace snapshot carries an export failure sentinel: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+            continue;
+        };
+        let source_library = manifest_by_id.get(&source_library_id).ok_or_else(|| {
+            anyhow!("workspace archive entry `{path}` is not declared in workspace-manifest.json")
+        })?;
+
+        // Provision a fresh target library so its runtime AI profile exists,
+        // retrying with `-2`, `-3`… suffixes on slug collision.
+        let created = create_target_library(
+            state,
+            workspace_id,
+            &source_library.slug,
+            &source_library.display_name,
+        )
+        .await?;
+
+        // Restore the embedded archive directly from the tar entry stream —
+        // it is itself an AsyncRead over the library's tar.zst bytes. Replace
+        // mode is correct because the library was just created empty.
+        let library_report = restore_library_archive(
+            state,
+            created.id,
+            &mut entry,
+            OverwriteMode::Replace,
+        )
+        .await
+        .map_err(|error| anyhow!("{error}"))
+        .with_context(|| {
+            format!(
+                "restore library `{}` (source {source_library_id}) into workspace {workspace_id}",
+                created.slug
+            )
+        })?;
+
+        report.libraries.push(WorkspaceLibraryImportReport {
+            library_id: created.id,
+            slug: created.slug,
+            postgres_rows_by_table: library_report.postgres_rows_by_table,
+            arango_docs_by_collection: library_report.arango_docs_by_collection,
+            arango_edges_by_collection: library_report.arango_edges_by_collection,
+            skipped_arango_edges_by_collection: library_report.skipped_arango_edges_by_collection,
+            blobs_restored: library_report.blobs_restored,
+        });
+        report.libraries_restored += 1;
+    }
+
+    Ok(report)
+}
+
+/// Parses `libraries/{uuid}.tar.zst` and returns the embedded library id.
+/// Returns `Ok(None)` for any path that is not a library archive entry.
+fn parse_workspace_library_entry_path(path: &str) -> anyhow::Result<Option<Uuid>> {
+    let Some(rest) = path.strip_prefix("libraries/") else {
+        return Ok(None);
+    };
+    let Some(id_str) = rest.strip_suffix(".tar.zst") else {
+        return Ok(None);
+    };
+    if id_str.contains('/') {
+        return Ok(None);
+    }
+    Uuid::parse_str(id_str)
+        .map(Some)
+        .with_context(|| format!("parse library id from workspace archive entry `{path}`"))
+}
+
+/// A target library minted by the workspace restore path.
+struct CreatedTargetLibrary {
+    id: Uuid,
+    slug: String,
+}
+
+/// Provisions a fresh library in `workspace_id` through [`CatalogService`] so
+/// its runtime AI profile is created, retrying with `-2`, `-3`… slug suffixes
+/// when the requested slug collides with a sibling library
+/// (`catalog_library_workspace_id_slug_key`).
+async fn create_target_library(
+    state: &AppState,
+    workspace_id: Uuid,
+    source_slug: &str,
+    display_name: &str,
+) -> anyhow::Result<CreatedTargetLibrary> {
+    const MAX_SLUG_ATTEMPTS: u32 = 50;
+    for attempt in 1..=MAX_SLUG_ATTEMPTS {
+        let candidate_slug =
+            if attempt == 1 { source_slug.to_string() } else { format!("{source_slug}-{attempt}") };
+        let command = crate::services::catalog_service::CreateLibraryCommand {
+            workspace_id,
+            slug: Some(candidate_slug.clone()),
+            display_name: display_name.to_string(),
+            description: None,
+            created_by_principal_id: None,
+        };
+        match state.canonical_services.catalog.create_library(state, command).await {
+            Ok(library) => {
+                return Ok(CreatedTargetLibrary { id: library.id, slug: library.slug });
+            }
+            Err(crate::interfaces::http::router_support::ApiError::Conflict(_)) => {
+                // Slug collided with a sibling library — try the next suffix.
+                continue;
+            }
+            Err(error) => {
+                bail!(
+                    "create target library for workspace {workspace_id} (slug `{candidate_slug}`): {error:?}"
+                );
+            }
+        }
+    }
+    bail!(
+        "could not allocate a free slug for workspace {workspace_id} library `{source_slug}` after {MAX_SLUG_ATTEMPTS} attempts"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_manifest_serde_round_trips() {
+        let workspace_id = Uuid::now_v7();
+        let lib_a = Uuid::now_v7();
+        let lib_b = Uuid::now_v7();
+        let manifest = WorkspaceSnapshotManifest {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            workspace_id,
+            workspace_slug: "alpha-suite".to_string(),
+            exported_at: chrono::Utc::now(),
+            source_version: "0.0.0-test".to_string(),
+            include_kinds: vec![IncludeKind::LibraryData, IncludeKind::Blobs],
+            libraries: vec![
+                WorkspaceManifestLibrary {
+                    id: lib_a,
+                    slug: "provider-beta".to_string(),
+                    display_name: "Provider Beta".to_string(),
+                },
+                WorkspaceManifestLibrary {
+                    id: lib_b,
+                    slug: "provider-gamma".to_string(),
+                    display_name: "Provider Gamma".to_string(),
+                },
+            ],
+        };
+
+        let bytes = serde_json::to_vec(&manifest).expect("serialize workspace manifest");
+        let parsed: WorkspaceSnapshotManifest =
+            serde_json::from_slice(&bytes).expect("deserialize workspace manifest");
+
+        assert_eq!(parsed.schema_version, SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(parsed.workspace_id, workspace_id);
+        assert_eq!(parsed.workspace_slug, "alpha-suite");
+        assert_eq!(parsed.include_kinds, vec![IncludeKind::LibraryData, IncludeKind::Blobs]);
+        assert_eq!(parsed.libraries.len(), 2);
+        assert_eq!(parsed.libraries[0].id, lib_a);
+        assert_eq!(parsed.libraries[1].slug, "provider-gamma");
+    }
+
+    #[test]
+    fn workspace_library_entry_path_parses_and_rejects() {
+        let id = Uuid::now_v7();
+        assert_eq!(
+            parse_workspace_library_entry_path(&format!("libraries/{id}.tar.zst")).unwrap(),
+            Some(id)
+        );
+        assert_eq!(parse_workspace_library_entry_path("workspace-manifest.json").unwrap(), None);
+        assert_eq!(parse_workspace_library_entry_path("libraries/nested/x.tar.zst").unwrap(), None);
+        assert!(parse_workspace_library_entry_path("libraries/not-a-uuid.tar.zst").is_err());
+    }
 
     fn manifest_with_sections(
         postgres_tables: Vec<&str>,
@@ -2494,15 +3063,31 @@ mod tests {
     fn per_dim_vector_collection_name_parser_round_trips_chunk_and_entity_shards() {
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1024"), Some(1024));
         assert_eq!(
+            parse_per_dim_vector_collection_dim(
+                "knowledge_chunk_vector_d3072_l019ded0008207ad29224ca3d0c82d57c"
+            ),
+            Some(3072)
+        );
+        assert_eq!(
             parse_per_dim_vector_collection_dim("knowledge_entity_vector_d3072"),
             Some(3072)
         );
+        assert_eq!(
+            parse_per_dim_vector_collection_dim(
+                "knowledge_entity_vector_d1536_l019ded0008207ad29224ca3d0c82d57c"
+            ),
+            Some(1536)
+        );
         assert!(is_per_dim_vector_collection_name("knowledge_chunk_vector_d1"));
         assert!(is_per_dim_chunk_vector_collection_name("knowledge_chunk_vector_d1024"));
+        assert!(is_per_dim_chunk_vector_collection_name(
+            "knowledge_chunk_vector_d3072_l019ded0008207ad29224ca3d0c82d57c"
+        ));
         assert!(!is_per_dim_chunk_vector_collection_name("knowledge_entity_vector_d1024"));
         // Negative cases — legacy names, missing digits, alpha suffixes,
         // wrong prefix.
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector"), None);
+        assert_eq!(parse_per_dim_vector_collection_dim("knowledge_entity_vector"), None);
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d"), None);
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1024x"), None);
         assert_eq!(parse_per_dim_vector_collection_dim("other_collection_d1024"), None);

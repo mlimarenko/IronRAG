@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.20
+  version: 0.4.23
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -1130,6 +1130,82 @@ paths:
           description: Caller is not a workspace admin
         '404':
           description: Library not found
+  /v1/catalog/workspaces/{workspaceId}/snapshot:
+    get:
+      tags:
+      - content
+      summary: |-
+        Streams a workspace snapshot as a plain `application/x-tar` archive that
+        bundles every library in the workspace (each embedded library archive is
+        already zstd-compressed).
+      description: Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to export a portable library archive for backup, migration, or offline inspection.
+      operationId: exportWorkspaceSnapshot
+      parameters:
+      - name: workspaceId
+        in: path
+        description: Workspace identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: include
+        in: query
+        description: Comma-separated include kinds applied to every library archive (default `library_data,blobs`)
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Streaming plain tar bundling every library archive
+          content:
+            application/x-tar:
+              schema:
+                type: string
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized for the workspace
+        '404':
+          description: Workspace not found
+    post:
+      tags:
+      - content
+      summary: |-
+        Restores a workspace from a plain-tar snapshot body, provisioning one fresh
+        library per embedded archive.
+      description: Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to import a previously exported library archive into the selected library scope.
+      operationId: importWorkspaceSnapshot
+      parameters:
+      - name: workspaceId
+        in: path
+        description: Workspace identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: overwrite
+        in: query
+        description: 'Overwrite mode recorded in the report: ''reject'' (default) or ''replace''. Each newly minted library is always restored in replace mode.'
+        required: false
+        schema:
+          type: string
+      requestBody:
+        description: Plain tar archive previously emitted by GET /v1/catalog/workspaces/{workspaceId}/snapshot
+        content:
+          application/x-tar: {}
+      responses:
+        '200':
+          description: Workspace snapshot import report (per-library row counts)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceSnapshotImportReportResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized for the workspace
+        '404':
+          description: Workspace not found
   /v1/chunks:
     get:
       tags:
@@ -12104,6 +12180,59 @@ components:
           format: int64
         totalCost:
           type: string
+    WorkspaceLibraryImportReportResponse:
+      type: object
+      description: One library's restore counts inside a [`WorkspaceSnapshotImportReportResponse`].
+      required:
+      - libraryId
+      - slug
+      - postgresRowsByTable
+      - arangoDocsByStore
+      - arangoEdgesByStore
+      - skippedArangoEdgesByStore
+      - blobsRestored
+      properties:
+        arangoDocsByStore:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+            minimum: 0
+          propertyNames:
+            type: string
+        arangoEdgesByStore:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+            minimum: 0
+          propertyNames:
+            type: string
+        blobsRestored:
+          type: integer
+          format: int64
+          minimum: 0
+        libraryId:
+          type: string
+          format: uuid
+        postgresRowsByTable:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+            minimum: 0
+          propertyNames:
+            type: string
+        skippedArangoEdgesByStore:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+            minimum: 0
+          propertyNames:
+            type: string
+        slug:
+          type: string
     WorkspaceMembership:
       type: object
       required:
@@ -12149,6 +12278,28 @@ components:
         principalId:
           type: string
           format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+    WorkspaceSnapshotImportReportResponse:
+      type: object
+      description: Report returned by `POST /v1/catalog/workspaces/{workspaceId}/snapshot`.
+      required:
+      - workspaceId
+      - overwriteMode
+      - librariesRestored
+      - libraries
+      properties:
+        libraries:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkspaceLibraryImportReportResponse'
+        librariesRestored:
+          type: integer
+          format: int64
+          minimum: 0
+        overwriteMode:
+          $ref: '#/components/schemas/OverwriteMode'
         workspaceId:
           type: string
           format: uuid

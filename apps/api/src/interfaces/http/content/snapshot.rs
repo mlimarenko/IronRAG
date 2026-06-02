@@ -31,12 +31,16 @@ use crate::{
     app::state::AppState,
     interfaces::http::{
         auth::AuthContext,
-        authorization::{POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE, load_library_and_authorize},
+        authorization::{
+            POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE, POLICY_WORKSPACE_ADMIN,
+            POLICY_WORKSPACE_READ, load_library_and_authorize, load_workspace_and_authorize,
+        },
         router_support::ApiError,
     },
     services::content::service::snapshot::{
-        IncludeKind, OverwriteMode, SnapshotImportReport, export_library_archive,
-        restore_library_archive,
+        IncludeKind, OverwriteMode, SnapshotImportReport, WorkspaceSnapshotImportReport,
+        export_library_archive, export_workspace_archive, restore_library_archive,
+        restore_workspace_archive,
     },
 };
 
@@ -79,6 +83,55 @@ impl From<SnapshotImportReport> for SnapshotImportReportResponse {
                 .into_iter()
                 .collect(),
             blobs_restored: report.blobs_restored,
+        }
+    }
+}
+
+/// One library's restore counts inside a [`WorkspaceSnapshotImportReportResponse`].
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceLibraryImportReportResponse {
+    pub library_id: Uuid,
+    pub slug: String,
+    pub postgres_rows_by_table: BTreeMap<String, u64>,
+    pub arango_docs_by_store: BTreeMap<String, u64>,
+    pub arango_edges_by_store: BTreeMap<String, u64>,
+    pub skipped_arango_edges_by_store: BTreeMap<String, u64>,
+    pub blobs_restored: u64,
+}
+
+/// Report returned by `POST /v1/catalog/workspaces/{workspaceId}/snapshot`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSnapshotImportReportResponse {
+    pub workspace_id: Uuid,
+    pub overwrite_mode: OverwriteMode,
+    pub libraries_restored: u64,
+    pub libraries: Vec<WorkspaceLibraryImportReportResponse>,
+}
+
+impl From<WorkspaceSnapshotImportReport> for WorkspaceSnapshotImportReportResponse {
+    fn from(report: WorkspaceSnapshotImportReport) -> Self {
+        Self {
+            workspace_id: report.workspace_id,
+            overwrite_mode: report.overwrite_mode,
+            libraries_restored: report.libraries_restored,
+            libraries: report
+                .libraries
+                .into_iter()
+                .map(|library| WorkspaceLibraryImportReportResponse {
+                    library_id: library.library_id,
+                    slug: library.slug,
+                    postgres_rows_by_table: library.postgres_rows_by_table.into_iter().collect(),
+                    arango_docs_by_store: library.arango_docs_by_collection.into_iter().collect(),
+                    arango_edges_by_store: library.arango_edges_by_collection.into_iter().collect(),
+                    skipped_arango_edges_by_store: library
+                        .skipped_arango_edges_by_collection
+                        .into_iter()
+                        .collect(),
+                    blobs_restored: library.blobs_restored,
+                })
+                .collect(),
         }
     }
 }
@@ -227,15 +280,161 @@ pub async fn import_library_snapshot(
     Ok(Json(report.into()))
 }
 
-/// Snapshot routes. Wired as a `Router` because the import route
-/// disables the global body-size limit — the caller can stream a
-/// multi-GB archive as the request body, and tar-zst is self-validating.
+/// Streams a workspace snapshot as a plain `application/x-tar` archive that
+/// bundles every library in the workspace (each embedded library archive is
+/// already zstd-compressed).
+#[utoipa::path(
+    get,
+    path = "/v1/catalog/workspaces/{workspaceId}/snapshot",
+    tag = "content",
+    operation_id = "exportWorkspaceSnapshot",
+    params(
+        ("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier"),
+        ("include" = Option<String>, Query, description = "Comma-separated include kinds applied to every library archive (default `library_data,blobs`)"),
+    ),
+    responses(
+        (status = 200, description = "Streaming plain tar bundling every library archive", content_type = "application/x-tar", body = String),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the workspace"),
+        (status = 404, description = "Workspace not found"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.export_workspace_snapshot",
+    skip_all,
+    fields(workspace_id = %workspace_id)
+)]
+pub async fn export_workspace_snapshot(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    Query(query): Query<ExportQuery>,
+) -> Result<Response, ApiError> {
+    let workspace =
+        load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_READ).await?;
+
+    let include = match query.include.as_deref() {
+        None | Some("") => vec![IncludeKind::LibraryData, IncludeKind::Blobs],
+        Some(raw) => IncludeKind::parse_csv(raw)
+            .map_err(|error| ApiError::BadRequest(format!("invalid include: {error}")))?,
+    };
+
+    let (writer, reader) = tokio::io::duplex(64 * 1024);
+    let exporter_state = state.clone();
+    let ws_id = workspace.id;
+    let include_clone = include.clone();
+    let join = tokio::spawn(async move {
+        export_workspace_archive(exporter_state, ws_id, include_clone, writer).await
+    });
+    let observer_ws_id = ws_id;
+    tokio::spawn(async move {
+        match join.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(
+                    workspace_id = %observer_ws_id,
+                    error = format!("{error:#}"),
+                    "workspace snapshot export failed",
+                );
+            }
+            Err(join_error) => {
+                tracing::error!(
+                    workspace_id = %observer_ws_id,
+                    error = format!("{join_error}"),
+                    "workspace snapshot export task panicked or was cancelled",
+                );
+            }
+        }
+    });
+
+    let stream = tokio_util::io::ReaderStream::new(reader);
+    let body = Body::from_stream(stream);
+
+    let filename =
+        format!("workspace-{}-{}.tar", workspace.slug, chrono::Utc::now().format("%Y%m%dT%H%M%S"),);
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    // Plain (uncompressed) tar — the embedded library archives are already
+    // zstd. Content-Encoding: identity opts out of the global CompressionLayer.
+    let response = Response::builder()
+        .status(200)
+        .header(header::CONTENT_TYPE, "application/x-tar")
+        .header(header::CONTENT_DISPOSITION, disposition)
+        .header(header::CONTENT_ENCODING, "identity")
+        .body(body)
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    Ok(response)
+}
+
+/// Restores a workspace from a plain-tar snapshot body, provisioning one fresh
+/// library per embedded archive.
+#[tracing::instrument(
+    level = "info",
+    name = "http.import_workspace_snapshot",
+    skip_all,
+    fields(workspace_id = %workspace_id)
+)]
+#[utoipa::path(
+    post,
+    path = "/v1/catalog/workspaces/{workspaceId}/snapshot",
+    tag = "content",
+    operation_id = "importWorkspaceSnapshot",
+    params(
+        ("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier"),
+        ("overwrite" = Option<String>, Query, description = "Overwrite mode recorded in the report: 'reject' (default) or 'replace'. Each newly minted library is always restored in replace mode."),
+    ),
+    request_body(
+        content_type = "application/x-tar",
+        description = "Plain tar archive previously emitted by GET /v1/catalog/workspaces/{workspaceId}/snapshot",
+    ),
+    responses(
+        (status = 200, description = "Workspace snapshot import report (per-library row counts)", body = WorkspaceSnapshotImportReportResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the workspace"),
+        (status = 404, description = "Workspace not found"),
+    ),
+)]
+pub async fn import_workspace_snapshot(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    Query(query): Query<ImportQuery>,
+    body: Body,
+) -> Result<Json<WorkspaceSnapshotImportReportResponse>, ApiError> {
+    load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
+
+    let overwrite = OverwriteMode::parse(query.overwrite.as_deref().unwrap_or(""))
+        .map_err(|error| ApiError::BadRequest(format!("invalid overwrite: {error}")))?;
+
+    let body_stream = body
+        .into_data_stream()
+        .map_err(|error| std::io::Error::other(format!("body stream error: {error}")));
+    let reader = StreamReader::new(body_stream);
+
+    let report = restore_workspace_archive(&state, workspace_id, reader, overwrite)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(report.into()))
+}
+
+/// Snapshot routes. Wired as a `Router` because the import routes
+/// disable the global body-size limit — the caller can stream a
+/// multi-GB archive as the request body, and tar(-zst) is self-validating.
 pub(super) fn routes() -> Router<AppState> {
-    Router::new().route(
-        "/content/libraries/{library_id}/snapshot",
-        MethodRouter::new()
-            .get(export_library_snapshot)
-            .post(import_library_snapshot)
-            .layer(DefaultBodyLimit::disable()),
-    )
+    Router::new()
+        .route(
+            "/content/libraries/{library_id}/snapshot",
+            MethodRouter::new()
+                .get(export_library_snapshot)
+                .post(import_library_snapshot)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/catalog/workspaces/{workspace_id}/snapshot",
+            MethodRouter::new()
+                .get(export_workspace_snapshot)
+                .post(import_workspace_snapshot)
+                .layer(DefaultBodyLimit::disable()),
+        )
 }

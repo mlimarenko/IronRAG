@@ -164,6 +164,8 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::content::get_document_head,
         crate::interfaces::http::content::snapshot::export_library_snapshot,
         crate::interfaces::http::content::snapshot::import_library_snapshot,
+        crate::interfaces::http::content::snapshot::export_workspace_snapshot,
+        crate::interfaces::http::content::snapshot::import_workspace_snapshot,
         crate::interfaces::http::ai::update_credential,
         crate::interfaces::http::ai::create_model_preset,
         crate::interfaces::http::ai::update_model_preset,
