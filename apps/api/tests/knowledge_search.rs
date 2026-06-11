@@ -501,6 +501,8 @@ impl KnowledgeSearchHttpFixture {
                 external_key: "search-document".to_string(),
                 file_name: None,
                 title: Some("Search Document".to_string()),
+                source_uri: None,
+                document_hint: None,
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
                 readable_revision_id: Some(revision_id),
@@ -508,6 +510,8 @@ impl KnowledgeSearchHttpFixture {
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
+                parent_document_id: None,
+                document_role: "primary".to_string(),
             })
             .await
             .context("failed to insert knowledge search document")?;
@@ -630,8 +634,7 @@ impl KnowledgeSearchHttpFixture {
             "updated_at": now,
         });
         let _: Value = state
-            .arango_graph_store
-            .client()
+            .arango_client
             .query_json(
                 "UPSERT { _key: @key }
                  INSERT @doc
@@ -665,8 +668,7 @@ impl KnowledgeSearchHttpFixture {
             "updated_at": now,
         });
         let _: Value = state
-            .arango_graph_store
-            .client()
+            .arango_client
             .query_json(
                 "UPSERT { _key: @key }
                  INSERT @doc
@@ -1408,6 +1410,8 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 external_key: "lexical-target".to_string(),
                 file_name: None,
                 title: Some("Target".to_string()),
+                source_uri: None,
+                document_hint: None,
                 document_state: "active".to_string(),
                 active_revision_id: Some(target_revision_id),
                 readable_revision_id: Some(target_revision_id),
@@ -1415,6 +1419,8 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
+                parent_document_id: None,
+                document_role: "primary".to_string(),
             })
             .await
             .context("failed to insert target document")?;
@@ -1500,6 +1506,8 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 external_key: "lexical-distractor".to_string(),
                 file_name: None,
                 title: Some("Distractor".to_string()),
+                source_uri: None,
+                document_hint: None,
                 document_state: "active".to_string(),
                 active_revision_id: Some(distractor_revision_id),
                 readable_revision_id: Some(distractor_revision_id),
@@ -1507,6 +1515,8 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
+                parent_document_id: None,
+                document_role: "primary".to_string(),
             })
             .await
             .context("failed to insert distractor document")?;
@@ -1629,6 +1639,8 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 external_key: "vector-doc".to_string(),
                 file_name: None,
                 title: Some("Vector Doc".to_string()),
+                source_uri: None,
+                document_hint: None,
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
                 readable_revision_id: Some(revision_id),
@@ -1636,6 +1648,8 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
+                parent_document_id: None,
+                document_role: "primary".to_string(),
             })
             .await
             .context("failed to insert vector test document")?;
@@ -1879,6 +1893,8 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
                 external_key: "replacement-doc".to_string(),
                 file_name: None,
                 title: Some("Replacement Doc".to_string()),
+                source_uri: None,
+                document_hint: None,
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_one_id),
                 readable_revision_id: Some(revision_one_id),
@@ -1886,6 +1902,8 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
+                parent_document_id: None,
+                document_role: "primary".to_string(),
             })
             .await
             .context("failed to insert replacement document")?;

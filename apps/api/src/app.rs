@@ -29,7 +29,8 @@ const STARTUP_ARANGO_READY_RETRY_DELAY: Duration = Duration::from_secs(3);
 /// Returns any configuration, bind, listener, or serve error encountered during startup.
 pub async fn run() -> anyhow::Result<()> {
     let config = config::Settings::from_env()?;
-    crate::observability::init_tracing()?;
+    let deployment_id = crate::observability::resolve_deployment_id(&config.database_url).await;
+    crate::observability::init_tracing(deployment_id)?;
     let role = config.service_role_kind().map_err(anyhow::Error::msg)?;
 
     let state = state::AppState::new(config.clone()).await?;
@@ -101,7 +102,9 @@ async fn run_http_api(
     graph_backend: &str,
     shutdown: shutdown::ShutdownSignal,
 ) -> anyhow::Result<()> {
-    spawn_boot_arango_healthcheck(state.clone(), shutdown.subscribe());
+    if state.settings.knowledge_plane_backend == "arango" {
+        spawn_boot_arango_healthcheck(state.clone(), shutdown.subscribe());
+    }
     spawn_runtime_graph_projection_prewarm(state.clone());
     let router = build_router(state.clone());
     let addr: SocketAddr = config.bind_addr.parse()?;
@@ -195,7 +198,9 @@ async fn run_startup_authority(
 
     run_postgres_migrations(&state.persistence.postgres).await?;
     validate_canonical_bootstrap_state(&state.persistence.postgres, &state.settings).await?;
-    run_startup_arango_bootstrap(state).await?;
+    if state.settings.knowledge_plane_backend == "arango" {
+        run_startup_arango_bootstrap(state).await?;
+    }
     let storage_probe = state.content_storage.prepare_startup().await?;
     if !matches!(storage_probe.status, ContentStorageProbeStatus::Ok) {
         anyhow::bail!(

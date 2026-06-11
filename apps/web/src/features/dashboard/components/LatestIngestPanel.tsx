@@ -1,7 +1,6 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
-import { ArrowRight, Globe } from 'lucide-react';
-import { Button } from '@/shared/components/ui/button';
+import { Globe } from 'lucide-react';
 import type { RecentWebRun } from "../model/types";
 import { formatDateTime, hostnameFromUrl, runStateClass } from "../model/format";
 
@@ -9,10 +8,9 @@ type LatestIngestPanelProps = {
   t: TFunction;
   locale: string;
   latestRun: RecentWebRun | undefined;
-  onNavigate: (path: string) => void;
 };
 
-function LatestIngestPanelImpl({ t, locale, latestRun, onNavigate }: LatestIngestPanelProps) {
+function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps) {
   const emptyLabel = t('dashboard.notAvailable');
   return (
     <div className="workbench-surface p-5 sm:p-6">
@@ -75,16 +73,6 @@ function LatestIngestPanelImpl({ t, locale, latestRun, onNavigate }: LatestInges
               {formatDateTime(latestRun.lastActivityAt, locale, emptyLabel)}
             </span>
           </div>
-
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-4 w-full justify-between"
-            onClick={() => onNavigate('/documents')}
-          >
-            {t('dashboard.openDocuments')}
-            <ArrowRight className="h-3.5 w-3.5" />
-          </Button>
         </>
       ) : (
         <div className="mt-4 rounded-xl border border-dashed border-border/70 bg-background/60 p-4 text-sm text-muted-foreground">

@@ -233,6 +233,7 @@ impl IngestAttemptsFixture {
                     external_key: Some(format!("ingest-attempts-doc-{}", Uuid::now_v7().simple())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await

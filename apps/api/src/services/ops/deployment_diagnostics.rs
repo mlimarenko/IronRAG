@@ -178,7 +178,7 @@ pub struct DependencyStatus {
 pub struct DependencyStatusSet {
     pub postgres: DependencyStatus,
     pub redis: DependencyStatus,
-    pub arangodb: DependencyStatus,
+    pub knowledge_plane: DependencyStatus,
 }
 
 #[derive(Clone, Serialize, utoipa::ToSchema)]
@@ -328,11 +328,23 @@ impl DeploymentDiagnosticsService {
             "redis unreachable".to_string(),
         );
 
-        let arangodb_status = dependency_status(
-            state.settings.dependency_mode(DependencyKind::ArangoDb),
-            state.arango_client.ping().await.is_ok(),
-            "arangodb unreachable".to_string(),
-        );
+        let knowledge_plane_status = match state.settings.knowledge_plane_backend.as_str() {
+            "postgres" => dependency_status(
+                state.settings.dependency_mode(DependencyKind::Postgres),
+                postgres_knowledge_plane_ready(state).await,
+                "postgres knowledge plane not ready".to_string(),
+            ),
+            "arango" => dependency_status(
+                state.settings.dependency_mode(DependencyKind::ArangoDb),
+                state.arango_client.ping().await.is_ok(),
+                "arangodb unreachable".to_string(),
+            ),
+            backend => DependencyStatus {
+                mode: DEPENDENCY_MODE_MISCONFIGURED.to_string(),
+                status: DependencyHealth::Misconfigured,
+                message: Some(format!("unsupported knowledge_plane_backend `{backend}`")),
+            },
+        };
 
         let storage_probe = state.content_storage.probe().await;
         let storage = StorageStatus {
@@ -374,7 +386,7 @@ impl DeploymentDiagnosticsService {
         for (name, dep_status) in [
             ("postgres", &postgres_status),
             ("redis", &redis_status),
-            ("arangodb", &arangodb_status),
+            ("knowledge_plane", &knowledge_plane_status),
         ] {
             tracing::debug!(stage = "readiness", dependency = %name, status = ?dep_status.status, "health check completed");
             if !matches!(dep_status.status, DependencyHealth::Ok) {
@@ -383,7 +395,7 @@ impl DeploymentDiagnosticsService {
         }
 
         let all_dependencies_ok =
-            [postgres_status.status, redis_status.status, arangodb_status.status]
+            [postgres_status.status, redis_status.status, knowledge_plane_status.status]
                 .into_iter()
                 .all(|status| matches!(status, DependencyHealth::Ok));
         let storage_ok = storage.status == StorageHealth::Ok;
@@ -434,7 +446,7 @@ impl DeploymentDiagnosticsService {
                 dependencies: DependencyStatusSet {
                     postgres: postgres_status,
                     redis: redis_status,
-                    arangodb: arangodb_status,
+                    knowledge_plane: knowledge_plane_status,
                 },
                 storage,
                 topology,
@@ -506,6 +518,13 @@ impl DeploymentDiagnosticsService {
                 message: Some("startup authority is executing".to_string()),
             };
         }
+        if state.settings.knowledge_plane_backend == "postgres" {
+            return StartupAuthorityStatus {
+                mode: mode.as_str().to_string(),
+                state: StartupAuthorityState::Succeeded,
+                message: None,
+            };
+        }
         match validate_arango_bootstrap_state(&state.arango_client, &state.settings).await {
             Ok(()) => StartupAuthorityStatus {
                 mode: mode.as_str().to_string(),
@@ -519,6 +538,27 @@ impl DeploymentDiagnosticsService {
             },
         }
     }
+}
+
+async fn postgres_knowledge_plane_ready(state: &AppState) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        with ping as (select 1 as ok)
+        select
+            (select ok from ping) = 1
+            and exists (select 1 from pg_extension where extname = 'vector')
+            and to_regclass('public.knowledge_chunk') is not null
+            and exists (
+                select 1
+                from information_schema.tables
+                where table_schema = 'public'
+                  and table_name like 'knowledge\_%' escape '\'
+            )
+        "#,
+    )
+    .fetch_one(&state.persistence.heartbeat_postgres)
+    .await
+    .unwrap_or(false)
 }
 
 const fn startup_authority_status_cache_ttl(state: StartupAuthorityState) -> Duration {

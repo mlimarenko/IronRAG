@@ -1126,95 +1126,162 @@ pub(crate) async fn collect_revision_grounding_references(
     let entity_references = if chunk_ids.is_empty() {
         Vec::new()
     } else {
-        let cursor = state
-            .arango_graph_store
-            .client()
-            .query_json(
-                "FOR edge IN @@collection
-                 FILTER edge.chunk_id IN @chunk_ids
-                 COLLECT entity_id = edge.entity_id
-                 AGGREGATE rank = MIN(edge.rank), score = MAX(edge.score)
-                 LET reason = FIRST(
-                    FOR item IN @@collection
-                    FILTER item.entity_id == entity_id AND item.chunk_id IN @chunk_ids
-                    SORT item.rank ASC, item.created_at ASC, item._key ASC
-                    LIMIT 1
-                    RETURN item.inclusionReason
-                 )
-                 SORT rank ASC, score DESC, entity_id ASC
-                 LIMIT @limit
-                 RETURN {
-                    entity_id,
-                    rank,
-                    score,
-                    inclusion_reason: reason
-                 }",
-                serde_json::json!({
-                    "@collection": crate::infra::arangodb::collections::KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-                    "chunk_ids": chunk_ids,
-                    "limit": limit.max(1),
-                }),
-            )
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
-        let rows: Vec<ArangoChunkMentionReferenceRow> = serde_json::from_value(result)
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        rows.into_iter()
-            .map(|row| McpEntityReference {
-                entity_id: row.entity_id,
-                rank: row.rank,
-                score: row.score,
-                inclusion_reason: row.inclusion_reason,
-            })
-            .collect()
+        match state.settings.knowledge_plane_backend.as_str() {
+            "arango" => {
+                let cursor = state
+                    .arango_client
+                    .query_json(
+                        "FOR edge IN @@collection
+                         FILTER edge.chunk_id IN @chunk_ids
+                         COLLECT entity_id = edge.entity_id
+                         AGGREGATE rank = MIN(edge.rank), score = MAX(edge.score)
+                         LET reason = FIRST(
+                            FOR item IN @@collection
+                            FILTER item.entity_id == entity_id AND item.chunk_id IN @chunk_ids
+                            SORT item.rank ASC, item.created_at ASC, item._key ASC
+                            LIMIT 1
+                            RETURN item.inclusionReason
+                         )
+                         SORT rank ASC, score DESC, entity_id ASC
+                         LIMIT @limit
+                         RETURN {
+                            entity_id,
+                            rank,
+                            score,
+                            inclusion_reason: reason
+                         }",
+                        serde_json::json!({
+                            "@collection": crate::infra::arangodb::collections::KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
+                            "chunk_ids": chunk_ids,
+                            "limit": limit.max(1),
+                        }),
+                    )
+                    .await
+                    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+                let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
+                let rows: Vec<ArangoChunkMentionReferenceRow> = serde_json::from_value(result)
+                    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+                rows.into_iter()
+                    .map(|row| McpEntityReference {
+                        entity_id: row.entity_id,
+                        rank: row.rank,
+                        score: row.score,
+                        inclusion_reason: row.inclusion_reason,
+                    })
+                    .collect()
+            }
+            "postgres" => {
+                let rows = sqlx::query_as::<_, PgEntityReferenceRow>(
+                    "select to_id as entity_id,
+                            min(rank) as rank,
+                            max(score) as score,
+                            (array_agg(
+                                inclusion_reason
+                                order by rank asc nulls last,
+                                         created_at asc nulls last,
+                                         from_id asc,
+                                         to_id asc,
+                                         relation_type asc
+                            ))[1] as inclusion_reason
+                     from knowledge_chunk_entity_mention
+                     where from_id = any($1::uuid[])
+                     group by to_id
+                     order by min(rank) asc nulls last,
+                              max(score) desc nulls last,
+                              to_id asc
+                     limit $2",
+                )
+                .bind(chunk_ids)
+                .bind(limit.max(1) as i64)
+                .fetch_all(&state.persistence.postgres)
+                .await
+                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+
+                rows.into_iter().map(PgEntityReferenceRow::into_mcp).collect()
+            }
+            _ => return Err(ApiError::Internal),
+        }
     };
 
     let relation_references = if evidence_ids.is_empty() {
         Vec::new()
     } else {
-        let cursor = state
-            .arango_graph_store
-            .client()
-            .query_json(
-                "FOR edge IN @@collection
-                 FILTER edge.evidence_id IN @evidence_ids
-                 COLLECT relation_id = edge.relation_id
-                 AGGREGATE rank = MIN(edge.rank), score = MAX(edge.score)
-                 LET reason = FIRST(
-                    FOR item IN @@collection
-                    FILTER item.relation_id == relation_id AND item.evidence_id IN @evidence_ids
-                    SORT item.rank ASC, item.created_at ASC, item._key ASC
-                    LIMIT 1
-                    RETURN item.inclusionReason
-                 )
-                 SORT rank ASC, score DESC, relation_id ASC
-                 LIMIT @limit
-                 RETURN {
-                    relation_id,
-                    rank,
-                    score,
-                    inclusion_reason: reason
-                 }",
-                serde_json::json!({
-                    "@collection": crate::infra::arangodb::collections::KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-                    "evidence_ids": evidence_ids,
-                    "limit": limit.max(1),
-                }),
-            )
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
-        let rows: Vec<ArangoRelationSupportReferenceRow> = serde_json::from_value(result)
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        rows.into_iter()
-            .map(|row| McpRelationReference {
-                relation_id: row.relation_id,
-                rank: row.rank,
-                score: row.score,
-                inclusion_reason: row.inclusion_reason,
-            })
-            .collect()
+        match state.settings.knowledge_plane_backend.as_str() {
+            "arango" => {
+                let cursor = state
+                    .arango_client
+                    .query_json(
+                        "FOR edge IN @@collection
+                         FILTER edge.evidence_id IN @evidence_ids
+                         COLLECT relation_id = edge.relation_id
+                         AGGREGATE rank = MIN(edge.rank), score = MAX(edge.score)
+                         LET reason = FIRST(
+                            FOR item IN @@collection
+                            FILTER item.relation_id == relation_id AND item.evidence_id IN @evidence_ids
+                            SORT item.rank ASC, item.created_at ASC, item._key ASC
+                            LIMIT 1
+                            RETURN item.inclusionReason
+                         )
+                         SORT rank ASC, score DESC, relation_id ASC
+                         LIMIT @limit
+                         RETURN {
+                            relation_id,
+                            rank,
+                            score,
+                            inclusion_reason: reason
+                         }",
+                        serde_json::json!({
+                            "@collection": crate::infra::arangodb::collections::KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
+                            "evidence_ids": evidence_ids,
+                            "limit": limit.max(1),
+                        }),
+                    )
+                    .await
+                    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+                let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
+                let rows: Vec<ArangoRelationSupportReferenceRow> =
+                    serde_json::from_value(result)
+                        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+                rows.into_iter()
+                    .map(|row| McpRelationReference {
+                        relation_id: row.relation_id,
+                        rank: row.rank,
+                        score: row.score,
+                        inclusion_reason: row.inclusion_reason,
+                    })
+                    .collect()
+            }
+            "postgres" => {
+                let rows = sqlx::query_as::<_, PgRelationReferenceRow>(
+                    "select to_id as relation_id,
+                            min(rank) as rank,
+                            max(score) as score,
+                            (array_agg(
+                                inclusion_reason
+                                order by rank asc nulls last,
+                                         created_at asc nulls last,
+                                         from_id asc,
+                                         to_id asc,
+                                         relation_type asc
+                            ))[1] as inclusion_reason
+                     from knowledge_evidence_relation_support
+                     where from_id = any($1::uuid[])
+                     group by to_id
+                     order by min(rank) asc nulls last,
+                              max(score) desc nulls last,
+                              to_id asc
+                     limit $2",
+                )
+                .bind(&evidence_ids)
+                .bind(limit.max(1) as i64)
+                .fetch_all(&state.persistence.postgres)
+                .await
+                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+
+                rows.into_iter().map(PgRelationReferenceRow::into_mcp).collect()
+            }
+            _ => return Err(ApiError::Internal),
+        }
     };
 
     Ok(McpRevisionGroundingReferences {
@@ -1223,6 +1290,44 @@ pub(crate) async fn collect_revision_grounding_references(
         relation_references,
         evidence_references,
     })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PgEntityReferenceRow {
+    entity_id: Uuid,
+    rank: Option<i32>,
+    score: Option<f64>,
+    inclusion_reason: Option<String>,
+}
+
+impl PgEntityReferenceRow {
+    fn into_mcp(self) -> McpEntityReference {
+        McpEntityReference {
+            entity_id: self.entity_id,
+            rank: self.rank.unwrap_or(i32::MAX),
+            score: self.score.unwrap_or(0.0),
+            inclusion_reason: self.inclusion_reason,
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PgRelationReferenceRow {
+    relation_id: Uuid,
+    rank: Option<i32>,
+    score: Option<f64>,
+    inclusion_reason: Option<String>,
+}
+
+impl PgRelationReferenceRow {
+    fn into_mcp(self) -> McpRelationReference {
+        McpRelationReference {
+            relation_id: self.relation_id,
+            rank: self.rank.unwrap_or(i32::MAX),
+            score: self.score.unwrap_or(0.0),
+            inclusion_reason: self.inclusion_reason,
+        }
+    }
 }
 
 pub(crate) fn readable_status_reason(

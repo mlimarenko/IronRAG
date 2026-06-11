@@ -60,7 +60,7 @@ spec:
             # RAM-backed /tmp charges scratch bytes to the pod memory cgroup;
             # keeping it on disk lands them in ephemeral-storage (capped by
             # the resource preset), off the memory budget. Mirrors the host
-            # tmpfs /tmp trap fixed for docker-compose; see CLAUDE.md.
+            # tmpfs /tmp trap fixed for docker-compose.
             sizeLimit: 1Gi
         {{- if eq .Values.storage.provider "filesystem" }}
         - name: content-storage

@@ -1,13 +1,17 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useApp } from '@/shared/contexts/app-context';
+import { useCan } from '@/shared/auth/useCan';
+import { onShellIntent } from '@/shared/lib/shell-events';
+import { CommandPaletteMount } from '@/features/command-palette/CommandPaletteMount';
 import { adminApi, ASYNC_OPERATION_TERMINAL_STATES, Catalog, Ops, unwrap } from '@/shared/api';
 import { ShellFooter } from '@/app/components/ShellFooter';
+import { UserMenu } from '@/app/components/UserMenu';
 import {
-  Home, FileText, Share2, MessageSquare, Settings, Code2,
-  ChevronDown, LogOut, Menu, X, Plus, Trash2, AlertTriangle, Search
+  Home, FileText, Share2, MessageSquare, Settings,
+  ChevronDown, Menu, X, Plus, Trash2, AlertTriangle, Search, Building2, Library as LibraryIcon,
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import {
@@ -29,13 +33,14 @@ import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { errorMessage } from '@/shared/lib/errorMessage';
 
-const NAV_ITEMS = [
+// Primary nav — the four daily-operator surfaces every authenticated role
+// sees. Admin and Swagger are deliberately NOT here: Admin is a role-gated
+// single entry rendered separately, Swagger is demoted to the footer.
+const PRIMARY_NAV = [
   { id: 'home', path: '/dashboard', icon: Home },
   { id: 'documents', path: '/documents', icon: FileText },
   { id: 'graph', path: '/graph', icon: Share2 },
   { id: 'assistant', path: '/assistant', icon: MessageSquare },
-  { id: 'admin', path: '/admin', icon: Settings },
-  { id: 'swagger', path: '/swagger', icon: Code2 },
 ] as const;
 
 const CATALOG_DELETE_POLL_INTERVAL_MS = 2000;
@@ -49,10 +54,11 @@ function delay(ms: number) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
   const {
-    user, workspaces, activeWorkspace, libraries, activeLibrary,
-    setWorkspaces, setActiveWorkspace, setLibraries, setActiveLibrary, logout,
-    refreshSession
+    workspaces, activeWorkspace, libraries, activeLibrary,
+    setWorkspaces, setActiveWorkspace, setLibraries, setActiveLibrary,
+    refreshSession,
   } = useApp();
+  const { can } = useCan();
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -67,8 +73,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [workspaceSearch, setWorkspaceSearch] = useState('');
   const [librarySearch, setLibrarySearch] = useState('');
-  const shellUserName = user?.displayName ?? t('shell.userFallback');
-  const shellAccessLabel = user?.accessLabel ?? t('shell.accessFallback');
+  // Controlled so the dashboard empty state can pop the picker via a shell
+  // intent (the desktop selector; mobile falls back to the create dialog).
+  const [libraryMenuOpen, setLibraryMenuOpen] = useState(false);
+
+  const canManageWorkspace = can('workspace.manage');
+  const canCreateLibrary = can('library.create');
+  const canDeleteLibrary = can('library.delete');
+  const canAccessAdmin = can('admin.access');
+
+  // Surgical bridge for cross-surface intents (dashboard empty-state CTAs).
+  useEffect(() => onShellIntent('open-library-picker', () => setLibraryMenuOpen(true)), []);
+  useEffect(() => {
+    if (!canCreateLibrary) return undefined;
+    return onShellIntent('create-library', () => setCreateLibOpen(true));
+  }, [canCreateLibrary]);
 
   const isActive = (path: string) => location.pathname.startsWith(path);
   const workspaceSearchValue = workspaceSearch.trim().toLowerCase();
@@ -205,6 +224,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   const missingPurposes = activeLibrary?.missingBindingPurposes ?? [];
+  const showAiWarning = canAccessAdmin && !!activeLibrary && missingPurposes.length > 0;
   const selectorContentClass =
     'w-[min(22rem,calc(100vw-2rem))] max-h-[min(32rem,calc(100vh-5rem))] overflow-hidden p-0';
   const selectorListClass = 'max-h-[min(22rem,calc(100vh-13rem))] overflow-y-auto p-1';
@@ -236,17 +256,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ))
         )}
       </div>
-      <DropdownMenuSeparator />
-      <div className="p-1">
-        <DropdownMenuItem onClick={() => setCreateWsOpen(true)}>
-          <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createWorkspace')}
-        </DropdownMenuItem>
-        {activeWorkspace && (
-          <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteWsOpen(true); }} className="text-destructive">
-            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteWorkspace')}
-          </DropdownMenuItem>
-        )}
-      </div>
+      {canManageWorkspace && (
+        <>
+          <DropdownMenuSeparator />
+          <div className="p-1">
+            <DropdownMenuItem onClick={() => setCreateWsOpen(true)}>
+              <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createWorkspace')}
+            </DropdownMenuItem>
+            {activeWorkspace && (
+              <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteWsOpen(true); }} className="text-destructive">
+                <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteWorkspace')}
+              </DropdownMenuItem>
+            )}
+          </div>
+        </>
+      )}
     </DropdownMenuContent>
   );
 
@@ -277,30 +301,79 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ))
         )}
       </div>
-      <DropdownMenuSeparator />
-      <div className="p-1">
-        <DropdownMenuItem onClick={() => setCreateLibOpen(true)}>
-          <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createLibrary')}
-        </DropdownMenuItem>
-        {activeLibrary && (
-          <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteLibOpen(true); }} className="text-destructive">
-            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteLibrary')}
-          </DropdownMenuItem>
-        )}
-      </div>
+      {(canCreateLibrary || canDeleteLibrary) && (
+        <>
+          <DropdownMenuSeparator />
+          <div className="p-1">
+            {canCreateLibrary && (
+              <DropdownMenuItem onClick={() => setCreateLibOpen(true)}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" /> {t('shell.createLibrary')}
+              </DropdownMenuItem>
+            )}
+            {canDeleteLibrary && activeLibrary && (
+              <DropdownMenuItem onClick={() => { setDeleteConfirmName(''); setDeleteLibOpen(true); }} className="text-destructive">
+                <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('shell.deleteLibrary')}
+              </DropdownMenuItem>
+            )}
+          </div>
+        </>
+      )}
     </DropdownMenuContent>
   );
 
+  // Labelled scope selector trigger — replaces the two identical unlabelled
+  // buttons. A leading icon + caption ("Workspace" / "Library") makes the
+  // current scope unambiguous at a glance.
+  const renderScopeTrigger = (
+    caption: string,
+    value: string,
+    Icon: typeof Building2,
+  ) => (
+    <button
+      type="button"
+      className="flex items-center gap-2 rounded-lg border border-shell-border bg-shell-hover px-2.5 py-1 text-left outline-none transition-colors hover:bg-shell-active/15 focus-visible:ring-2 focus-visible:ring-shell-active/60"
+    >
+      <Icon className="h-3.5 w-3.5 shrink-0 text-shell-muted" />
+      <span className="flex min-w-0 flex-col leading-tight">
+        <span className="text-[9px] font-semibold uppercase tracking-wide text-shell-muted">
+          {caption}
+        </span>
+        <span className="max-w-[120px] truncate text-xs font-medium text-shell-foreground">
+          {value}
+        </span>
+      </span>
+      <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
+    </button>
+  );
+
+  const aiWarningButton = (fullWidth = false) => (
+    <button
+      type="button"
+      onClick={() => { void navigate('/admin/ai'); setMobileMenuOpen(false); }}
+      className={`flex items-center gap-1.5 rounded-full border border-amber-700/25 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 transition-colors hover:bg-amber-100 dark:border-amber-400/25 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-950/60 ${fullWidth ? 'w-full justify-center' : ''}`}
+      title={t('shell.configureInSettings')}
+    >
+      <AlertTriangle className="h-3 w-3" />
+      <span>{missingPurposes.length > 1 ? t('admin.bindingsMissingPlural') : t('admin.bindingsMissing')}</span>
+    </button>
+  );
+
   return (
-    <div className="h-screen max-h-screen flex flex-col overflow-hidden bg-background">
+    <div className="flex h-screen max-h-screen flex-col overflow-hidden bg-background">
       {/* Top shell */}
-      <header className="h-13 flex items-center px-4 gap-2 shrink-0 relative z-50" style={{
-        background: 'linear-gradient(180deg, hsl(var(--shell-bg)), hsl(225 32% 8%))',
-        borderBottom: '1px solid hsl(var(--shell-border))',
-        boxShadow: '0 1px 3px hsl(225 32% 4% / 0.3)',
-      }}>
+      <header
+        className="relative z-50 flex h-13 shrink-0 items-center gap-2 px-4"
+        style={{
+          background: 'linear-gradient(180deg, hsl(var(--shell-bg)), hsl(226 36% 7%))',
+          borderBottom: '1px solid hsl(var(--shell-border))',
+          boxShadow: '0 1px 3px hsl(226 36% 4% / 0.3)',
+        }}
+      >
         {/* Brand */}
-        <Link to="/dashboard" className="font-bold text-sm tracking-tight mr-4 flex items-center gap-2.5 group" style={{ color: 'hsl(var(--shell-foreground))' }}>
+        <Link
+          to="/dashboard"
+          className="group mr-3 flex items-center gap-2.5 text-sm font-bold tracking-tight text-shell-foreground"
+        >
           <img
             src="/favicon.svg"
             alt=""
@@ -310,148 +383,137 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span className="hidden sm:inline">{t('common.productName')}</span>
         </Link>
 
-        {/* Desktop nav */}
-        <nav className="hidden md:flex items-center gap-0.5 mr-auto">
-          {NAV_ITEMS.map(item => (
-            <button
+        {/* Desktop primary nav */}
+        <nav aria-label={t('shell.primaryNav')} className="mr-auto hidden items-center gap-0.5 md:flex">
+          {PRIMARY_NAV.map(item => (
+            <Link
               key={item.path}
-              onClick={() => navigate(item.path)}
+              to={item.path}
+              aria-current={isActive(item.path) ? 'page' : undefined}
               className={`shell-nav-item flex items-center gap-1.5 ${isActive(item.path) ? 'active' : ''}`}
             >
               <item.icon className="h-3.5 w-3.5" />
               <span>{t(`nav.${item.id}`)}</span>
-            </button>
+            </Link>
           ))}
         </nav>
 
         {/* Mobile menu toggle */}
         <button
-          className="md:hidden ml-auto p-1.5 rounded-lg transition-colors"
+          type="button"
+          className="ml-auto rounded-lg p-1.5 text-shell-foreground transition-colors hover:bg-shell-hover md:hidden"
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          style={{ color: 'hsl(var(--shell-foreground))' }}
           aria-label={t('shell.toggleNavigation')}
+          aria-expanded={mobileMenuOpen}
         >
           {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
 
-        {/* Right side controls */}
-        <div className="hidden md:flex items-center gap-1.5 ml-auto">
-          {/* Library readiness warning */}
-          {activeLibrary && missingPurposes.length > 0 && (
-            <button
-              onClick={() => navigate('/admin?tab=ai')}
-              className="flex items-center gap-1 rounded-full border border-amber-700/25 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100 transition-colors dark:border-amber-400/25 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-950/60"
-              title={t('shell.configureInSettings')}
-            >
-              <AlertTriangle className="h-3 w-3" />
-              <span>{missingPurposes.length > 1 ? t('admin.bindingsMissingPlural') : t('admin.bindingsMissing')}</span>
-            </button>
-          )}
+        {/* Right-side controls */}
+        <div className="ml-auto hidden items-center gap-1.5 md:flex">
+          {showAiWarning && aiWarningButton()}
 
-          {/* Workspace selector */}
+          {/* Labelled scope selectors */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all duration-200 font-medium" style={{
-                color: 'hsl(var(--shell-foreground))',
-                background: 'hsl(var(--shell-hover))',
-                border: '1px solid hsl(var(--shell-border))',
-              }}>
-                <span className="truncate max-w-[100px]">{activeWorkspace?.name ?? t('shell.noWorkspace')}</span>
-                <ChevronDown className="h-3 w-3 opacity-50" />
-              </button>
+              {renderScopeTrigger(t('shell.workspaceScope'), activeWorkspace?.name ?? t('shell.noWorkspace'), Building2)}
             </DropdownMenuTrigger>
             {renderWorkspaceMenu('end')}
           </DropdownMenu>
 
-          {/* Library selector */}
-          <DropdownMenu>
+          <DropdownMenu open={libraryMenuOpen} onOpenChange={setLibraryMenuOpen}>
             <DropdownMenuTrigger asChild>
-              <button className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all duration-200 font-medium" style={{
-                color: 'hsl(var(--shell-foreground))',
-                background: 'hsl(var(--shell-hover))',
-                border: '1px solid hsl(var(--shell-border))',
-              }}>
-                <span className="truncate max-w-[100px]">{activeLibrary?.name ?? t('shell.noLibrary')}</span>
-                <ChevronDown className="h-3 w-3 opacity-50" />
-              </button>
+              {renderScopeTrigger(t('shell.libraryScope'), activeLibrary?.name ?? t('shell.noLibrary'), LibraryIcon)}
             </DropdownMenuTrigger>
             {renderLibraryMenu('end')}
           </DropdownMenu>
 
-          {/* User menu */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button className="flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-lg transition-all duration-200" style={{
-                color: 'hsl(var(--shell-foreground))',
-                background: 'hsl(var(--shell-hover))',
-                border: '1px solid hsl(var(--shell-border))',
-              }}>
-                <div className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style={{
-                  background: 'linear-gradient(135deg, hsl(var(--shell-active) / 0.3), hsl(var(--shell-active) / 0.15))',
-                  color: 'hsl(var(--shell-active))',
-                }}>
-                  {shellUserName[0].toUpperCase()}
-                </div>
-                <span className="truncate max-w-[80px] font-medium">{shellUserName}</span>
-                <ChevronDown className="h-3 w-3 opacity-50" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-[180px]">
-              <div className="px-2 py-1.5 text-xs text-muted-foreground font-medium">
-                {shellAccessLabel}
-              </div>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => { void logout(); void navigate('/login'); }}>
-                <LogOut className="h-3.5 w-3.5 mr-1.5" /> {t('shell.logout')}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {/* Admin entry — single, role-gated to admin.access */}
+          {canAccessAdmin && (
+            <Link
+              to="/admin"
+              aria-current={isActive('/admin') ? 'page' : undefined}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                isActive('/admin')
+                  ? 'border-shell-active/40 bg-shell-active/20 text-shell-foreground'
+                  : 'border-shell-border bg-shell-hover text-shell-foreground hover:bg-shell-active/15'
+              }`}
+            >
+              <Settings className="h-3.5 w-3.5" />
+              <span>{t('nav.admin')}</span>
+            </Link>
+          )}
+
+          <UserMenu />
         </div>
       </header>
 
-      {/* Mobile nav overlay */}
+      {/* Mobile nav drawer */}
       {mobileMenuOpen && (
-        <div className="md:hidden border-b p-3 space-y-1 animate-fade-in" style={{ background: 'hsl(var(--shell-bg))' }}>
-          {NAV_ITEMS.map(item => (
-            <button
-              key={item.path}
-              onClick={() => { void navigate(item.path); setMobileMenuOpen(false); }}
-              className={`shell-nav-item flex items-center gap-2 w-full ${isActive(item.path) ? 'active' : ''}`}
-            >
-              <item.icon className="h-4 w-4" />
-              <span>{t(`nav.${item.id}`)}</span>
-            </button>
-          ))}
-          <div className="pt-2 flex flex-wrap gap-2">
+        <div
+          className="animate-fade-in space-y-3 border-b border-shell-border p-3 md:hidden"
+          style={{ background: 'hsl(var(--shell-bg))' }}
+        >
+          {showAiWarning && aiWarningButton(true)}
+
+          <nav aria-label={t('shell.primaryNav')} className="space-y-1">
+            {PRIMARY_NAV.map(item => (
+              <Link
+                key={item.path}
+                to={item.path}
+                onClick={() => setMobileMenuOpen(false)}
+                aria-current={isActive(item.path) ? 'page' : undefined}
+                className={`shell-nav-item flex w-full items-center gap-2 ${isActive(item.path) ? 'active' : ''}`}
+              >
+                <item.icon className="h-4 w-4" />
+                <span>{t(`nav.${item.id}`)}</span>
+              </Link>
+            ))}
+            {canAccessAdmin && (
+              <Link
+                to="/admin"
+                onClick={() => setMobileMenuOpen(false)}
+                aria-current={isActive('/admin') ? 'page' : undefined}
+                className={`shell-nav-item flex w-full items-center gap-2 ${isActive('/admin') ? 'active' : ''}`}
+              >
+                <Settings className="h-4 w-4" />
+                <span>{t('nav.admin')}</span>
+              </Link>
+            )}
+          </nav>
+
+          <div className="flex flex-wrap gap-2">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg font-medium" style={{ color: 'hsl(var(--shell-foreground))', background: 'hsl(var(--shell-hover))', border: '1px solid hsl(var(--shell-border))' }}>
-                  <span className="truncate max-w-[120px]">{activeWorkspace?.name ?? t('shell.noWorkspace')}</span>
-                  <ChevronDown className="h-3 w-3 opacity-50" />
-                </button>
+                {renderScopeTrigger(t('shell.workspaceScope'), activeWorkspace?.name ?? t('shell.noWorkspace'), Building2)}
               </DropdownMenuTrigger>
               {renderWorkspaceMenu('start')}
             </DropdownMenu>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg font-medium" style={{ color: 'hsl(var(--shell-foreground))', background: 'hsl(var(--shell-hover))', border: '1px solid hsl(var(--shell-border))' }}>
-                  <span className="truncate max-w-[120px]">{activeLibrary?.name ?? t('shell.noLibrary')}</span>
-                  <ChevronDown className="h-3 w-3 opacity-50" />
-                </button>
+                {renderScopeTrigger(t('shell.libraryScope'), activeLibrary?.name ?? t('shell.noLibrary'), LibraryIcon)}
               </DropdownMenuTrigger>
               {renderLibraryMenu('start')}
             </DropdownMenu>
+          </div>
+
+          <div className="border-t border-shell-border pt-3">
+            <UserMenu variant="inline" onAfterAction={() => setMobileMenuOpen(false)} />
           </div>
         </div>
       )}
 
       {/* Main content */}
-      <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {children}
       </main>
 
-      {/* Footer */}
+      {/* Footer (hosts the demoted Swagger link) */}
       <ShellFooter />
+
+      {/* Global ⌘K command palette — self-contained (owns its own open state
+          + keyboard shortcut), so this mount stays a single element. */}
+      <CommandPaletteMount />
 
       {/* Dialogs */}
       <Dialog open={createWsOpen} onOpenChange={setCreateWsOpen}>

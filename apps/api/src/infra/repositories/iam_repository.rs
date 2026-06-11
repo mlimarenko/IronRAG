@@ -2,6 +2,41 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgConnection, PgPool};
 use uuid::Uuid;
 
+/// System role assigned to a user principal.
+///
+/// Maps 1:1 to the `public.iam_system_role` PG enum and to the
+/// `ShellRole` contract the UI shell gates its capability matrix on. The
+/// ordering reflects increasing privilege (`viewer` < `operator` < `admin`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemRole {
+    Viewer,
+    Operator,
+    Admin,
+}
+
+impl SystemRole {
+    /// Canonical wire string, matching the PG enum labels.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Operator => "operator",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Parses the canonical wire string into a [`SystemRole`].
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "viewer" => Some(Self::Viewer),
+            "operator" => Some(Self::Operator),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct IamPrincipalRow {
     pub id: Uuid,
@@ -13,6 +48,17 @@ pub struct IamPrincipalRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct IamPrincipalProfileRow {
+    pub id: Uuid,
+    pub principal_kind: String,
+    pub status: String,
+    pub display_label: String,
+    pub login: Option<String>,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct IamUserRow {
     pub principal_id: Uuid,
     pub login: String,
@@ -21,6 +67,18 @@ pub struct IamUserRow {
     pub password_hash: String,
     pub auth_provider_kind: String,
     pub external_subject: Option<String>,
+    /// Canonical system-role wire string (`viewer` | `operator` | `admin`).
+    pub role: String,
+}
+
+impl IamUserRow {
+    /// Parses the stored role string into a [`SystemRole`], defaulting to
+    /// the least-privileged `viewer` if the column ever holds an unknown value
+    /// (fail-closed).
+    #[must_use]
+    pub fn system_role(&self) -> SystemRole {
+        SystemRole::from_str(&self.role).unwrap_or(SystemRole::Viewer)
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -217,6 +275,34 @@ pub async fn list_principals(postgres: &PgPool) -> Result<Vec<IamPrincipalRow>, 
     .await
 }
 
+pub async fn list_principal_profiles_by_ids(
+    postgres: &PgPool,
+    principal_ids: &[Uuid],
+) -> Result<Vec<IamPrincipalProfileRow>, sqlx::Error> {
+    if principal_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, IamPrincipalProfileRow>(
+        "select
+            principal.id,
+            principal.principal_kind::text as principal_kind,
+            principal.status::text as status,
+            principal.display_label,
+            iam_user.login,
+            iam_user.display_name,
+            iam_user.role::text as role
+         from iam_principal principal
+         left join iam_user
+           on iam_user.principal_id = principal.id
+         where principal.id = any($1)
+         order by principal.display_label asc, principal.id asc",
+    )
+    .bind(principal_ids)
+    .fetch_all(postgres)
+    .await
+}
+
 pub async fn disable_principal(
     postgres: &PgPool,
     principal_id: Uuid,
@@ -251,7 +337,8 @@ pub async fn get_user_by_principal_id(
             display_name,
             password_hash,
             auth_provider_kind,
-            external_subject
+            external_subject,
+            role::text as role
          from iam_user
          where principal_id = $1",
     )
@@ -272,7 +359,8 @@ pub async fn get_user_by_email(
             display_name,
             password_hash,
             auth_provider_kind,
-            external_subject
+            external_subject,
+            role::text as role
          from iam_user
          where lower(email) = lower($1)",
     )
@@ -293,7 +381,8 @@ pub async fn get_user_by_login(
             display_name,
             password_hash,
             auth_provider_kind,
-            external_subject
+            external_subject,
+            role::text as role
          from iam_user
          where lower(login) = lower($1)",
     )
@@ -314,7 +403,8 @@ pub async fn get_user_by_login_or_email(
             display_name,
             password_hash,
             auth_provider_kind,
-            external_subject
+            external_subject,
+            role::text as role
          from iam_user
          where lower(login) = lower($1)
             or lower(email) = lower($1)
@@ -334,6 +424,138 @@ pub async fn count_active_user_principals(postgres: &PgPool) -> Result<i64, sqlx
            and status = 'active'",
     )
     .fetch_one(postgres)
+    .await
+}
+
+/// Lists every user principal (login/email/display_name/role/auth provider),
+/// ordered by login for a stable admin surface.
+pub async fn list_users(postgres: &PgPool) -> Result<Vec<IamUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, IamUserRow>(
+        "select
+            principal_id,
+            login,
+            email,
+            display_name,
+            password_hash,
+            auth_provider_kind,
+            external_subject,
+            role::text as role
+         from iam_user
+         order by login asc",
+    )
+    .fetch_all(postgres)
+    .await
+}
+
+/// Counts active user principals currently carrying the `admin` system role.
+///
+/// Used by the role-change guard to prevent demoting the last administrator.
+pub async fn count_admin_users(postgres: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from iam_user as users
+         join iam_principal as principal
+           on principal.id = users.principal_id
+         where users.role = 'admin'
+           and principal.status = 'active'",
+    )
+    .fetch_one(postgres)
+    .await
+}
+
+/// Creates a new user principal plus its `iam_user` row with a system role.
+///
+/// `password_hash` must already be produced by the canonical argon2 hashing
+/// used by `setup_bootstrap_admin` (see `services::iam::service::hash_password`).
+/// Returns the freshly inserted [`IamUserRow`].
+pub async fn create_user(
+    postgres: &PgPool,
+    login: &str,
+    email: &str,
+    display_name: &str,
+    password_hash: &str,
+    role: SystemRole,
+) -> Result<IamUserRow, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let principal_id = Uuid::now_v7();
+
+    sqlx::query(
+        "insert into iam_principal (
+            id,
+            principal_kind,
+            display_label,
+            status,
+            parent_principal_id,
+            created_at,
+            disabled_at
+        )
+        values ($1, 'user', $2, 'active', null, now(), null)",
+    )
+    .bind(principal_id)
+    .bind(display_name)
+    .execute(&mut *transaction)
+    .await?;
+
+    let row = sqlx::query_as::<_, IamUserRow>(
+        "insert into iam_user (
+            principal_id,
+            login,
+            email,
+            display_name,
+            password_hash,
+            auth_provider_kind,
+            external_subject,
+            role
+        )
+        values ($1, $2, $3, $4, $5, 'password', null, $6::iam_system_role)
+        returning
+            principal_id,
+            login,
+            email,
+            display_name,
+            password_hash,
+            auth_provider_kind,
+            external_subject,
+            role::text as role",
+    )
+    .bind(principal_id)
+    .bind(login)
+    .bind(email)
+    .bind(display_name)
+    .bind(password_hash)
+    .bind(role.as_str())
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(row)
+}
+
+/// Sets the system role for the user identified by `principal_id`.
+///
+/// Returns `None` when no `iam_user` row exists for that principal.
+pub async fn set_user_role(
+    postgres: &PgPool,
+    principal_id: Uuid,
+    role: SystemRole,
+) -> Result<Option<IamUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, IamUserRow>(
+        "update iam_user
+         set role = $2::iam_system_role
+         where principal_id = $1
+         returning
+            principal_id,
+            login,
+            email,
+            display_name,
+            password_hash,
+            auth_provider_kind,
+            external_subject,
+            role::text as role",
+    )
+    .bind(principal_id)
+    .bind(role.as_str())
+    .fetch_optional(postgres)
     .await
 }
 
@@ -1134,9 +1356,10 @@ pub async fn claim_bootstrap_user(
             display_name,
             password_hash,
             auth_provider_kind,
-            external_subject
+            external_subject,
+            role
         )
-        values ($1, $2, $3, $4, $5, 'password', null)
+        values ($1, $2, $3, $4, $5, 'password', null, 'admin')
         returning principal_id, login, email, display_name, now() as claimed_at",
     )
     .bind(principal_id)

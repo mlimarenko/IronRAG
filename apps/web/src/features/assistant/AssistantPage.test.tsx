@@ -184,6 +184,11 @@ describe('AssistantPage integration', () => {
     textarea?.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
+  function visibleTextOccurrences(text: string) {
+    const content = container.textContent ?? '';
+    return content.split(text).length - 1;
+  }
+
   it('loads the session rail on mount and renders session titles', async () => {
     await renderPage();
 
@@ -192,6 +197,23 @@ describe('AssistantPage integration', () => {
       libraryId: 'library-1',
     });
     expect(container.textContent).toContain('Deployment notes');
+  });
+
+  it('does not render the composer debug button for admin users', async () => {
+    useAppMock.mockReturnValue({
+      activeLibrary: {
+        id: 'library-1',
+        workspaceId: 'ws-1',
+        missingBindingPurposes: [],
+      },
+      activeWorkspace: { id: 'ws-1' },
+      locale: 'en',
+      user: { role: 'admin' },
+    });
+
+    await renderPage();
+
+    expect(container.querySelector('button[aria-label="Debug"]')).toBeNull();
   });
 
   it('posts a turn and replaces the placeholder with the final answer + evidence', async () => {
@@ -551,6 +573,7 @@ describe('AssistantPage integration', () => {
     await flushUi();
 
     expect(container.textContent).toContain('Pending answer landed');
+    expect(visibleTextOccurrences('What is pending?')).toBe(1);
     expect(releaseSession.disabled).toBe(false);
   });
 

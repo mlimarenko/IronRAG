@@ -6,25 +6,29 @@
 
 ```text
 apps/web/src/
-├── adapters/      Raw API envelopes -> domain models
-├── api/           Тонкие HTTP-клиенты для `/v1/*`
-├── components/    Переиспользуемые view-компоненты и feature-виджеты
-├── contexts/      Глобальное app state, включая active workspace и library
-├── hooks/         Cross-page React hooks
-├── lib/           Утилиты без React
-├── pages/         Route shells и page-owned feature packages
-├── test/          Сквозные UI-аудиты
-└── types/         Общие frontend domain types
+├── app/             App shell, root-роутинг и shell-level компоненты
+├── features/        Page-owned feature packages (по одному каталогу на surface)
+│   └── {feature}/   page shell, components/, model/ (adapters), hooks/, workers/
+└── shared/          Cross-feature строительные блоки
+    ├── api/         Тонкие HTTP-клиенты для `/v1/*`
+    ├── components/  Переиспользуемые view-компоненты (включая ui/ presentation-примитивы)
+    ├── contexts/    Глобальное app state, включая active workspace и library
+    ├── forms/       Общие form helpers
+    ├── hooks/       Cross-page React hooks
+    ├── i18n/        Locale-ресурсы
+    ├── lib/         Утилиты без React
+    ├── test/        Сквозные UI-аудиты
+    └── types/       Общие frontend domain types
 ```
 
 ## Frontend-контракты
 
-- `api/*` ходит в backend и возвращает wire payload либо уже нормализованный DTO.
-- `adapters/*` — единственная зона, где Raw API envelope превращается в domain model.
-- `pages/*` оркестрируют загрузку данных, routing state и page-owned derived state.
-- `components/*` рендерят и не владеют transport-логикой.
-- Page-specific helpers живут рядом со страницей в `pages/{feature}/`.
-- `components/ui/*` остаются presentation-only.
+- `shared/api/*` ходит в backend и возвращает wire payload либо уже нормализованный DTO.
+- `features/*/model/*Adapter.*` — единственная зона, где Raw API envelope превращается в domain model.
+- `features/*` оркестрируют загрузку данных, routing state и page-owned derived state.
+- `shared/components/*` рендерят и не владеют transport-логикой.
+- Page-specific helpers живут рядом со страницей в `features/{feature}/`.
+- `shared/components/ui/*` остаются presentation-only.
 
 ## Владение страницами
 

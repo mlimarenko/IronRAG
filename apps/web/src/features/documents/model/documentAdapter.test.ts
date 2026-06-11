@@ -208,7 +208,7 @@ describe('mapListItem', () => {
     expect(doc.stage).toBe('Extracting graph');
   });
 
-  it('keeps the backend failure message as the primary failed-document reason', () => {
+  it('keeps backend failure details as diagnostics behind a known failed-document reason', () => {
     const doc = mapListItem(
       buildRaw({
         status: 'failed',
@@ -221,7 +221,27 @@ describe('mapListItem', () => {
 
     expect(doc.failureCode).toBe('parser_failed');
     expect(doc.failureMessage).toBe('Parser failed on page 2');
-    expect(doc.statusReason).toBe('Parser failed on page 2');
+    expect(doc.statusReason).toBe('The document parser could not extract usable content.');
+    expect(doc.failureNotice?.diagnosticMessage).toBe('Parser failed on page 2');
+  });
+
+  it('maps upload extraction failures to operator guidance with diagnostics', () => {
+    const doc = mapListItem(
+      buildRaw({
+        status: 'failed',
+        readiness: 'failed',
+        stage: 'extract_content',
+        failureCode: 'upload_extraction_failed',
+        failureMessage: 'Upload extraction failed',
+      }),
+      i18n.t.bind(i18n),
+    );
+
+    expect(doc.statusReason).toContain('could not be extracted');
+    expect(doc.failureNotice?.summary).toContain('could not be extracted');
+    expect(doc.failureNotice?.action).toContain('Retry the upload');
+    expect(doc.failureNotice?.diagnosticCode).toBe('upload_extraction_failed');
+    expect(doc.failureNotice?.diagnosticMessage).toBe('Upload extraction failed');
   });
 
   it('returns null for non-numeric list cost values', () => {

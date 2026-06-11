@@ -71,6 +71,57 @@ fn build_exact_technical_literals_section_renders_line_item_inventory() {
 }
 
 #[test]
+fn config_section_literal_extractor_keeps_identifier_shaped_sections() {
+    let sections = extract_config_section_literals(
+        "`[CFG]`\n[UI.ScanPanel.qrCode]\narr[0]\n[text](http://demo.local)\nvalue = document.shopCode[04d]\n[9]\n[bad value]",
+        8,
+    );
+
+    assert_eq!(sections, vec!["[CFG]".to_string(), "[UI.ScanPanel.qrCode]".to_string()]);
+}
+
+#[test]
+fn parameter_literal_extractor_keeps_spaced_config_assignment_names() {
+    let parameters = extract_parameter_literals(
+        "[UI.ScanPanel.qrCode]\nvisible = true\narr[0]\nplain prose without assignment",
+        8,
+    );
+
+    assert_eq!(parameters, vec!["visible".to_string()]);
+}
+
+#[test]
+fn build_exact_technical_literals_section_renders_config_sections() {
+    let section = build_exact_technical_literals_section(
+        "How do I configure Provider Alpha primary and display sections?",
+        &query_ir_with_act_scope_and_target_types(
+            QueryAct::ConfigureHow,
+            QueryScope::SingleDocument,
+            ["configuration_file", "config_key"],
+        ),
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: Uuid::now_v7(),
+            document_label: "Provider Alpha setup".to_string(),
+            excerpt: "Provider Alpha uses the primary configuration section.".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.9),
+            source_text: repair_technical_layout_noise(
+                "/opt/provider-alpha/alpha.conf\n[CFG]\nendpointUrl = http://demo.local\n[UI.ScanPanel.qrCode]\nvisible = true",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(section.contains("  Sections:\n    - `[CFG]`\n    - `[UI.ScanPanel.qrCode]"));
+    assert!(section.contains("`endpointUrl`"));
+    assert!(section.contains("`visible`"));
+}
+
+#[test]
 fn route_target_types_do_not_expand_endpoint_literal_intent() {
     let intent = detect_technical_literal_intent_from_query_ir(
         "Which graph route connects the entities?",

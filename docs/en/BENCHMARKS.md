@@ -11,6 +11,7 @@ apps/api/benchmarks/grounded_query/
 │   ├── docs/        technical docs and contract fixtures
 │   ├── code/        code and config files
 │   ├── documents/   PDF, DOCX, PPTX fixtures
+│   ├── graph/       multi-hop graph topology fixtures
 │   └── fixtures/    upload-path smoke fixtures
 ├── *.json           suite definitions
 ├── run_live_benchmark.py

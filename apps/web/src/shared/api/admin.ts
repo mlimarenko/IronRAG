@@ -1,5 +1,4 @@
 import { Admin, Ai, Audit, Catalog, Iam, Ops } from "./generated";
-import { client } from "./generated/client.gen";
 import { unwrap } from "./runtime";
 import {
   resolveProviderBaseUrlPolicy,
@@ -11,9 +10,14 @@ import type {
   UpdateCredentialRequest,
   CreateBindingRequest,
   UpdateBindingRequest,
+  CreateProviderRequest,
+  UpdateProviderRequest,
+  CreateModelRequest,
+  UpdateModelRequest,
   CreateModelPresetRequest,
   UpdateModelPresetRequest,
   CreatePriceOverrideRequest,
+  UpdatePriceOverrideRequest,
 } from "@/shared/types/api-requests";
 import type {
   AdminSurface as AdminSurfaceResponse,
@@ -22,7 +26,9 @@ import type {
   CatalogLibraryResponse,
   CatalogWorkspaceResponse,
   CreateBindingAssignmentRequest as GeneratedCreateBindingRequest,
+  CreateModelCatalogRequest as GeneratedCreateModelRequest,
   CreateModelPresetRequest as GeneratedCreateModelPresetRequest,
+  CreateProviderCatalogRequest as GeneratedCreateProviderRequest,
   CreateProviderCredentialRequest as GeneratedCreateCredentialRequest,
   CreateWorkspacePriceOverrideRequest as GeneratedCreatePriceOverrideRequest,
   IngestQueueMoveDirection,
@@ -34,10 +40,14 @@ import type {
   ProviderCatalogEntryResponse,
   ProviderCredentialResponse,
   UpdateBindingAssignmentRequest as GeneratedUpdateBindingRequest,
+  UpdateModelCatalogRequest as GeneratedUpdateModelRequest,
   UpdateModelPresetRequest as GeneratedUpdateModelPresetRequest,
+  UpdateProviderCatalogRequest as GeneratedUpdateProviderRequest,
   UpdateProviderCredentialRequest as GeneratedUpdateCredentialRequest,
+  UpdateWorkspacePriceOverrideRequest as GeneratedUpdatePriceOverrideRequest,
   ListAiCredentialsData,
   ListAiModelsData,
+  ListAiPricesData,
   ListAuditEventsData,
   ListIngestQueueData,
   UpdateLibraryRecognitionPolicyRequest,
@@ -46,6 +56,12 @@ import type {
   MintTokenResponse,
   TokenResponse,
   AuditEventPageResponse,
+  CreateUserRequest as GeneratedCreateUserRequest,
+  SetUserRoleRequest as GeneratedSetUserRoleRequest,
+  SetUserAccessRequest as GeneratedSetUserAccessRequest,
+  SystemRole,
+  UserAccessResponse,
+  UserResponse,
   WebIngestPattern,
   WebIngestUrlFilter,
 } from "./generated";
@@ -56,6 +72,7 @@ type ListIngestQueueParams = NonNullable<ListIngestQueueData["query"]>;
 type AiScopeParams = NonNullable<ListAiCredentialsData["query"]>;
 
 export type ListModelsParams = NonNullable<ListAiModelsData["query"]>;
+type ListPricesParams = NonNullable<ListAiPricesData["query"]>;
 export type {
   CatalogLibraryResponse,
   CatalogWorkspaceResponse,
@@ -216,10 +233,33 @@ export function adminModelCatalogOptions(params: ListModelsParams = {}) {
 }
 
 export type MintTokenRequest = GeneratedMintTokenRequest;
+export type CreateUserRequest = GeneratedCreateUserRequest;
+export type SetUserRoleRequest = GeneratedSetUserRoleRequest;
+export type SetUserAccessRequest = GeneratedSetUserAccessRequest;
+export type { SystemRole, UserAccessResponse, UserResponse };
 
 export const adminApi = {
   listTokens: () =>
     Iam.listIamTokens({}).then((result) => unwrap<TokenResponse[]>(result)),
+  listUsers: () =>
+    Iam.listIamUsers({}).then((result) => unwrap<UserResponse[]>(result)),
+  createUser: (request: CreateUserRequest) =>
+    Iam.createIamUser({ body: request }).then((result) =>
+      unwrap<UserResponse>(result),
+    ),
+  setUserRole: (principalId: string, role: SystemRole) =>
+    Iam.setIamUserRole({
+      path: { principalId },
+      body: { role },
+    }).then((result) => unwrap<UserResponse>(result)),
+  getUserAccess: (principalId: string) =>
+    Iam.getIamUserAccess({ path: { principalId } }).then((result) =>
+      unwrap<UserAccessResponse>(result),
+    ),
+  setUserAccess: (principalId: string, request: SetUserAccessRequest) =>
+    Iam.setIamUserAccess({ path: { principalId }, body: request }).then(
+      (result) => unwrap<UserAccessResponse>(result),
+    ),
   mintToken: (request: MintTokenRequest) =>
     Iam.mintIamToken({ body: request }).then((result) =>
       unwrap<MintTokenResponse>(result),
@@ -241,10 +281,36 @@ export const adminApi = {
     Ai.listAiProviders().then((result) =>
       parseProviderCatalogResponse(unwrap(result)),
     ),
+  createProvider: (data: CreateProviderRequest) =>
+    Ai.createAiProvider({
+      body: toGeneratedRequest<GeneratedCreateProviderRequest>(data),
+    }).then((result) => unwrap<ProviderCatalogEntryResponse>(result)),
+  updateProvider: (providerId: string, data: UpdateProviderRequest) =>
+    Ai.updateAiProvider({
+      path: { providerId },
+      body: toGeneratedRequest<GeneratedUpdateProviderRequest>(data),
+    }).then((result) => unwrap<ProviderCatalogEntryResponse>(result)),
+  deleteProvider: (providerId: string) =>
+    Ai.deleteAiProvider({ path: { providerId } }).then((result) => {
+      unwrap(result);
+    }),
   listModels: (params: ListModelsParams = {}) =>
     Ai.listAiModels({ query: params }).then((result) =>
       parseModelCatalogResponse(unwrap(result)),
     ),
+  createModel: (data: CreateModelRequest) =>
+    Ai.createAiModel({
+      body: toGeneratedRequest<GeneratedCreateModelRequest>(data),
+    }).then((result) => unwrap<ModelCatalogEntryResponse>(result)),
+  updateModel: (modelId: string, data: UpdateModelRequest) =>
+    Ai.updateAiModel({
+      path: { modelId },
+      body: toGeneratedRequest<GeneratedUpdateModelRequest>(data),
+    }).then((result) => unwrap<ModelCatalogEntryResponse>(result)),
+  deleteModel: (modelId: string) =>
+    Ai.deleteAiModel({ path: { modelId } }).then((result) => {
+      unwrap(result);
+    }),
   listCredentials: (params: AiScopeParams = {}) =>
     Ai.listAiCredentials({ query: params }).then((result) =>
       unwrap<ProviderCredentialResponse[]>(result),
@@ -258,6 +324,10 @@ export const adminApi = {
       path: { credentialId },
       body: toGeneratedRequest<GeneratedUpdateCredentialRequest>(data),
     }).then((result) => unwrap<ProviderCredentialResponse>(result)),
+  deleteCredential: (credentialId: string) =>
+    Ai.deleteAiCredential({ path: { credentialId } }).then((result) => {
+      unwrap(result);
+    }),
   listBindings: (
     params: Required<Pick<AiScopeParams, "scopeKind">> & AiScopeParams,
   ) =>
@@ -294,14 +364,27 @@ export const adminApi = {
       path: { presetId },
       body: toGeneratedRequest<GeneratedUpdateModelPresetRequest>(data),
     }).then((result) => unwrap<ModelPresetResponse>(result)),
-  listPrices: () =>
-    Ai.listAiPrices({}).then((result) =>
+  deleteModelPreset: (presetId: string) =>
+    Ai.deleteAiModelPreset({ path: { presetId } }).then((result) => {
+      unwrap(result);
+    }),
+  listPrices: (params: ListPricesParams = {}) =>
+    Ai.listAiPrices({ query: params }).then((result) =>
       unwrap<PriceCatalogEntryResponse[]>(result),
     ),
   createPriceOverride: (data: CreatePriceOverrideRequest) =>
     Ai.createAiPriceOverride({
       body: toGeneratedRequest<GeneratedCreatePriceOverrideRequest>(data),
     }).then((result) => unwrap<PriceCatalogEntryResponse>(result)),
+  updatePriceOverride: (priceId: string, data: UpdatePriceOverrideRequest) =>
+    Ai.updateAiPriceOverride({
+      path: { priceId },
+      body: toGeneratedRequest<GeneratedUpdatePriceOverrideRequest>(data),
+    }).then((result) => unwrap<PriceCatalogEntryResponse>(result)),
+  deletePriceOverride: (priceId: string) =>
+    Ai.deleteAiPriceOverride({ path: { priceId } }).then((result) => {
+      unwrap(result);
+    }),
 
   getAdminSurface: () =>
     Admin.getAdminSurface().then((result) =>
@@ -355,21 +438,25 @@ export const adminApi = {
       path: { libraryId },
       body: policy,
     }).then((result) => unwrap<CatalogLibraryResponse>(result)),
-  updateLibraryMcpSettings: (
+  updateLibraryMcpSettings: async (
     libraryId: string,
     body: UpdateLibraryMcpSettingsRequest,
-  ) =>
-    client
-      .patch<{ 200: CatalogLibraryResponse }, unknown>({
-        security: [{ scheme: "bearer", type: "http" }],
-        url: "/v1/libraries/{libraryId}",
-        path: { libraryId },
-        body,
-        headers: {
-          "Content-Type": "application/json",
-        },
-      })
-      .then((result) => unwrap<CatalogLibraryResponse>(result)),
+  ) => {
+    const existing = unwrap<CatalogLibraryResponse>(
+      await Catalog.getCatalogLibrary({ path: { libraryId } }),
+    );
+    return Catalog.updateCatalogLibrary({
+      path: { libraryId },
+      body: {
+        slug: existing.slug,
+        displayName: existing.displayName,
+        description: existing.description ?? null,
+        extractionPrompt: existing.extractionPrompt ?? null,
+        lifecycleState: existing.lifecycleState,
+        includeDocumentHintInMcpAnswers: body.includeDocumentHintInMcpAnswers,
+      },
+    }).then((result) => unwrap<CatalogLibraryResponse>(result));
+  },
   createWorkspace: (name: string) =>
     Catalog.createCatalogWorkspace({ body: { displayName: name } }).then(
       (result) => unwrap<CatalogWorkspaceResponse>(result),

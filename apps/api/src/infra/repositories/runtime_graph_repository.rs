@@ -832,6 +832,33 @@ pub async fn list_admitted_runtime_graph_edges_by_node_ids(
     .await
 }
 
+/// Maximum byte length of a persisted `runtime_graph_node.label`.
+///
+/// `runtime_graph_node` carries btree indexes that include `label` (and
+/// `lower(label)`). PostgreSQL caps a single btree index tuple at ~2704 bytes,
+/// so an oversized label aborts the INSERT — and inside a whole-library restore
+/// transaction that rolls back the entire import (Workstream R / R4). The cap
+/// is a pure byte bound, NOT a natural-language rule: real entity names are
+/// short, and a multi-kilobyte "label" is extraction noise, not a name. We keep
+/// the bound comfortably under 2704 to leave room for the fixed index columns
+/// and for case-folding growth in `lower(label)`.
+const RUNTIME_GRAPH_LABEL_MAX_BYTES: usize = 2000;
+
+/// Clamps a graph-node label to [`RUNTIME_GRAPH_LABEL_MAX_BYTES`] without
+/// splitting a UTF-8 codepoint. Script-agnostic: it bounds the byte length
+/// only and never inspects, transliterates, or matches against any
+/// natural-language content. Returns the input unchanged when it already fits.
+fn clamp_runtime_graph_label(label: &str) -> &str {
+    if label.len() <= RUNTIME_GRAPH_LABEL_MAX_BYTES {
+        return label;
+    }
+    let mut end = RUNTIME_GRAPH_LABEL_MAX_BYTES;
+    while end > 0 && !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    &label[..end]
+}
+
 /// Upserts a canonical runtime graph node.
 ///
 /// # Errors
@@ -875,7 +902,7 @@ pub async fn upsert_runtime_graph_node(
     .bind(Uuid::now_v7())
     .bind(library_id)
     .bind(canonical_key)
-    .bind(label)
+    .bind(clamp_runtime_graph_label(label))
     .bind(node_type)
     .bind(document_id)
     .bind(aliases_json)
@@ -939,7 +966,7 @@ pub async fn upsert_runtime_graph_document_node(
     .bind(Uuid::now_v7())
     .bind(library_id)
     .bind(canonical_key)
-    .bind(label)
+    .bind(clamp_runtime_graph_label(label))
     .bind(document_id)
     .bind(aliases_json)
     .bind(summary)
@@ -1014,7 +1041,8 @@ pub async fn bulk_upsert_runtime_graph_nodes(
     }
     let ids: Vec<Uuid> = (0..inputs.len()).map(|_| Uuid::now_v7()).collect();
     let canonical_keys: Vec<&str> = inputs.iter().map(|i| i.canonical_key.as_str()).collect();
-    let labels: Vec<&str> = inputs.iter().map(|i| i.label.as_str()).collect();
+    let labels: Vec<&str> =
+        inputs.iter().map(|i| clamp_runtime_graph_label(i.label.as_str())).collect();
     let node_types: Vec<&str> = inputs.iter().map(|i| i.node_type.as_str()).collect();
     let aliases_jsons: Vec<serde_json::Value> =
         inputs.iter().map(|i| i.aliases_json.clone()).collect();
@@ -1750,6 +1778,7 @@ pub async fn search_runtime_graph_evidence_by_text(
     pool: &PgPool,
     library_id: Uuid,
     query_texts: &[String],
+    document_ids: &[Uuid],
     limit: i64,
 ) -> Result<Vec<RuntimeGraphEvidenceRow>, sqlx::Error> {
     if query_texts.is_empty() || limit <= 0 {
@@ -1764,8 +1793,10 @@ pub async fn search_runtime_graph_evidence_by_text(
         limit,
         search_queries.len().saturating_add(literal_queries.len()),
     );
+    let document_filter =
+        if document_ids.is_empty() { "" } else { " and evidence.document_id = any($6::uuid[])" };
 
-    sqlx::query_as::<_, RuntimeGraphEvidenceRow>(
+    let sql = format!(
         "with requested_text(search_query, ordinal) as (
              select search_query, ordinal::integer
              from unnest($2::text[]) with ordinality as request(search_query, ordinal)
@@ -1830,6 +1861,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                  from runtime_graph_evidence as evidence
                  where evidence.library_id = $1
                    and btrim(evidence.evidence_text) <> ''
+                   {document_filter}
                    and to_tsvector('simple'::regconfig, evidence.evidence_text)
                        @@ requested_text_query.ts_query
                  order by
@@ -1877,6 +1909,7 @@ pub async fn search_runtime_graph_evidence_by_text(
                  from runtime_graph_evidence as evidence
                  where evidence.library_id = $1
                    and btrim(evidence.evidence_text) <> ''
+                   {document_filter}
                    and lower(evidence.evidence_text) like requested_literal_query.literal_pattern escape '~'
                  order by
                     evidence.confidence_score desc nulls last,
@@ -1959,15 +1992,19 @@ pub async fn search_runtime_graph_evidence_by_text(
             confidence_score desc nulls last,
             created_at desc,
             id desc
-         limit $4",
-    )
-    .bind(library_id)
-    .bind(search_queries)
-    .bind(literal_queries)
-    .bind(limit)
-    .bind(per_query_candidate_limit)
-    .fetch_all(pool)
-    .await
+         limit $4"
+    );
+
+    let mut query = sqlx::query_as::<_, RuntimeGraphEvidenceRow>(&sql)
+        .bind(library_id)
+        .bind(search_queries)
+        .bind(literal_queries)
+        .bind(limit)
+        .bind(per_query_candidate_limit);
+    if !document_ids.is_empty() {
+        query = query.bind(document_ids);
+    }
+    query.fetch_all(pool).await
 }
 
 fn runtime_graph_evidence_per_query_candidate_limit(limit: i64, query_count: usize) -> i64 {
@@ -2640,28 +2677,37 @@ pub async fn list_active_runtime_graph_target_ids_excluding_content_revision(
     .await
 }
 
-/// Marks active graph evidence for one logical content revision as inactive.
+/// Deletes active graph evidence for one logical content revision and returns
+/// the node/edge targets it pointed at.
+///
+/// The returned targets are the exact nodes/edges whose support count must be
+/// recalculated after the superseded revision's evidence is gone — a
+/// content-shrinking re-revision can drop those targets to zero support, which
+/// the caller then prunes by id. Mirrors the contract of
+/// [`deactivate_runtime_graph_evidence_by_documents`] so a re-revision supersede
+/// stays bounded to the document's own graph footprint instead of forcing a
+/// library-wide projection rebuild.
 ///
 /// # Errors
-/// Returns any `SQLx` error raised while updating revision-scoped evidence rows.
+/// Returns any `SQLx` error raised while deleting revision-scoped evidence rows.
 pub async fn deactivate_runtime_graph_evidence_by_content_revision(
     pool: &PgPool,
     library_id: Uuid,
     document_id: Uuid,
     revision_id: Uuid,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
+) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
         "delete from runtime_graph_evidence
          where library_id = $1
            and document_id = $2
-           and (revision_id = $3 or revision_id is null)",
+           and (revision_id = $3 or revision_id is null)
+         returning target_kind, target_id",
     )
     .bind(library_id)
     .bind(document_id)
     .bind(revision_id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+    .fetch_all(pool)
+    .await
 }
 
 /// Recalculates graph node/edge support counters from surviving active evidence.
@@ -3375,15 +3421,416 @@ fn admitted_runtime_graph_counts_query() -> String {
         .to_string()
 }
 
+/// One multi-word entity node eligible for acronym-alias backfill.
+#[derive(Debug, Clone, FromRow)]
+pub struct AcronymBackfillNodeRow {
+    pub id: Uuid,
+    pub label: String,
+}
+
+/// Lists non-document entity nodes of the active projection whose label is a
+/// multi-word phrase, keyset-paginated by `id`. Only multi-word labels can
+/// carry a per-word-initials acronym, so single-token labels are filtered out
+/// in SQL to keep the backfill scan bounded on large libraries.
+///
+/// The multi-word predicate is structural (an alphanumeric run, a non-alnum
+/// gap, then another alphanumeric run) and script-agnostic.
+///
+/// # Errors
+/// Returns any `SQLx` error raised during the query.
+pub async fn list_multiword_runtime_graph_nodes_for_acronym_backfill(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    after_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<AcronymBackfillNodeRow>, sqlx::Error> {
+    sqlx::query_as::<_, AcronymBackfillNodeRow>(
+        "select n.id, n.label
+         from runtime_graph_node n
+         where n.library_id = $1
+           and n.projection_version = $2
+           and n.node_type <> 'document'
+           and n.label ~ '[[:alnum:]][^[:alnum:]]+[[:alnum:]]'
+           and ($3::uuid is null or n.id > $3)
+         order by n.id asc
+         limit $4",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(after_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lists non-document entity nodes of the active projection whose label is a
+/// single token (no internal non-alphanumeric gap) and is not pure lowercase
+/// prose, keyset-paginated by `id`. These are the candidate short-form acronym
+/// nodes for the reverse corpus-gloss backfill (a node labelled `AS` gaining the
+/// full-form phrase `Alpha Suite` from a `<phrase> ( <short> )` gloss in its own
+/// evidence).
+///
+/// Both structural predicates are script-agnostic. The single-token predicate is
+/// the complement of the multi-word predicate used by
+/// [`list_multiword_runtime_graph_nodes_for_acronym_backfill`]. A label that is
+/// purely lowercase letters can never be identifier-shaped (no separator, digit,
+/// or uppercase), so excluding those in SQL is recall-complete while keeping the
+/// scan bounded; the precise identifier-shape gate runs caller-side before any
+/// evidence is loaded.
+///
+/// # Errors
+/// Returns any `SQLx` error raised during the query.
+pub async fn list_short_token_runtime_graph_nodes_for_acronym_backfill(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    after_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<AcronymBackfillNodeRow>, sqlx::Error> {
+    sqlx::query_as::<_, AcronymBackfillNodeRow>(
+        "select n.id, n.label
+         from runtime_graph_node n
+         where n.library_id = $1
+           and n.projection_version = $2
+           and n.node_type <> 'document'
+           and n.label !~ '[[:alnum:]][^[:alnum:]]+[[:alnum:]]'
+           and n.label !~ '^[[:space:]]*[[:lower:]]+[[:space:]]*$'
+           and char_length(btrim(n.label)) >= 2
+           and ($3::uuid is null or n.id > $3)
+         order by n.id asc
+         limit $4",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(after_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// One evidence chunk text attached to a graph node.
+#[derive(Debug, Clone, FromRow)]
+pub struct NodeEvidenceChunkTextRow {
+    pub node_id: Uuid,
+    pub chunk_text: String,
+}
+
+/// Loads up to `per_node_limit` evidence chunk texts for each node in
+/// `node_ids`, joining `runtime_graph_evidence` to `content_chunk`. Used by the
+/// acronym backfill to re-run the structural detectors over existing data
+/// without re-ingesting documents.
+///
+/// Only chunks that actually contain the node's label as a substring are
+/// returned. Both structural detectors require the full-form label to appear in
+/// the chunk (the parenthetical gloss is `<label> ( <short> )`; the standalone
+/// detector requires the label phrase to be present), so this filter is
+/// recall-complete for them while bounding the text volume to the chunks that
+/// can possibly carry a gloss — no arbitrary per-node cap that could drop a
+/// gloss chunk on a high-evidence node.
+///
+/// # Errors
+/// Returns any `SQLx` error raised during the query.
+pub async fn list_runtime_graph_node_evidence_chunk_texts(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    node_ids: &[Uuid],
+) -> Result<Vec<NodeEvidenceChunkTextRow>, sqlx::Error> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, NodeEvidenceChunkTextRow>(
+        "select distinct e.target_id as node_id, c.normalized_text as chunk_text
+         from runtime_graph_evidence e
+         join runtime_graph_node n
+           on n.id = e.target_id
+          and n.library_id = $1
+          and n.projection_version = $3
+         join content_chunk c on c.id = e.chunk_id
+         where e.library_id = $1
+           and e.target_kind = 'node'
+           and e.target_id = any($2::uuid[])
+           and e.chunk_id is not null
+           and position(lower(n.label) in lower(c.normalized_text)) > 0",
+    )
+    .bind(library_id)
+    .bind(node_ids)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Idempotently unions `new_aliases` into a node's `aliases_json`.
+///
+/// The update is a no-op (zero rows affected) when every alias in
+/// `new_aliases` is already present, so re-running the backfill never
+/// duplicates an alias and never churns `updated_at`. Existing aliases are
+/// preserved; the merged set is deduplicated and sorted.
+///
+/// Returns the number of rows updated (0 or 1).
+///
+/// # Errors
+/// Returns any `SQLx` error raised during the update.
+pub async fn add_runtime_graph_node_aliases(
+    pool: &PgPool,
+    node_id: Uuid,
+    projection_version: i64,
+    new_aliases: &[String],
+) -> Result<u64, sqlx::Error> {
+    let trimmed: Vec<String> = new_aliases
+        .iter()
+        .map(|alias| alias.trim().to_string())
+        .filter(|alias| !alias.is_empty())
+        .collect();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    let incoming_json = serde_json::Value::Array(
+        trimmed.iter().map(|alias| serde_json::Value::String(alias.clone())).collect(),
+    );
+    let result = sqlx::query(
+        "update runtime_graph_node n
+         set aliases_json = (
+                 select coalesce(jsonb_agg(distinct value order by value), '[]'::jsonb)
+                 from (
+                     select btrim(value) as value
+                     from jsonb_array_elements_text(
+                         case when jsonb_typeof(n.aliases_json) = 'array'
+                              then n.aliases_json else '[]'::jsonb end
+                     ) as existing(value)
+                     where btrim(value) <> ''
+                     union
+                     select btrim(value) as value
+                     from unnest($3::text[]) as incoming(value)
+                     where btrim(value) <> ''
+                 ) merged
+             ),
+             updated_at = now()
+         where n.id = $1
+           and n.projection_version = $2
+           and not (coalesce(n.aliases_json, '[]'::jsonb) @> $4::jsonb)",
+    )
+    .bind(node_id)
+    .bind(projection_version)
+    .bind(&trimmed)
+    .bind(incoming_json)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Recomputes the structural (parenthetical-gloss) acronym alias subset for a
+/// node.
+///
+/// The operation is a **replace-within-slot**, not a plain union:
+/// - Any existing alias that is identifier-shaped AND equals `label_initials`
+///   (i.e. was written by a previous structural-alias pass) is removed from the
+///   stored set if it is absent from `justified_aliases`.
+/// - Every alias in `justified_aliases` is added.
+/// - All other existing aliases (LLM-extracted, manually set) are preserved.
+///
+/// This deterministically reverts wrongly attached initials-aliases from
+/// earlier passes while keeping aliases from other sources intact. Re-running
+/// with the same `justified_aliases` is a no-op.
+///
+/// `label_initials` must be the uppercased per-word initials of the node label
+/// (e.g. `"AS"` for `"Alpha Suite"`). It is used as the discriminating key: an
+/// existing alias is only eligible for removal when it matches this value
+/// case-insensitively.
+///
+/// Returns the number of rows updated (0 or 1).
+///
+/// # Errors
+/// Returns any `SQLx` error raised during the update.
+pub async fn recompute_runtime_graph_node_structural_aliases(
+    pool: &PgPool,
+    node_id: Uuid,
+    projection_version: i64,
+    label_initials: &str,
+    justified_aliases: &[String],
+) -> Result<u64, sqlx::Error> {
+    // Build the expected final set: existing aliases that are NOT the stale
+    // initials-slot, plus the newly justified ones.
+    // We do this in SQL so it is a single round-trip and consistent even under
+    // concurrent writes.
+    let upper_initials = label_initials.to_uppercase();
+    let justified_trimmed: Vec<String> =
+        justified_aliases.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+    let justified_json = serde_json::Value::Array(
+        justified_trimmed.iter().map(|a| serde_json::Value::String(a.clone())).collect(),
+    );
+    let result = sqlx::query(
+        // $1 = node_id, $2 = projection_version,
+        // $3 = upper_initials (the stale-slot discriminator),
+        // $4 = justified_trimmed (incoming set as text[]),
+        // $5 = justified_json (for the @> no-op guard on the incoming side)
+        "update runtime_graph_node n
+         set aliases_json = (
+                 select coalesce(jsonb_agg(distinct value order by value), '[]'::jsonb)
+                 from (
+                     -- keep existing aliases that are NOT the initials slot
+                     select btrim(value) as value
+                     from jsonb_array_elements_text(
+                         case when jsonb_typeof(n.aliases_json) = 'array'
+                              then n.aliases_json else '[]'::jsonb end
+                     ) as existing(value)
+                     where btrim(value) <> ''
+                       and upper(btrim(value)) <> $3
+                     union
+                     -- add the freshly justified aliases
+                     select btrim(value) as value
+                     from unnest($4::text[]) as incoming(value)
+                     where btrim(value) <> ''
+                 ) merged
+             ),
+             updated_at = now()
+         where n.id = $1
+           and n.projection_version = $2
+           and (
+               -- there is a stale initials-alias that needs removal
+               exists (
+                   select 1
+                   from jsonb_array_elements_text(
+                       case when jsonb_typeof(n.aliases_json) = 'array'
+                            then n.aliases_json else '[]'::jsonb end
+                   ) as existing(value)
+                   where upper(btrim(value)) = $3
+                     and not ($5::jsonb @> jsonb_build_array(btrim(value)))
+               )
+               or
+               -- there is a justified alias not yet in the stored set
+               not (coalesce(n.aliases_json, '[]'::jsonb) @> $5::jsonb)
+           )",
+    )
+    .bind(node_id)
+    .bind(projection_version)
+    .bind(&upper_initials)
+    .bind(&justified_trimmed)
+    .bind(justified_json)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Recomputes the structural (parenthetical-gloss) **full-form** alias subset
+/// for a short-token node — the reverse of
+/// [`recompute_runtime_graph_node_structural_aliases`].
+///
+/// The forward pass attaches the short acronym to a multi-word node and keys the
+/// stale slot by *literal equality* with the acronym. This reverse pass attaches
+/// the full-form phrase to a node whose label *is* the short acronym and keys the
+/// stale slot by *per-word initials*: an existing alias is part of the recomputed
+/// slot iff its uppercased per-word initials equal `short_label_upper`.
+///
+/// - Any existing alias whose initials equal `short_label_upper` is removed if it
+///   is absent from `justified_aliases` (the gloss that justified it is gone).
+/// - Every alias in `justified_aliases` is added.
+/// - All other existing aliases (single-token, foreign-initials, LLM-extracted,
+///   manually set) are preserved — `is distinct from` keeps NULL-initials values.
+///
+/// `short_label_upper` must be the uppercased node label (e.g. `"AS"`). The two
+/// passes never run on the same node: the forward pass scans multi-word labels,
+/// this one scans single-token labels. Re-running with the same justified set is
+/// a no-op.
+///
+/// Returns the number of rows updated (0 or 1).
+///
+/// # Errors
+/// Returns any `SQLx` error raised during the update.
+pub async fn recompute_runtime_graph_node_fullform_aliases(
+    pool: &PgPool,
+    node_id: Uuid,
+    projection_version: i64,
+    justified_aliases: &[String],
+) -> Result<u64, sqlx::Error> {
+    let justified_trimmed: Vec<String> =
+        justified_aliases.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+    if justified_trimmed.is_empty() {
+        return Ok(0);
+    }
+    let justified_json = serde_json::Value::Array(
+        justified_trimmed.iter().map(|a| serde_json::Value::String(a.clone())).collect(),
+    );
+    // ADD-ONLY by design: the reverse direction unions gloss-justified
+    // full-form aliases into the node's alias set and never removes anything.
+    // Unlike the forward slot (the exact short string, unambiguously owned by
+    // the gloss capture), a "full-form" slot has no safe ownership marker — a
+    // removal pass keyed on per-word initials was observed stripping
+    // legitimate extraction-derived aliases of OTHER senses on polysemous
+    // short-labeled nodes. A stale gloss-derived full form lingering after a
+    // gloss disappears is the lesser harm and is corrected by re-ingest.
+    let result = sqlx::query(
+        // $1 = node_id, $2 = projection_version,
+        // $3 = justified aliases as text[], $4 = same as jsonb (no-op guard).
+        "update runtime_graph_node n
+         set aliases_json = (
+                 select coalesce(jsonb_agg(distinct value order by value), '[]'::jsonb)
+                 from (
+                     select btrim(value) as value
+                     from jsonb_array_elements_text(
+                         case when jsonb_typeof(n.aliases_json) = 'array'
+                              then n.aliases_json else '[]'::jsonb end
+                     ) as existing(value)
+                     where btrim(value) <> ''
+                     union
+                     select btrim(value) as value
+                     from unnest($3::text[]) as incoming(value)
+                     where btrim(value) <> ''
+                 ) merged
+             ),
+             updated_at = now()
+         where n.id = $1
+           and n.projection_version = $2
+           and not (coalesce(n.aliases_json, '[]'::jsonb) @> $4::jsonb)",
+    )
+    .bind(node_id)
+    .bind(projection_version)
+    .bind(&justified_trimmed)
+    .bind(justified_json)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP, runtime_graph_entity_search_terms,
+        RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP, RUNTIME_GRAPH_LABEL_MAX_BYTES,
+        clamp_runtime_graph_label, runtime_graph_entity_search_terms,
         runtime_graph_entity_wildcard_prefixes, runtime_graph_evidence_literal_search_queries,
         runtime_graph_evidence_per_query_candidate_limit,
         runtime_graph_evidence_text_search_queries,
         runtime_graph_evidence_text_search_token_prefix, runtime_graph_evidence_text_search_tokens,
     };
+
+    #[test]
+    fn clamp_runtime_graph_label_leaves_short_labels_untouched() {
+        let label = "Alpha Suite payment module";
+        assert_eq!(clamp_runtime_graph_label(label), label);
+    }
+
+    #[test]
+    fn clamp_runtime_graph_label_bounds_oversized_labels_by_bytes() {
+        // A ~1.6 KB ASCII "label" — the extraction-noise shape that overflowed
+        // the btree index and aborted whole-library restores (R4).
+        let oversized = "x".repeat(1600 * 4);
+        let clamped = clamp_runtime_graph_label(&oversized);
+        assert!(clamped.len() <= RUNTIME_GRAPH_LABEL_MAX_BYTES);
+        assert!(oversized.starts_with(clamped));
+    }
+
+    #[test]
+    fn clamp_runtime_graph_label_never_splits_a_codepoint() {
+        // Each codepoint here is multi-byte; the cap must fall back to a char
+        // boundary rather than slice mid-codepoint (which would panic / corrupt).
+        // Script-agnostic: we assert structural validity, not any language.
+        let multibyte = "\u{1F680}".repeat(RUNTIME_GRAPH_LABEL_MAX_BYTES); // 4 bytes each
+        let clamped = clamp_runtime_graph_label(&multibyte);
+        assert!(clamped.len() <= RUNTIME_GRAPH_LABEL_MAX_BYTES);
+        // Re-borrowing as &str proves we landed on a valid UTF-8 boundary.
+        assert!(clamped.chars().all(|ch| ch == '\u{1F680}'));
+    }
 
     #[test]
     fn evidence_text_search_tokens_keep_structural_literals_without_language_lists() {

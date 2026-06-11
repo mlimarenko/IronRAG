@@ -335,6 +335,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: false,
+            system_role: None,
         }
     }
 
@@ -445,6 +446,8 @@ mod tests {
         assert!(descriptor.description.contains("then follow up if the result is incomplete"));
         assert!(descriptor.description.contains("sourced package/module"));
         assert!(descriptor.description.contains("parameter names/defaults"));
+        assert!(descriptor.description.contains("copy or minimally reformat"));
+        assert!(descriptor.description.contains("exact code-formatted literals"));
         assert!(
             descriptor.description.contains("preserve the tool result's visible item coverage")
         );

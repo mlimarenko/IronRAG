@@ -134,6 +134,30 @@ enum Commands {
         cluster_size: usize,
     },
 
+    /// Backfill corpus-gloss acronym aliases for a library's graph nodes.
+    ///
+    /// Re-reads each multi-word entity node's evidence chunk text, applies the
+    /// structural acronym detectors against the node label, and unions any
+    /// detected short forms into the node's aliases. Idempotent: re-running
+    /// attaches nothing new.
+    BackfillAcronymAliases {
+        /// Library slug
+        library: String,
+    },
+
+    /// Backfill structural document parentage and roles for a library.
+    ///
+    /// Re-resolves declared parent keys, recovers parentage structurally for
+    /// legacy rows from the attachment page id in their structural source, and
+    /// finalizes each child's typed role from its media class. Idempotent:
+    /// re-running resolves and updates nothing. Reports scanned / resolved /
+    /// role-set counts plus the orphan and unresolved-image-children gate
+    /// metrics.
+    BackfillDocumentParents {
+        /// Library slug
+        library: String,
+    },
+
     /// Print CLI build version
     Version,
 }
@@ -869,6 +893,59 @@ async fn cmd_build_raptor(
     Ok(())
 }
 
+// ── Graph maintenance commands ──────────────────────────────────────
+
+async fn cmd_backfill_acronym_aliases(pool: &PgPool, library: &str) -> Result<()> {
+    let library_id = resolve_library_id(pool, library).await?;
+    println!("Backfilling acronym aliases for library '{library}' (id: {library_id})...");
+
+    let report =
+        ironrag_backend::services::graph::acronym_alias_backfill::backfill_acronym_aliases(
+            pool, library_id,
+        )
+        .await
+        .context("acronym alias backfill failed")?;
+
+    println!(
+        "Acronym alias backfill complete:\n  forward (short alias on multi-word node): {} nodes scanned, {} nodes updated, {} aliases added\n  reverse (full-form alias on short node):  {} nodes scanned, {} nodes updated, {} aliases added",
+        report.nodes_scanned,
+        report.nodes_updated,
+        report.aliases_added,
+        report.reverse_nodes_scanned,
+        report.reverse_nodes_updated,
+        report.reverse_aliases_added,
+    );
+    Ok(())
+}
+
+async fn cmd_backfill_document_parents(pool: &PgPool, library: &str) -> Result<()> {
+    let library_id = resolve_library_id(pool, library).await?;
+    println!("Backfilling document parentage for library '{library}' (id: {library_id})...");
+
+    let report =
+        ironrag_backend::services::content::document_parent_backfill::backfill_document_parents(
+            pool, library_id,
+        )
+        .await
+        .context("document-parentage backfill failed")?;
+
+    println!(
+        "Document-parentage backfill complete: {} scanned, {} resolved, {} roles set, {} orphan image children, {} unresolved image children",
+        report.scanned,
+        report.resolved,
+        report.role_set,
+        report.orphan_image_children,
+        report.unresolved_image_children,
+    );
+    if report.unresolved_image_children > 0 {
+        eprintln!(
+            "WARNING: {} raster-image children have a resolvable parent that was not attached; this must be zero",
+            report.unresolved_image_children,
+        );
+    }
+    Ok(())
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -921,6 +998,14 @@ async fn main() -> Result<()> {
 
         Commands::BuildRaptor { library, max_level, cluster_size } => {
             cmd_build_raptor(&pool, settings, &library, max_level, cluster_size).await
+        }
+
+        Commands::BackfillAcronymAliases { library } => {
+            cmd_backfill_acronym_aliases(&pool, &library).await
+        }
+
+        Commands::BackfillDocumentParents { library } => {
+            cmd_backfill_document_parents(&pool, &library).await
         }
 
         Commands::Version => unreachable!("handled before pool init"),

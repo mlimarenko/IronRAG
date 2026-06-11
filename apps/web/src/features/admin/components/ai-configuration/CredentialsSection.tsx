@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { KeyRound, Loader2 } from 'lucide-react';
+import { KeyRound, Loader2, Pencil, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { z } from 'zod';
 
@@ -20,12 +20,7 @@ import {
   normalizeProviderBaseUrl,
   resolveProviderCredentialPolicy,
 } from '@/shared/lib/ai-provider';
-
-function canOverrideBaseUrl(
-  provider: { credentialSource?: string } | null | undefined,
-): boolean {
-  return Boolean(provider) && provider?.credentialSource !== 'env';
-}
+import { errorMessage } from '@/shared/lib/errorMessage';
 import { ProviderCredentialFields } from '@/shared/components/ai-provider/ProviderCredentialFields';
 import {
   fieldErrorMessage,
@@ -48,6 +43,12 @@ import {
 
 import { EntityWorkbench, InspectorField, InspectorSection } from './EntityWorkbench';
 
+function canOverrideBaseUrl(
+  provider: { credentialSource?: string } | null | undefined,
+): boolean {
+  return Boolean(provider) && provider?.credentialSource !== 'env';
+}
+
 type CredentialsSectionProps = {
   selectedScope: AIScopeKind;
   scopeContext: AiScopeContext;
@@ -68,6 +69,8 @@ export function CredentialsSection({
   const { t } = useTranslation();
   const [credentialOpen, setCredentialOpen] = useState(false);
   const [editingCredential, setEditingCredential] = useState<AICredential | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AICredential | null>(null);
+  const [deletingCredential, setDeletingCredential] = useState(false);
   const [credentialLabelTouched, setCredentialLabelTouched] = useState(false);
   const credentialSchema = useMemo(
     () =>
@@ -258,6 +261,21 @@ export function CredentialsSection({
     },
   );
 
+  const deleteCredential = async () => {
+    if (!deleteTarget || deletingCredential) return;
+    setDeletingCredential(true);
+    try {
+      await adminApi.deleteCredential(deleteTarget.id);
+      setDeleteTarget(null);
+      invalidateAll();
+      toast.success(t('admin.aiPanel.messages.credentialDeleted'));
+    } catch (err) {
+      toast.error(errorMessage(err, t('admin.aiPanel.messages.credentialDeleteFailed')));
+    } finally {
+      setDeletingCredential(false);
+    }
+  };
+
   const toolbar = (
     <Button size="sm" onClick={openNewCredentialEditor}>
       <KeyRound className="mr-1.5 h-3.5 w-3.5" /> {t('admin.add')}
@@ -276,6 +294,30 @@ export function CredentialsSection({
         emptyMessage={t('admin.aiPanel.empty.noLocalCredentials')}
         searchPlaceholder={t('admin.aiPanel.filters.credentialsSearch')}
         toolbar={toolbar}
+        rowActions={entry => (
+          <>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              aria-label={`${t('admin.edit')}: ${entry.label}`}
+              onClick={() => openCredentialEditor(entry)}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 text-status-failed hover:text-status-failed"
+              aria-label={`${t('admin.delete')}: ${entry.label}`}
+              onClick={() => setDeleteTarget(entry)}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </>
+        )}
         matchesFilter={(entry, filter) =>
           matchesFilter(
             [
@@ -373,19 +415,27 @@ export function CredentialsSection({
                   </InspectorSection>
                 )}
                 <InspectorSection title={t('admin.aiPanel.fields.identifier')}>
-                  <InspectorField label="ID" value={entry.id} mono />
+                  <InspectorField label={t('admin.aiPanel.fields.identifier')} value={entry.id} mono />
                 </InspectorSection>
               </>
             ),
             actions: (
-              <Button
-                size="sm"
-                variant="outline"
-                className="w-full justify-center"
-                onClick={() => openCredentialEditor(entry)}
-              >
-                {t('admin.edit')}
-              </Button>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => openCredentialEditor(entry)}
+                >
+                  <Pencil className="mr-1.5 h-3.5 w-3.5" /> {t('admin.edit')}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setDeleteTarget(entry)}
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" /> {t('admin.delete')}
+                </Button>
+              </div>
             ),
           };
         }}
@@ -449,6 +499,25 @@ export function CredentialsSection({
             <Button variant="outline" onClick={resetCredentialDialog}>{t('admin.cancel')}</Button>
             <Button disabled={!credentialForm.formState.isValid || credentialForm.formState.isSubmitting} onClick={() => void saveCredential()}>
               {credentialForm.formState.isSubmitting ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={open => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('admin.aiPanel.dialogs.deleteCredentialTitle')}</DialogTitle>
+            <DialogDescription>
+              {t('admin.aiPanel.dialogs.deleteCredentialDescription', {
+                credential: deleteTarget?.label ?? '',
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('admin.cancel')}</Button>
+            <Button variant="destructive" disabled={deletingCredential} onClick={() => void deleteCredential()}>
+              {deletingCredential ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.delete')}
             </Button>
           </DialogFooter>
         </DialogContent>

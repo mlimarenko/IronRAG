@@ -5,6 +5,7 @@ import type {
   DocumentStatus as GeneratedDocumentStatus,
   GraphStatus as GeneratedGraphStatus,
 } from "@/shared/api/generated";
+import type { DocumentFailureNotice } from "@/shared/lib/document-processing";
 
 // Core domain types for IronRAG
 
@@ -56,6 +57,7 @@ export interface DocumentItem {
   fileType: string;
   fileSize: number;
   uploadedAt: string;
+  completedAt?: string;
   cost: number | null;
   status: DocumentStatus;
   readiness: DocumentReadiness;
@@ -66,6 +68,7 @@ export interface DocumentItem {
   failureCode?: string;
   failureMessage?: string;
   statusReason?: string;
+  failureNotice?: DocumentFailureNotice;
   canRetry?: boolean;
   documentHint?: string;
   sourceKind?:
@@ -167,6 +170,15 @@ export interface AssistantMessage {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
+  /**
+   * Server-authoritative wall-clock for the turn, in milliseconds. Measured
+   * end-to-end on the API host (`execution.completedAt − execution.startedAt`)
+   * so it never folds in client↔server clock skew the way subtracting the
+   * optimistic browser-stamped user timestamp from the server answer timestamp
+   * would. Absent on messages hydrated from history (reload path), where the
+   * server-vs-server timestamp delta is used instead.
+   */
+  durationMs?: number;
   executionId?: string | null;
   attachments?: FileAttachment[];
   stage?: AssistantStage;
@@ -332,7 +344,7 @@ export interface AIProvider {
   displayName: string;
   kind: string;
   apiStyle: string;
-  lifecycleState: "active" | "deprecated" | "preview";
+  lifecycleState: "active" | "deprecated" | "preview" | "disabled";
   defaultBaseUrl?: string;
   apiKeyRequired: boolean;
   baseUrlRequired: boolean;
@@ -372,6 +384,7 @@ export interface AIModelOption {
   capabilityKind: string;
   modalityKind: string;
   allowedBindingPurposes: AIPurpose[];
+  lifecycleState?: "active" | "deprecated" | "preview" | "disabled";
   contextWindow?: number;
   maxOutputTokens?: number;
   availabilityState: AIModelAvailabilityState;
@@ -412,6 +425,8 @@ export interface AIBindingAssignment {
 
 export interface PricingRule {
   id: string;
+  modelCatalogId: string;
+  workspaceId?: string;
   provider: string;
   model: string;
   billingUnit: string;

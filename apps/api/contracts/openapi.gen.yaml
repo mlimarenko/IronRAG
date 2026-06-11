@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.4.23
+  version: 0.5.0
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -272,6 +272,34 @@ paths:
           description: Caller cannot administer credentials in the credential's scope
         '404':
           description: Credential not found
+    delete:
+      tags:
+      - ai
+      summary: Delete ai credential.
+      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+      operationId: deleteAiCredential
+      parameters:
+      - name: credentialId
+        in: path
+        description: Provider credential identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Empty acknowledgement payload
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot administer credentials in the credential's scope
+        '404':
+          description: Credential not found
+        '409':
+          description: Credential is still referenced
   /v1/ai/model-presets:
     get:
       tags:
@@ -367,6 +395,34 @@ paths:
           description: Caller cannot administer presets in the preset's scope
         '404':
           description: Preset not found
+    delete:
+      tags:
+      - ai
+      summary: Delete ai model preset.
+      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+      operationId: deleteAiModelPreset
+      parameters:
+      - name: presetId
+        in: path
+        description: Model preset identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Empty acknowledgement payload
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot administer presets in the preset's scope
+        '404':
+          description: Preset not found
+        '409':
+          description: Preset is still referenced
   /v1/ai/models:
     get:
       tags:
@@ -412,6 +468,89 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller cannot view the requested workspace/library
+    post:
+      tags:
+      - ai
+      summary: Create ai model.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: createAiModel
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateModelCatalogRequest'
+        required: true
+      responses:
+        '200':
+          description: Newly created AI model catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelCatalogEntryResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+  /v1/ai/models/{modelId}:
+    put:
+      tags:
+      - ai
+      summary: Update ai model.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: updateAiModel
+      parameters:
+      - name: modelId
+        in: path
+        description: AI model catalog identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateModelCatalogRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated AI model catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelCatalogEntryResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '404':
+          description: Model not found
+    delete:
+      tags:
+      - ai
+      summary: Delete ai model.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+      operationId: deleteAiModel
+      parameters:
+      - name: modelId
+        in: path
+        description: AI model catalog identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Model catalog entry was disabled
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '404':
+          description: Model not found
   /v1/ai/prices:
     get:
       tags:
@@ -500,6 +639,36 @@ paths:
           description: Caller cannot administer pricing for the workspace
         '404':
           description: Price override not found
+    delete:
+      tags:
+      - ai
+      summary: Delete ai price override.
+      description: Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+      operationId: deleteAiPriceOverride
+      parameters:
+      - name: priceId
+        in: path
+        description: Price catalog entry identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Empty acknowledgement payload
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: System catalog prices are read-only
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot administer pricing for the workspace
+        '404':
+          description: Price override not found
+        '409':
+          description: Price override is still referenced
   /v1/ai/providers:
     get:
       tags:
@@ -518,6 +687,89 @@ paths:
                   $ref: '#/components/schemas/ProviderCatalogEntryResponse'
         '401':
           description: Caller is not authenticated
+    post:
+      tags:
+      - ai
+      summary: Create ai provider.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: createAiProvider
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProviderCatalogRequest'
+        required: true
+      responses:
+        '200':
+          description: Newly created AI provider catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderCatalogEntryResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+  /v1/ai/providers/{providerId}:
+    put:
+      tags:
+      - ai
+      summary: Update ai provider.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: updateAiProvider
+      parameters:
+      - name: providerId
+        in: path
+        description: AI provider catalog identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProviderCatalogRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated AI provider catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderCatalogEntryResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '404':
+          description: Provider not found
+    delete:
+      tags:
+      - ai
+      summary: Delete ai provider.
+      description: Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+      operationId: deleteAiProvider
+      parameters:
+      - name: providerId
+        in: path
+        description: AI provider catalog identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Provider catalog entry was disabled
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '404':
+          description: Provider not found
   /v1/audit/events:
     get:
       tags:
@@ -1298,6 +1550,16 @@ paths:
         required: false
         schema:
           type: string
+      - name: ids
+        in: query
+        description: |-
+          Comma-separated list of document ids to keep. Empty or absent = no
+          filter. Lets a caller resolve specific documents (e.g. a deep link
+          carrying `documentId`) through the same canonical list derivation
+          that powers the table, instead of a divergent per-id detail mapper.
+        required: false
+        schema:
+          type: string
       responses:
         '200':
           description: Document list page
@@ -1878,12 +2140,12 @@ paths:
         content:
           application/zstd: {}
       responses:
-        '200':
-          description: Snapshot import report (per-table row counts, blob count, applied overwrite mode)
+        '202':
+          description: Snapshot import accepted; poll /v1/ops/operations/{operationId}
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SnapshotImportReportResponse'
+                $ref: '#/components/schemas/SnapshotImportAcceptedResponse'
         '401':
           description: Caller is not authenticated
         '403':
@@ -2433,6 +2695,152 @@ paths:
           description: Caller is not an IAM administrator
         '404':
           description: Token principal not found
+  /v1/iam/users:
+    get:
+      tags:
+      - iam
+      summary: List iam users.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+      operationId: listIamUsers
+      responses:
+        '200':
+          description: All user principals with their system roles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+    post:
+      tags:
+      - iam
+      summary: Create iam user.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: createIamUser
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+        required: true
+      responses:
+        '200':
+          description: Newly created user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          description: Invalid request payload
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '409':
+          description: Login or email already exists
+  /v1/iam/users/{principalId}/access:
+    get:
+      tags:
+      - iam
+      summary: Get iam user access.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+      operationId: getIamUserAccess
+      parameters:
+      - name: principalId
+        in: path
+        description: User principal id whose access is read
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The user's workspace and library access grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserAccessResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '404':
+          description: User not found
+    put:
+      tags:
+      - iam
+      summary: Set iam user access.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: setIamUserAccess
+      parameters:
+      - name: principalId
+        in: path
+        description: User principal id whose access is set
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetUserAccessRequest'
+        required: true
+      responses:
+        '200':
+          description: The user's access after reconciliation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserAccessResponse'
+        '400':
+          description: Invalid permission kind for a resource
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '404':
+          description: User, workspace or library not found
+  /v1/iam/users/{principalId}/role:
+    patch:
+      tags:
+      - iam
+      summary: Set iam user role.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: setIamUserRole
+      parameters:
+      - name: principalId
+        in: path
+        description: User principal id whose role changes
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetUserRoleRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not a system administrator
+        '404':
+          description: User not found
+        '409':
+          description: Would demote the last remaining administrator
   /v1/ingest/attempts/{attemptId}:
     get:
       tags:
@@ -4558,6 +4966,35 @@ components:
         same response shape. `progress` is populated whenever at least one child
         operation references this row via `parent_async_operation_id`; for
         non-batch operations it reports zeros across the board.
+    AuditActorPrincipalResponse:
+      type: object
+      required:
+      - id
+      - principalKind
+      - status
+      - displayLabel
+      properties:
+        displayLabel:
+          type: string
+        displayName:
+          type:
+          - string
+          - 'null'
+        id:
+          type: string
+          format: uuid
+        login:
+          type:
+          - string
+          - 'null'
+        principalKind:
+          type: string
+        role:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
     AuditAssistantCallResponse:
       type: object
       required:
@@ -4636,6 +5073,10 @@ components:
       properties:
         actionKind:
           type: string
+        actorPrincipal:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/AuditActorPrincipalResponse'
         actorPrincipalId:
           type:
           - string
@@ -5966,6 +6407,15 @@ components:
           type:
           - string
           - 'null'
+        parentExternalKey:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Optional connector-declared structural parent identity
+            (`content_document.external_key` of the parent document). When the
+            parent already exists in the library it is resolved at admission;
+            otherwise the deferred resolver reconciles it later.
         sourceUri:
           type:
           - string
@@ -6014,6 +6464,41 @@ components:
           format: uuid
         resourceKind:
           $ref: '#/components/schemas/IamGrantResourceKind'
+    CreateModelCatalogRequest:
+      type: object
+      required:
+      - providerCatalogId
+      - modelName
+      - capabilityKind
+      - modalityKind
+      - lifecycleState
+      properties:
+        allowedBindingPurposes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AiBindingPurpose'
+        capabilityKind:
+          type: string
+        contextWindow:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        lifecycleState:
+          type: string
+        maxOutputTokens:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        metadataJson: {}
+        modalityKind:
+          type: string
+        modelName:
+          type: string
+        providerCatalogId:
+          type: string
+          format: uuid
     CreateModelPresetRequest:
       type: object
       required:
@@ -6118,6 +6603,28 @@ components:
         workspaceId:
           type: string
           format: uuid
+    CreateProviderCatalogRequest:
+      type: object
+      required:
+      - providerKind
+      - displayName
+      - apiStyle
+      - lifecycleState
+      - capabilityFlagsJson
+      properties:
+        apiStyle:
+          type: string
+        capabilityFlagsJson: {}
+        defaultBaseUrl:
+          type:
+          - string
+          - 'null'
+        displayName:
+          type: string
+        lifecycleState:
+          type: string
+        providerKind:
+          type: string
     CreateProviderCredentialRequest:
       type: object
       required:
@@ -6212,6 +6719,25 @@ components:
         workspaceId:
           type: string
           format: uuid
+    CreateUserRequest:
+      type: object
+      required:
+      - login
+      - email
+      - displayName
+      - password
+      - role
+      properties:
+        displayName:
+          type: string
+        email:
+          type: string
+        login:
+          type: string
+        password:
+          type: string
+        role:
+          $ref: '#/components/schemas/SystemRole'
     CreateWebIngestRunRequest:
       type: object
       required:
@@ -6434,9 +6960,9 @@ components:
       required:
       - postgres
       - redis
-      - arangodb
+      - knowledgePlane
       properties:
-        arangodb:
+        knowledgePlane:
           $ref: '#/components/schemas/DependencyStatus'
         postgres:
           $ref: '#/components/schemas/DependencyStatus'
@@ -7217,26 +7743,6 @@ components:
       - api_token
       - worker
       - bootstrap
-    IncludeKind:
-      type: string
-      description: |-
-        Scope of a library snapshot.
-
-        A library is an atomic unit from the operator's point of view: its
-        documents, revisions, chunks, graph facts, knowledge entities and
-        relations all describe the same thing and are worthless without each
-        other. The canonical scope keeps that domain model whole instead of
-        exposing persistence-tier fragments to operators.
-
-        The canonical scope `LibraryData` therefore always includes every
-        non-blob row required to rebuild the library 1:1. `Blobs` is the
-        separate opt-in toggle for original source files (PDFs, images,
-        etc.); it is optional because a large library's source tree can
-        easily dwarf the rest of the snapshot.
-      enum:
-      - workspace
-      - library_data
-      - blobs
     IngestAttempt:
       type: object
       required:
@@ -8150,9 +8656,18 @@ components:
           - string
           - 'null'
           format: date-time
+        document_hint:
+          type:
+          - string
+          - 'null'
         document_id:
           type: string
           format: uuid
+        document_role:
+          type: string
+          description: |-
+            Typed document role mirrored from `content_document.document_role`
+            (`primary` | `attachment` | `attached_context`).
         document_state:
           type: string
         external_key:
@@ -8169,11 +8684,23 @@ components:
         library_id:
           type: string
           format: uuid
+        parent_document_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: |-
+            Canonical structural source parent (mirrored from
+            `content_document.parent_document_id`). `None` for primary documents.
         readable_revision_id:
           type:
           - string
           - 'null'
           format: uuid
+        source_uri:
+          type:
+          - string
+          - 'null'
         title:
           type:
           - string
@@ -9014,6 +9541,18 @@ components:
         typedFactCount:
           type: integer
           minimum: 0
+    LibraryAccessEntryRequest:
+      type: object
+      description: Desired library access entry in a `PUT /iam/users/{id}/access` request.
+      required:
+      - libraryId
+      - permissionKind
+      properties:
+        libraryId:
+          type: string
+          format: uuid
+        permissionKind:
+          $ref: '#/components/schemas/IamPermissionKind'
     LibraryCostSummary:
       type: object
       required:
@@ -9392,6 +9931,7 @@ components:
       - modelName
       - capabilityKind
       - modalityKind
+      - lifecycleState
       - allowedBindingPurposes
       - availabilityState
       - availableCredentialIds
@@ -9417,6 +9957,8 @@ components:
         id:
           type: string
           format: uuid
+        lifecycleState:
+          type: string
         maxOutputTokens:
           type:
           - integer
@@ -10890,6 +11432,31 @@ components:
         principalId:
           type: string
           format: uuid
+    SetUserAccessRequest:
+      type: object
+      description: |-
+        Declarative target state for a user's workspace + library access.
+
+        The handler reconciles the user's existing workspace/library grants against
+        this set: grants not present here are revoked, missing ones are created, and
+        matching ones are left untouched. Other grant kinds (system, document, etc.)
+        are not touched by this endpoint.
+      properties:
+        libraries:
+          type: array
+          items:
+            $ref: '#/components/schemas/LibraryAccessEntryRequest'
+        workspaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkspaceAccessEntryRequest'
+    SetUserRoleRequest:
+      type: object
+      required:
+      - role
+      properties:
+        role:
+          $ref: '#/components/schemas/SystemRole'
     ShellBootstrap:
       type: object
       required:
@@ -10979,63 +11546,30 @@ components:
           format: uuid
         role:
           $ref: '#/components/schemas/ShellRole'
-    SnapshotImportReportResponse:
+    SnapshotImportAcceptedResponse:
       type: object
       required:
+      - operationId
+      - workspaceId
       - libraryId
       - overwriteMode
-      - includeKinds
-      - postgresRowsByTable
-      - arangoDocsByStore
-      - arangoEdgesByStore
-      - skippedArangoEdgesByStore
-      - blobsRestored
+      - archiveBytes
       properties:
-        arangoDocsByStore:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
-        arangoEdgesByStore:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
-        blobsRestored:
+        archiveBytes:
           type: integer
           format: int64
           minimum: 0
-        includeKinds:
-          type: array
-          items:
-            $ref: '#/components/schemas/IncludeKind'
         libraryId:
+          type: string
+          format: uuid
+        operationId:
           type: string
           format: uuid
         overwriteMode:
           $ref: '#/components/schemas/OverwriteMode'
-        postgresRowsByTable:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
-        skippedArangoEdgesByStore:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
+        workspaceId:
+          type: string
+          format: uuid
     StartupAuthorityState:
       type: string
       enum:
@@ -11178,6 +11712,17 @@ components:
         workspaceId:
           type: string
           format: uuid
+    SystemRole:
+      type: string
+      description: |-
+        System role assigned to a user principal (viewer < operator < admin).
+
+        Canonical source for the UI shell's capability gating. Mirrors the
+        `public.iam_system_role` PG enum and the `ShellRole` shell-bootstrap field.
+      enum:
+      - viewer
+      - operator
+      - admin
     TechnicalFactKind:
       type: string
       enum:
@@ -11600,6 +12145,41 @@ components:
           $ref: '#/components/schemas/WebIngestUrlFilter'
         materializationFilter:
           $ref: '#/components/schemas/WebIngestUrlFilter'
+    UpdateModelCatalogRequest:
+      type: object
+      required:
+      - providerCatalogId
+      - modelName
+      - capabilityKind
+      - modalityKind
+      - lifecycleState
+      properties:
+        allowedBindingPurposes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AiBindingPurpose'
+        capabilityKind:
+          type: string
+        contextWindow:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        lifecycleState:
+          type: string
+        maxOutputTokens:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        metadataJson: {}
+        modalityKind:
+          type: string
+        modelName:
+          type: string
+        providerCatalogId:
+          type: string
+          format: uuid
     UpdateModelPresetRequest:
       type: object
       required:
@@ -11627,6 +12207,27 @@ components:
           - number
           - 'null'
           format: double
+    UpdateProviderCatalogRequest:
+      type: object
+      required:
+      - providerKind
+      - displayName
+      - apiStyle
+      - lifecycleState
+      properties:
+        apiStyle:
+          type: string
+        capabilityFlagsJson: {}
+        defaultBaseUrl:
+          type:
+          - string
+          - 'null'
+        displayName:
+          type: string
+        lifecycleState:
+          type: string
+        providerKind:
+          type: string
     UpdateProviderCredentialRequest:
       type: object
       required:
@@ -11697,10 +12298,57 @@ components:
           format: uuid
         unitPrice:
           type: string
+    UserAccessResponse:
+      type: object
+      description: |-
+        The full per-user access picture: every workspace- and library-scoped grant
+        the admin can manage from the Users access editor.
+      required:
+      - principalId
+      - workspaces
+      - libraries
+      properties:
+        libraries:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserLibraryAccessResponse'
+        principalId:
+          type: string
+          format: uuid
+        workspaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserWorkspaceAccessResponse'
+    UserLibraryAccessResponse:
+      type: object
+      description: |-
+        One library the user has been granted access to, with its workspace and the
+        permission tier. Returned by `GET /iam/users/{id}/access`.
+      required:
+      - grantId
+      - libraryId
+      - workspaceId
+      - displayName
+      - permissionKind
+      properties:
+        displayName:
+          type: string
+        grantId:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        permissionKind:
+          $ref: '#/components/schemas/IamPermissionKind'
+        workspaceId:
+          type: string
+          format: uuid
     UserProfile:
       type: object
       required:
       - principalId
+      - role
       properties:
         displayName:
           type:
@@ -11717,6 +12365,8 @@ components:
         principalId:
           type: string
           format: uuid
+        role:
+          $ref: '#/components/schemas/SystemRole'
     UserResponse:
       type: object
       required:
@@ -11724,6 +12374,7 @@ components:
       - login
       - email
       - displayName
+      - role
       - authProviderKind
       properties:
         authProviderKind:
@@ -11739,6 +12390,29 @@ components:
         login:
           type: string
         principalId:
+          type: string
+          format: uuid
+        role:
+          $ref: '#/components/schemas/SystemRole'
+    UserWorkspaceAccessResponse:
+      type: object
+      description: |-
+        One workspace the user has been granted access to, with the permission
+        tier that access was granted at. Returned by `GET /iam/users/{id}/access`.
+      required:
+      - grantId
+      - workspaceId
+      - displayName
+      - permissionKind
+      properties:
+        displayName:
+          type: string
+        grantId:
+          type: string
+          format: uuid
+        permissionKind:
+          $ref: '#/components/schemas/IamPermissionKind'
+        workspaceId:
           type: string
           format: uuid
     VersionResponse:
@@ -12158,6 +12832,18 @@ components:
       - web_snapshot_unavailable
       - web_capture_materialization_failed
       - recursive_crawl_failed
+    WorkspaceAccessEntryRequest:
+      type: object
+      description: Desired workspace access entry in a `PUT /iam/users/{id}/access` request.
+      required:
+      - workspaceId
+      - permissionKind
+      properties:
+        permissionKind:
+          $ref: '#/components/schemas/IamPermissionKind'
+        workspaceId:
+          type: string
+          format: uuid
     WorkspaceCostSummary:
       type: object
       required:

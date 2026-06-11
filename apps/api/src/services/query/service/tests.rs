@@ -5,11 +5,15 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    domains::query::{QueryTurnKind, QueryVerificationState},
+    domains::{
+        agent_runtime::RuntimeLifecycleState,
+        query::{QueryTurnKind, QueryVerificationState},
+    },
     infra::{
         arangodb::{
             context_store::{
-                KnowledgeBundleChunkReferenceRow, KnowledgeContextBundleReferenceSetRow,
+                KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
+                KnowledgeBundleRelationReferenceRow, KnowledgeContextBundleReferenceSetRow,
                 KnowledgeContextBundleRow,
             },
             document_store::{KnowledgeChunkRow, KnowledgeStructuredBlockRow},
@@ -23,18 +27,24 @@ use crate::{
 };
 
 use super::{
-    ExternalConversationTurn, MAX_DETAIL_PREPARED_SEGMENT_REFERENCES,
-    MAX_DETAIL_TECHNICAL_FACT_REFERENCES, RankedBundleReference,
+    ExternalConversationTurn, MAX_DETAIL_GRAPH_EDGE_REFERENCES, MAX_DETAIL_GRAPH_NODE_REFERENCES,
+    MAX_DETAIL_PREPARED_SEGMENT_REFERENCES, MAX_DETAIL_TECHNICAL_FACT_REFERENCES,
+    RankedBundleReference,
     context::{
         derive_fact_rank_refs, seed_chunk_refs_from_answer_context,
         seed_entity_refs_from_answer_graph, seed_relation_endpoint_refs_from_answer_graph,
         seed_relation_refs_from_answer_graph, selected_fact_ids_for_detail,
     },
-    formatting::{build_prepared_segment_references, parse_query_verification_state},
+    formatting::{
+        build_prepared_segment_references, map_entity_references, map_relation_references,
+        parse_query_verification_state,
+    },
     session::{
         build_conversation_runtime_context,
         build_conversation_runtime_context_with_external_history,
         build_prior_grounded_answer_context_messages,
+        select_prior_grounded_answer_replay_executions,
+        should_replay_prior_grounded_answer_context,
     },
 };
 
@@ -261,6 +271,83 @@ fn selected_fact_ids_for_detail_stays_bounded_to_canonical_limit() {
 }
 
 #[test]
+fn graph_references_for_detail_stay_bounded_and_ranked() {
+    let bundle_id = Uuid::now_v7();
+    let execution_id = Uuid::now_v7();
+    let total = MAX_DETAIL_GRAPH_NODE_REFERENCES + 8;
+    let bundle = KnowledgeContextBundleReferenceSetRow {
+        bundle: KnowledgeContextBundleRow {
+            key: bundle_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            bundle_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            query_execution_id: Some(execution_id),
+            bundle_state: "ready".to_string(),
+            bundle_strategy: "hybrid".to_string(),
+            requested_mode: "mix".to_string(),
+            resolved_mode: "mix".to_string(),
+            selected_fact_ids: Vec::new(),
+            verification_state: "not_run".to_string(),
+            verification_warnings: json!([]),
+            freshness_snapshot: json!({}),
+            candidate_summary: json!({}),
+            assembly_diagnostics: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        },
+        chunk_references: Vec::new(),
+        entity_references: (0..total)
+            .map(|index| {
+                let rank = i32::try_from(total - index).expect("synthetic rank fits i32");
+                let entity_id = Uuid::now_v7();
+                KnowledgeBundleEntityReferenceRow {
+                    key: format!("{bundle_id}:{entity_id}"),
+                    bundle_id,
+                    entity_id,
+                    rank,
+                    score: f64::from(rank),
+                    inclusion_reason: Some("synthetic".to_string()),
+                    created_at: Utc::now(),
+                }
+            })
+            .collect(),
+        relation_references: (0..(MAX_DETAIL_GRAPH_EDGE_REFERENCES + 8))
+            .map(|index| {
+                let total = MAX_DETAIL_GRAPH_EDGE_REFERENCES + 8;
+                let rank = i32::try_from(total - index).expect("synthetic rank fits i32");
+                let relation_id = Uuid::now_v7();
+                KnowledgeBundleRelationReferenceRow {
+                    key: format!("{bundle_id}:{relation_id}"),
+                    bundle_id,
+                    relation_id,
+                    rank,
+                    score: f64::from(rank),
+                    inclusion_reason: Some("synthetic".to_string()),
+                    created_at: Utc::now(),
+                }
+            })
+            .collect(),
+        evidence_references: Vec::new(),
+    };
+
+    let entity_references = map_entity_references(&bundle);
+    let relation_references = map_relation_references(&bundle);
+
+    assert_eq!(entity_references.len(), MAX_DETAIL_GRAPH_NODE_REFERENCES);
+    assert_eq!(relation_references.len(), MAX_DETAIL_GRAPH_EDGE_REFERENCES);
+    assert_eq!(entity_references.first().map(|reference| reference.rank), Some(1));
+    assert_eq!(relation_references.first().map(|reference| reference.rank), Some(1));
+    assert!(entity_references.iter().all(|reference| {
+        usize::try_from(reference.rank).is_ok_and(|rank| rank <= MAX_DETAIL_GRAPH_NODE_REFERENCES)
+    }));
+    assert!(relation_references.iter().all(|reference| {
+        usize::try_from(reference.rank).is_ok_and(|rank| rank <= MAX_DETAIL_GRAPH_EDGE_REFERENCES)
+    }));
+}
+
+#[test]
 fn build_prepared_segment_references_prioritizes_query_matching_headings_and_limits_revision_fanout()
  {
     let bundle_id = Uuid::now_v7();
@@ -438,6 +525,7 @@ fn build_conversation_runtime_context_rewrites_short_follow_up_from_history() {
     );
 
     assert!(context.effective_query_text.contains("tell me how to move items in the product"));
+    assert!(context.contextual_follow_up);
     assert!(!context.effective_query_text.contains("Sure, here are the product steps."));
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.effective_query_text.contains("\nquestion: continue"));
@@ -544,9 +632,14 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
         build_conversation_runtime_context(&[first_turn, second_turn.clone()], second_turn.id);
 
     assert_eq!(context.effective_query_text, "tell me how to move items in the product");
+    assert!(!context.contextual_follow_up);
     assert_eq!(context.prompt_history_text.as_deref(), Some("User: how to fill in a transfer"));
     assert_eq!(context.prompt_history_messages.len(), 1);
     assert_eq!(context.prompt_history_messages[0].role, "user");
+    assert!(
+        !should_replay_prior_grounded_answer_context(&context),
+        "standalone questions should not receive prior grounded-answer chunk replay"
+    );
 }
 
 #[test]
@@ -721,6 +814,264 @@ fn build_conversation_runtime_context_keeps_short_disambiguator_for_tool_follow_
 }
 
 #[test]
+fn build_conversation_runtime_context_scopes_history_overlapping_follow_up() {
+    let conversation_id = Uuid::now_v7();
+    let first_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "how do I configure Provider Alpha".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "To configure Provider Alpha settings, use `alphaPackage`, `/opt/alpha.conf`, `alphaTimeout`, and `alphaMode`.".to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "explain how to configure all settings".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[first_user_turn, assistant_turn, follow_up_turn.clone()],
+        follow_up_turn.id,
+    );
+
+    assert!(context.effective_query_text.starts_with("scope: "));
+    assert!(context.contextual_follow_up);
+    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("`alphaPackage`"));
+    assert!(context.effective_query_text.contains("`/opt/alpha.conf`"));
+    assert!(context.effective_query_text.ends_with("explain how to configure all settings"));
+    assert!(context.coreference_entities.contains(&"Provider".to_string()));
+    assert!(context.coreference_entities.contains(&"Alpha".to_string()));
+    assert!(should_replay_prior_grounded_answer_context(&context));
+}
+
+#[test]
+fn build_conversation_runtime_context_scopes_medium_length_assistant_follow_up() {
+    let conversation_id = Uuid::now_v7();
+    let first_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "how do I configure Provider Alpha".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Provider Alpha uses `alphaPackage`, `/opt/alpha.conf`, `alphaTimeout`, and `alphaMode`.".to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "show me every setting now".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[first_user_turn, assistant_turn, follow_up_turn.clone()],
+        follow_up_turn.id,
+    );
+
+    assert!(context.contextual_follow_up);
+    assert!(context.effective_query_text.starts_with("scope: "));
+    assert!(context.effective_query_text.contains("Provider Alpha"));
+    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("`alphaPackage`"));
+    assert!(context.effective_query_text.ends_with("show me every setting now"));
+    assert!(should_replay_prior_grounded_answer_context(&context));
+}
+
+#[test]
+fn build_conversation_runtime_context_avoids_polluted_latest_assistant_literals() {
+    let conversation_id = Uuid::now_v7();
+    let first_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "which connector variants exist".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let choice_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Available variants: Provider Alpha, Provider Beta.".to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let subject_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "Provider Alpha".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let good_answer_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 4,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Provider Alpha uses `alphaPackage`, `/opt/alpha.conf`, and `alphaTimeout`."
+            .to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let config_follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 5,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "show every setting now".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let polluted_answer_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 6,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Provider Alpha remains the selected variant.\n`betaPackage`\n`/opt/beta.conf`\n`betaPort`"
+            .to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    };
+    let procedure_follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 7,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "show complete steps".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[
+            first_user_turn,
+            choice_turn,
+            subject_turn,
+            good_answer_turn,
+            config_follow_up_turn,
+            polluted_answer_turn,
+            procedure_follow_up_turn.clone(),
+        ],
+        procedure_follow_up_turn.id,
+    );
+
+    assert!(context.contextual_follow_up);
+    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("`alphaPackage`"));
+    assert!(context.effective_query_text.contains("`/opt/alpha.conf`"));
+    assert!(!context.effective_query_text.contains("`betaPackage`"));
+    assert!(!context.effective_query_text.contains("`/opt/beta.conf`"));
+    assert!(context.coreference_entities.contains(&"Provider".to_string()));
+    assert!(context.coreference_entities.contains(&"Alpha".to_string()));
+    assert!(!context.coreference_entities.contains(&"Beta".to_string()));
+}
+
+#[test]
+fn build_conversation_runtime_context_keeps_new_topic_question_out_of_prior_config_answer() {
+    let conversation_id = Uuid::now_v7();
+    let troubleshooting_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "what should we do when Provider Alpha terminal loses payment confirmation"
+            .to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let external_prior_turns = vec![
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::User,
+            content_text: "which connector variants exist".to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Available variants: Provider Alpha, Provider Beta.".to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::User,
+            content_text: "Provider Alpha".to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Provider Alpha setup uses `alphaPackage`, `/opt/alpha.conf`, `alphaTimeout`, and `alphaMode`."
+                .to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::User,
+            content_text: "show every setting now".to_string(),
+        },
+        ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text:
+                "Use `alphaPackage`, `/opt/alpha.conf`, `[Main]`, `alphaTimeout`, and `alphaMode`."
+                    .to_string(),
+        },
+    ];
+
+    let context = build_conversation_runtime_context_with_external_history(
+        &[troubleshooting_turn.clone()],
+        troubleshooting_turn.id,
+        &external_prior_turns,
+    );
+
+    assert!(context.contextual_follow_up);
+    assert!(context.effective_query_text.starts_with("scope: "));
+    assert!(context.effective_query_text.contains("topic: Provider Alpha"));
+    assert!(context.effective_query_text.contains("Provider Alpha terminal"));
+    assert!(!context.effective_query_text.contains("literal anchors:"));
+    assert!(!context.effective_query_text.contains("`alphaPackage`"));
+    assert!(!context.effective_query_text.contains("`/opt/alpha.conf`"));
+    assert!(!context.effective_query_text.contains("`alphaTimeout`"));
+}
+
+#[test]
 fn build_conversation_runtime_context_preserves_dense_assistant_literals_in_tool_history() {
     let conversation_id = Uuid::now_v7();
     let first_user_turn = query_repository::QueryTurnRow {
@@ -765,11 +1116,123 @@ fn build_conversation_runtime_context_preserves_dense_assistant_literals_in_tool
     let assistant_history = context
         .grounded_answer_tool_history
         .iter()
-        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+        .find(|turn| {
+            matches!(turn.turn_kind, QueryTurnKind::Assistant)
+                && turn.content_text.starts_with("literals: ")
+        })
         .expect("assistant history should be exported");
     assert!(assistant_history.content_text.starts_with("literals: "));
     assert!(assistant_history.content_text.contains("`pkg-alpha`"));
     assert!(assistant_history.content_text.contains("`pkg-theta`"));
+    assert!(
+        assistant_history.content_text.chars().count() < 900,
+        "dense assistant history should preserve exact literals without replaying most prior prose"
+    );
+
+    let prompt_history_message = context
+        .prompt_history_messages
+        .iter()
+        .find(|message| {
+            message.content.as_deref().is_some_and(|content| {
+                content.contains("Prior assistant compact literal memory")
+                    && content.contains("`pkg-alpha`")
+            })
+        })
+        .expect("compact literal memory should reach prompt history");
+    assert_eq!(prompt_history_message.role, "system");
+    let prompt_history_text = prompt_history_message.content.as_deref().unwrap_or_default();
+    assert!(prompt_history_text.contains("literals: "));
+    assert!(prompt_history_text.contains("never copy it as a user-facing answer"));
+}
+
+#[test]
+fn build_conversation_runtime_context_pins_old_assistant_literals_for_follow_up() {
+    let conversation_id = Uuid::now_v7();
+    let mut turns = Vec::new();
+    turns.push(query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "list package identifiers".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    });
+    turns.push(query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text: "Found `pkg-alpha`, `pkg-beta`, `/opt/pkg-alpha.conf`, and `alphaTimeout`."
+            .to_string(),
+        execution_id: Some(Uuid::now_v7()),
+        created_at: Utc::now(),
+    });
+    for pair_index in 0..7 {
+        turns.push(query_repository::QueryTurnRow {
+            id: Uuid::now_v7(),
+            conversation_id,
+            turn_index: 3 + pair_index * 2,
+            turn_kind: QueryTurnKind::User,
+            author_principal_id: None,
+            content_text: format!("unrelated checkpoint {pair_index}"),
+            execution_id: None,
+            created_at: Utc::now(),
+        });
+        turns.push(query_repository::QueryTurnRow {
+            id: Uuid::now_v7(),
+            conversation_id,
+            turn_index: 4 + pair_index * 2,
+            turn_kind: QueryTurnKind::Assistant,
+            author_principal_id: None,
+            content_text: format!("checkpoint acknowledged {pair_index}"),
+            execution_id: Some(Uuid::now_v7()),
+            created_at: Utc::now(),
+        });
+    }
+    let follow_up_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 17,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "continue".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    turns.push(follow_up_turn.clone());
+
+    let context = build_conversation_runtime_context(&turns, follow_up_turn.id);
+
+    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("`pkg-alpha`"));
+    assert!(context.effective_query_text.contains("`alphaTimeout`"));
+
+    let prompt_anchor_message = context
+        .prompt_history_messages
+        .iter()
+        .find(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("pinned literal anchors"))
+        })
+        .expect("pinned anchors should reach prompt history");
+    let prompt_anchor_text = prompt_anchor_message.content.as_deref().unwrap_or_default();
+    assert!(prompt_anchor_text.contains("`pkg-beta`"));
+    assert!(prompt_anchor_text.contains("`/opt/pkg-alpha.conf`"));
+
+    let tool_anchor_turn = context
+        .grounded_answer_tool_history
+        .first()
+        .expect("pinned anchors should reach tool history");
+    assert!(matches!(tool_anchor_turn.turn_kind, QueryTurnKind::Assistant));
+    assert!(tool_anchor_turn.content_text.starts_with("literal anchors:"));
+    assert!(tool_anchor_turn.content_text.contains("`pkg-alpha`"));
+    assert!(tool_anchor_turn.content_text.contains("`alphaTimeout`"));
 }
 
 #[test]
@@ -1151,6 +1614,7 @@ fn build_conversation_runtime_context_standalone_question_after_assistant_answer
     );
 
     assert_eq!(context.effective_query_text, "what is the dashboard session timeout setting");
+    assert!(!context.contextual_follow_up);
     assert_eq!(
         context.prompt_history_text.as_deref(),
         Some(
@@ -1170,6 +1634,10 @@ fn build_conversation_runtime_context_standalone_question_after_assistant_answer
     assert!(
         !context.effective_query_text.contains("literal anchors:"),
         "standalone query should not inherit prior literal anchors"
+    );
+    assert!(
+        !should_replay_prior_grounded_answer_context(&context),
+        "standalone questions after assistant answers should not replay prior grounded chunks"
     );
 }
 
@@ -1264,6 +1732,56 @@ fn prior_grounded_answer_context_messages_filter_foreign_library_chunks() {
     assert!(!content.contains(&foreign_chunk_id.to_string()));
 }
 
+#[test]
+fn prior_grounded_answer_replay_selection_preserves_newest_first_order() {
+    let library_id = Uuid::now_v7();
+    let foreign_library_id = Uuid::now_v7();
+    let latest_id = Uuid::now_v7();
+    let older_id = Uuid::now_v7();
+    let failed_id = Uuid::now_v7();
+    let foreign_id = Uuid::now_v7();
+    let now = Utc::now();
+    let executions = vec![
+        test_query_execution_row(
+            library_id,
+            latest_id,
+            RuntimeLifecycleState::Completed,
+            None,
+            "latest precise setup question",
+            now,
+        ),
+        test_query_execution_row(
+            library_id,
+            failed_id,
+            RuntimeLifecycleState::Failed,
+            Some("tool_error"),
+            "failed setup question",
+            now,
+        ),
+        test_query_execution_row(
+            foreign_library_id,
+            foreign_id,
+            RuntimeLifecycleState::Completed,
+            None,
+            "foreign library question",
+            now,
+        ),
+        test_query_execution_row(
+            library_id,
+            older_id,
+            RuntimeLifecycleState::Completed,
+            None,
+            "older broad setup question",
+            now,
+        ),
+    ];
+
+    let selected = select_prior_grounded_answer_replay_executions(executions, library_id, 2);
+
+    let selected_ids = selected.iter().map(|execution| execution.id).collect::<Vec<_>>();
+    assert_eq!(selected_ids, vec![latest_id, older_id]);
+}
+
 fn test_chunk_reference(chunk_id: Uuid, rank: i32, score: f64) -> KnowledgeBundleChunkReferenceRow {
     KnowledgeBundleChunkReferenceRow {
         key: format!("chunk-ref-{chunk_id}"),
@@ -1273,6 +1791,37 @@ fn test_chunk_reference(chunk_id: Uuid, rank: i32, score: f64) -> KnowledgeBundl
         score,
         inclusion_reason: Some("synthetic".to_string()),
         created_at: Utc::now(),
+    }
+}
+
+fn test_query_execution_row(
+    library_id: Uuid,
+    execution_id: Uuid,
+    runtime_lifecycle_state: RuntimeLifecycleState,
+    failure_code: Option<&str>,
+    query_text: &str,
+    started_at: chrono::DateTime<Utc>,
+) -> query_repository::QueryExecutionRow {
+    query_repository::QueryExecutionRow {
+        id: execution_id,
+        workspace_id: Uuid::now_v7(),
+        library_id,
+        conversation_id: Uuid::now_v7(),
+        context_bundle_id: Uuid::now_v7(),
+        request_turn_id: Some(Uuid::now_v7()),
+        response_turn_id: Some(Uuid::now_v7()),
+        binding_id: Some(Uuid::now_v7()),
+        runtime_execution_id: Uuid::now_v7(),
+        runtime_lifecycle_state,
+        runtime_active_stage: None,
+        turn_budget: 5,
+        turn_count: 1,
+        parallel_action_limit: 3,
+        query_text: query_text.to_string(),
+        failure_code: failure_code.map(str::to_string),
+        failure_summary_redacted: None,
+        started_at,
+        completed_at: Some(started_at),
     }
 }
 

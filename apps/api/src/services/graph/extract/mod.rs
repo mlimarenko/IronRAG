@@ -1,3 +1,4 @@
+pub(crate) mod acronym_gloss;
 mod parse;
 mod prompt;
 mod recovery;

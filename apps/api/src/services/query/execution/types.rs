@@ -93,6 +93,7 @@ pub(crate) enum RuntimeChunkScoreKind {
     QueryIrFocus,
     SourceContext,
     FocusedDocument,
+    LatestVersion,
 }
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]

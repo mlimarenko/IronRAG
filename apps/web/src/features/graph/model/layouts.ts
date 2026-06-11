@@ -12,9 +12,29 @@ type PackedCircle = {
   radius: number;
 };
 
+type GridMeasure = {
+  columns: number;
+  rows: number;
+  width: number;
+  height: number;
+};
+
 function getNodeLabel(graph: Graph, node: string): string {
   const label = graph.getNodeAttribute(node, 'label');
   return typeof label === 'string' ? label : node;
+}
+
+function getNodeType(graph: Graph, node: string): string {
+  const type = graph.getNodeAttribute(node, 'nodeType');
+  return typeof type === 'string' && type.length > 0 ? type : 'entity';
+}
+
+function getAllNodes(graph: Graph): string[] {
+  const nodes: string[] = [];
+  graph.forEachNode((node) => {
+    nodes.push(node);
+  });
+  return nodes;
 }
 
 function sortNodesByImportance(graph: Graph, nodes: string[]): string[] {
@@ -62,6 +82,60 @@ function groupNodesByType(graph: Graph): GroupedNodes[] {
  * every layout consistently.
  */
 const NODE_VISUAL_GAP = 6;
+
+function stableHash(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function measureGrid(size: number, columns: number, rowGap: number, columnGap: number): GridMeasure {
+  if (size === 0) {
+    return { columns: 1, rows: 0, width: 0, height: 0 };
+  }
+  const safeColumns = Math.max(1, Math.min(size || 1, columns));
+  const rows = Math.max(1, Math.ceil(size / safeColumns));
+  return {
+    columns: safeColumns,
+    rows,
+    width: Math.max(1, safeColumns - 1) * columnGap,
+    height: Math.max(1, rows - 1) * rowGap,
+  };
+}
+
+function layoutNodeGrid(
+  graph: Graph,
+  nodes: string[],
+  centerX: number,
+  centerY: number,
+  columns: number,
+  rowGap: number,
+  columnGap: number,
+): void {
+  if (nodes.length === 0) return;
+
+  const measure = measureGrid(nodes.length, columns, rowGap, columnGap);
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    const row = Math.floor(index / measure.columns);
+    const column = index % measure.columns;
+    const rowStart = row * measure.columns;
+    const rowCount = Math.min(measure.columns, nodes.length - rowStart);
+    const rowWidth = Math.max(1, rowCount - 1) * columnGap;
+    const x =
+      centerX +
+      (rowCount === 1
+        ? 0
+        : column * columnGap - rowWidth / 2 + (row % 2 === 1 ? columnGap * 0.12 : 0));
+    const y = centerY + (row - (measure.rows - 1) / 2) * rowGap;
+
+    graph.setNodeAttribute(nodes[index], 'x', x);
+    graph.setNodeAttribute(nodes[index], 'y', y);
+  }
+}
 
 /** How many nodes can comfortably sit on a single concentric ring at radius
  *  R, given the global node gap. The ring's circumference is `2πR`, and we
@@ -275,6 +349,336 @@ function layoutClusters(graph: Graph): void {
       graph.setNodeAttribute(group.nodes[index], 'x', centerX + Math.cos(angle) * distance);
       graph.setNodeAttribute(group.nodes[index], 'y', centerY + Math.sin(angle) * distance);
     }
+  });
+}
+
+function layoutHubs(graph: Graph): void {
+  if (graph.order === 0) return;
+
+  const nodes = sortNodesByImportance(graph, getAllNodes(graph));
+  const orderRoot = Math.sqrt(graph.order);
+  const hubCount = Math.min(
+    24,
+    Math.max(1, Math.ceil(orderRoot / (graph.order > 2500 ? 22 : 12))),
+    nodes.length,
+  );
+  const hubs = nodes.slice(0, hubCount);
+  const hubSet = new Set(hubs);
+  const assignments = new Map<string, string[]>();
+  hubs.forEach((hub) => assignments.set(hub, []));
+
+  for (const node of nodes) {
+    if (hubSet.has(node)) continue;
+
+    let selectedHub: string | null = null;
+    let selectedScore = -1;
+    graph.forEachNeighbor(node, (neighbor) => {
+      if (!hubSet.has(neighbor)) return;
+      const score = graph.degree(neighbor);
+      if (
+        score > selectedScore ||
+        (score === selectedScore && selectedHub !== null && hubs.indexOf(neighbor) < hubs.indexOf(selectedHub))
+      ) {
+        selectedHub = neighbor;
+        selectedScore = score;
+      }
+    });
+
+    const fallbackHub = hubs[stableHash(`${getNodeType(graph, node)}:${getNodeLabel(graph, node)}`) % hubCount];
+    const owner = selectedHub ?? fallbackHub;
+    assignments.get(owner)?.push(node);
+  }
+
+  const localGap = Math.max(NODE_VISUAL_GAP * 2.4, orderRoot * 0.9);
+  const maxAssigned = Math.max(...Array.from(assignments.values()).map((group) => group.length), 1);
+  const orbitRadius =
+    hubCount === 1
+      ? 0
+      : Math.max(90, orderRoot * 7, Math.sqrt(maxAssigned) * localGap * 1.8);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+  hubs.forEach((hub, hubIndex) => {
+    const centerAngle = hubCount === 1 ? 0 : (2 * Math.PI * hubIndex) / hubCount - Math.PI / 2;
+    const centerX = Math.cos(centerAngle) * orbitRadius;
+    const centerY = Math.sin(centerAngle) * orbitRadius;
+    graph.setNodeAttribute(hub, 'x', centerX);
+    graph.setNodeAttribute(hub, 'y', centerY);
+
+    const assigned = sortNodesByImportance(graph, assignments.get(hub) ?? []);
+    const radius = Math.max(localGap * 1.6, Math.sqrt(Math.max(assigned.length, 1)) * localGap * 0.72);
+    for (let index = 0; index < assigned.length; index += 1) {
+      const distance = localGap + radius * Math.sqrt((index + 0.5) / assigned.length);
+      const angle = index * goldenAngle + hubIndex * 0.37;
+      graph.setNodeAttribute(assigned[index], 'x', centerX + Math.cos(angle) * distance);
+      graph.setNodeAttribute(assigned[index], 'y', centerY + Math.sin(angle) * distance);
+    }
+  });
+}
+
+function layoutSources(graph: Graph): void {
+  if (graph.order === 0) return;
+
+  const groups = groupNodesByType(graph);
+  const documents = sortNodesByImportance(
+    graph,
+    groups.find((group) => group.type === 'document')?.nodes ?? [],
+  );
+  if (documents.length === 0) {
+    layoutBands(graph);
+    return;
+  }
+
+  const otherGroups = groups.filter((group) => group.type !== 'document');
+  const orderRoot = Math.sqrt(graph.order);
+  const cell = Math.max(NODE_VISUAL_GAP * 2.4, orderRoot * 1.2);
+  const rowGap = cell * 1.34;
+  const columnGap = cell * 1.48;
+  const sectionGap = cell * 5.6;
+
+  const documentColumns = Math.max(1, Math.min(26, Math.ceil(Math.sqrt(documents.length) * 1.35)));
+  const documentMeasure = measureGrid(documents.length, documentColumns, rowGap, columnGap);
+  const groupMeasurements = otherGroups.map((group) => {
+    const columns = Math.max(1, Math.min(44, Math.ceil(Math.sqrt(group.nodes.length) * 1.55)));
+    return {
+      group,
+      measure: measureGrid(group.nodes.length, columns, rowGap, columnGap),
+    };
+  });
+
+  const rightHeight =
+    groupMeasurements.reduce((sum, item) => sum + item.measure.height, 0) +
+    Math.max(0, groupMeasurements.length - 1) * sectionGap;
+  const totalHeight = Math.max(documentMeasure.height, rightHeight);
+  const rightWidth = Math.max(...groupMeasurements.map((item) => item.measure.width), 0);
+  const leftX = -(documentMeasure.width / 2 + sectionGap / 2);
+  const rightX = rightWidth === 0 ? 0 : rightWidth / 2 + sectionGap / 2;
+
+  layoutNodeGrid(graph, documents, leftX, 0, documentMeasure.columns, rowGap, columnGap);
+
+  let cursorY = -totalHeight / 2;
+  groupMeasurements.forEach(({ group, measure }) => {
+    const centerY = cursorY + measure.height / 2;
+    layoutNodeGrid(graph, group.nodes, rightX, centerY, measure.columns, rowGap, columnGap);
+    cursorY += measure.height + sectionGap;
+  });
+}
+
+function collectDepthLayers(graph: Graph, seeds: string[], maxDepth: number): string[][] {
+  const layers = Array.from({ length: maxDepth + 2 }, () => [] as string[]);
+  const depthByNode = new Map<string, number>();
+  const queue: string[] = [];
+
+  for (const seed of seeds) {
+    if (depthByNode.has(seed)) continue;
+    depthByNode.set(seed, 0);
+    queue.push(seed);
+  }
+
+  let head = 0;
+  while (head < queue.length) {
+    const current = queue[head];
+    head += 1;
+    const currentDepth = depthByNode.get(current) ?? 0;
+    if (currentDepth >= maxDepth) continue;
+    graph.forEachNeighbor(current, (neighbor) => {
+      if (depthByNode.has(neighbor)) return;
+      depthByNode.set(neighbor, currentDepth + 1);
+      queue.push(neighbor);
+    });
+  }
+
+  graph.forEachNode((node) => {
+    const depth = depthByNode.get(node);
+    layers[depth == null ? maxDepth + 1 : Math.min(depth, maxDepth)].push(node);
+  });
+
+  return layers.map((layer) => sortNodesByImportance(graph, layer));
+}
+
+function layoutFlow(graph: Graph): void {
+  if (graph.order === 0) return;
+
+  const nodes = sortNodesByImportance(graph, getAllNodes(graph));
+  const documents = nodes.filter((node) => getNodeType(graph, node) === 'document');
+  const seedLimit = Math.max(1, Math.min(24, Math.ceil(Math.sqrt(graph.order) / 18)));
+  const seeds = (documents.length > 0 ? documents : nodes).slice(0, seedLimit);
+  const maxDepth = graph.order > 20000 ? 4 : 5;
+  const layers = collectDepthLayers(graph, seeds, maxDepth);
+  const orderRoot = Math.sqrt(graph.order);
+  const cell = Math.max(NODE_VISUAL_GAP * 2.3, orderRoot * 1.15);
+  const rowGap = cell * 1.32;
+  const columnGap = cell * 1.34;
+  const layerGap = cell * 4.8;
+
+  const measurements = layers.map((layer) => {
+    const columns = Math.max(1, Math.min(40, Math.ceil(Math.sqrt(layer.length || 1) * 1.45)));
+    return {
+      nodes: layer,
+      measure: measureGrid(layer.length, columns, rowGap, columnGap),
+    };
+  });
+  const totalWidth =
+    measurements.reduce((sum, item) => sum + item.measure.width, 0) +
+    Math.max(0, measurements.length - 1) * layerGap;
+
+  let cursorX = -totalWidth / 2;
+  measurements.forEach(({ nodes: layerNodes, measure }) => {
+    const centerX = cursorX + measure.width / 2;
+    layoutNodeGrid(graph, layerNodes, centerX, 0, measure.columns, rowGap, columnGap);
+    cursorX += measure.width + layerGap;
+  });
+}
+
+function assignRadialSectors(graph: Graph, seeds: string[], maxDepth: number): Map<string, { seedIndex: number; depth: number }> {
+  const assignments = new Map<string, { seedIndex: number; depth: number }>();
+  const queue: string[] = [];
+
+  seeds.forEach((seed, seedIndex) => {
+    if (assignments.has(seed)) return;
+    assignments.set(seed, { seedIndex, depth: 0 });
+    queue.push(seed);
+  });
+
+  let head = 0;
+  while (head < queue.length) {
+    const current = queue[head];
+    head += 1;
+    const currentAssignment = assignments.get(current);
+    if (!currentAssignment || currentAssignment.depth >= maxDepth) continue;
+    graph.forEachNeighbor(current, (neighbor) => {
+      if (assignments.has(neighbor)) return;
+      assignments.set(neighbor, {
+        seedIndex: currentAssignment.seedIndex,
+        depth: currentAssignment.depth + 1,
+      });
+      queue.push(neighbor);
+    });
+  }
+
+  graph.forEachNode((node) => {
+    if (assignments.has(node)) return;
+    assignments.set(node, {
+      seedIndex: stableHash(`${getNodeType(graph, node)}:${node}`) % seeds.length,
+      depth: maxDepth + 1,
+    });
+  });
+
+  return assignments;
+}
+
+function layoutRadial(graph: Graph): void {
+  if (graph.order === 0) return;
+
+  const nodes = sortNodesByImportance(graph, getAllNodes(graph));
+  const seedCount = Math.min(
+    12,
+    Math.max(1, Math.ceil(Math.sqrt(graph.order) / (graph.order > 5000 ? 42 : 18))),
+    nodes.length,
+  );
+  const seeds = nodes.slice(0, seedCount);
+  const maxDepth = graph.order > 20000 ? 4 : 5;
+  const assignments = assignRadialSectors(graph, seeds, maxDepth);
+  const groups = Array.from({ length: seedCount }, () =>
+    Array.from({ length: maxDepth + 2 }, () => [] as string[]),
+  );
+
+  graph.forEachNode((node) => {
+    const assignment = assignments.get(node);
+    if (!assignment) return;
+    groups[assignment.seedIndex][Math.min(assignment.depth, maxDepth + 1)].push(node);
+  });
+
+  const orderRoot = Math.sqrt(graph.order);
+  const innerRadius = Math.max(55, orderRoot * 2.2);
+  const ringGap = Math.max(NODE_VISUAL_GAP * 5, orderRoot * 1.7);
+  const arcGap = Math.max(NODE_VISUAL_GAP * 2.2, orderRoot * 0.85);
+  const sectorGap = Math.min(0.16, (2 * Math.PI) / Math.max(24, seedCount * 4));
+  const sectorAngle = (2 * Math.PI - seedCount * sectorGap) / seedCount;
+
+  groups.forEach((depthGroups, seedIndex) => {
+    const startAngle = -Math.PI / 2 + seedIndex * (sectorAngle + sectorGap);
+    const endAngle = startAngle + sectorAngle;
+    const middleAngle = (startAngle + endAngle) / 2;
+
+    depthGroups.forEach((depthNodes, depth) => {
+      const sorted = sortNodesByImportance(graph, depthNodes);
+      if (depth === 0) {
+        sorted.forEach((node, index) => {
+          const radius = innerRadius + index * NODE_VISUAL_GAP;
+          graph.setNodeAttribute(node, 'x', Math.cos(middleAngle) * radius);
+          graph.setNodeAttribute(node, 'y', Math.sin(middleAngle) * radius);
+        });
+        return;
+      }
+      layoutNodesInSector(
+        graph,
+        sorted,
+        startAngle,
+        endAngle,
+        innerRadius + depth * ringGap,
+        ringGap * 0.34,
+        arcGap,
+      );
+    });
+  });
+}
+
+function layoutCirclepack(graph: Graph): void {
+  if (graph.order === 0) return;
+
+  const groups = groupNodesByType(graph);
+  const orderRoot = Math.sqrt(graph.order);
+  const cell = Math.max(NODE_VISUAL_GAP * 1.5, orderRoot * 0.55);
+  const gap = Math.max(18, cell * 1.8);
+  const circles = groups.map((group) => ({
+    group,
+    radius: Math.max(18, Math.sqrt(group.nodes.length) * cell),
+  }));
+  const areaBudget = circles.reduce((sum, circle) => {
+    const side = circle.radius * 2 + gap;
+    return sum + side * side;
+  }, 0);
+  const targetRowWidth = Math.max(gap * 4, Math.sqrt(areaBudget * 1.15));
+  const placements: { group: GroupedNodes; radius: number; centerX: number; centerY: number }[] = [];
+
+  let cursorX = 0;
+  let cursorY = 0;
+  let rowHeight = 0;
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  circles.forEach((circle) => {
+    const side = circle.radius * 2 + gap;
+    if (cursorX > 0 && cursorX + side > targetRowWidth) {
+      cursorX = 0;
+      cursorY += rowHeight;
+      rowHeight = 0;
+    }
+
+    const centerX = cursorX + circle.radius;
+    const centerY = cursorY + circle.radius;
+    placements.push({ group: circle.group, radius: circle.radius, centerX, centerY });
+
+    cursorX += side;
+    rowHeight = Math.max(rowHeight, side);
+    minX = Math.min(minX, centerX - circle.radius);
+    maxX = Math.max(maxX, centerX + circle.radius);
+    minY = Math.min(minY, centerY - circle.radius);
+    maxY = Math.max(maxY, centerY + circle.radius);
+  });
+
+  const offsetX = (minX + maxX) / 2;
+  const offsetY = (minY + maxY) / 2;
+  placements.forEach((placement) => {
+    layoutComponentNodes(
+      graph,
+      placement.group.nodes,
+      placement.centerX - offsetX,
+      placement.centerY - offsetY,
+      placement.radius,
+    );
   });
 }
 
@@ -494,5 +898,23 @@ export function applyGraphLayout(graph: Graph, layout: GraphLayoutType): void {
     case 'clusters':
       layoutClusters(graph);
       return;
+    case 'hubs':
+      layoutHubs(graph);
+      return;
+    case 'sources':
+      layoutSources(graph);
+      return;
+    case 'flow':
+      layoutFlow(graph);
+      return;
+    case 'radial':
+      layoutRadial(graph);
+      return;
+    case 'circlepack':
+      layoutCirclepack(graph);
+      return;
   }
+
+  const unreachable: never = layout;
+  throw new Error(`Unsupported graph layout: ${unreachable}`);
 }

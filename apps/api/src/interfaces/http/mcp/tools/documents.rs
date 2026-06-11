@@ -3,8 +3,9 @@ use serde_json::{Value, json};
 use crate::interfaces::http::router_support::ApiError;
 use crate::mcp_types::{
     McpAuditActionKind, McpAuditScope, McpDeleteDocumentRequest, McpGetMutationStatusRequest,
-    McpListDocumentsRequest, McpReadDocumentRequest, McpSearchDocumentsRequest,
-    McpUpdateDocumentRequest, McpUploadDocumentsRequest,
+    McpListDocumentsRequest, McpReadDocumentRequest, McpReadDocumentResponse,
+    McpSearchDocumentsRequest, McpSearchDocumentsResponse, McpUpdateDocumentRequest,
+    McpUploadDocumentsRequest,
 };
 
 use super::super::{
@@ -20,6 +21,12 @@ use super::ToolCallContext;
 
 pub(crate) const SEARCH_DOCUMENTS_TOOL_NAME: &str = "search_documents";
 pub(crate) const READ_DOCUMENT_TOOL_NAME: &str = "read_document";
+
+const SEARCH_RESULT_TEXT_HIT_LIMIT: usize = 5;
+const SEARCH_RESULT_TEXT_EXCERPT_CHARS: usize = 700;
+const READ_RESULT_TEXT_CONTENT_CHARS: usize = 6_000;
+const READ_RESULT_TEXT_VISUAL_CHARS: usize = 1_500;
+const TOOL_RESULT_TEXT_INLINE_CHARS: usize = 240;
 
 pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     match name {
@@ -276,6 +283,144 @@ pub(crate) async fn call_tool(
     Some(result)
 }
 
+fn search_documents_result_text(payload: &McpSearchDocumentsResponse) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Document memory search returned {} hit(s) for query: {}",
+        payload.hits.len(),
+        compact_tool_result_inline(&payload.query, TOOL_RESULT_TEXT_INLINE_CHARS)
+    ));
+    if !payload.libraries.is_empty() {
+        lines.push(format!("libraryScopes: {}", payload.libraries.join(", ")));
+    }
+    if payload.hits.is_empty() {
+        lines.push("No matching documents were returned.".to_string());
+        return lines.join("\n");
+    }
+
+    for (index, hit) in payload.hits.iter().take(SEARCH_RESULT_TEXT_HIT_LIMIT).enumerate() {
+        lines.push(format!("Hit {}:", index + 1));
+        lines.push(format!("documentId: {}", hit.document_id));
+        lines.push(format!(
+            "title: {}",
+            compact_tool_result_inline(&hit.document_title, TOOL_RESULT_TEXT_INLINE_CHARS)
+        ));
+        lines.push(format!("score: {:.4}", hit.score));
+        lines.push(format!(
+            "readability: {:?}; readiness: {}; graphCoverage: {}",
+            hit.readability_state, hit.readiness_kind, hit.graph_coverage_kind
+        ));
+        if let Some(offset) = hit.suggested_start_offset {
+            lines.push(format!(
+                "suggestedStartOffset: {} (use as read_document.startOffset)",
+                offset
+            ));
+        }
+        if let Some(start) = hit.excerpt_start_offset {
+            let end =
+                hit.excerpt_end_offset.map_or_else(|| "?".to_string(), |value| value.to_string());
+            lines.push(format!("excerptOffsets: {}..{}", start, end));
+        }
+        if let Some(excerpt) = hit.excerpt.as_deref() {
+            lines.push("excerpt:".to_string());
+            lines.push(compact_tool_result_text(excerpt, SEARCH_RESULT_TEXT_EXCERPT_CHARS));
+        }
+    }
+
+    if payload.hits.len() > SEARCH_RESULT_TEXT_HIT_LIMIT {
+        lines.push(format!(
+            "{} additional hit(s) omitted from text; inspect structuredContent if needed.",
+            payload.hits.len() - SEARCH_RESULT_TEXT_HIT_LIMIT
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn read_document_result_text(payload: &McpReadDocumentResponse) -> String {
+    let mut lines = Vec::new();
+    lines.push("Document read returned this source window:".to_string());
+    lines.push(format!("documentId: {}", payload.document_id));
+    lines.push(format!(
+        "title: {}",
+        compact_tool_result_inline(&payload.document_title, TOOL_RESULT_TEXT_INLINE_CHARS)
+    ));
+    lines.push(format!(
+        "readMode: {:?}; readability: {:?}; readiness: {}; graphCoverage: {}",
+        payload.read_mode,
+        payload.readability_state,
+        payload.readiness_kind,
+        payload.graph_coverage_kind
+    ));
+    lines.push(format!(
+        "sliceOffsets: {}..{}",
+        payload.slice_start_offset, payload.slice_end_offset
+    ));
+    if let Some(total) = payload.total_content_length {
+        lines.push(format!("totalContentLength: {}", total));
+    }
+    lines.push(format!("hasMore: {}", payload.has_more));
+    if let Some(token) = payload.continuation_token.as_deref() {
+        lines.push(format!(
+            "continuationToken: {}",
+            compact_tool_result_inline(token, TOOL_RESULT_TEXT_INLINE_CHARS)
+        ));
+    }
+    if let Some(access) = payload.source_access.as_ref() {
+        lines.push(format!(
+            "sourceAccess: {} {}",
+            compact_tool_result_inline(&access.kind, TOOL_RESULT_TEXT_INLINE_CHARS),
+            compact_tool_result_inline(&access.href, TOOL_RESULT_TEXT_INLINE_CHARS)
+        ));
+    }
+    if let Some(description) = payload.visual_description.as_deref() {
+        lines.push("visualDescription:".to_string());
+        lines.push(compact_tool_result_text(description, READ_RESULT_TEXT_VISUAL_CHARS));
+    }
+    if let Some(content) = payload.content.as_deref() {
+        lines.push("content:".to_string());
+        lines.push(compact_tool_result_text(content, READ_RESULT_TEXT_CONTENT_CHARS));
+    } else if payload.visual_description.is_none() {
+        lines.push("No readable text content was returned in this window.".to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn compact_tool_result_inline(value: &str, max_chars: usize) -> String {
+    let compacted = compact_tool_result_text(value, max_chars);
+    compacted.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn compact_tool_result_text(value: &str, max_chars: usize) -> String {
+    let normalized = value
+        .chars()
+        .filter_map(|ch| match ch {
+            '\r' => None,
+            '\n' | '\t' => Some(ch),
+            _ if ch.is_control() => Some(' '),
+            _ => Some(ch),
+        })
+        .collect::<String>();
+    truncate_chars(normalized.trim(), max_chars)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return value.chars().take(max_chars).collect();
+    }
+    let mut output = value.chars().take(max_chars - 3).collect::<String>();
+    output.push_str("...");
+    output
+}
+
 async fn search_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpSearchDocumentsRequest>(arguments.clone()) {
         Ok(args) => match crate::services::mcp::access::search_documents(
@@ -317,7 +462,7 @@ async fn search_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     }),
                 )
                 .await;
-                ok_tool_result("Document memory search completed.", json!(payload))
+                ok_tool_result(&search_documents_result_text(&payload), json!(payload))
             }
             Err(error) => {
                 record_error_audit(
@@ -406,7 +551,7 @@ async fn read_document(context: ToolCallContext<'_>, arguments: &Value) -> McpTo
                     }),
                 )
                 .await;
-                ok_tool_result("Document read completed.", json!(payload))
+                ok_tool_result(&read_document_result_text(&payload), json!(payload))
             }
             Err(error) => {
                 record_error_audit(
@@ -862,5 +1007,101 @@ async fn get_mutation_status(context: ToolCallContext<'_>, arguments: &Value) ->
             .await;
             tool_error_result(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use crate::mcp_types::{McpDocumentHit, McpReadMode, McpReadabilityState};
+
+    use super::*;
+
+    fn test_uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    #[test]
+    fn search_result_text_exposes_readable_hit_context() {
+        let payload = McpSearchDocumentsResponse {
+            query: "subject S parameter P".to_string(),
+            limit: 3,
+            libraries: vec!["workspace/library".to_string()],
+            hits: vec![McpDocumentHit {
+                document_id: test_uuid(1),
+                library_id: test_uuid(2),
+                workspace_id: test_uuid(3),
+                document_title: "Alpha Suite Operations".to_string(),
+                latest_revision_id: None,
+                score: 0.97,
+                excerpt: Some("Parameter P is configured in section C.".to_string()),
+                excerpt_start_offset: Some(120),
+                excerpt_end_offset: Some(160),
+                suggested_start_offset: Some(112),
+                readability_state: McpReadabilityState::Readable,
+                readiness_kind: "graph_ready".to_string(),
+                graph_coverage_kind: "ready".to_string(),
+                status_reason: None,
+                chunk_references: Vec::new(),
+                technical_fact_references: Vec::new(),
+                entity_references: Vec::new(),
+                relation_references: Vec::new(),
+                evidence_references: Vec::new(),
+            }],
+        };
+
+        let text = search_documents_result_text(&payload);
+
+        assert!(text.contains("Document memory search returned 1 hit(s)"));
+        assert!(text.contains("Alpha Suite Operations"));
+        assert!(text.contains("suggestedStartOffset: 112"));
+        assert!(text.contains("Parameter P is configured"));
+    }
+
+    #[test]
+    fn read_result_text_exposes_content_and_continuation() {
+        let payload = McpReadDocumentResponse {
+            document_id: test_uuid(10),
+            document_title: "Beta Module Reference".to_string(),
+            library_id: test_uuid(11),
+            workspace_id: test_uuid(12),
+            latest_revision_id: None,
+            read_mode: McpReadMode::Full,
+            readability_state: McpReadabilityState::Readable,
+            readiness_kind: "graph_ready".to_string(),
+            graph_coverage_kind: "ready".to_string(),
+            status_reason: None,
+            mime_type: None,
+            source_uri: None,
+            source_access: None,
+            visual_description: None,
+            content: Some("path=/opt/service\nvalue=true\nnext=token".to_string()),
+            slice_start_offset: 200,
+            slice_end_offset: 260,
+            total_content_length: Some(500),
+            continuation_token: Some("continue-1".to_string()),
+            has_more: true,
+            chunk_references: Vec::new(),
+            technical_fact_references: Vec::new(),
+            entity_references: Vec::new(),
+            relation_references: Vec::new(),
+            evidence_references: Vec::new(),
+        };
+
+        let text = read_document_result_text(&payload);
+
+        assert!(text.contains("Document read returned this source window"));
+        assert!(text.contains("Beta Module Reference"));
+        assert!(text.contains("sliceOffsets: 200..260"));
+        assert!(text.contains("continuationToken: continue-1"));
+        assert!(text.contains("path=/opt/service"));
+    }
+
+    #[test]
+    fn tool_result_text_truncates_on_character_boundaries() {
+        let text = compact_tool_result_text("abcdef", 5);
+
+        assert_eq!(text, "ab...");
     }
 }

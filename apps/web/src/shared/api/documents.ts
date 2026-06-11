@@ -1,6 +1,7 @@
-import { Content } from "./generated";
-import { createClient, createConfig } from "./generated/client";
+import { Content, Ops } from "./generated";
+import { client as generatedClient } from "./generated/client.gen";
 import type {
+  AsyncOperationDetailResponse,
   BatchCancelResponse,
   BatchDocumentOperationAcceptedResponse,
   ContentDocumentDetailResponse,
@@ -20,6 +21,7 @@ import type {
   OverwriteMode,
   PreparedSegmentDetail,
   PreparedSegmentsPageResponse,
+  SnapshotImportAcceptedResponse,
   SnapshotImportReportResponse,
   TechnicalFactsPageResponse,
   TypedTechnicalFact,
@@ -27,11 +29,8 @@ import type {
   WebIngestRunReceipt as GeneratedWebIngestRunReceipt,
   WebIngestRunSummary,
 } from "./generated";
+import { ASYNC_OPERATION_TERMINAL_STATES } from "./ops";
 import { ApiError, type ApiErrorBody, unwrap } from "./runtime";
-
-type ImportLibrarySnapshotOptions = Parameters<typeof Content.importLibrarySnapshot>[0];
-
-const rawBodyClient = createClient(createConfig({ bodySerializer: (body) => body }));
 
 export type DocumentListItem = ContentDocumentListItem;
 export type DocumentListPageResponse = GeneratedDocumentListPageResponse;
@@ -66,6 +65,13 @@ interface DocumentListParams {
   includeTotal?: boolean;
   /** Empty / undefined = no filter. Sent as a comma-separated list. */
   status?: DocumentListStatusFilter[];
+  /**
+   * Restrict the page to specific document ids. Empty / undefined = no
+   * filter. Sent as a comma-separated list. Used to resolve a deep-linked
+   * `documentId` through the canonical list derivation so the inspector
+   * opens even when the target is off the loaded page.
+   */
+  ids?: string[];
 }
 
 type BatchDeleteResponse = BatchDocumentOperationAcceptedResponse;
@@ -135,6 +141,7 @@ export const documentsApi = {
     if (params.includeDeleted !== undefined) query.includeDeleted = params.includeDeleted;
     if (params.includeTotal !== undefined) query.includeTotal = params.includeTotal;
     if (params.status && params.status.length > 0) query.status = params.status.join(",");
+    if (params.ids && params.ids.length > 0) query.ids = params.ids.join(",");
 
     return Content.listContentDocuments({ query }).then(
       (result): DocumentListPageResponse => unwrap(result),
@@ -333,11 +340,35 @@ export const documentsApi = {
     }).then((result): BatchReprocessAcceptedResponse => unwrap(result)),
 };
 
-export type LibrarySnapshotIncludeKind = Extract<IncludeKind, "library_data" | "blobs">;
+export type LibrarySnapshotIncludeKind = Extract<
+  IncludeKind,
+  "library_data" | "blobs" | "workspace" | "ai_config"
+>;
 
 export type LibrarySnapshotOverwriteMode = OverwriteMode;
 
 type LibrarySnapshotImportReport = SnapshotImportReportResponse;
+type LibrarySnapshotImportAccepted = SnapshotImportAcceptedResponse;
+
+export type LibrarySnapshotImportResult =
+  | { kind: "completed"; report: LibrarySnapshotImportReport }
+  | { kind: "accepted"; operation: LibrarySnapshotImportAccepted };
+
+const SNAPSHOT_IMPORT_POLL_INTERVAL_MS = 2_000;
+const SNAPSHOT_IMPORT_TIMEOUT_MS = 30 * 60 * 1_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function snapshotApiBaseUrl(): string {
+  const configured = generatedClient.getConfig().baseUrl;
+  if (configured) return configured.replace(/\/$/, "");
+  if (typeof globalThis.location !== "undefined" && globalThis.location.origin !== "null") {
+    return globalThis.location.origin;
+  }
+  return "";
+}
 
 async function readApiErrorBody(response: Response): Promise<ApiErrorBody> {
   const text = await response.text();
@@ -404,19 +435,51 @@ export const librarySnapshotApi = {
     libraryId: string,
     file: File,
     overwrite: LibrarySnapshotOverwriteMode,
-  ): Promise<LibrarySnapshotImportReport> => {
-    const request: ImportLibrarySnapshotOptions = {
-      baseUrl: globalThis.location?.origin ?? "",
-      body: file,
-      client: rawBodyClient,
-      credentials: "include",
-      headers: { "Content-Type": "application/zstd" },
-      path: { libraryId },
-    };
-    if (overwrite !== "reject") request.query = { overwrite };
-
-    return Content.importLibrarySnapshot(request).then(
-      (result): LibrarySnapshotImportReport => unwrap(result),
-    );
+  ): Promise<LibrarySnapshotImportResult> => {
+    const query = overwrite !== "reject"
+      ? `?overwrite=${encodeURIComponent(overwrite)}`
+      : "";
+    return fetch(
+      `${snapshotApiBaseUrl()}/v1/content/libraries/${encodeURIComponent(libraryId)}/snapshot${query}`,
+      {
+        body: file,
+        credentials: "include",
+        headers: { "Content-Type": "application/zstd" },
+        method: "POST",
+      },
+    ).then(async (response): Promise<LibrarySnapshotImportResult> => {
+      if (!response.ok) {
+        throw new ApiError(response.status, await readApiErrorBody(response));
+      }
+      const payload = await response.json();
+      if (response.status === 202 && typeof payload?.operationId === "string") {
+        return {
+          kind: "accepted",
+          operation: payload as LibrarySnapshotImportAccepted,
+        };
+      }
+      return {
+        kind: "completed",
+        report: payload as LibrarySnapshotImportReport,
+      };
+    });
+  },
+  waitForImport: async (
+    operationId: string,
+    timeoutMs = SNAPSHOT_IMPORT_TIMEOUT_MS,
+  ): Promise<AsyncOperationDetailResponse> => {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const operation = await Ops.getAsyncOperation({
+        path: { operationId },
+      }).then((result): AsyncOperationDetailResponse => unwrap(result));
+      if (ASYNC_OPERATION_TERMINAL_STATES.has(operation.status)) {
+        return operation;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("snapshot_import_timeout");
+      }
+      await sleep(SNAPSHOT_IMPORT_POLL_INTERVAL_MS);
+    }
   },
 };

@@ -1103,3 +1103,176 @@ where
         .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
     serde_json::from_value(result).context("failed to decode ArangoDB result rows")
 }
+
+// --- Knowledge-plane ContextStore port (forwards to inherent methods) ---
+// The trait is the swappable boundary for the 0.5.0 PG migration; bodies stay
+// on the concrete struct. Materialized read-back single-round-trip + edge
+// write-count contracts documented on crate::infra::knowledge_plane::ContextStore.
+#[async_trait::async_trait]
+impl crate::infra::knowledge_plane::ContextStore for ArangoContextStore {
+    async fn upsert_bundle(
+        &self,
+        row: &KnowledgeContextBundleRow,
+    ) -> anyhow::Result<KnowledgeContextBundleRow> {
+        self.upsert_bundle(row).await
+    }
+    async fn get_bundle(
+        &self,
+        bundle_id: Uuid,
+    ) -> anyhow::Result<Option<KnowledgeContextBundleRow>> {
+        self.get_bundle(bundle_id).await
+    }
+    async fn get_bundle_by_query_execution(
+        &self,
+        query_execution_id: Uuid,
+    ) -> anyhow::Result<Option<KnowledgeContextBundleRow>> {
+        self.get_bundle_by_query_execution(query_execution_id).await
+    }
+    async fn list_bundles_by_library(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeContextBundleRow>> {
+        self.list_bundles_by_library(library_id).await
+    }
+    async fn update_bundle_state(
+        &self,
+        bundle_id: Uuid,
+        bundle_state: &str,
+        selected_fact_ids: &[Uuid],
+        verification_state: &str,
+        verification_warnings: serde_json::Value,
+        freshness_snapshot: serde_json::Value,
+        candidate_summary: serde_json::Value,
+        assembly_diagnostics: serde_json::Value,
+    ) -> anyhow::Result<Option<KnowledgeContextBundleRow>> {
+        self.update_bundle_state(
+            bundle_id,
+            bundle_state,
+            selected_fact_ids,
+            verification_state,
+            verification_warnings,
+            freshness_snapshot,
+            candidate_summary,
+            assembly_diagnostics,
+        )
+        .await
+    }
+    async fn upsert_trace(
+        &self,
+        row: &KnowledgeRetrievalTraceRow,
+    ) -> anyhow::Result<KnowledgeRetrievalTraceRow> {
+        self.upsert_trace(row).await
+    }
+    async fn get_trace(
+        &self,
+        trace_id: Uuid,
+    ) -> anyhow::Result<Option<KnowledgeRetrievalTraceRow>> {
+        self.get_trace(trace_id).await
+    }
+    async fn list_traces_by_bundle(
+        &self,
+        bundle_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeRetrievalTraceRow>> {
+        self.list_traces_by_bundle(bundle_id).await
+    }
+    async fn list_traces_by_query_execution(
+        &self,
+        query_execution_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeRetrievalTraceRow>> {
+        self.list_traces_by_query_execution(query_execution_id).await
+    }
+    async fn update_trace_state(
+        &self,
+        trace_id: Uuid,
+        trace_state: &str,
+        diagnostics_json: serde_json::Value,
+    ) -> anyhow::Result<Option<KnowledgeRetrievalTraceRow>> {
+        self.update_trace_state(trace_id, trace_state, diagnostics_json).await
+    }
+    async fn replace_bundle_chunk_edges(
+        &self,
+        bundle_id: Uuid,
+        library_id: Uuid,
+        edges: &[KnowledgeBundleChunkEdgeRow],
+    ) -> anyhow::Result<Vec<KnowledgeBundleChunkEdgeRow>> {
+        self.replace_bundle_chunk_edges(bundle_id, library_id, edges).await
+    }
+    async fn replace_bundle_entity_edges(
+        &self,
+        bundle_id: Uuid,
+        library_id: Uuid,
+        edges: &[KnowledgeBundleEntityEdgeRow],
+    ) -> anyhow::Result<Vec<KnowledgeBundleEntityEdgeRow>> {
+        self.replace_bundle_entity_edges(bundle_id, library_id, edges).await
+    }
+    async fn replace_bundle_relation_edges(
+        &self,
+        bundle_id: Uuid,
+        library_id: Uuid,
+        edges: &[KnowledgeBundleRelationEdgeRow],
+    ) -> anyhow::Result<Vec<KnowledgeBundleRelationEdgeRow>> {
+        self.replace_bundle_relation_edges(bundle_id, library_id, edges).await
+    }
+    async fn replace_bundle_evidence_edges(
+        &self,
+        bundle_id: Uuid,
+        library_id: Uuid,
+        edges: &[KnowledgeBundleEvidenceEdgeRow],
+    ) -> anyhow::Result<Vec<KnowledgeBundleEvidenceEdgeRow>> {
+        self.replace_bundle_evidence_edges(bundle_id, library_id, edges).await
+    }
+    async fn list_bundle_chunk_edges(
+        &self,
+        bundle_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeBundleChunkEdgeRow>> {
+        self.list_bundle_chunk_edges(bundle_id).await
+    }
+    async fn list_bundle_entity_edges(
+        &self,
+        bundle_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeBundleEntityEdgeRow>> {
+        self.list_bundle_entity_edges(bundle_id).await
+    }
+    async fn list_bundle_relation_edges(
+        &self,
+        bundle_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeBundleRelationEdgeRow>> {
+        self.list_bundle_relation_edges(bundle_id).await
+    }
+    async fn list_bundle_evidence_edges(
+        &self,
+        bundle_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeBundleEvidenceEdgeRow>> {
+        self.list_bundle_evidence_edges(bundle_id).await
+    }
+    async fn get_bundle_reference_set(
+        &self,
+        bundle_id: Uuid,
+    ) -> anyhow::Result<Option<KnowledgeContextBundleReferenceSetRow>> {
+        self.get_bundle_reference_set(bundle_id).await
+    }
+    async fn get_bundle_reference_set_by_query_execution(
+        &self,
+        query_execution_id: Uuid,
+    ) -> anyhow::Result<Option<KnowledgeContextBundleReferenceSetRow>> {
+        self.get_bundle_reference_set_by_query_execution(query_execution_id).await
+    }
+    async fn list_bundle_reference_sets_by_library(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeContextBundleReferenceSetRow>> {
+        self.list_bundle_reference_sets_by_library(library_id).await
+    }
+    async fn delete_bundle_chunk_edges(&self, bundle_id: Uuid) -> anyhow::Result<u64> {
+        self.delete_bundle_chunk_edges(bundle_id).await
+    }
+    async fn delete_bundle_entity_edges(&self, bundle_id: Uuid) -> anyhow::Result<u64> {
+        self.delete_bundle_entity_edges(bundle_id).await
+    }
+    async fn delete_bundle_relation_edges(&self, bundle_id: Uuid) -> anyhow::Result<u64> {
+        self.delete_bundle_relation_edges(bundle_id).await
+    }
+    async fn delete_bundle_evidence_edges(&self, bundle_id: Uuid) -> anyhow::Result<u64> {
+        self.delete_bundle_evidence_edges(bundle_id).await
+    }
+}

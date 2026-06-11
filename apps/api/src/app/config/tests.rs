@@ -7,6 +7,7 @@ fn sample_settings() -> Settings {
         service_role: "api".into(),
         database_url: "postgres://postgres:postgres@127.0.0.1:5432/ironrag".into(),
         database_max_connections: 64,
+        knowledge_plane_backend: "arango".into(),
         redis_url: "redis://127.0.0.1:6379".into(),
         arangodb_url: "http://127.0.0.1:8529".into(),
         arangodb_database: "ironrag".into(),
@@ -138,7 +139,9 @@ fn settings_from_env_entries(entries: &[(&str, &str)]) -> Settings {
         .expect("config should build");
     let mut settings: Settings = cfg.try_deserialize().expect("settings should deserialize");
     settings.service_role = settings.service_role.trim().to_ascii_lowercase();
+    settings.knowledge_plane_backend = settings.knowledge_plane_backend.trim().to_ascii_lowercase();
     validate_service_role(&settings).expect("role should validate");
+    validate_knowledge_plane_backend(&settings).expect("knowledge backend should validate");
     validate_service_name(&settings).expect("service name should validate");
     validate_arangodb_settings(&settings).expect("arangodb settings should validate");
     validate_ingestion_settings(&settings).expect("ingestion settings should validate");
@@ -159,6 +162,7 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.service_name, "ironrag-backend");
     assert_eq!(settings.environment, "local");
     assert_eq!(settings.database_max_connections, 64);
+    assert_eq!(settings.knowledge_plane_backend, "arango");
     assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 16);
     assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
     assert_eq!(settings.arangodb_url, "http://127.0.0.1:8529");
@@ -244,6 +248,22 @@ fn canonical_prefixed_flat_variables_override_defaults() {
     assert_eq!(settings.database_url, "postgres://postgres:postgres@postgres:5432/ironrag");
     assert_eq!(settings.service_role, "api");
     assert_eq!(settings.log_filter, "debug");
+}
+
+#[test]
+fn knowledge_plane_backend_env_overrides_default() {
+    let settings = settings_from_env_entries(&[("IRONRAG_KNOWLEDGE_PLANE_BACKEND", " POSTGRES ")]);
+
+    assert_eq!(settings.knowledge_plane_backend, "postgres");
+}
+
+#[test]
+fn rejects_invalid_knowledge_plane_backend() {
+    let mut settings = sample_settings();
+    settings.knowledge_plane_backend = "mysql".into();
+
+    let error = validate_knowledge_plane_backend(&settings).expect_err("backend should fail");
+    assert!(error.contains("knowledge_plane_backend"));
 }
 
 #[test]
@@ -412,6 +432,11 @@ fn resolved_ui_bootstrap_ai_exposes_binding_defaults_without_provider_credential
                     binding_purpose: "vision".into(),
                     provider_kind: Some("provider-alpha".into()),
                     model_name: Some("alpha-vision".into()),
+                },
+                UiBootstrapAiBindingDefault {
+                    binding_purpose: "agent".into(),
+                    provider_kind: Some("provider-alpha".into()),
+                    model_name: Some("alpha-chat-large".into()),
                 },
             ],
         }),

@@ -17,7 +17,11 @@ storage:
 dependencies:
   postgres:
     mode: bundled
+    image:
+      repository: pgvector/pgvector
+      tag: pg18
   redis:
     mode: bundled
-  arangodb:
-    mode: bundled
+    image:
+      repository: redis
+      tag: "8.8"

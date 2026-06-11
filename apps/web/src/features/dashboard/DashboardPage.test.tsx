@@ -27,8 +27,8 @@ function LocationProbe() {
   return <div data-testid="destination">{`${location.pathname}${location.search}`}</div>;
 }
 
-function sampleDashboard() {
-  return {
+function sampleDashboard(overrides: Record<string, unknown> = {}) {
+  const dashboard = {
     overview: {
       totalDocuments: 12,
       readyDocuments: 8,
@@ -96,11 +96,12 @@ function sampleDashboard() {
         code: 'failed_documents',
         title: 'custom title ignored',
         detail: 'custom detail ignored',
-        routePath: '/ignored',
+        routePath: '/documents?status=failed',
         level: 'error',
       },
     ],
   };
+  return { ...dashboard, ...overrides };
 }
 
 describe('DashboardPage integration', () => {
@@ -199,6 +200,60 @@ describe('DashboardPage integration', () => {
     // for known codes; it must use the translated `attentionTitles.failed_documents`.
     expect(container.textContent).not.toContain('custom title ignored');
     expect(container.textContent).toContain('Failed documents');
+    expect(container.textContent).toContain('Review failed documents');
+  });
+
+  it('navigates failed-document attention to the failed documents filter', async () => {
+    await renderPage();
+
+    const attention = findButton('Review failed documents');
+    expect(attention).toBeTruthy();
+
+    await act(async () => {
+      attention?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
+    expect(container.querySelector('[data-testid="destination"]')?.textContent).toBe(
+      '/documents?status=failed',
+    );
+  });
+
+  it('navigates graph attention to the graph workspace instead of documents', async () => {
+    opsMock.mockResolvedValue({
+      data: sampleDashboard({
+        attention: [
+          {
+            code: 'graph_coverage_gap',
+            title: 'ignored graph title',
+            detail: 'ignored graph detail',
+            routePath: '/graph',
+            level: 'warning',
+          },
+        ],
+      }),
+      error: undefined,
+      response: new Response(),
+      request: new Request('http://localhost'),
+    } as never);
+
+    await renderPage();
+
+    const attention = findButton('Open graph coverage');
+    expect(attention).toBeTruthy();
+
+    await act(async () => {
+      attention?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
+    expect(container.querySelector('[data-testid="destination"]')?.textContent).toBe('/graph');
+  });
+
+  it('does not render duplicate generic document buttons on the dashboard', async () => {
+    await renderPage();
+
+    expect(findButton('Open Documents')).toBeUndefined();
   });
 
   it('surfaces the most recent web run, not the first in the list', async () => {
@@ -214,6 +269,8 @@ describe('DashboardPage integration', () => {
 
     const card = findButton('broken.pdf');
     expect(card).toBeTruthy();
+    expect(card?.textContent).toContain('Processing failed: Parser error.');
+    expect(card?.textContent).not.toContain('parser_error');
 
     await act(async () => {
       card?.dispatchEvent(new MouseEvent('click', { bubbles: true }));

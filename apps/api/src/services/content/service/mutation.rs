@@ -70,6 +70,7 @@ impl ContentService {
                         external_key: command.external_key,
                         file_name: command.file_name,
                         created_by_principal_id: command.created_by_principal_id,
+                        parent_external_key: command.parent_external_key,
                     },
                 )
                 .await?;

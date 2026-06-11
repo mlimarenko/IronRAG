@@ -2,13 +2,22 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::{QueryIR, QueryScope};
+use crate::domains::query_ir::{
+    LiteralKind, QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped,
+};
 use crate::services::query::effective_query::current_question_segment;
 use crate::services::query::planner::strip_leading_question_marker;
 use crate::services::query::text_match::related_prefix_token_match;
 
 use super::retrieve::score_value;
+use super::technical_literal_extractors::{
+    extract_config_section_literals, extract_explicit_path_literals, extract_http_methods,
+    extract_package_command_literals, extract_parameter_literals, extract_prefix_literals,
+    extract_url_literals,
+};
 use super::types::RuntimeMatchedChunk;
+
+const TECHNICAL_LITERAL_INVENTORY_SCORE_CAP: isize = 48;
 
 /// Extracts focus keywords for technical chunk ranking.
 ///
@@ -44,7 +53,7 @@ pub(super) fn technical_literal_focus_keywords(
     for token in strip_leading_question_marker(current_question)
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
         .map(str::trim)
-        .filter(|token| token.chars().count() >= 4)
+        .filter(|token| should_keep_technical_focus_token(token))
         .map(str::to_lowercase)
     {
         if seen.insert(token.clone()) {
@@ -58,8 +67,19 @@ fn technical_literal_question_tokens(value: &str) -> impl Iterator<Item = String
     value
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
         .map(str::trim)
-        .filter(|token| token.chars().count() >= 4)
+        .filter(|token| should_keep_technical_focus_token(token))
         .map(str::to_lowercase)
+}
+
+fn should_keep_technical_focus_token(token: &str) -> bool {
+    token.chars().count() >= 4 || is_short_technical_focus_token(token)
+}
+
+fn is_short_technical_focus_token(token: &str) -> bool {
+    let char_count = token.chars().count();
+    (2..=3).contains(&char_count)
+        && token.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && token.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
 fn technical_keyword_stem(keyword: &str) -> Option<String> {
@@ -191,6 +211,66 @@ pub(super) fn technical_chunk_selection_score(
         .sum::<isize>()
 }
 
+fn query_ir_wants_literal_inventory_boost(question: &str, ir: Option<&QueryIR>) -> bool {
+    let Some(ir) = ir else {
+        return false;
+    };
+    if ir.is_exact_literal_technical()
+        || matches!(ir.act, QueryAct::ConfigureHow | QueryAct::RetrieveValue)
+    {
+        return true;
+    }
+    if ir.target_types.iter().any(|tag| {
+        matches!(
+            tag.trim().to_ascii_lowercase().as_str(),
+            "endpoint"
+                | "path"
+                | "url"
+                | "wsdl"
+                | "base_url"
+                | "parameter"
+                | "config_key"
+                | "software_module"
+                | "package"
+                | "configuration_file"
+                | "filesystem_path"
+                | "http_method"
+                | "port"
+                | "protocol"
+                | "connection"
+        )
+    }) {
+        return true;
+    }
+    if ir.literal_constraints.iter().any(|literal| match literal.kind {
+        LiteralKind::Url | LiteralKind::Path => true,
+        LiteralKind::Identifier => literal_text_is_identifier_shaped(&literal.text),
+        LiteralKind::Version | LiteralKind::NumericCode | LiteralKind::Other => false,
+    }) {
+        return true;
+    }
+    ir.confidence <= 0.3
+        && matches!(ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && matches!(ir.scope, QueryScope::SingleDocument)
+        && ir.source_slice.is_none()
+        && ir.target_types.is_empty()
+        && ir.literal_constraints.is_empty()
+        && technical_literal_focus_keywords(question, Some(ir))
+            .iter()
+            .any(|keyword| keyword.chars().count() < 4)
+}
+
+fn technical_literal_inventory_score(text: &str) -> isize {
+    let score = extract_parameter_literals(text, 16).len().saturating_mul(4)
+        + extract_config_section_literals(text, 8).len().saturating_mul(3)
+        + extract_explicit_path_literals(text, 8).len().saturating_mul(3)
+        + extract_package_command_literals(text, 4).len().saturating_mul(3)
+        + extract_url_literals(text, 4).len().saturating_mul(2)
+        + extract_prefix_literals(text, 4).len().saturating_mul(2)
+        + extract_http_methods(text, 4).len();
+    (score as isize).min(TECHNICAL_LITERAL_INVENTORY_SCORE_CAP)
+}
+
 pub(super) fn select_document_balanced_chunks<'a>(
     question: &str,
     ir: Option<&QueryIR>,
@@ -212,23 +292,41 @@ pub(super) fn select_document_balanced_chunks<'a>(
 
     for document_chunks in per_document_chunks.values_mut() {
         let local_keywords = document_local_focus_keywords(question, ir, document_chunks, keywords);
+        let literal_inventory_boost = query_ir_wants_literal_inventory_boost(question, ir);
         let score_by_chunk_id = document_chunks
             .iter()
             .map(|chunk| {
+                let evidence_text =
+                    format!("{} {} {}", chunk.document_label, chunk.excerpt, chunk.source_text);
                 let match_score = technical_chunk_selection_score(
-                    &format!("{} {}", chunk.excerpt, chunk.source_text),
+                    &evidence_text,
                     &local_keywords,
                     pagination_requested,
                 );
-                (chunk.chunk_id, (match_score, score_value(chunk.score)))
+                let inventory_score = literal_inventory_boost
+                    .then(|| technical_literal_inventory_score(&evidence_text))
+                    .unwrap_or(0);
+                (
+                    chunk.chunk_id,
+                    (
+                        match_score + inventory_score,
+                        match_score,
+                        inventory_score,
+                        score_value(chunk.score),
+                    ),
+                )
             })
             .collect::<HashMap<_, _>>();
         document_chunks.sort_by(|left, right| {
-            let (left_match, left_score) =
+            let (left_total, left_match, left_inventory, left_score) =
                 score_by_chunk_id.get(&left.chunk_id).copied().unwrap_or_default();
-            let (right_match, right_score) =
+            let (right_total, right_match, right_inventory, right_score) =
                 score_by_chunk_id.get(&right.chunk_id).copied().unwrap_or_default();
-            right_match.cmp(&left_match).then_with(|| right_score.total_cmp(&left_score))
+            right_total
+                .cmp(&left_total)
+                .then_with(|| right_match.cmp(&left_match))
+                .then_with(|| right_inventory.cmp(&left_inventory))
+                .then_with(|| right_score.total_cmp(&left_score))
         });
     }
 
@@ -253,6 +351,46 @@ pub(super) fn select_document_balanced_chunks<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domains::query_ir::QueryLanguage;
+
+    fn test_chunk(
+        document_id: Uuid,
+        label: &str,
+        index: i32,
+        source_text: &str,
+    ) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            revision_id: Uuid::now_v7(),
+            chunk_index: index,
+            chunk_kind: Some("text".to_string()),
+            document_label: label.to_string(),
+            excerpt: source_text.to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(1.0),
+            source_text: source_text.to_string(),
+        }
+    }
+
+    fn test_query_ir() -> QueryIR {
+        QueryIR {
+            act: QueryAct::ConfigureHow,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 1.0,
+        }
+    }
 
     #[test]
     fn technical_keyword_weight_accepts_longer_related_prefix_token() {
@@ -262,5 +400,82 @@ mod tests {
     #[test]
     fn technical_keyword_weight_rejects_short_prefix_target_tokens() {
         assert_eq!(technical_keyword_weight("acmealpha payment configuration", "acmr"), 0);
+    }
+
+    #[test]
+    fn chunk_selection_uses_document_label_and_literal_inventory_for_config_chunks() {
+        let document_id = Uuid::now_v7();
+        let overview = test_chunk(
+            document_id,
+            "Alpha Connector setup guide",
+            0,
+            "General behavior without settings.",
+        );
+        let config = test_chunk(
+            document_id,
+            "Alpha Connector setup guide",
+            1,
+            "[Main]\nalphaMerchantId = 10\nsecretKey = value\npollInterval = 30",
+        );
+        let mut ir = test_query_ir();
+        ir.target_types = vec!["config_key".to_string()];
+
+        let chunks = [overview, config.clone()];
+        let selected = select_document_balanced_chunks(
+            "Alpha Connector configuration parameters",
+            Some(&ir),
+            &chunks,
+            &technical_literal_focus_keywords(
+                "Alpha Connector configuration parameters",
+                Some(&ir),
+            ),
+            false,
+            1,
+            1,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].chunk_id, config.chunk_id);
+    }
+
+    #[test]
+    fn technical_focus_keywords_keep_short_technical_tokens_by_shape() {
+        let keywords = technical_literal_focus_keywords(
+            "Which QR ID setting maps to the alpha flag?",
+            Some(&test_query_ir()),
+        );
+
+        assert!(keywords.iter().any(|keyword| keyword == "qr"));
+        assert!(keywords.iter().any(|keyword| keyword == "id"));
+        assert!(!keywords.iter().any(|keyword| keyword == "to"));
+    }
+
+    #[test]
+    fn chunk_selection_uses_short_technical_fallback_inventory_for_config_chunks() {
+        let document_id = Uuid::now_v7();
+        let overview = test_chunk(document_id, "Alpha guide", 0, "QR settings overview.");
+        let config = test_chunk(
+            document_id,
+            "Alpha guide",
+            1,
+            "[UI.Alpha.QR]\nalphaVisible = true\nprintSlip = false",
+        );
+        let mut ir = test_query_ir();
+        ir.act = QueryAct::Describe;
+        ir.confidence = 0.25;
+
+        let chunks = [overview, config.clone()];
+        let selected = select_document_balanced_chunks(
+            "Which QR setting is used?",
+            Some(&ir),
+            &chunks,
+            &technical_literal_focus_keywords("Which QR setting is used?", Some(&ir)),
+            false,
+            1,
+            1,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].chunk_id, config.chunk_id);
     }
 }

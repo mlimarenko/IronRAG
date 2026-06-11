@@ -1,7 +1,10 @@
 DOCKER_COMPOSE ?= docker compose
-DOCKER_COMPOSE_FILE ?= docker-compose-local.yml
+DOCKER_COMPOSE_FILE ?= docker-compose.yml
+# Local source-build image names so `compose build` tags `:local` instead of
+# overwriting the published `pipingspace/*:latest` tags (see docker-compose.yml).
+LOCAL_IMAGE_ENV ?= IRONRAG_BACKEND_IMAGE=ironrag-backend:local IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local
 LOCAL_DOCKER_APP_SERVICES ?= backend
-LOCAL_DOCKER_ALL_SERVICES ?= postgres redis arangodb backend worker nginx
+LOCAL_DOCKER_ALL_SERVICES ?= postgres redis startup backend worker frontend
 IRONRAG_BENCHMARK_BASE_URL ?= http://127.0.0.1:19000/v1
 IRONRAG_BENCHMARK_SUITES ?= apps/api/benchmarks/grounded_query/api_baseline_suite.json apps/api/benchmarks/grounded_query/workflow_strict_suite.json apps/api/benchmarks/grounded_query/layout_noise_suite.json apps/api/benchmarks/grounded_query/graph_multihop_suite.json apps/api/benchmarks/grounded_query/multiformat_surface_suite.json
 IRONRAG_TECHNICAL_SUITES ?= apps/api/benchmarks/grounded_query/technical_contract_suite.json
@@ -179,9 +182,16 @@ helm-chart-check:
 mem-budget-check:
 	scripts/ops/check-mem-budget.sh
 
-check: backend-change-gate frontend-check helm-chart-check mem-budget-check
+# Validate the install wizard: syntax, the resource-sizing table, the
+# atomic/secret-safe .env merge, and (where a pty is available) the interactive
+# prompts. No Docker or network required.
+install-script-check:
+	bash -n install.sh
+	bash tests/install_wizard.test.sh
 
-check-strict: backend-change-gate backend-doc frontend-check helm-chart-check mem-budget-check
+check: backend-change-gate frontend-check helm-chart-check mem-budget-check install-script-check
+
+check-strict: backend-change-gate backend-doc frontend-check helm-chart-check mem-budget-check install-script-check
 
 pre-commit-install:
 	pre-commit install --install-hooks
@@ -258,21 +268,21 @@ benchmark-golden-seed:
 	@$(MAKE) benchmark-grounded-seed IRONRAG_BENCHMARK_SUITES="$(IRONRAG_GOLDEN_SUITES)" IRONRAG_BENCHMARK_OUTPUT_DIR="$(IRONRAG_GOLDEN_OUTPUT_DIR)" IRONRAG_BENCHMARK_LIBRARY_NAME="Golden Benchmark Seed"
 
 docker-local-build:
-	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_APP_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_APP_SERVICES)
 
 docker-local-rebuild:
-	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build --no-cache $(LOCAL_DOCKER_APP_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build --no-cache $(LOCAL_DOCKER_APP_SERVICES)
 
 docker-local-redeploy:
-	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --force-recreate $(LOCAL_DOCKER_APP_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --force-recreate $(LOCAL_DOCKER_APP_SERVICES)
 
 docker-local-refresh: docker-local-build docker-local-redeploy
 
 docker-local-up:
-	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d $(LOCAL_DOCKER_ALL_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d $(LOCAL_DOCKER_ALL_SERVICES)
 
 docker-local-down:
-	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) down
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) down
 
 perf-probe:
 	python3 scripts/ops/profile-ui-endpoints.py

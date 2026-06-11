@@ -16,13 +16,62 @@ export const GRAPH_NODE_COLORS: Record<string, string> = {
 };
 
 export const GRAPH_EDGE_COLORS = {
-  dense: 'rgba(71, 85, 105, 0.48)',
-  regular: 'rgba(71, 85, 105, 0.64)',
-  muted: 'rgba(71, 85, 105, 0.34)',
-  highlight: 'rgba(51, 65, 85, 0.82)',
+  dense: 'rgba(148, 163, 184, 0.38)',
+  denseLight: 'rgba(15, 23, 42, 0.34)',
+  regular: 'rgba(100, 116, 139, 0.72)',
+  muted: 'rgba(100, 116, 139, 0.42)',
+  highlight: 'rgba(245, 158, 11, 0.9)',
 } as const;
 
+/// Above this rendered-edge count the graph view draws a stride-sampled
+/// subset of edges instead of every edge (rasterising every edge is the
+/// large-graph render bottleneck). Shared between SigmaGraph (which applies
+/// it) and GraphPage (which shows the edge-density toggle).
+export const GRAPH_EDGE_RENDER_CAP = 70000;
+
+/// Denser overview cap used when the user asks for more visual edge context.
+/// This intentionally remains capped: the full topology stays available to
+/// selection, neighbors, and inspectors, but the canvas never attempts to draw
+/// hundreds of thousands of lines on every Firefox frame.
+export const GRAPH_EDGE_DENSE_RENDER_CAP = 110000;
+
+/// Above this raw edge count, changing the rendered edge density is itself a
+/// visible Sigma repaint spike in Firefox. The full topology remains available
+/// to adjacency, selection, and inspectors; the canvas keeps the safe overview
+/// sample instead of exposing a janky toolbar action.
+export const GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES = 120000;
+
 export const GRAPH_LAYOUT_OPTIONS = [
+  {
+    id: 'hubs',
+    iconKey: 'hubs',
+    labelKey: 'graph.layouts.hubs',
+    descriptionKey: 'graph.layoutDescriptions.hubs',
+  },
+  {
+    id: 'sources',
+    iconKey: 'sources',
+    labelKey: 'graph.layouts.sources',
+    descriptionKey: 'graph.layoutDescriptions.sources',
+  },
+  {
+    id: 'flow',
+    iconKey: 'flow',
+    labelKey: 'graph.layouts.flow',
+    descriptionKey: 'graph.layoutDescriptions.flow',
+  },
+  {
+    id: 'radial',
+    iconKey: 'radial',
+    labelKey: 'graph.layouts.radial',
+    descriptionKey: 'graph.layoutDescriptions.radial',
+  },
+  {
+    id: 'circlepack',
+    iconKey: 'circlepack',
+    labelKey: 'graph.layouts.circlepack',
+    descriptionKey: 'graph.layoutDescriptions.circlepack',
+  },
   {
     id: 'sectors',
     iconKey: 'sectors',
@@ -57,8 +106,17 @@ export const GRAPH_LAYOUT_OPTIONS = [
 
 export type GraphLayoutType = (typeof GRAPH_LAYOUT_OPTIONS)[number]['id'];
 
+export const DEFAULT_GRAPH_LAYOUT: GraphLayoutType = 'hubs';
+
 export function isGraphLayoutType(value: string | undefined | null): value is GraphLayoutType {
   return GRAPH_LAYOUT_OPTIONS.some((layout) => layout.id === value);
+}
+
+export function normalizeRecommendedGraphLayout(
+  value: string | undefined | null,
+): GraphLayoutType | null {
+  if (!isGraphLayoutType(value)) return null;
+  return value === 'bands' ? DEFAULT_GRAPH_LAYOUT : value;
 }
 
 

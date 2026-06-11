@@ -2,6 +2,7 @@ import i18n from '@/shared/i18n';
 
 export function registerConfigDrivenI18nKeysForAudit() {
   // Static calls for config-object keys consumed through t(key) lookups in excluded trees.
+  void i18n.t(`graph.layouts.${''}`);
   void i18n.t(`graph.layoutDescriptions.${''}`);
 
   void i18n.t('login.purposeEmbedChunk');

@@ -1,13 +1,18 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
-import { FileText, Share2 } from 'lucide-react';
+import { FileText, Share2, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { cn } from '@/shared/lib/utils';
 import type { EvidenceBundle } from '@/shared/types';
-import { VERIFICATION_CONFIG, verificationLabel } from "../model/verificationConfig";
+import { VerificationChip } from './VerificationChip';
 
 type EvidencePanelProps = {
   t: TFunction;
   evidence: EvidenceBundle;
+  /** Optional close handler; when present, a close control is shown. */
+  onClose?: () => void;
+  /** Extra classes for layout (width / responsive visibility) at the call site. */
+  className?: string;
   onOpenDocuments: () => void;
   onOpenGraph: () => void;
 };
@@ -27,36 +32,46 @@ function formatRelevance(value: number): string {
   return value.toFixed(2);
 }
 
-function EvidencePanelImpl({ t, evidence, onOpenDocuments, onOpenGraph }: EvidencePanelProps) {
-  const vc =
-    evidence.verificationState !== 'not_run'
-      ? VERIFICATION_CONFIG[evidence.verificationState]
-      : null;
+function EvidencePanelImpl({
+  t,
+  evidence,
+  onClose,
+  className,
+  onOpenDocuments,
+  onOpenGraph,
+}: EvidencePanelProps) {
+  const showVerdict = evidence.verificationState !== 'not_run';
 
   return (
-    <div className="inspector-panel w-72 lg:w-80 shrink-0 hidden lg:block overflow-y-auto animate-slide-in-right">
-      <div className="p-3 border-b">
+    <div
+      className={cn(
+        'inspector-panel shrink-0 overflow-y-auto animate-slide-in-right',
+        className,
+      )}
+    >
+      <div className="flex items-center justify-between gap-2 border-b p-3">
         <h3 className="text-sm font-bold tracking-tight">{t('assistant.evidence')}</h3>
+        {onClose && (
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="h-7 w-7 shrink-0"
+            aria-label={t('assistant.close')}
+            title={t('assistant.close')}
+            onClick={onClose}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        )}
       </div>
       <div className="p-3 space-y-4">
-        {vc && (
-          <div
-            className="flex items-center gap-2.5 p-3.5 rounded-xl"
-            style={{
-              background:
-                evidence.verificationState === 'passed'
-                  ? 'hsl(var(--status-ready-bg))'
-                  : 'hsl(var(--status-warning-bg))',
-              boxShadow: `inset 0 0 0 1px ${
-                evidence.verificationState === 'passed'
-                  ? 'hsl(var(--status-ready-ring) / 0.3)'
-                  : 'hsl(var(--status-warning-ring) / 0.3)'
-              }`,
-            }}
-          >
-            <vc.icon className={`h-4 w-4 ${vc.cls}`} />
-            <span className="text-sm font-bold">{verificationLabel(evidence.verificationState, t)}</span>
-          </div>
+        {showVerdict && (
+          <VerificationChip
+            t={t}
+            state={evidence.verificationState}
+            warnings={evidence.verificationWarnings}
+          />
         )}
 
         {evidence.runtimeSummary && (

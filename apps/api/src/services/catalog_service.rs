@@ -303,16 +303,18 @@ impl CatalogService {
         // on prod before this fix. Fire a sweep per library that lived
         // under the workspace; failures are loud-logged but do not
         // resurrect the workspace row.
-        for orphan_library_id in libraries_before_delete {
-            if let Err(arango_error) =
-                clear_library_arango_footprint(state, orphan_library_id).await
-            {
-                error!(
-                    workspace_id = %workspace.id,
-                    library_id = %orphan_library_id,
-                    error = ?arango_error,
-                    "failed to cascade workspace delete into arango library footprint"
-                );
+        if state.settings.knowledge_plane_backend == "arango" {
+            for orphan_library_id in libraries_before_delete {
+                if let Err(arango_error) =
+                    clear_library_arango_footprint(state, orphan_library_id).await
+                {
+                    error!(
+                        workspace_id = %workspace.id,
+                        library_id = %orphan_library_id,
+                        error = ?arango_error,
+                        "failed to cascade workspace delete into arango library footprint"
+                    );
+                }
             }
         }
 
@@ -636,13 +638,15 @@ impl CatalogService {
         // never see again. Run the same canonical sweep snapshot-
         // restore-replace uses; failures are loud-logged but do not
         // resurrect the PG row.
-        if let Err(arango_error) = clear_library_arango_footprint(state, library.id).await {
-            error!(
-                workspace_id = %library.workspace_id,
-                library_id = %library.id,
-                error = ?arango_error,
-                "failed to cascade library delete into arango library footprint"
-            );
+        if state.settings.knowledge_plane_backend == "arango" {
+            if let Err(arango_error) = clear_library_arango_footprint(state, library.id).await {
+                error!(
+                    workspace_id = %library.workspace_id,
+                    library_id = %library.id,
+                    error = ?arango_error,
+                    "failed to cascade library delete into arango library footprint"
+                );
+            }
         }
 
         purge_stashed_directory(state, stashed_directory.as_ref()).await;

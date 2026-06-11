@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Brain, Loader2 } from 'lucide-react';
+import { AlertTriangle, Brain, Loader2, Pencil, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { z } from 'zod';
 
@@ -23,6 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import { errorMessage } from '@/shared/lib/errorMessage';
 import type { AIModelOption, AIProvider, AIScopeKind, ModelPreset } from '@/shared/types';
 import {
   compareByUpdatedAtDesc,
@@ -70,6 +71,8 @@ export function PresetsSection({
   const [providerOverrideId, setProviderOverrideId] = useState('');
   const [presetOpen, setPresetOpen] = useState(false);
   const [editingPreset, setEditingPreset] = useState<ModelPreset | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ModelPreset | null>(null);
+  const [deletingPreset, setDeletingPreset] = useState(false);
   const [presetNameTouched, setPresetNameTouched] = useState(false);
   const [presetMaxTokensTouched, setPresetMaxTokensTouched] = useState(false);
   const lastOpenAddRequestRef = useRef(0);
@@ -281,6 +284,21 @@ export function PresetsSection({
     },
   );
 
+  const deletePreset = async () => {
+    if (!deleteTarget || deletingPreset) return;
+    setDeletingPreset(true);
+    try {
+      await adminApi.deleteModelPreset(deleteTarget.id);
+      setDeleteTarget(null);
+      invalidateAll();
+      toast.success(t('admin.aiPanel.messages.presetDeleted'));
+    } catch (err) {
+      toast.error(errorMessage(err, t('admin.aiPanel.messages.presetDeleteFailed')));
+    } finally {
+      setDeletingPreset(false);
+    }
+  };
+
   const toolbar = (
     <>
       <div className="w-[200px]">
@@ -331,6 +349,30 @@ export function PresetsSection({
         }
         searchPlaceholder={t('admin.aiPanel.filters.presetsSearch')}
         toolbar={toolbar}
+        rowActions={preset => (
+          <>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              aria-label={`${t('admin.edit')}: ${preset.presetName}`}
+              onClick={() => openPresetEditor(preset)}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 text-status-failed hover:text-status-failed"
+              aria-label={`${t('admin.delete')}: ${preset.presetName}`}
+              onClick={() => setDeleteTarget(preset)}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </>
+        )}
         matchesFilter={(preset, filter) =>
           matchesFilter(
             [
@@ -442,19 +484,27 @@ export function PresetsSection({
                   </InspectorSection>
                 )}
                 <InspectorSection title={t('admin.aiPanel.fields.identifier')}>
-                  <InspectorField label="ID" value={preset.id} mono />
+                  <InspectorField label={t('admin.aiPanel.fields.identifier')} value={preset.id} mono />
                 </InspectorSection>
               </>
             ),
             actions: (
-              <Button
-                size="sm"
-                variant="outline"
-                className="w-full justify-center"
-                onClick={() => openPresetEditor(preset)}
-              >
-                {t('admin.edit')}
-              </Button>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => openPresetEditor(preset)}
+                >
+                  <Pencil className="mr-1.5 h-3.5 w-3.5" /> {t('admin.edit')}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setDeleteTarget(preset)}
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" /> {t('admin.delete')}
+                </Button>
+              </div>
             ),
           };
         }}
@@ -565,6 +615,33 @@ export function PresetsSection({
                 </>
               ) : (
                 t('admin.save')
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={open => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('admin.aiPanel.dialogs.deletePresetTitle')}</DialogTitle>
+            <DialogDescription>
+              {t('admin.aiPanel.dialogs.deletePresetDescription', {
+                preset: deleteTarget?.presetName ?? '',
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              {t('admin.cancel')}
+            </Button>
+            <Button variant="destructive" disabled={deletingPreset} onClick={() => void deletePreset()}>
+              {deletingPreset ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}
+                </>
+              ) : (
+                t('admin.delete')
               )}
             </Button>
           </DialogFooter>

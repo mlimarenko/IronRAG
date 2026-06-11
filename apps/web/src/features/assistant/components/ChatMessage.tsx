@@ -1,14 +1,33 @@
 import { memo, useEffect, useState } from 'react';
 import type { TFunction } from 'i18next';
-import { BrainCircuit, CheckCircle2, ExternalLink, FileText, Loader2, Wrench } from 'lucide-react';
+import {
+  BrainCircuit,
+  Bug,
+  Check,
+  CheckCircle2,
+  Copy,
+  ExternalLink,
+  FileText,
+  Layers,
+  Loader2,
+  Wrench,
+} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { AssistantAgentActivityEvent, AssistantMessage } from '@/shared/types';
-import { VERIFICATION_CONFIG, verificationLabel } from "../model/verificationConfig";
+import { VerificationChip } from './VerificationChip';
 
 type ChatMessageProps = {
   t: TFunction;
   message: AssistantMessage;
   responseMs?: number;
+  /** Total distinct evidence sources (segments + entities) backing this answer. */
+  totalSourceCount?: number;
+  /** Opens the evidence/citations panel scoped to this message. */
+  onOpenEvidence?: () => void;
+  /** Opens the debug inspector for this turn (developer mode only). */
+  onInspect?: () => void;
+  /** When true, surfaces the per-message debug affordance. */
+  developerMode?: boolean;
 };
 
 type AnswerSourceLink = {
@@ -259,13 +278,66 @@ const markdownComponents = {
   ),
 };
 
-function ChatMessageImpl({ t, message, responseMs }: ChatMessageProps) {
+function CopyAnswerButton({ t, content }: { t: TFunction; content: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return undefined;
+    const timer = window.setTimeout(() => setCopied(false), 1800);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard?.writeText(content);
+      setCopied(true);
+    } catch {
+      // Clipboard may be blocked (insecure context / denied permission); the
+      // action is best-effort and must never throw into the render tree.
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      aria-label={copied ? t('assistant.copied') : t('assistant.copyAnswer')}
+      title={copied ? t('assistant.copied') : t('assistant.copyAnswer')}
+      className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-background/60 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+    >
+      {copied ? (
+        <Check className="h-3 w-3 text-status-ready" aria-hidden="true" />
+      ) : (
+        <Copy className="h-3 w-3" aria-hidden="true" />
+      )}
+      <span>{copied ? t('assistant.copied') : t('assistant.copyAnswer')}</span>
+    </button>
+  );
+}
+
+function ChatMessageImpl({
+  t,
+  message,
+  responseMs,
+  totalSourceCount,
+  onOpenEvidence,
+  onInspect,
+  developerMode,
+}: ChatMessageProps) {
   const isUser = message.role === 'user';
   const vcState = message.evidence?.verificationState;
-  const vc = vcState && vcState !== 'not_run' ? VERIFICATION_CONFIG[vcState] : null;
-  const vcLabel = vcState && vcState !== 'not_run' ? verificationLabel(vcState, t) : null;
+  const showVerdict = !isUser && vcState != null && vcState !== 'not_run';
   const isPendingAssistant = !isUser && !message.content;
   const sourceLinks = !isUser && !isPendingAssistant ? collectAnswerSourceLinks(message) : [];
+  const hiddenSourceCount =
+    totalSourceCount != null ? Math.max(0, totalSourceCount - sourceLinks.length) : 0;
+  const hasEvidence = Boolean(
+    message.evidence &&
+      (message.evidence.segmentRefs.length > 0 ||
+        message.evidence.entityRefs.length > 0 ||
+        message.evidence.factRefs.length > 0),
+  );
+  const showFooterActions =
+    !isUser && !isPendingAssistant && Boolean(message.content);
   const messageWidthClass = isUser
     ? 'max-w-[80%]'
     : isPendingAssistant
@@ -292,12 +364,6 @@ function ChatMessageImpl({ t, message, responseMs }: ChatMessageProps) {
             : undefined
         }
       >
-        {vc && (
-          <div className="flex items-center gap-2 text-xs">
-            <vc.icon className={`h-3 w-3 ${vc.cls}`} />
-            <span className={`font-semibold ${vc.cls}`}>{vcLabel}</span>
-          </div>
-        )}
         <div
           className={`text-sm leading-relaxed ${
             !isUser && !isPendingAssistant
@@ -340,6 +406,18 @@ function ChatMessageImpl({ t, message, responseMs }: ChatMessageProps) {
                         <span className="min-w-0 truncate">{link.label}</span>
                       </a>
                     ))}
+                    {onOpenEvidence && (hiddenSourceCount > 0 || hasEvidence) && (
+                      <button
+                        type="button"
+                        onClick={onOpenEvidence}
+                        className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs font-bold text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      >
+                        <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        {hiddenSourceCount > 0
+                          ? t('assistant.seeAllSources', { count: totalSourceCount ?? 0 })
+                          : t('assistant.viewEvidence')}
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -353,6 +431,31 @@ function ChatMessageImpl({ t, message, responseMs }: ChatMessageProps) {
           )}
         </div>
       </div>
+      {showVerdict && vcState && (
+        <VerificationChip
+          t={t}
+          state={vcState}
+          warnings={message.evidence?.verificationWarnings}
+          className="mt-1.5"
+        />
+      )}
+      {showFooterActions && (
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 px-1">
+          <CopyAnswerButton t={t} content={message.content} />
+          {developerMode && onInspect && (
+            <button
+              type="button"
+              onClick={onInspect}
+              aria-label={t('assistant.inspectTurn')}
+              title={t('assistant.inspectTurn')}
+              className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-background/60 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+            >
+              <Bug className="h-3 w-3" aria-hidden="true" />
+              <span>{t('assistant.inspectTurn')}</span>
+            </button>
+          )}
+        </div>
+      )}
       {(showTimestamp || showLatency) && (
         <div className={`flex items-center gap-2 px-1 ${isUser ? 'justify-end' : 'justify-start'}`}>
           {showTimestamp && (

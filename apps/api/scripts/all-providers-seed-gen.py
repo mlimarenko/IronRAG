@@ -59,7 +59,7 @@ ROLE_TITLE = {
 
 # ────────────────────────────────────────────────────────────────────
 # Pricing tables — USD per 1M tokens (input, output, cached_input or None).
-# Public-list prices as of 2026-05-09. Sources: provider documentation.
+# Public-list prices as of 2026-06-04. Sources: provider documentation.
 # Glob-style key matched against model_name; first match wins.
 # ────────────────────────────────────────────────────────────────────
 PRICES_USD: dict[str, list[tuple[str, tuple[float, float | None, float | None]]]] = {
@@ -128,10 +128,18 @@ PRICES_USD: dict[str, list[tuple[str, tuple[float, float | None, float | None]]]
         ("deepseek-coder*",     (0.27, 1.10, 0.07)),
     ],
     "qwen": [
-        # Qwen3 / Qwen3.5 / Qwen3.6 series
+        # Qwen3 / Qwen3.5 / Qwen3.6 / Qwen3.7 series
+        ("qwen3.7-max*",        (1.25, 3.75, None)),
+        ("qwen3.7-plus*",       (0.40, 1.60, None)),
         ("qwen3.6-max*",        (1.60, 6.40, None)),
         ("qwen3.6-plus*",       (0.80, 3.20, None)),
         ("qwen3.6-27b*",        (0.30, 1.20, None)),
+        ("glm-5.1*",            (0.98, 3.08, None)),
+        ("kimi-k2.6*",          (0.684, 3.42, None)),
+        ("minimax-m2.5*",       (0.15, 1.15, None)),
+        ("mimo-v2.5-pro*",      (0.15, 1.15, None)),
+        ("deepseek-v4-pro*",    (0.435, 0.87, None)),
+        ("deepseek-v4-flash*",  (0.0983, 0.1966, None)),
         ("qwen3.5-max*",        (1.60, 6.40, None)),
         ("qwen3.5-plus*",       (0.80, 3.20, None)),
         ("qwen3.5-flash*",      (0.075, 0.30, None)),
@@ -263,7 +271,7 @@ def classify(model_id: str) -> tuple[str, str, list[str]]:
         "gemini", "imagen-vision",
         "grok-2-vision", "grok-3-vision", "grok-4", "grok-vision",
         "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.5-vl",
-        "qwen3.6-vl",
+        "qwen3.6-vl", "qwen3.7-vl",
         "vl-", "-vl-", "-vl:",
         "pixtral", "mistral-medium", "mistral-large",
         "molmo", "kimi-vl", "internvl", "minimax-m", "yi-vision",

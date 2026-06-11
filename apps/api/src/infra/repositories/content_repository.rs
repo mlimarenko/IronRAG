@@ -67,6 +67,9 @@ pub struct ContentDocumentRow {
     pub created_by_principal_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    pub parent_document_id: Option<Uuid>,
+    pub parent_external_key: Option<String>,
+    pub document_role: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -155,6 +158,16 @@ pub struct NewContentDocument<'a> {
     pub external_key: &'a str,
     pub document_state: &'a str,
     pub created_by_principal_id: Option<Uuid>,
+    /// Declared structural parent key from the connector (the page a dependent
+    /// rides with). Resolved to `parent_document_id` at admission when the
+    /// parent already exists, otherwise left pending for the resolver.
+    pub parent_external_key: Option<&'a str>,
+    /// Resolved canonical parent document id, when the parent was already
+    /// admitted at creation time.
+    pub parent_document_id: Option<Uuid>,
+    /// Typed role decided at admission: `primary`, `attachment`, or
+    /// `attached_context`.
+    pub document_role: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +254,10 @@ pub async fn list_documents_by_library(
             document_state::text as document_state,
             created_by_principal_id,
             created_at,
-            deleted_at
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role
          from content_document
          where library_id = $1
          order by created_at desc",
@@ -274,7 +290,10 @@ where
             document_state::text as document_state,
             created_by_principal_id,
             created_at,
-            deleted_at
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role
          from content_document
          where id = $1",
     )
@@ -297,7 +316,10 @@ pub async fn get_document_by_external_key(
             document_state::text as document_state,
             created_by_principal_id,
             created_at,
-            deleted_at
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role
          from content_document
          where library_id = $1
            and external_key = $2
@@ -308,6 +330,59 @@ pub async fn get_document_by_external_key(
     .bind(external_key)
     .fetch_optional(postgres)
     .await
+}
+
+/// Lists the non-deleted child documents that resolve to `parent_document_id`
+/// in `library_id`. Used by the delete-cascade lifecycle to act on a parent's
+/// children. Multi-parent occurrence attribution is out of scope: a child has
+/// exactly one canonical (first-resolved) `parent_document_id`.
+pub async fn list_active_children_by_parent(
+    postgres: &PgPool,
+    library_id: Uuid,
+    parent_document_id: Uuid,
+) -> Result<Vec<ContentDocumentRow>, sqlx::Error> {
+    sqlx::query_as::<_, ContentDocumentRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            external_key,
+            document_state::text as document_state,
+            created_by_principal_id,
+            created_at,
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role
+         from content_document
+         where library_id = $1
+           and parent_document_id = $2
+           and document_state <> 'deleted'
+         order by created_at desc, id desc",
+    )
+    .bind(library_id)
+    .bind(parent_document_id)
+    .fetch_all(postgres)
+    .await
+}
+
+/// Detaches a child document from its resolved parent by clearing
+/// `parent_document_id` while preserving the declared `parent_external_key`.
+/// Used when a parent is deleted but the child (role `attachment`) stays alive
+/// as a peer document; keeping the declared key lets the resolver re-attach if
+/// the parent reappears.
+pub async fn detach_document_parent<'e, E>(
+    executor: E,
+    document_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query("update content_document set parent_document_id = null where id = $1")
+        .bind(document_id)
+        .execute(executor)
+        .await
+        .map(|_| ())
 }
 
 pub async fn create_document(
@@ -333,9 +408,12 @@ where
             document_state,
             created_by_principal_id,
             created_at,
-            deleted_at
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role
         )
-        values ($1, $2, $3, $4, $5::content_document_state, $6, now(), null)
+        values ($1, $2, $3, $4, $5::content_document_state, $6, now(), null, $7, $8, $9)
         returning
             id,
             workspace_id,
@@ -344,7 +422,10 @@ where
             document_state::text as document_state,
             created_by_principal_id,
             created_at,
-            deleted_at",
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role",
     )
     .bind(Uuid::now_v7())
     .bind(new_document.workspace_id)
@@ -352,6 +433,9 @@ where
     .bind(new_document.external_key)
     .bind(new_document.document_state)
     .bind(new_document.created_by_principal_id)
+    .bind(new_document.parent_document_id)
+    .bind(new_document.parent_external_key)
+    .bind(new_document.document_role)
     .fetch_one(executor)
     .await
 }
@@ -387,7 +471,10 @@ where
             document_state::text as document_state,
             created_by_principal_id,
             created_at,
-            deleted_at",
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role",
     )
     .bind(document_id)
     .bind(document_state)
@@ -1644,6 +1731,7 @@ pub async fn list_document_page_rows(
     sort: DocumentListSortColumn,
     sort_desc: bool,
     status_filter: &[String],
+    id_filter: &[Uuid],
 ) -> Result<ContentDocumentListPage, sqlx::Error> {
     // Fetch `limit + 1` rows so we can report `has_more` without a COUNT(*).
     let fetch_limit = i64::from(limit) + 1;
@@ -1795,6 +1883,7 @@ pub async fn list_document_page_rows(
             where d.library_id = $1
               and ($2::bool or d.document_state = 'active')
               and ($3::text is null or lower(d.external_key) like $3)
+              and (cardinality($8::uuid[]) = 0 or d.id = any($8))
         ),
         page as (
             select * from joined j
@@ -1869,7 +1958,7 @@ pub async fn list_document_page_rows(
 
     // Bind order: $1 library_id, $2 include_deleted, $3 search,
     //             $4 cursor_ts, $5 cursor_id, $6 fetch_limit,
-    //             $7 status_filter.
+    //             $7 status_filter, $8 id_filter.
     //
     // `persistent(false)` forces each execution to re-plan using
     // concrete parameter values. Postgres caches prepared-statement
@@ -1890,6 +1979,7 @@ pub async fn list_document_page_rows(
     query = query.bind(cursor_id);
     query = query.bind(fetch_limit);
     query = query.bind(status_filter);
+    query = query.bind(id_filter);
 
     let mut rows = query.fetch_all(postgres).await?;
     let has_more = rows.len() > limit as usize;

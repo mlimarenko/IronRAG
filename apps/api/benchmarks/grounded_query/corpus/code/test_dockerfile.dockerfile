@@ -8,7 +8,7 @@
 # Uses a full Node image to install both production and dev dependencies.
 # The node_modules output is reused by the build stage.
 # ---------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS deps
+FROM node:24-alpine AS deps
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN npm ci --ignore-scripts \
 # Compiles TypeScript to JavaScript and runs any build-time code generation.
 # Dev dependencies are available here but won't be in the final image.
 # ---------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS build
+FROM node:24-alpine AS build
 
 WORKDIR /app
 
@@ -44,7 +44,7 @@ RUN npm prune --production
 # Uses a distroless-style slim image with only what's needed to run.
 # No build tools, no dev dependencies, no source TypeScript files.
 # ---------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS runtime
+FROM node:24-alpine AS runtime
 
 # Create a non-root user for security.
 # The application should never run as root in production.

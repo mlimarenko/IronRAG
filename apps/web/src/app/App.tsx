@@ -6,6 +6,7 @@ import { Toaster } from "@/shared/components/ui/toaster";
 import { TooltipProvider } from "@/shared/components/ui/tooltip";
 import { FeatureErrorBoundary } from "@/shared/components/FeatureErrorBoundary";
 import { AppProvider } from "@/shared/contexts/AppContext";
+import { PreferencesProvider } from "@/shared/contexts/PreferencesProvider";
 import { useApp } from "@/shared/contexts/app-context";
 import { AppShell } from "@/app/components/AppShell";
 import { useTranslation } from "react-i18next";
@@ -138,7 +139,7 @@ function AuthenticatedRoutes() {
           }
         />
         <Route
-          path="/admin"
+          path="/admin/*"
           element={
             <LazyFeatureRoute feature="admin">
               <AdminPage />
@@ -170,6 +171,7 @@ function AuthenticatedRoutes() {
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
+      <PreferencesProvider>
       <AppProvider>
         <Toaster />
         <Sonner />
@@ -187,6 +189,7 @@ const App = () => (
           </Routes>
         </BrowserRouter>
       </AppProvider>
+      </PreferencesProvider>
     </TooltipProvider>
     <QueryDevtools />
   </QueryClientProvider>

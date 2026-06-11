@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   CheckSquare,
   Clock,
+  Columns3,
   Hourglass,
   Search,
   XCircle,
@@ -11,6 +12,11 @@ import {
 
 import { Button } from "@/shared/components/ui/button";
 import { Input } from "@/shared/components/ui/input";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/shared/components/ui/tooltip";
 import type { DocumentListStatusCounts } from "@/shared/api/generated";
 
 import type {
@@ -22,8 +28,10 @@ type DocumentsFiltersBarProps = {
   libraryCost: number;
   onCancelSelection: () => void;
   onStartSelection: () => void;
+  onToggleDetailColumns: () => void;
   searchQuery: string;
   selectionMode: boolean;
+  showDetailColumns: boolean;
   statusBucket: DocumentsStatusBucket;
   statusCounts: DocumentListStatusCounts | null;
   t: TFunction;
@@ -35,8 +43,10 @@ export function DocumentsFiltersBar({
   libraryCost,
   onCancelSelection,
   onStartSelection,
+  onToggleDetailColumns,
   searchQuery,
   selectionMode,
+  showDetailColumns,
   statusBucket,
   statusCounts,
   t,
@@ -129,31 +139,53 @@ export function DocumentsFiltersBar({
           );
         })}
       </div>
-      {showCostSummary && (
-        <div className="ml-auto mr-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span>
-            {t("documents.libraryCost")}:{" "}
-            <span className="font-bold tabular-nums">
-              ${libraryCost.toFixed(3)}
+      {/* Reserve the cost-summary slot so toggling cost > 0 does not shove the
+          action buttons sideways (DOC-11). The slot collapses its content but
+          keeps the right-aligned action group anchored via ml-auto. */}
+      <div className="ml-auto flex items-center gap-3">
+        {showCostSummary && (
+          <div className="hidden flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground lg:flex">
+            <span>
+              {t("documents.libraryCost")}:{" "}
+              <span className="font-bold tabular-nums">
+                ${libraryCost.toFixed(3)}
+              </span>
             </span>
-          </span>
-          <span>
-            {t("documents.workspaceCost")}:{" "}
-            <span className="font-bold tabular-nums">
-              ${workspaceCost.toFixed(3)}
+            <span>
+              {t("documents.workspaceCost")}:{" "}
+              <span className="font-bold tabular-nums">
+                ${workspaceCost.toFixed(3)}
+              </span>
             </span>
-          </span>
-        </div>
-      )}
-      <Button
-        size="sm"
-        variant={selectionMode ? "default" : "outline"}
-        className={`${showCostSummary ? "" : "ml-auto"} h-8 text-xs`}
-        onClick={selectionMode ? onCancelSelection : onStartSelection}
-      >
-        <CheckSquare className="h-3.5 w-3.5 mr-1.5" />
-        {selectionMode ? t("documents.cancelSelection") : t("documents.select")}
-      </Button>
+          </div>
+        )}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant={showDetailColumns ? "default" : "outline"}
+              className="h-8 text-xs"
+              aria-pressed={showDetailColumns}
+              onClick={onToggleDetailColumns}
+            >
+              <Columns3 className="h-3.5 w-3.5 mr-1.5" />
+              {t("documents.detailColumns")}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-64">
+            {t("documents.detailColumnsHint")}
+          </TooltipContent>
+        </Tooltip>
+        <Button
+          size="sm"
+          variant={selectionMode ? "default" : "outline"}
+          className="h-8 text-xs"
+          onClick={selectionMode ? onCancelSelection : onStartSelection}
+        >
+          <CheckSquare className="h-3.5 w-3.5 mr-1.5" />
+          {selectionMode ? t("documents.cancelSelection") : t("documents.select")}
+        </Button>
+      </div>
     </div>
   );
 }

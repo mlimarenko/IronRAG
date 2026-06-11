@@ -111,6 +111,9 @@ export type UploadQueueItem = {
   name: string;
   state: "uploading" | "done" | "error";
   error?: string;
+  errorAction?: string;
+  errorDiagnosticCode?: string;
+  errorDiagnosticMessage?: string;
 };
 
 export type BulkRerunState = {
@@ -130,6 +133,12 @@ export type DocumentsTableState = {
   pageSize: PageSizeOption;
   sort: TableSortState<DocumentListSortKey>;
   localSort: LocalSortState;
+  /**
+   * Opt-in page-scoped detail columns (Cost / Pipeline time / Finished). These
+   * sort only the loaded page, so they're collapsed by default to keep the
+   * table inside laptop widths and only shown when the operator asks for them.
+   */
+  showDetailColumns: boolean;
 };
 
 export type UpdateSearchParamState = (
@@ -142,6 +151,7 @@ const DEFAULT_DOCUMENTS_TABLE_STATE: DocumentsTableState = {
   pageSize: DEFAULT_PAGE_SIZE,
   sort: { key: "uploaded_at", direction: "desc" },
   localSort: null,
+  showDetailColumns: false,
 };
 
 const DOCUMENT_SORT_KEYS: readonly DocumentListSortKey[] = [
@@ -225,6 +235,10 @@ function parseDocumentsTableState(raw: unknown): DocumentsTableState {
       DOCUMENT_LOCAL_SORT_KEYS,
       DEFAULT_DOCUMENTS_TABLE_STATE.localSort,
     ),
+    showDetailColumns:
+      typeof record.showDetailColumns === "boolean"
+        ? record.showDetailColumns
+        : DEFAULT_DOCUMENTS_TABLE_STATE.showDetailColumns,
   };
 }
 

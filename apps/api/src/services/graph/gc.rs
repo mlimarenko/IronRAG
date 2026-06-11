@@ -30,17 +30,31 @@ use crate::{
 pub struct Context {
     arango_client: Arc<ArangoClient>,
     postgres: PgPool,
+    knowledge_plane_backend: String,
 }
 
 impl Context {
     #[must_use]
     pub fn new(arango_client: Arc<ArangoClient>, postgres: PgPool) -> Self {
-        Self { arango_client, postgres }
+        Self::with_backend(arango_client, postgres, "arango")
+    }
+
+    #[must_use]
+    pub fn with_backend(
+        arango_client: Arc<ArangoClient>,
+        postgres: PgPool,
+        knowledge_plane_backend: impl Into<String>,
+    ) -> Self {
+        Self { arango_client, postgres, knowledge_plane_backend: knowledge_plane_backend.into() }
     }
 
     #[must_use]
     pub fn from_state(state: &AppState) -> Self {
-        Self::new(Arc::clone(&state.arango_client), state.persistence.postgres.clone())
+        Self::with_backend(
+            Arc::clone(&state.arango_client),
+            state.persistence.postgres.clone(),
+            state.settings.knowledge_plane_backend.clone(),
+        )
     }
 }
 
@@ -49,6 +63,8 @@ impl Context {
 pub struct GcReport {
     pub entities_deleted: u32,
     pub relations_deleted: u32,
+    #[serde(default)]
+    pub evidence_deleted: u32,
     pub libraries_scanned: u32,
 }
 
@@ -58,6 +74,7 @@ impl GcReport {
         Self {
             entities_deleted: self.entities_deleted.saturating_add(other.entities_deleted),
             relations_deleted: self.relations_deleted.saturating_add(other.relations_deleted),
+            evidence_deleted: self.evidence_deleted.saturating_add(other.evidence_deleted),
             libraries_scanned: self.libraries_scanned.saturating_add(other.libraries_scanned),
         }
     }
@@ -75,10 +92,14 @@ pub enum GraphGcError {
     LockRelease { library_id: Uuid, source: sqlx::Error },
     #[error("failed to execute graph GC AQL for library {library_id}: {source}")]
     Arango { library_id: Uuid, source: anyhow::Error },
+    #[error("postgres error during graph GC for library {library_id}: {source}")]
+    Postgres { library_id: Uuid, source: sqlx::Error },
     #[error("failed to decode graph GC report for library {library_id}: {source}")]
     Decode { library_id: Uuid, source: anyhow::Error },
     #[error("graph GC returned no report row for library {library_id}")]
     MissingReport { library_id: Uuid },
+    #[error("unsupported knowledge plane backend `{backend}` for graph GC")]
+    UnsupportedBackend { backend: String },
 }
 
 pub(crate) const ZOMBIE_NODE_GC_AQL: &str = r#"
@@ -214,7 +235,11 @@ pub async fn gc_zombie_nodes(library_id: Uuid, ctx: &Context) -> Result<GcReport
 
     let result = async {
         ensure_library_has_no_active_ingest_jobs(library_id, &ctx.postgres).await?;
-        run_gc_aql(library_id, &ctx.arango_client).await
+        match ctx.knowledge_plane_backend.as_str() {
+            "arango" => run_gc_aql(library_id, &ctx.arango_client).await,
+            "postgres" => run_gc_postgres(library_id, &ctx.postgres).await,
+            backend => Err(GraphGcError::UnsupportedBackend { backend: backend.to_string() }),
+        }
     }
     .await;
 
@@ -271,6 +296,173 @@ async fn run_gc_aql(
     let mut reports = decode_many_results::<GcReport>(cursor)
         .map_err(|source| GraphGcError::Decode { library_id, source })?;
     reports.pop().ok_or(GraphGcError::MissingReport { library_id })
+}
+
+pub(crate) async fn run_gc_postgres(
+    library_id: Uuid,
+    postgres: &PgPool,
+) -> Result<GcReport, GraphGcError> {
+    let mut tx =
+        postgres.begin().await.map_err(|source| GraphGcError::Postgres { library_id, source })?;
+    let report = run_gc_postgres_transaction(library_id, &mut tx).await?;
+    tx.commit().await.map_err(|source| GraphGcError::Postgres { library_id, source })?;
+    Ok(report)
+}
+
+pub(crate) async fn run_gc_postgres_transaction(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<GcReport, GraphGcError> {
+    let orphan_evidence_before = delete_orphan_runtime_graph_evidence(library_id, tx).await?;
+    let (edge_evidence_deleted, edges_deleted) =
+        delete_zombie_runtime_graph_edges(library_id, tx).await?;
+    let (node_evidence_deleted, nodes_deleted) =
+        delete_zombie_runtime_graph_nodes(library_id, tx).await?;
+    let orphan_evidence_after = delete_orphan_runtime_graph_evidence(library_id, tx).await?;
+
+    Ok(GcReport {
+        entities_deleted: count_to_u32(nodes_deleted),
+        relations_deleted: count_to_u32(edges_deleted),
+        evidence_deleted: count_to_u32(
+            orphan_evidence_before
+                + edge_evidence_deleted
+                + node_evidence_deleted
+                + orphan_evidence_after,
+        ),
+        libraries_scanned: 1,
+    })
+}
+
+async fn delete_orphan_runtime_graph_evidence(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<i64, GraphGcError> {
+    sqlx::query_scalar::<_, i64>(
+        "with deleted as ( \
+             delete from runtime_graph_evidence evidence \
+             where evidence.library_id = $1 \
+               and ( \
+                   (evidence.target_kind = 'node' and not exists ( \
+                       select 1 from runtime_graph_node node \
+                       where node.library_id = evidence.library_id \
+                         and node.id = evidence.target_id \
+                   )) \
+                   or \
+                   (evidence.target_kind = 'edge' and not exists ( \
+                       select 1 from runtime_graph_edge edge \
+                       where edge.library_id = evidence.library_id \
+                         and edge.id = evidence.target_id \
+                   )) \
+               ) \
+             returning 1 \
+         ) \
+         select count(*)::bigint from deleted",
+    )
+    .bind(library_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|source| GraphGcError::Postgres { library_id, source })
+}
+
+async fn delete_zombie_runtime_graph_edges(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(i64, i64), GraphGcError> {
+    sqlx::query_as::<_, (i64, i64)>(
+        "with zombie_nodes as ( \
+             select node.id \
+             from runtime_graph_node node \
+             where node.library_id = $1 \
+               and not exists ( \
+                   select 1 from runtime_graph_evidence evidence \
+                   where evidence.library_id = node.library_id \
+                     and evidence.target_kind = 'node' \
+                     and evidence.target_id = node.id \
+               ) \
+         ), \
+         zombie_edges as ( \
+             select edge.id \
+             from runtime_graph_edge edge \
+             where edge.library_id = $1 \
+               and ( \
+                   not exists ( \
+                       select 1 from runtime_graph_evidence evidence \
+                       where evidence.library_id = edge.library_id \
+                         and evidence.target_kind = 'edge' \
+                         and evidence.target_id = edge.id \
+                   ) \
+                   or exists (select 1 from zombie_nodes node where node.id = edge.from_node_id) \
+                   or exists (select 1 from zombie_nodes node where node.id = edge.to_node_id) \
+               ) \
+         ), \
+         deleted_edge_evidence as ( \
+             delete from runtime_graph_evidence evidence \
+             using zombie_edges \
+             where evidence.library_id = $1 \
+               and evidence.target_kind = 'edge' \
+               and evidence.target_id = zombie_edges.id \
+             returning 1 \
+         ), \
+         deleted_edges as ( \
+             delete from runtime_graph_edge edge \
+             using zombie_edges \
+             where edge.library_id = $1 \
+               and edge.id = zombie_edges.id \
+             returning 1 \
+         ) \
+         select \
+             (select count(*)::bigint from deleted_edge_evidence), \
+             (select count(*)::bigint from deleted_edges)",
+    )
+    .bind(library_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|source| GraphGcError::Postgres { library_id, source })
+}
+
+async fn delete_zombie_runtime_graph_nodes(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(i64, i64), GraphGcError> {
+    sqlx::query_as::<_, (i64, i64)>(
+        "with zombie_nodes as ( \
+             select node.id \
+             from runtime_graph_node node \
+             where node.library_id = $1 \
+               and not exists ( \
+                   select 1 from runtime_graph_evidence evidence \
+                   where evidence.library_id = node.library_id \
+                     and evidence.target_kind = 'node' \
+                     and evidence.target_id = node.id \
+               ) \
+         ), \
+         deleted_node_evidence as ( \
+             delete from runtime_graph_evidence evidence \
+             using zombie_nodes \
+             where evidence.library_id = $1 \
+               and evidence.target_kind = 'node' \
+               and evidence.target_id = zombie_nodes.id \
+             returning 1 \
+         ), \
+         deleted_nodes as ( \
+             delete from runtime_graph_node node \
+             using zombie_nodes \
+             where node.library_id = $1 \
+               and node.id = zombie_nodes.id \
+             returning 1 \
+         ) \
+         select \
+             (select count(*)::bigint from deleted_node_evidence), \
+             (select count(*)::bigint from deleted_nodes)",
+    )
+    .bind(library_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|source| GraphGcError::Postgres { library_id, source })
+}
+
+fn count_to_u32(count: i64) -> u32 {
+    u32::try_from(count.max(0)).unwrap_or(u32::MAX)
 }
 
 fn gc_bind_vars(library_id: Uuid) -> serde_json::Value {

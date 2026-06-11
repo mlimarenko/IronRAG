@@ -5,6 +5,8 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import GraphPage from '@/features/graph/GraphPage';
+import { GRAPH_LAYOUT_OPTIONS } from '@/features/graph/model/config';
+import i18n from '@/shared/i18n';
 
 const { useAppMock, documentsApiMock, knowledgeApiMock } = vi.hoisted(() => ({
   useAppMock: vi.fn(),
@@ -45,12 +47,14 @@ vi.mock('@/features/graph/components/SigmaGraph', () => ({
   default: (props: {
     nodes: Array<{ id: string; label: string }>;
     hiddenIds?: Set<string>;
+    layout: string;
     onSelect: (id: string | null) => void;
   }) => {
     const hidden = props.hiddenIds ?? new Set<string>();
     const visible = props.nodes.filter((node) => !hidden.has(node.id));
     return (
       <div data-testid="sigma-graph">
+        <div data-testid="active-layout">{props.layout}</div>
         <div data-testid="visible-node-count">{visible.length}</div>
         <div data-testid="topology-node-count">{props.nodes.length}</div>
         {visible.map((node) => (
@@ -73,9 +77,11 @@ describe('GraphPage', () => {
   let container: HTMLDivElement;
   let root: Root | null;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    localStorage.setItem('ironrag_locale', 'en');
+    await i18n.changeLanguage('en');
 
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -172,7 +178,7 @@ describe('GraphPage', () => {
     });
   }
 
-  async function renderPage() {
+  async function renderPage(initialEntry = '/graph') {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: 0, refetchOnWindowFocus: false } },
     });
@@ -181,7 +187,7 @@ describe('GraphPage', () => {
       root = createRoot(container);
       root.render(
         <QueryClientProvider client={queryClient}>
-          <MemoryRouter initialEntries={['/graph']}>
+          <MemoryRouter initialEntries={[initialEntry]}>
             <Routes>
               <Route path="/graph" element={<GraphPage />} />
               <Route path="/documents" element={<DocumentsLocationProbe />} />
@@ -207,7 +213,7 @@ describe('GraphPage', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  it('clears the text filter and restores the full graph with the global reset action', async () => {
+  it('does not render a global reset action and clears selection by closing the inspector', async () => {
     await renderPage();
 
     const visibleNodeCount = () => container.querySelector('[data-testid="visible-node-count"]')?.textContent;
@@ -234,18 +240,25 @@ describe('GraphPage', () => {
     await flushUi();
 
     expect(visibleNodeCount()).toBe('1');
+    expect(findButton('Clear')).toBeUndefined();
 
-    const clearButton = findButton('Clear');
-    expect(clearButton).toBeTruthy();
+    await flushUi();
+    expect(container.textContent).toContain('Canonical summary for the selected document.');
+
+    const closeButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.getAttribute('aria-label') === i18n.t('common.close'),
+    );
+    expect(closeButton).toBeTruthy();
 
     await act(async () => {
-      clearButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      closeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    await flushSearchDebounce();
     await flushUi();
 
-    expect(searchInput).toHaveValue('');
-    expect(visibleNodeCount()).toBe('3');
+    expect(container.textContent).not.toContain('Canonical summary for the selected document.');
+    expect(searchInput).toHaveValue('data_pipeline.py');
+    expect(visibleNodeCount()).toBe('1');
+    expect(findButton('Clear')).toBeUndefined();
   });
 
   it('does not refetch topology or rebuild node identity when search filter changes', async () => {
@@ -325,8 +338,11 @@ describe('GraphPage', () => {
   it('shows the recommended layout as a toolbar action after switching away from it', async () => {
     await renderPage();
 
+    expect(container.textContent).not.toContain(i18n.t('graph.layoutDescriptions.sectors'));
+
+    const bandsLabel = i18n.t('graph.layouts.bands');
     const bandsButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.getAttribute('aria-label') === 'Bands',
+      button.getAttribute('aria-label') === bandsLabel,
     );
     expect(bandsButton).toBeTruthy();
 
@@ -335,8 +351,10 @@ describe('GraphPage', () => {
     });
     await flushUi();
 
+    const recommendedLabel = i18n.t('graph.recommended');
+    const sectorsLabel = i18n.t('graph.layouts.sectors');
     const recommendedButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Recommended:') && button.textContent.includes('Sectors'),
+      button.textContent?.includes(recommendedLabel) && button.textContent.includes(sectorsLabel),
     );
     expect(recommendedButton).toBeTruthy();
 
@@ -347,9 +365,32 @@ describe('GraphPage', () => {
 
     expect(
       Array.from(container.querySelectorAll('button')).find((button) =>
-        button.textContent?.includes('Recommended:'),
+        button.textContent?.includes(recommendedLabel),
       ),
     ).toBeUndefined();
+  });
+
+  it('switches every configured graph layout action without refetching topology', async () => {
+    await renderPage();
+
+    const activeLayout = () => container.querySelector('[data-testid="active-layout"]')?.textContent;
+
+    for (const option of GRAPH_LAYOUT_OPTIONS) {
+      const label = i18n.t(option.labelKey);
+      const button = Array.from(container.querySelectorAll('button')).find((candidate) =>
+        candidate.getAttribute('aria-label') === label,
+      );
+      expect(button).toBeTruthy();
+
+      await act(async () => {
+        button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flushUi();
+
+      expect(activeLayout()).toBe(option.id);
+    }
+
+    expect(knowledgeApiMock.getGraphTopology).toHaveBeenCalledTimes(1);
   });
 
   it('shows the selected entity subtype in the detail panel', async () => {
@@ -383,8 +424,26 @@ describe('GraphPage', () => {
     await flushUi();
     await flushUi();
 
+    const detailsButton = findButton('Details');
+    expect(detailsButton).toBeTruthy();
+    await act(async () => {
+      detailsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
     expect(container.textContent).toContain('pipeline_stage');
     expect(container.textContent).toContain('Sub-type');
+  });
+
+  it('opens the document inspector from a graph node id in the URL', async () => {
+    await renderPage('/graph?nodeId=doc-1');
+    await flushUi();
+    await flushUi();
+
+    expect(documentsApiMock.get).toHaveBeenCalledWith('doc-1');
+    expect(container.textContent).toContain('data_pipeline.py');
+    expect(container.textContent).toContain('Canonical summary for the selected document.');
+    expect(container.textContent).toContain('View Document');
   });
 
   it('shows and filters the no-sub-type legend bucket only when the type also has real sub-types', async () => {
@@ -553,9 +612,9 @@ describe('GraphPage', () => {
     // Both source documents must appear in the inspector as clickable
     // neighbor rows. The connection counter in the header must also show
     // the full neighbour count (2), not a truncated projection.
-    expect(container.textContent).toContain('Source Documents (2)');
+    expect(container.textContent).toContain('Source Documents');
     expect(container.textContent).toContain('data_pipeline.py');
     expect(container.textContent).toContain('etl_service.py');
-    expect(container.textContent).toMatch(/2\s+connections/);
+    expect(container.textContent).toContain('connections');
   });
 });

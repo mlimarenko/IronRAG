@@ -28,9 +28,10 @@ use crate::{
     },
     services::ai_catalog_service::{
         AiScopeRef, CreateBindingAssignmentCommand, CreateBindingValidationCommand,
-        CreateModelPresetCommand, CreateProviderCredentialCommand,
-        CreateWorkspacePriceOverrideCommand, UpdateBindingAssignmentCommand,
-        UpdateModelPresetCommand, UpdateProviderCredentialCommand,
+        CreateModelCatalogCommand, CreateModelPresetCommand, CreateProviderCatalogCommand,
+        CreateProviderCredentialCommand, CreateWorkspacePriceOverrideCommand,
+        UpdateBindingAssignmentCommand, UpdateModelCatalogCommand, UpdateModelPresetCommand,
+        UpdateProviderCatalogCommand, UpdateProviderCredentialCommand,
         UpdateWorkspacePriceOverrideCommand,
     },
     services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
@@ -61,6 +62,59 @@ pub struct AiScopeQuery {
     pub scope_kind: Option<AiScopeKind>,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProviderCatalogRequest {
+    pub provider_kind: String,
+    pub display_name: String,
+    pub api_style: String,
+    pub lifecycle_state: String,
+    pub default_base_url: Option<String>,
+    pub capability_flags_json: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProviderCatalogRequest {
+    pub provider_kind: String,
+    pub display_name: String,
+    pub api_style: String,
+    pub lifecycle_state: String,
+    pub default_base_url: Option<String>,
+    pub capability_flags_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateModelCatalogRequest {
+    pub provider_catalog_id: Uuid,
+    pub model_name: String,
+    pub capability_kind: String,
+    pub modality_kind: String,
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub allowed_binding_purposes: Vec<AiBindingPurpose>,
+    pub context_window: Option<i32>,
+    pub max_output_tokens: Option<i32>,
+    #[serde(default)]
+    pub metadata_json: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateModelCatalogRequest {
+    pub provider_catalog_id: Uuid,
+    pub model_name: String,
+    pub capability_kind: String,
+    pub modality_kind: String,
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub allowed_binding_purposes: Vec<AiBindingPurpose>,
+    pub context_window: Option<i32>,
+    pub max_output_tokens: Option<i32>,
+    pub metadata_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -181,6 +235,7 @@ pub struct ModelCatalogEntryResponse {
     pub model_name: String,
     pub capability_kind: String,
     pub modality_kind: String,
+    pub lifecycle_state: String,
     pub allowed_binding_purposes: Vec<AiBindingPurpose>,
     pub context_window: Option<i32>,
     pub max_output_tokens: Option<i32>,
@@ -265,14 +320,19 @@ pub struct BindingValidationResponse {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/ai/providers", get(list_providers))
-        .route("/ai/models", get(list_models))
+        .route("/ai/providers", get(list_providers).post(create_provider))
+        .route("/ai/providers/{provider_id}", put(update_provider).delete(delete_provider))
+        .route("/ai/models", get(list_models).post(create_model))
+        .route("/ai/models/{model_id}", put(update_model).delete(delete_model))
         .route("/ai/model-presets", get(list_model_presets).post(create_model_preset))
-        .route("/ai/model-presets/{preset_id}", put(update_model_preset))
+        .route(
+            "/ai/model-presets/{preset_id}",
+            put(update_model_preset).delete(delete_model_preset),
+        )
         .route("/ai/prices", get(list_prices).post(create_price_override))
-        .route("/ai/prices/{price_id}", put(update_price_override))
+        .route("/ai/prices/{price_id}", put(update_price_override).delete(delete_price_override))
         .route("/ai/credentials", get(list_credentials).post(create_credential))
-        .route("/ai/credentials/{credential_id}", put(update_credential))
+        .route("/ai/credentials/{credential_id}", put(update_credential).delete(delete_credential))
         .route("/ai/bindings", get(list_binding_assignments).post(create_binding_assignment))
         .route(
             "/ai/bindings/{binding_id}",
@@ -345,6 +405,315 @@ pub async fn list_models(
         )
         .await?;
     Ok(Json(entries.into_iter().map(map_model).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ai/providers",
+    tag = "ai",
+    operation_id = "createAiProvider",
+    request_body = CreateProviderCatalogRequest,
+    responses(
+        (status = 200, description = "Newly created AI provider catalog entry", body = ProviderCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.create_provider", skip_all)]
+pub async fn create_provider(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Json(payload): Json<CreateProviderCatalogRequest>,
+) -> Result<Json<ProviderCatalogEntryResponse>, ApiError> {
+    authorize_ai_catalog_admin(&auth)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .create_provider_catalog(
+            &state,
+            CreateProviderCatalogCommand {
+                provider_kind: payload.provider_kind,
+                display_name: payload.display_name,
+                api_style: payload.api_style,
+                lifecycle_state: payload.lifecycle_state,
+                default_base_url: payload.default_base_url,
+                capability_flags_json: payload.capability_flags_json,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.provider_catalog.create",
+        "succeeded",
+        Some(format!("AI provider {} created", entry.display_name)),
+        Some(format!(
+            "principal {} created AI provider catalog entry {}",
+            auth.principal_id, entry.id
+        )),
+        vec![instance_subject("provider_catalog", entry.id)],
+    )
+    .await;
+    Ok(Json(map_provider(entry)))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/ai/providers/{providerId}",
+    tag = "ai",
+    operation_id = "updateAiProvider",
+    params(("providerId" = uuid::Uuid, Path, description = "AI provider catalog identifier")),
+    request_body = UpdateProviderCatalogRequest,
+    responses(
+        (status = 200, description = "Updated AI provider catalog entry", body = ProviderCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "Provider not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.update_provider", skip_all, fields(provider_id = %provider_id))]
+pub async fn update_provider(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(provider_id): Path<Uuid>,
+    Json(payload): Json<UpdateProviderCatalogRequest>,
+) -> Result<Json<ProviderCatalogEntryResponse>, ApiError> {
+    authorize_ai_catalog_admin(&auth)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .update_provider_catalog(
+            &state,
+            UpdateProviderCatalogCommand {
+                provider_id,
+                provider_kind: payload.provider_kind,
+                display_name: payload.display_name,
+                api_style: payload.api_style,
+                lifecycle_state: payload.lifecycle_state,
+                default_base_url: payload.default_base_url,
+                capability_flags_json: payload.capability_flags_json,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.provider_catalog.update",
+        "succeeded",
+        Some(format!("AI provider {} updated", entry.display_name)),
+        Some(format!(
+            "principal {} updated AI provider catalog entry {}",
+            auth.principal_id, entry.id
+        )),
+        vec![instance_subject("provider_catalog", entry.id)],
+    )
+    .await;
+    Ok(Json(map_provider(entry)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/ai/providers/{providerId}",
+    tag = "ai",
+    operation_id = "deleteAiProvider",
+    params(("providerId" = uuid::Uuid, Path, description = "AI provider catalog identifier")),
+    responses(
+        (status = 200, description = "Provider catalog entry was disabled", body = serde_json::Value),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "Provider not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.delete_provider", skip_all, fields(provider_id = %provider_id))]
+pub async fn delete_provider(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(provider_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authorize_ai_catalog_admin(&auth)?;
+    let entry =
+        state.canonical_services.ai_catalog.disable_provider_catalog(&state, provider_id).await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.provider_catalog.disable",
+        "succeeded",
+        Some(format!("AI provider {} disabled", entry.display_name)),
+        Some(format!(
+            "principal {} disabled AI provider catalog entry {}",
+            auth.principal_id, entry.id
+        )),
+        vec![instance_subject("provider_catalog", entry.id)],
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "disabled": true })))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ai/models",
+    tag = "ai",
+    operation_id = "createAiModel",
+    request_body = CreateModelCatalogRequest,
+    responses(
+        (status = 200, description = "Newly created AI model catalog entry", body = ModelCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.create_model", skip_all)]
+pub async fn create_model(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Json(payload): Json<CreateModelCatalogRequest>,
+) -> Result<Json<ModelCatalogEntryResponse>, ApiError> {
+    authorize_ai_catalog_admin(&auth)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .create_model_catalog(
+            &state,
+            CreateModelCatalogCommand {
+                provider_catalog_id: payload.provider_catalog_id,
+                model_name: payload.model_name,
+                capability_kind: payload.capability_kind,
+                modality_kind: payload.modality_kind,
+                lifecycle_state: payload.lifecycle_state,
+                allowed_binding_purposes: payload.allowed_binding_purposes,
+                context_window: payload.context_window,
+                max_output_tokens: payload.max_output_tokens,
+                metadata_json: payload.metadata_json,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.model_catalog.create",
+        "succeeded",
+        Some(format!("AI model {} created", entry.model_name)),
+        Some(format!(
+            "principal {} created AI model catalog entry {}",
+            auth.principal_id, entry.id
+        )),
+        vec![instance_subject("model_catalog", entry.id)],
+    )
+    .await;
+    Ok(Json(map_model(ResolvedModelCatalogEntry {
+        model: entry,
+        availability_state: ModelAvailabilityState::Unknown,
+        available_credential_ids: Vec::new(),
+    })))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/ai/models/{modelId}",
+    tag = "ai",
+    operation_id = "updateAiModel",
+    params(("modelId" = uuid::Uuid, Path, description = "AI model catalog identifier")),
+    request_body = UpdateModelCatalogRequest,
+    responses(
+        (status = 200, description = "Updated AI model catalog entry", body = ModelCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "Model not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.update_model", skip_all, fields(model_id = %model_id))]
+pub async fn update_model(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(model_id): Path<Uuid>,
+    Json(payload): Json<UpdateModelCatalogRequest>,
+) -> Result<Json<ModelCatalogEntryResponse>, ApiError> {
+    authorize_ai_catalog_admin(&auth)?;
+    let entry = state
+        .canonical_services
+        .ai_catalog
+        .update_model_catalog(
+            &state,
+            UpdateModelCatalogCommand {
+                model_id,
+                provider_catalog_id: payload.provider_catalog_id,
+                model_name: payload.model_name,
+                capability_kind: payload.capability_kind,
+                modality_kind: payload.modality_kind,
+                lifecycle_state: payload.lifecycle_state,
+                allowed_binding_purposes: payload.allowed_binding_purposes,
+                context_window: payload.context_window,
+                max_output_tokens: payload.max_output_tokens,
+                metadata_json: payload.metadata_json,
+            },
+        )
+        .await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.model_catalog.update",
+        "succeeded",
+        Some(format!("AI model {} updated", entry.model_name)),
+        Some(format!(
+            "principal {} updated AI model catalog entry {}",
+            auth.principal_id, entry.id
+        )),
+        vec![instance_subject("model_catalog", entry.id)],
+    )
+    .await;
+    Ok(Json(map_model(ResolvedModelCatalogEntry {
+        model: entry,
+        availability_state: ModelAvailabilityState::Unknown,
+        available_credential_ids: Vec::new(),
+    })))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/ai/models/{modelId}",
+    tag = "ai",
+    operation_id = "deleteAiModel",
+    params(("modelId" = uuid::Uuid, Path, description = "AI model catalog identifier")),
+    responses(
+        (status = 200, description = "Model catalog entry was disabled", body = serde_json::Value),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "Model not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.delete_model", skip_all, fields(model_id = %model_id))]
+pub async fn delete_model(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(model_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authorize_ai_catalog_admin(&auth)?;
+    let entry = state.canonical_services.ai_catalog.disable_model_catalog(&state, model_id).await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.model_catalog.disable",
+        "succeeded",
+        Some(format!("AI model {} disabled", entry.model_name)),
+        Some(format!(
+            "principal {} disabled AI model catalog entry {}",
+            auth.principal_id, entry.id
+        )),
+        vec![instance_subject("model_catalog", entry.id)],
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "disabled": true })))
 }
 
 #[utoipa::path(
@@ -663,6 +1032,67 @@ pub async fn update_credential(
 
 #[tracing::instrument(
     level = "info",
+    name = "http.delete_credential",
+    skip_all,
+    fields(credential_id = %credential_id)
+)]
+#[utoipa::path(
+    delete,
+    path = "/v1/ai/credentials/{credentialId}",
+    tag = "ai",
+    operation_id = "deleteAiCredential",
+    params(("credentialId" = uuid::Uuid, Path, description = "Provider credential identifier")),
+    responses(
+        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer credentials in the credential's scope"),
+        (status = 404, description = "Credential not found"),
+        (status = 409, description = "Credential is still referenced"),
+    ),
+)]
+pub async fn delete_credential(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(credential_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let credential =
+        state.canonical_services.ai_catalog.get_provider_credential(&state, credential_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        credential.scope_kind,
+        credential.workspace_id,
+        credential.library_id,
+    )
+    .await?;
+    state.canonical_services.ai_catalog.delete_provider_credential(&state, credential_id).await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.provider_credential.delete",
+        "succeeded",
+        Some(format!("provider credential {} deleted", credential.label)),
+        Some(format!(
+            "principal {} deleted provider credential {} in {}",
+            auth.principal_id,
+            credential_id,
+            describe_scope(credential.scope_kind, credential.workspace_id, credential.library_id),
+        )),
+        vec![subject_from_scope(
+            "provider_credential",
+            credential_id,
+            credential.workspace_id,
+            credential.library_id,
+        )],
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+#[tracing::instrument(
+    level = "info",
     name = "http.create_price_override",
     skip_all,
     fields(workspace_id = %payload.workspace_id)
@@ -798,6 +1228,66 @@ pub async fn update_price_override(
     )
     .await;
     Ok(Json(map_price(entry)))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.delete_price_override",
+    skip_all,
+    fields(price_id = %price_id)
+)]
+#[utoipa::path(
+    delete,
+    path = "/v1/ai/prices/{priceId}",
+    tag = "ai",
+    operation_id = "deleteAiPriceOverride",
+    params(("priceId" = uuid::Uuid, Path, description = "Price catalog entry identifier")),
+    responses(
+        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
+        (status = 400, description = "System catalog prices are read-only"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer pricing for the workspace"),
+        (status = 404, description = "Price override not found"),
+        (status = 409, description = "Price override is still referenced"),
+    ),
+)]
+pub async fn delete_price_override(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(price_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let price =
+        state.canonical_services.ai_catalog.get_price_catalog_entry(&state, price_id).await?;
+    let workspace_id = price
+        .workspace_id
+        .ok_or_else(|| ApiError::BadRequest("system catalog prices are read-only".to_string()))?;
+    if price.catalog_scope != "workspace_override" {
+        return Err(ApiError::BadRequest("system catalog prices are read-only".to_string()));
+    }
+    authorize_workspace_permission(&auth, workspace_id, POLICY_PROVIDERS_ADMIN)?;
+    state.canonical_services.ai_catalog.delete_workspace_price_override(&state, price_id).await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.price_override.delete",
+        "succeeded",
+        Some(format!("workspace price override {} deleted", price_id)),
+        Some(format!(
+            "principal {} deleted workspace price override {} in workspace {}",
+            auth.principal_id, price_id, workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "workspace".to_string(),
+            subject_id: workspace_id,
+            workspace_id: Some(workspace_id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
 #[tracing::instrument(
@@ -940,6 +1430,61 @@ pub async fn update_model_preset(
     )
     .await;
     Ok(Json(map_model_preset(entry)))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.delete_model_preset",
+    skip_all,
+    fields(preset_id = %preset_id)
+)]
+#[utoipa::path(
+    delete,
+    path = "/v1/ai/model-presets/{presetId}",
+    tag = "ai",
+    operation_id = "deleteAiModelPreset",
+    params(("presetId" = uuid::Uuid, Path, description = "Model preset identifier")),
+    responses(
+        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot administer presets in the preset's scope"),
+        (status = 404, description = "Preset not found"),
+        (status = 409, description = "Preset is still referenced"),
+    ),
+)]
+pub async fn delete_model_preset(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(preset_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let preset = state.canonical_services.ai_catalog.get_model_preset(&state, preset_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        preset.scope_kind,
+        preset.workspace_id,
+        preset.library_id,
+    )
+    .await?;
+    state.canonical_services.ai_catalog.delete_model_preset(&state, preset_id).await?;
+    record_ai_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "ai.model_preset.delete",
+        "succeeded",
+        Some(format!("model preset {} deleted", preset.preset_name)),
+        Some(format!(
+            "principal {} deleted model preset {} in {}",
+            auth.principal_id,
+            preset_id,
+            describe_scope(preset.scope_kind, preset.workspace_id, preset.library_id),
+        )),
+        vec![subject_from_scope("model_preset", preset_id, preset.workspace_id, preset.library_id)],
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
 #[tracing::instrument(
@@ -1280,6 +1825,7 @@ fn map_model(entry: ResolvedModelCatalogEntry) -> ModelCatalogEntryResponse {
         model_name: entry.model.model_name,
         capability_kind: entry.model.capability_kind,
         modality_kind: entry.model.modality_kind,
+        lifecycle_state: entry.model.lifecycle_state,
         allowed_binding_purposes: entry.model.allowed_binding_purposes,
         context_window: entry.model.context_window,
         max_output_tokens: entry.model.max_output_tokens,
@@ -1374,6 +1920,24 @@ fn map_binding_validation(entry: BindingValidation) -> BindingValidationResponse
         checked_at: entry.checked_at,
         failure_code: entry.failure_code,
         message: entry.message,
+    }
+}
+
+fn authorize_ai_catalog_admin(auth: &AuthContext) -> Result<(), ApiError> {
+    auth.require_write_capability()?;
+    if auth.is_system_admin {
+        return Ok(());
+    }
+    Err(ApiError::forbidden("system administrator required"))
+}
+
+fn instance_subject(subject_kind: &str, subject_id: Uuid) -> AppendAuditEventSubjectCommand {
+    AppendAuditEventSubjectCommand {
+        subject_kind: subject_kind.to_string(),
+        subject_id,
+        workspace_id: None,
+        library_id: None,
+        document_id: None,
     }
 }
 

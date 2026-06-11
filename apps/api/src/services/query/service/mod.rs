@@ -45,6 +45,8 @@ pub(crate) const CANONICAL_QUERY_MODE: RuntimeQueryMode = RuntimeQueryMode::Mix;
 pub(crate) const MAX_DETAIL_TECHNICAL_FACT_REFERENCES: usize = 24;
 pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES: usize = 48;
 pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION: usize = 8;
+pub(crate) const MAX_DETAIL_GRAPH_NODE_REFERENCES: usize = 96;
+pub(crate) const MAX_DETAIL_GRAPH_EDGE_REFERENCES: usize = 96;
 /// Minimum characters a token must have to count as a focus signal for
 /// prepared-segment ranking. Length cutoff is language-agnostic; mirrors
 /// `planner.rs::TOKEN_MIN_LEN`.
@@ -53,6 +55,7 @@ pub(crate) const PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN: usize = 4;
 #[derive(Debug, Clone)]
 pub(crate) struct ConversationRuntimeContext {
     pub(crate) effective_query_text: String,
+    pub(crate) contextual_follow_up: bool,
     pub(crate) query_planning_history_text: Option<String>,
     pub(crate) prompt_history_text: Option<String>,
     pub(crate) prompt_history_messages: Vec<crate::integrations::llm::ChatMessage>,

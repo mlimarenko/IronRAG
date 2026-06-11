@@ -29,6 +29,8 @@ type PendingResolver = {
 
 let sharedWorker: Worker | null = null;
 let nextRequestId = 1;
+let nextTopologyId = 1;
+let topologyIds = new WeakMap<object, number>();
 const pending = new Map<number, PendingResolver>();
 
 function ensureWorker(): Worker {
@@ -57,6 +59,7 @@ function ensureWorker(): Worker {
     }
     pending.clear();
     sharedWorker = null;
+    topologyIds = new WeakMap<object, number>();
   });
   sharedWorker = worker;
   return worker;
@@ -66,16 +69,31 @@ export function computeGraphLayoutOffThread(params: {
   nodes: GraphLayoutRequestNode[];
   edges: Array<{ sourceId: string; targetId: string }>;
   layout: GraphLayoutType;
+  cacheKey?: object;
 }): Promise<GraphLayoutResponse> {
   const worker = ensureWorker();
   const requestId = nextRequestId;
   nextRequestId += 1;
+  let topologyId: number | undefined;
+  let includeTopology = true;
+  if (params.cacheKey) {
+    const cachedId = topologyIds.get(params.cacheKey);
+    if (cachedId != null) {
+      topologyId = cachedId;
+      includeTopology = false;
+    } else {
+      topologyId = nextTopologyId;
+      nextTopologyId += 1;
+      topologyIds.set(params.cacheKey, topologyId);
+    }
+  }
   const message: GraphLayoutRequest = {
     type: 'compute',
     requestId,
+    topologyId,
     layout: params.layout,
-    nodes: params.nodes,
-    edges: params.edges,
+    nodes: includeTopology ? params.nodes : undefined,
+    edges: includeTopology ? params.edges : undefined,
   };
   return new Promise<GraphLayoutResponse>((resolve, reject) => {
     pending.set(requestId, { resolve, reject });

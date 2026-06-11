@@ -1,10 +1,12 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import {
+  Clipboard,
   Eye,
   FilePenLine,
   Download,
   Info,
+  Network,
   Pencil,
   RotateCw,
   Trash2,
@@ -24,6 +26,7 @@ import {
 import { documentsApi, type DocumentLifecycleDetail } from '@/shared/api';
 import type { DocumentItem } from '@/shared/types';
 import { compactText, truncatedTitle } from '@/shared/lib/compactText';
+import { buildDocumentFailureNotice } from '@/shared/lib/document-processing';
 
 import {
   buildDocumentStatusBadgeConfig,
@@ -34,6 +37,8 @@ import {
 } from '@/features/documents/model/documentAdapter';
 
 type DocumentsInspectorPanelProps = {
+  canEdit?: boolean;
+  canDelete?: boolean;
   documentHintEditable?: boolean;
   editorActionDisabledReason?: string | null;
   editorActionEnabled: boolean;
@@ -50,6 +55,7 @@ type DocumentsInspectorPanelProps = {
   onOpenEditor: () => void;
   onDocumentHintUpdated?: (documentId: string, documentHint: string | null) => void;
   onRetry: () => void;
+  onViewInGraph?: () => void;
   presentation?: 'sidebar' | 'drawer';
 };
 
@@ -399,6 +405,8 @@ function buildPipelineDetails(
 }
 
 export function DocumentsInspectorPanel({
+  canEdit = true,
+  canDelete = true,
   documentHintEditable = false,
   editorActionDisabledReason,
   editorActionEnabled,
@@ -415,6 +423,7 @@ export function DocumentsInspectorPanel({
   onOpenEditor,
   onDocumentHintUpdated,
   onRetry,
+  onViewInGraph,
   presentation = 'sidebar',
 }: DocumentsInspectorPanelProps) {
   const isWebPage = isWebPageDocument(
@@ -500,7 +509,15 @@ export function DocumentsInspectorPanel({
   }
   const failureNotice =
     selectedDoc.status === 'failed'
-      ? selectedDoc.failureMessage ?? selectedDoc.statusReason ?? selectedDoc.failureCode
+      ? selectedDoc.failureNotice ??
+        buildDocumentFailureNotice(
+          {
+            failureCode: selectedDoc.failureCode,
+            failureMessage: selectedDoc.failureMessage ?? selectedDoc.statusReason,
+            stage: selectedDoc.stage,
+          },
+          t,
+        )
       : undefined;
   const visibleProgressPercent =
     selectedDoc.progressPercent != null
@@ -729,19 +746,51 @@ export function DocumentsInspectorPanel({
         </div>
 
         {failureNotice && (
-          <div className="inline-error">
+          <div className="inline-error" data-testid="document-failure-notice">
             <div className="flex items-start gap-1.5 [overflow-wrap:anywhere]">
               <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
-              <span>{failureNotice}</span>
+              <div className="min-w-0 space-y-1">
+                <div className="font-semibold">{failureNotice.title}</div>
+                <div>{failureNotice.summary}</div>
+                <div className="text-muted-foreground">{failureNotice.impact}</div>
+              </div>
             </div>
-            {selectedDoc.failureCode &&
-              selectedDoc.failureCode !== failureNotice &&
-              selectedDoc.failureCode !== selectedDoc.statusReason && (
-                <div className="mt-2 font-mono text-[10px] text-muted-foreground [overflow-wrap:anywhere]">
-                  {selectedDoc.failureCode}
-                </div>
-              )}
+            <div className="mt-2 rounded-md border border-destructive/20 bg-destructive/10 px-2 py-1.5 text-xs">
+              <div className="font-semibold text-foreground">{t('documents.failureActionLabel')}</div>
+              <div className="mt-0.5 text-muted-foreground [overflow-wrap:anywhere]">
+                {failureNotice.action}
+              </div>
             </div>
+            {(failureNotice.diagnosticMessage || failureNotice.diagnosticCode) && (
+              <div className="mt-2 space-y-1.5">
+                <div className="section-label">{t('documents.failureDiagnostics')}</div>
+                {failureNotice.diagnosticMessage && (
+                  <div className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                    {failureNotice.diagnosticMessage}
+                  </div>
+                )}
+                {failureNotice.diagnosticCode && (
+                  <div className="flex items-start gap-1.5">
+                    <code className="min-w-0 flex-1 font-mono text-[10px] text-muted-foreground [overflow-wrap:anywhere]">
+                      {failureNotice.diagnosticCode}
+                    </code>
+                    <button
+                      type="button"
+                      className="shrink-0 p-0.5 rounded hover:bg-muted/60 transition-colors text-muted-foreground hover:text-foreground"
+                      aria-label={t('documents.copyFailureCode')}
+                      onClick={() => {
+                        void navigator.clipboard
+                          .writeText(failureNotice.diagnosticCode ?? '')
+                          .then(() => toast.success(t('documents.failureCodeCopied')));
+                      }}
+                    >
+                      <Clipboard className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {/* Source link is available via the download button in actions */}
@@ -759,11 +808,6 @@ export function DocumentsInspectorPanel({
               },
               { label: t('documents.size'), value: formatSize(selectedDoc.fileSize) },
               { label: t('documents.uploaded'), value: formatDate(selectedDoc.uploadedAt, locale) },
-              {
-                label: t('documents.documentId'),
-                value: compactDocumentId.text,
-                title: selectedDoc.id,
-              },
               ...(selectedDoc.externalKey
                 ? [
                     {
@@ -784,6 +828,30 @@ export function DocumentsInspectorPanel({
                 </div>
               </div>
             ))}
+            {/* Document ID with copy button */}
+            <div className="col-span-2 min-w-0">
+              <div className="truncate leading-4 text-muted-foreground">{t('documents.documentId')}</div>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span
+                  className="truncate font-mono text-xs font-semibold leading-4 text-foreground"
+                  title={selectedDoc.id}
+                >
+                  {compactDocumentId.text}
+                </span>
+                <button
+                  type="button"
+                  className="shrink-0 p-0.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                  aria-label={t('documents.copyDocumentId')}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(selectedDoc.id).then(() =>
+                      toast.success(t('documents.documentIdCopied')),
+                    );
+                  }}
+                >
+                  <Clipboard className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
             {showDocumentHintField && (
               <div className="col-span-2 min-w-0">
                 <div className="flex min-w-0 items-center gap-1">
@@ -1016,7 +1084,7 @@ export function DocumentsInspectorPanel({
           </div>
         )}
 
-        <div className="flex items-center gap-1.5 pt-0.5">
+        <div className="flex items-center gap-1.5 pt-0.5 flex-wrap">
           <InspectorActionButton
             label={editorActionLabel}
             icon={editorActionIcon}
@@ -1034,24 +1102,37 @@ export function DocumentsInspectorPanel({
               onClick={openSource}
             />
           )}
-          <InspectorActionButton
-            label={retryActionLabel}
-            icon={<RotateCw />}
-            onClick={onRetry}
-          />
-          <InspectorActionButton
-            label={replaceActionLabel}
-            icon={<Upload />}
-            onClick={() => setReplaceFileOpen(true)}
-          />
-          <InspectorActionButton
-            label={deleteActionLabel}
-            icon={<Trash2 />}
-            onClick={() => setDeleteDocOpen(true)}
-            className="text-destructive hover:text-destructive"
-            wrapperClassName="ml-auto"
-            tooltipAlign="end"
-          />
+          {onViewInGraph && (
+            <InspectorActionButton
+              label={t('documents.viewInGraph')}
+              icon={<Network />}
+              onClick={onViewInGraph}
+            />
+          )}
+          {canEdit && (
+            <InspectorActionButton
+              label={retryActionLabel}
+              icon={<RotateCw />}
+              onClick={onRetry}
+            />
+          )}
+          {canEdit && (
+            <InspectorActionButton
+              label={replaceActionLabel}
+              icon={<Upload />}
+              onClick={() => setReplaceFileOpen(true)}
+            />
+          )}
+          {canDelete && (
+            <InspectorActionButton
+              label={deleteActionLabel}
+              icon={<Trash2 />}
+              onClick={() => setDeleteDocOpen(true)}
+              className="text-destructive hover:text-destructive"
+              wrapperClassName="ml-auto"
+              tooltipAlign="end"
+            />
+          )}
         </div>
 
       </div>

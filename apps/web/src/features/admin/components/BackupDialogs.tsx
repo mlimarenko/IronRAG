@@ -35,10 +35,17 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
   // files (PDFs / docx / etc.), which can easily dwarf the rest of
   // the archive.
   const [includeBlobs, setIncludeBlobs] = useState(true);
+  // Optional, portable extras the operator can fold into the archive: the
+  // owning workspace row and the AI configuration (provider/model catalogs,
+  // prices, presets, credentials without secrets, and binding assignments).
+  const [includeWorkspace, setIncludeWorkspace] = useState(false);
+  const [includeAiConfig, setIncludeAiConfig] = useState(false);
 
   const runExport = () => {
     const kinds: LibrarySnapshotIncludeKind[] = ['library_data'];
     if (includeBlobs) kinds.push('blobs');
+    if (includeWorkspace) kinds.push('workspace');
+    if (includeAiConfig) kinds.push('ai_config');
     librarySnapshotApi.downloadExport(libraryId, kinds);
     toast.success(t('admin.snapshot.exportSuccess'));
     onOpenChange(false);
@@ -77,6 +84,44 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
               </div>
             </div>
           </label>
+          <label
+            htmlFor="backup-include-workspace"
+            className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer hover:bg-accent/30 transition-colors"
+          >
+            <Checkbox
+              id="backup-include-workspace"
+              checked={includeWorkspace}
+              onCheckedChange={(value) => setIncludeWorkspace(value === true)}
+              className="mt-0.5"
+            />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">
+                {t('admin.snapshot.includeWorkspaceLabel')}
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                {t('admin.snapshot.includeWorkspaceDesc')}
+              </div>
+            </div>
+          </label>
+          <label
+            htmlFor="backup-include-ai-config"
+            className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer hover:bg-accent/30 transition-colors"
+          >
+            <Checkbox
+              id="backup-include-ai-config"
+              checked={includeAiConfig}
+              onCheckedChange={(value) => setIncludeAiConfig(value === true)}
+              className="mt-0.5"
+            />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">
+                {t('admin.snapshot.includeAiConfigLabel')}
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                {t('admin.snapshot.includeAiConfigDesc')}
+              </div>
+            </div>
+          </label>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -111,16 +156,29 @@ export function BackupImportDialog({
     if (!file) return;
     setImporting(true);
     try {
-      const report = await librarySnapshotApi.import(libraryId, file, overwrite);
-      const totalRows = Object.values(report.postgresRowsByTable ?? {}).reduce(
-        (sum, n) => sum + (typeof n === 'number' ? n : 0),
-        0,
-      );
-      toast.success(t('admin.snapshot.importSuccess', { count: totalRows }));
+      const result = await librarySnapshotApi.import(libraryId, file, overwrite);
+      if (result.kind === 'completed') {
+        let totalRows = 0;
+        for (const rowCount of Object.values(result.report.postgresRowsByTable ?? {})) {
+          if (typeof rowCount === 'number') totalRows += rowCount;
+        }
+        toast.success(t('admin.snapshot.importSuccess', { count: totalRows }));
+      } else {
+        toast.info(t('admin.snapshot.importAccepted'));
+        const operation = await librarySnapshotApi.waitForImport(result.operation.operationId);
+        if (operation.status !== 'ready') {
+          toast.error(t('admin.snapshot.importOperationFailed'));
+          return;
+        }
+        toast.success(t('admin.snapshot.importReady'));
+      }
       onCompleted();
       onOpenChange(false);
     } catch (error: unknown) {
-      toast.error(errorMessage(error, t('admin.snapshot.importFailed')));
+      const fallback = error instanceof Error && error.message === 'snapshot_import_timeout'
+        ? t('admin.snapshot.importTimeout')
+        : errorMessage(error, t('admin.snapshot.importFailed'));
+      toast.error(fallback);
     } finally {
       setImporting(false);
     }

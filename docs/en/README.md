@@ -9,13 +9,16 @@ this directory is the entry point for deeper technical material.
 | File | Topic |
 |---|---|
 | [PIPELINE.md](./PIPELINE.md) | Ingestion pipeline: recognition routing, chunking, structured preparation, embedding, technical-fact and graph extraction, finalize. |
-| [MCP.md](./MCP.md) | Model Context Protocol server, 21 tools, token scoping, transport modes. |
+| [MCP.md](./MCP.md) | Model Context Protocol server, 23 tools, token scoping, transport modes. |
 | [IAM.md](./IAM.md) | Identity / access model: principals, scopes, permission groups, system / workspace / library tokens. |
 | [CLI.md](./CLI.md) | `ironrag-cli` reference for backfills, GC, password reset, and migration helpers. |
 | [FRONTEND.md](./FRONTEND.md) | React 19 + Vite app architecture, vertical feature folders, generated SDK, server-state contract. |
+| [FRONTEND-TRANSPORT.md](./FRONTEND-TRANSPORT.md) | Frontend nginx: HTTP default, optional TLS/HTTP2/HTTP3, reverse-proxy checklist. |
+| [CAPACITY-PLANNING.md](./CAPACITY-PLANNING.md) | Host profiles, disk and vector sizing, large-host memory caps. |
 | [WEBHOOK.md](./WEBHOOK.md) | Outbound webhook subsystem: events, payload contract, signing, retry policy. |
-| [AI-BINDINGS.md](./AI-BINDINGS.md) | AI binding model: 10 purposes, scope ladder, wire-level prompt layout, model-choice tradeoffs, prompt-cache pitfalls. |
+| [AI-BINDINGS.md](./AI-BINDINGS.md) | AI binding model: 8 purposes, scope ladder, wire-level prompt layout, model-choice tradeoffs, prompt-cache pitfalls. |
 | [BENCHMARKS.md](./BENCHMARKS.md) | Performance baselines for retrieval, ingest, graph render, MCP-UI parity. |
+| [Upgrade from 0.4.x](../../README.md#upgrading-from-04x) | Short 0.4.x to 0.5.0 upgrade path; the full procedure is in the changelog. |
 
 ## Pipeline at a glance
 
@@ -108,17 +111,16 @@ flowchart LR
 
 `query_retrieve` and `embed_chunk` bindings are kept in sync. When an operator
 switches to an embedding model with a different dimension, they must run the
-vector rebuild utility from a source library using that binding; because Arango
-vector indexes are instance-wide, the rebuild recreates the chunk/entity vector
-indexes and recalculates all existing vector material before the new retrieval
-lane is used.
+vector rebuild utility from a source library using that binding. PostgreSQL
+stores vector material in per-`(library, dim)` pgvector relations tracked by a
+manifest, so the rebuild recalculates the affected vector material before the
+new retrieval lane is used.
 
 ## Storage map
 
 | Store | Role |
 |---|---|
-| **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, presets, prices), bindings, IAM, sessions, query executions, billing. Authoritative for everything except the knowledge graph itself. |
-| **ArangoDB** | Knowledge graph (nodes, edges, evidence), document store, cosine chunk/entity vectors, structured-block search, technical-fact index. |
+| **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, presets, prices), bindings, IAM, sessions, query executions, billing, knowledge documents, chunks, technical facts, graph data, context bundles, pgvector embeddings, and PostgreSQL full-text search indexes. |
 | **Redis** | Graph topology cache, IR cache, answer-context cache, prewarm coordination. |
 | **Filesystem / S3** | Source-document blobs (configurable; bundled `s4core` provides a built-in S3-compatible blob store). |
 
@@ -142,7 +144,7 @@ Binding writes enforce two invariants the runtime depends on:
   catalog entry; the vector-counterpart sync upserts the partner
   on every write to keep the active retrieval path consistent.
 - A dimension-changing embedding model switch is finalized by running the
-  vector rebuild utility, so Arango indexes and stored vectors move together.
+  vector rebuild utility, so pgvector relations and stored vectors move together.
 
 Per-purpose binding scopes resolve from library → workspace →
 instance, so a workspace can override the instance default for a

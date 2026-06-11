@@ -2,6 +2,7 @@ use crate::domains::query_ir::{LiteralKind, QueryIR, literal_text_is_identifier_
 
 use super::question_intent::query_ir_has_focused_document_answer_intent;
 pub(super) use super::technical_literal_extractors::{
+    extract_config_assignment_literals, extract_config_section_literals,
     extract_explicit_path_literals, extract_http_methods, extract_package_command_literals,
     extract_parameter_literals, extract_prefix_literals, extract_url_literals, push_unique_limited,
 };

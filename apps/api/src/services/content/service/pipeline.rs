@@ -40,6 +40,7 @@ use crate::{
         file_extract::{
             build_inline_text_extraction_plan, build_inline_text_extraction_plan_for_source,
         },
+        record_jsonl::project_record_unit_values_for_graph,
         table_graph::{TableGraphProfile, build_graph_table_row_text},
         table_summary::is_table_summary_text,
         text_quality::is_graph_extraction_text_eligible,
@@ -150,8 +151,12 @@ pub(super) fn build_graph_chunk_content(
     row_only_table_graph: bool,
     policy: &GraphExtractionChunkPolicy,
 ) -> Option<String> {
+    // The source_profile line is pure machine bookkeeping (source_format token,
+    // record/key counters, top_keys, time bounds) — it carries no entities, so
+    // it never reaches graph extraction. Search/embeddings keep the stored chunk
+    // text; only this graph-fed projection drops it.
     if chunk.chunk_kind.as_deref() == Some(CHUNK_KIND_SOURCE_PROFILE) {
-        return policy.is_record_stream().then(|| chunk.normalized_text.clone());
+        return None;
     }
     if chunk.quality_score.is_some_and(|score| score < GRAPH_EXTRACTION_MIN_CHUNK_QUALITY_SCORE) {
         return None;
@@ -159,10 +164,16 @@ pub(super) fn build_graph_chunk_content(
     if row_only_table_graph && chunk.chunk_kind.as_deref() != Some("table_row") {
         return None;
     }
-    if chunk.chunk_kind.as_deref() == Some(CHUNK_KIND_SOURCE_UNIT)
-        && !policy.admits_source_unit(chunk.chunk_id)
-    {
-        return None;
+    // Admitted source_unit chunks feed a values-only projection: the
+    // [unit_ordinal=N occurred_at=ISO] header, the dotted-path field KEYS, and
+    // timestamp VALUES are stripped so the graph anchors on real record values
+    // instead of the renderer's scaffolding. The full field-aware text stays in
+    // the stored chunk for search/embeddings.
+    if chunk.chunk_kind.as_deref() == Some(CHUNK_KIND_SOURCE_UNIT) {
+        if !policy.admits_source_unit(chunk.chunk_id) {
+            return None;
+        }
+        return project_record_unit_values_for_graph(&chunk.normalized_text);
     }
     if chunk.chunk_kind.as_deref() == Some("metadata_block")
         && is_table_summary_text(&chunk.normalized_text)
@@ -345,6 +356,7 @@ impl ContentService {
                     document_hint: command.document_hint,
                     storage_key: Some(storage_key),
                 }),
+                parent_external_key: command.parent_external_key,
             },
         )
         .await
@@ -408,6 +420,7 @@ impl ContentService {
                         external_key: Some(command.final_url.clone()),
                         file_name: None,
                         created_by_principal_id: command.requested_by_principal_id,
+                        parent_external_key: None,
                     },
                 )
                 .await?
@@ -1643,50 +1656,58 @@ mod tests {
     }
 
     #[test]
-    fn build_graph_chunk_content_admits_record_stream_profile_only_under_policy() {
-        let chunk = make_chunk("source_profile", "[source_profile records=20]");
-        let standard = GraphExtractionChunkPolicy::standard();
-        assert_eq!(build_graph_chunk_content(&chunk, None, false, &standard), None);
-
+    fn build_graph_chunk_content_never_feeds_source_profile_to_graph() {
+        // The source_profile line is pure machine bookkeeping (counters,
+        // top_keys, format token) and carries no entities, so it is dropped for
+        // graph extraction regardless of policy or quality score.
+        let chunk = make_chunk(
+            "source_profile",
+            "[source_profile source_format=record_jsonl unit_count=20 top_keys=carrier:1]",
+        );
+        assert_eq!(
+            build_graph_chunk_content(&chunk, None, false, &GraphExtractionChunkPolicy::standard()),
+            None
+        );
         let record_stream =
             GraphExtractionChunkPolicy::record_stream(std::collections::BTreeSet::new());
-        assert_eq!(
-            build_graph_chunk_content(&chunk, None, false, &record_stream),
-            Some("[source_profile records=20]".to_string())
-        );
+        assert_eq!(build_graph_chunk_content(&chunk, None, false, &record_stream), None);
+
+        let mut low_quality = chunk;
+        low_quality.quality_score = Some(0.0);
+        assert_eq!(build_graph_chunk_content(&low_quality, None, false, &record_stream), None);
     }
 
     #[test]
-    fn build_graph_chunk_content_keeps_record_stream_profile_when_quality_is_low() {
-        let mut chunk = make_chunk("source_profile", "[source_profile records=20]");
-        chunk.quality_score = Some(0.0);
-        let policy = GraphExtractionChunkPolicy::record_stream(std::collections::BTreeSet::new());
-
-        assert_eq!(
-            build_graph_chunk_content(&chunk, None, false, &policy),
-            Some("[source_profile records=20]".to_string())
+    fn build_graph_chunk_content_projects_record_stream_source_units_to_values_only() {
+        // An admitted source_unit feeds a values-only projection: the header,
+        // dotted-path keys, and timestamp values are stripped; real values stay.
+        let chunk = make_chunk(
+            "source_unit",
+            "[unit_ordinal=1 occurred_at=2026-04-22T19:05:00+00:00] fields: \
+carrier=ZephyrFreight-77; shippedAt=2026-04-22T19:05:00+00:00",
         );
-    }
 
-    #[test]
-    fn build_graph_chunk_content_limits_record_stream_source_units_to_selected_chunks() {
-        let chunk = make_chunk("source_unit", "record ordinal=1 field=value");
+        // The values-only projection is keyed off the source_unit kind, which is
+        // only ever emitted by the record renderer, so it applies whenever the
+        // chunk is a source_unit (the standard policy admits every source_unit).
         let standard = GraphExtractionChunkPolicy::standard();
         assert_eq!(
             build_graph_chunk_content(&chunk, None, false, &standard),
-            Some("record ordinal=1 field=value".to_string())
+            Some("ZephyrFreight-77".to_string())
         );
 
+        // Record-stream, not selected → skipped.
         let unselected =
             GraphExtractionChunkPolicy::record_stream(std::collections::BTreeSet::new());
         assert_eq!(build_graph_chunk_content(&chunk, None, false, &unselected), None);
 
+        // Record-stream, selected → values-only projection (no scaffolding).
         let mut selected_ids = std::collections::BTreeSet::new();
         selected_ids.insert(chunk.chunk_id);
         let selected = GraphExtractionChunkPolicy::record_stream(selected_ids);
         assert_eq!(
             build_graph_chunk_content(&chunk, None, false, &selected),
-            Some("record ordinal=1 field=value".to_string())
+            Some("ZephyrFreight-77".to_string())
         );
     }
 }

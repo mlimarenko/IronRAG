@@ -1,6 +1,6 @@
 use crate::domains::query_ir::{LiteralKind, QueryAct, QueryIR, SourceSliceDirection};
 
-const LATEST_VERSION_DEFAULT_COUNT: usize = 5;
+const LATEST_VERSION_DEFAULT_COUNT: usize = LATEST_VERSION_MAX_COUNT;
 const LATEST_VERSION_MAX_COUNT: usize = 10;
 pub(crate) const LATEST_VERSION_CHUNKS_PER_DOCUMENT: usize = 4;
 

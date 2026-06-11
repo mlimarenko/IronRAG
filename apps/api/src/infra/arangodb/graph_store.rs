@@ -36,6 +36,7 @@ use crate::infra::arangodb::{
 mod candidates;
 mod edges_or_projection;
 mod materialized;
+mod port_impl;
 mod traversal;
 
 #[derive(Debug, Clone)]

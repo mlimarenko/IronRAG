@@ -53,6 +53,175 @@ impl AiCatalogService {
         map_model_row(row)
     }
 
+    pub async fn create_provider_catalog(
+        &self,
+        state: &AppState,
+        command: CreateProviderCatalogCommand,
+    ) -> Result<ProviderCatalogEntry, ApiError> {
+        let provider_kind = normalize_non_empty(&command.provider_kind, "providerKind")?;
+        let display_name = normalize_non_empty(&command.display_name, "displayName")?;
+        let api_style =
+            normalize_allowed_value(&command.api_style, "apiStyle", &["openai_compatible"])?;
+        let lifecycle_state =
+            normalize_lifecycle_state(&command.lifecycle_state, "lifecycleState")?;
+        let default_base_url = normalize_optional(command.default_base_url.as_deref());
+        parse_provider_profile(&provider_kind, &command.capability_flags_json)?;
+        let row = ai_repository::create_provider_catalog(
+            &state.persistence.postgres,
+            &provider_kind,
+            &display_name,
+            &api_style,
+            &lifecycle_state,
+            default_base_url.as_deref(),
+            command.capability_flags_json,
+        )
+        .await
+        .map_err(map_ai_write_error)?;
+        map_provider_row(row)
+    }
+
+    pub async fn update_provider_catalog(
+        &self,
+        state: &AppState,
+        command: UpdateProviderCatalogCommand,
+    ) -> Result<ProviderCatalogEntry, ApiError> {
+        let provider_kind = normalize_non_empty(&command.provider_kind, "providerKind")?;
+        let display_name = normalize_non_empty(&command.display_name, "displayName")?;
+        let api_style =
+            normalize_allowed_value(&command.api_style, "apiStyle", &["openai_compatible"])?;
+        let lifecycle_state =
+            normalize_lifecycle_state(&command.lifecycle_state, "lifecycleState")?;
+        let default_base_url = normalize_optional(command.default_base_url.as_deref());
+        if let Some(profile_json) = &command.capability_flags_json {
+            parse_provider_profile(&provider_kind, profile_json)?;
+        }
+        let row = ai_repository::update_provider_catalog(
+            &state.persistence.postgres,
+            command.provider_id,
+            &provider_kind,
+            &display_name,
+            &api_style,
+            &lifecycle_state,
+            default_base_url.as_deref(),
+            command.capability_flags_json,
+        )
+        .await
+        .map_err(map_ai_write_error)?
+        .ok_or_else(|| ApiError::resource_not_found("provider_catalog", command.provider_id))?;
+        map_provider_row(row)
+    }
+
+    pub async fn disable_provider_catalog(
+        &self,
+        state: &AppState,
+        provider_catalog_id: Uuid,
+    ) -> Result<ProviderCatalogEntry, ApiError> {
+        let row = ai_repository::disable_provider_catalog(
+            &state.persistence.postgres,
+            provider_catalog_id,
+        )
+        .await
+        .map_err(map_ai_write_error)?
+        .ok_or_else(|| ApiError::resource_not_found("provider_catalog", provider_catalog_id))?;
+        map_provider_row(row)
+    }
+
+    pub async fn create_model_catalog(
+        &self,
+        state: &AppState,
+        command: CreateModelCatalogCommand,
+    ) -> Result<ModelCatalogEntry, ApiError> {
+        let model_name = normalize_non_empty(&command.model_name, "modelName")?;
+        let capability_kind = normalize_allowed_value(
+            &command.capability_kind,
+            "capabilityKind",
+            &["chat", "embedding"],
+        )?;
+        let modality_kind = normalize_allowed_value(
+            &command.modality_kind,
+            "modalityKind",
+            &["text", "multimodal"],
+        )?;
+        let lifecycle_state =
+            normalize_lifecycle_state(&command.lifecycle_state, "lifecycleState")?;
+        let metadata_json = metadata_with_binding_purposes(
+            command.metadata_json,
+            &command.allowed_binding_purposes,
+        )?;
+        let row = ai_repository::create_model_catalog(
+            &state.persistence.postgres,
+            command.provider_catalog_id,
+            &model_name,
+            &capability_kind,
+            &modality_kind,
+            command.context_window,
+            command.max_output_tokens,
+            &lifecycle_state,
+            metadata_json,
+        )
+        .await
+        .map_err(map_ai_write_error)?;
+        map_model_row(row)
+    }
+
+    pub async fn update_model_catalog(
+        &self,
+        state: &AppState,
+        command: UpdateModelCatalogCommand,
+    ) -> Result<ModelCatalogEntry, ApiError> {
+        let model_name = normalize_non_empty(&command.model_name, "modelName")?;
+        let capability_kind = normalize_allowed_value(
+            &command.capability_kind,
+            "capabilityKind",
+            &["chat", "embedding"],
+        )?;
+        let modality_kind = normalize_allowed_value(
+            &command.modality_kind,
+            "modalityKind",
+            &["text", "multimodal"],
+        )?;
+        let lifecycle_state =
+            normalize_lifecycle_state(&command.lifecycle_state, "lifecycleState")?;
+        let existing =
+            ai_repository::get_model_catalog_by_id(&state.persistence.postgres, command.model_id)
+                .await
+                .map_err(map_ai_write_error)?
+                .ok_or_else(|| ApiError::resource_not_found("model_catalog", command.model_id))?;
+        let metadata_json = metadata_with_binding_purposes(
+            command.metadata_json.unwrap_or(existing.metadata_json),
+            &command.allowed_binding_purposes,
+        )?;
+        let row = ai_repository::update_model_catalog(
+            &state.persistence.postgres,
+            command.model_id,
+            command.provider_catalog_id,
+            &model_name,
+            &capability_kind,
+            &modality_kind,
+            command.context_window,
+            command.max_output_tokens,
+            &lifecycle_state,
+            metadata_json,
+        )
+        .await
+        .map_err(map_ai_write_error)?
+        .ok_or_else(|| ApiError::resource_not_found("model_catalog", command.model_id))?;
+        map_model_row(row)
+    }
+
+    pub async fn disable_model_catalog(
+        &self,
+        state: &AppState,
+        model_catalog_id: Uuid,
+    ) -> Result<ModelCatalogEntry, ApiError> {
+        let row =
+            ai_repository::disable_model_catalog(&state.persistence.postgres, model_catalog_id)
+                .await
+                .map_err(map_ai_write_error)?
+                .ok_or_else(|| ApiError::resource_not_found("model_catalog", model_catalog_id))?;
+        map_model_row(row)
+    }
+
     pub async fn list_resolved_model_catalog(
         &self,
         state: &AppState,
@@ -153,22 +322,33 @@ impl AiCatalogService {
                         .map(|credential_ids| credential_ids.iter().copied().collect::<Vec<_>>())
                         .unwrap_or_default()
                 };
-                let availability_state = match provider_by_id
-                    .get(&model.provider_catalog_id)
-                    .map(|provider| provider.model_discovery.mode)
+                let availability_state = if model.lifecycle_state == "disabled"
+                    || provider_by_id
+                        .get(&model.provider_catalog_id)
+                        .is_some_and(|provider| provider.lifecycle_state == "disabled")
                 {
-                    Some(ProviderModelDiscoveryMode::Credential)
-                        if explicitly_checked_providers.contains(&model.provider_catalog_id) =>
+                    ModelAvailabilityState::Unavailable
+                } else {
+                    match provider_by_id
+                        .get(&model.provider_catalog_id)
+                        .map(|provider| provider.model_discovery.mode)
                     {
-                        if available_credential_ids.is_empty() {
-                            ModelAvailabilityState::Unavailable
-                        } else {
-                            ModelAvailabilityState::Available
+                        Some(ProviderModelDiscoveryMode::Credential)
+                            if explicitly_checked_providers
+                                .contains(&model.provider_catalog_id) =>
+                        {
+                            if available_credential_ids.is_empty() {
+                                ModelAvailabilityState::Unavailable
+                            } else {
+                                ModelAvailabilityState::Available
+                            }
                         }
+                        Some(ProviderModelDiscoveryMode::Credential) => {
+                            ModelAvailabilityState::Unknown
+                        }
+                        Some(_) => ModelAvailabilityState::Available,
+                        None => ModelAvailabilityState::Unknown,
                     }
-                    Some(ProviderModelDiscoveryMode::Credential) => ModelAvailabilityState::Unknown,
-                    Some(_) => ModelAvailabilityState::Available,
-                    None => ModelAvailabilityState::Unknown,
                 };
                 ResolvedModelCatalogEntry { model, availability_state, available_credential_ids }
             })
@@ -247,11 +427,68 @@ impl AiCatalogService {
         .ok_or_else(|| ApiError::resource_not_found("price_catalog_entry", command.price_id))?;
         Ok(map_price_row(row))
     }
+
+    pub async fn delete_workspace_price_override(
+        &self,
+        state: &AppState,
+        price_id: Uuid,
+    ) -> Result<(), ApiError> {
+        let affected =
+            ai_repository::delete_workspace_price_override(&state.persistence.postgres, price_id)
+                .await
+                .map_err(map_ai_delete_error)?;
+        if affected == 0 {
+            return Err(ApiError::resource_not_found("price_catalog_entry", price_id));
+        }
+        Ok(())
+    }
 }
 
 fn normalize_currency_code(value: &str) -> Result<String, ApiError> {
     let normalized = normalize_non_empty(value, "currencyCode")?;
     Ok(normalized.to_ascii_uppercase())
+}
+
+fn normalize_allowed_value(
+    value: &str,
+    field_name: &'static str,
+    allowed: &[&str],
+) -> Result<String, ApiError> {
+    let normalized = normalize_non_empty(value, field_name)?;
+    if allowed.iter().any(|entry| *entry == normalized) {
+        return Ok(normalized);
+    }
+    Err(ApiError::BadRequest(format!("{field_name} has unsupported value")))
+}
+
+fn normalize_lifecycle_state(value: &str, field_name: &'static str) -> Result<String, ApiError> {
+    normalize_allowed_value(value, field_name, &["active", "preview", "deprecated", "disabled"])
+}
+
+fn metadata_with_binding_purposes(
+    metadata_json: serde_json::Value,
+    purposes: &[AiBindingPurpose],
+) -> Result<serde_json::Value, ApiError> {
+    if purposes.is_empty() {
+        return Err(ApiError::BadRequest("allowedBindingPurposes must not be empty".to_string()));
+    }
+    let mut object = match metadata_json {
+        serde_json::Value::Null => serde_json::Map::new(),
+        serde_json::Value::Object(object) => object,
+        _ => {
+            return Err(ApiError::BadRequest("metadataJson must be an object".to_string()));
+        }
+    };
+    object.insert(
+        "defaultRoles".to_string(),
+        serde_json::Value::Array(
+            purposes
+                .iter()
+                .map(|purpose| serde_json::Value::String(binding_purpose_key(*purpose).to_string()))
+                .collect(),
+        ),
+    );
+    Ok(serde_json::Value::Object(object))
 }
 
 fn map_provider_row(
@@ -297,6 +534,8 @@ fn map_model_row(row: ai_repository::AiModelCatalogRow) -> Result<ModelCatalogEn
         model_name: row.model_name,
         capability_kind: row.capability_kind,
         modality_kind: row.modality_kind,
+        lifecycle_state: row.lifecycle_state,
+        metadata_json: row.metadata_json.clone(),
         allowed_binding_purposes: parse_allowed_binding_purposes(&row.metadata_json)?,
         context_window: row.context_window,
         max_output_tokens: row.max_output_tokens,

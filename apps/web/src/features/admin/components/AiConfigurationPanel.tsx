@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Brain, CheckCircle2, Database, KeyRound, Link2, Server } from 'lucide-react';
+import { AlertTriangle, Brain, CheckCircle2, Database, DollarSign, KeyRound, Link2, Server, Wand2 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
 import { FeatureErrorBoundary } from '@/shared/components/FeatureErrorBoundary';
 import { useApp } from '@/shared/contexts/app-context';
 import type { AIScopeKind } from '@/shared/types';
+import { AiBindingWizard } from './ai-configuration/AiBindingWizard';
+import { PricingTab } from './PricingTab';
 import {
   OPTIONAL_PURPOSES,
   purposeLabel,
@@ -24,16 +26,26 @@ import { useAiConfigQueries } from './ai-configuration/useAiConfigQueries';
 
 type AiConfigurationPanelProps = {
   active: boolean;
+  /**
+   * Deep-link entry points (ADM-04): the Libraries readiness "Fix" link and the
+   * Library Hub "Configure AI →" button route here with a scope + section so the
+   * panel opens directly on the binding the operator needs to fix.
+   */
+  initialScope?: AIScopeKind;
+  initialSection?: AiConfigSection;
+  /** Open the guided binding wizard on mount (first-run / cold-start path). */
+  openWizardOnMount?: boolean;
 };
 
 const SETUP_SECTIONS = ['bindings', 'credentials', 'presets'] satisfies AiConfigSection[];
-const CATALOG_SECTIONS = ['providers', 'models'] satisfies AiConfigSection[];
+const CATALOG_SECTIONS = ['providers', 'models', 'pricing'] satisfies AiConfigSection[];
 const SECTION_ICONS = {
   bindings: Link2,
   credentials: KeyRound,
   presets: Brain,
   providers: Server,
   models: Database,
+  pricing: DollarSign,
 } satisfies Record<AiConfigSection, typeof Link2>;
 
 function sectionLabel(section: AiConfigSection, t: (key: string) => string) {
@@ -41,6 +53,7 @@ function sectionLabel(section: AiConfigSection, t: (key: string) => string) {
   if (section === 'credentials') return t('admin.credentials');
   if (section === 'presets') return t('admin.modelPresets');
   if (section === 'providers') return t('admin.providers');
+  if (section === 'pricing') return t('admin.pricing');
   return t('admin.aiPanel.metrics.visibleModels');
 }
 
@@ -49,6 +62,7 @@ function sectionMetric(section: AiConfigSection, summary: AiReadinessSummary) {
   if (section === 'credentials') return String(summary.localCredentialCount);
   if (section === 'presets') return String(summary.localPresetCount);
   if (section === 'providers') return String(summary.providerCatalogCount);
+  if (section === 'pricing') return String(summary.priceRuleCount);
   return String(summary.visibleModelCount);
 }
 
@@ -217,14 +231,31 @@ function AiSectionNavigation({ activeSection, summary, onSelectSection, t }: Sec
   );
 }
 
-export default function AiConfigurationPanel({ active }: AiConfigurationPanelProps) {
+export default function AiConfigurationPanel({
+  active,
+  initialScope,
+  initialSection,
+  openWizardOnMount,
+}: AiConfigurationPanelProps) {
   const { t } = useTranslation();
   const { activeWorkspace, activeLibrary } = useApp();
-  const [selectedScope, setSelectedScope] = useState<AIScopeKind>('instance');
-  const [activeSection, setActiveSection] = useState<AiConfigSection>('bindings');
+  const [selectedScope, setSelectedScope] = useState<AIScopeKind>(initialScope ?? 'instance');
+  const [activeSection, setActiveSection] = useState<AiConfigSection>(initialSection ?? 'bindings');
   const [credentialAddRequest, setCredentialAddRequest] = useState(0);
   const [presetAddRequest, setPresetAddRequest] = useState(0);
-  const autoSelectedScopeRef = useRef(false);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  // When a deep-link arrives, opt out of the panel's own scope auto-selection
+  // so we honor the requested scope (e.g. a library Fix link) instead.
+  const autoSelectedScopeRef = useRef(Boolean(initialScope));
+
+  // Open the guided wizard once on cold-start / first-run entry.
+  const wizardAutoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (openWizardOnMount && !wizardAutoOpenedRef.current) {
+      wizardAutoOpenedRef.current = true;
+      setWizardOpen(true);
+    }
+  }, [openWizardOnMount]);
   const aiConfig = useAiConfigQueries({
     active,
     activeSection,
@@ -244,6 +275,7 @@ export default function AiConfigurationPanel({ active }: AiConfigurationPanelPro
       workspaceBindings: aiConfig.workspaceBindings,
       models: aiConfig.models,
       providers: aiConfig.providers,
+      priceRuleCount: aiConfig.priceRuleCount,
     }),
     [aiConfig, selectedScope],
   );
@@ -309,9 +341,11 @@ export default function AiConfigurationPanel({ active }: AiConfigurationPanelPro
   ) : activeSection === 'presets' ? (
     <PresetsSection selectedScope={selectedScope} scopeContext={aiConfig.scopeContext} providers={aiConfig.providers} models={aiConfig.models} presetsState={aiConfig.presetsState} modelById={aiConfig.modelById} invalidateAll={aiConfig.invalidateAll} openAddRequest={presetAddRequest} />
   ) : activeSection === 'providers' ? (
-    <ProvidersSection providersState={aiConfig.providersState} />
+    <ProvidersSection providersState={aiConfig.providersState} models={aiConfig.models} credentials={aiConfig.localCredentials} invalidateAll={aiConfig.invalidateAll} />
+  ) : activeSection === 'pricing' ? (
+    <PricingTab t={t} activeWorkspaceId={activeWorkspace?.id} active />
   ) : (
-    <ModelsSection modelsState={aiConfig.modelsState} providers={aiConfig.providers} />
+    <ModelsSection modelsState={aiConfig.modelsState} providers={aiConfig.providers} invalidateAll={aiConfig.invalidateAll} />
   );
 
   if (!active) {
@@ -321,9 +355,25 @@ export default function AiConfigurationPanel({ active }: AiConfigurationPanelPro
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-4 overflow-auto lg:overflow-visible">
       <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-        <h2 className="text-base font-bold tracking-tight">{t('admin.aiPanel.title')}</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-base font-bold tracking-tight">{t('admin.aiPanel.title')}</h2>
+          <Button type="button" size="sm" onClick={() => setWizardOpen(true)}>
+            <Wand2 className="mr-1.5 h-3.5 w-3.5" />
+            {t('admin.aiWizard.launch')}
+          </Button>
+        </div>
         <ScopePicker selectedScope={selectedScope} activeWorkspaceName={activeWorkspace?.name} activeLibraryName={activeLibrary?.name} onScopeChange={setSelectedScope} />
       </div>
+      <AiBindingWizard
+        open={wizardOpen}
+        onOpenChange={setWizardOpen}
+        summary={readinessSummary}
+        selectedScope={selectedScope}
+        activeWorkspaceName={activeWorkspace?.name}
+        activeLibraryName={activeLibrary?.name}
+        onScopeChange={setSelectedScope}
+        onOpenSection={openRecommendedSection}
+      />
       <AiReadinessPanel
         activeSection={activeSection}
         summary={readinessSummary}

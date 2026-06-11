@@ -1,17 +1,63 @@
+# IronRAG — single canonical Compose stack.
+#
+# This one file replaces the former four (base / local / large / s4). Every
+# dimension that used to need a separate file is now driven by env vars or a
+# Compose profile, so `docker compose up -d` is the default path and the
+# variants are opt-in:
+#
+#   default (no profile)   filesystem content storage, prebuilt Hub images,
+#                          16 GiB-host memory caps. Just `docker compose up -d`.
+#
+#   s4 profile             bundled s4core (S3-compatible) object storage.
+#     COMPOSE_PROFILES=s4 \
+#     IRONRAG_CONTENT_STORAGE_PROVIDER=s3 \
+#     IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE=bundled \
+#     IRONRAG_CONTENT_STORAGE_TOPOLOGY=shared_cluster \
+#       docker compose up -d
+#     (S3 endpoint/credentials already default to the bundled s4core; override
+#      IRONRAG_CONTENT_STORAGE_S3_* to point at an external bucket instead.)
+#     The s4core service only starts under this profile; startup/backend/worker
+#     wait for it via `depends_on … required: false`, so the default filesystem
+#     path never references it.
+#
+#   large host             raise the per-role memory caps for 24-32 GiB hosts /
+#                          big corpora — no separate file, just env:
+#     IRONRAG_DB_MEMORY_LIMIT=6144M \
+#     IRONRAG_BACKEND_MEMORY_LIMIT=4096M \
+#     IRONRAG_WORKER_MEMORY_LIMIT=4096M \
+#       docker compose up -d
+#
+#   local source build     build the images from this tree instead of pulling:
+#     IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
+#     IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
+#       docker compose up -d --build
+#     (`make docker-local-*` wires these names in for you.)
+#
+#   scale ingest workers   run N ingest workers. Default 1 keeps the baseline
+#                          stack simple and light enough for weak machines.
+#                          Scale-out is safe: workers claim jobs with
+#                          `for update skip locked` under per-library / per-
+#                          workspace / global concurrency caps, so replicas
+#                          never double-process the same job:
+#     IRONRAG_WORKER_REPLICAS=4 docker compose up -d
+#     (Kubernetes: set worker.replicaCount in charts/ironrag/values.yaml.)
+#
 # Application environment. Only operator-facing knobs live here. Narrow runtime
-# tuning (allocator, tokio pool, ingest parallelism, docling batching, vector
-# index budget, arango bootstrap toggles, OTEL exporter selection) is baked into
-# the image defaults (apps/api/Dockerfile + apps/api/src/app/config.rs) and stays
-# overridable by setting the matching IRONRAG_*/OTEL_* env var.
+# tuning (allocator, tokio pool, ingest parallelism, docling batching, pgvector
+# index budget, OTEL exporter selection) is baked into the image defaults
+# (apps/api/Dockerfile + apps/api/src/app/config.rs) and stays overridable by
+# setting the matching IRONRAG_*/OTEL_* env var.
 x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_ENVIRONMENT: ${IRONRAG_ENVIRONMENT:-production}
+  # Stable per-deployment telemetry id. Empty -> auto-derived from the Postgres
+  # cluster identity (unique per stack, stable across container recreation,
+  # shared by every role). Set a value only to override the auto id or when
+  # several stacks deliberately share one database.
+  IRONRAG_DEPLOYMENT_ID: ${IRONRAG_DEPLOYMENT_ID:-}
   IRONRAG_DATABASE_URL: postgres://${IRONRAG_POSTGRES_USER:-postgres}:${IRONRAG_POSTGRES_PASSWORD:-postgres}@${IRONRAG_POSTGRES_HOST:-postgres}:5432/${IRONRAG_POSTGRES_DB:-ironrag}
   IRONRAG_DATABASE_MAX_CONNECTIONS: ${IRONRAG_DATABASE_MAX_CONNECTIONS:-20}
+  IRONRAG_KNOWLEDGE_PLANE_BACKEND: postgres
   IRONRAG_REDIS_URL: ${IRONRAG_REDIS_URL:-redis://redis:6379}
-  IRONRAG_ARANGODB_URL: ${IRONRAG_ARANGODB_URL:-http://arangodb:8529}
-  IRONRAG_ARANGODB_DATABASE: ${IRONRAG_ARANGODB_DATABASE:-ironrag}
-  IRONRAG_ARANGODB_USERNAME: ${IRONRAG_ARANGODB_USERNAME:-root}
-  IRONRAG_ARANGODB_PASSWORD: ${IRONRAG_ARANGODB_PASSWORD:-ironrag-dev}
   IRONRAG_LOG_FILTER: ${IRONRAG_LOG_FILTER:-info}
   IRONRAG_FRONTEND_ORIGIN: ${IRONRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
   IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
@@ -35,129 +81,142 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
   IRONRAG_DEPENDENCY_POSTGRES_MODE: bundled
   IRONRAG_DEPENDENCY_REDIS_MODE: bundled
-  IRONRAG_DEPENDENCY_ARANGODB_MODE: bundled
+  # ── Content storage ──────────────────────────────────────────────────────
+  # Defaults validate as filesystem storage (provider=filesystem requires
+  # topology=single_node and object_storage_mode=disabled — see
+  # apps/api/src/app/config.rs::validate_content_storage_settings). The S3_*
+  # values below are inert under filesystem and pre-aimed at the bundled
+  # s4core, so switching to S3 means flipping these three knobs and enabling
+  # the `s4` profile (see the header). Never leave PROVIDER unset/empty: an
+  # empty value overrides the image default and fails to parse.
+  IRONRAG_CONTENT_STORAGE_PROVIDER: ${IRONRAG_CONTENT_STORAGE_PROVIDER:-filesystem}
+  IRONRAG_CONTENT_STORAGE_TOPOLOGY: ${IRONRAG_CONTENT_STORAGE_TOPOLOGY:-single_node}
+  IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE: ${IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE:-disabled}
+  IRONRAG_CONTENT_STORAGE_KEY_PREFIX: ${IRONRAG_CONTENT_STORAGE_KEY_PREFIX:-}
+  IRONRAG_CONTENT_STORAGE_S3_BUCKET: ${IRONRAG_CONTENT_STORAGE_S3_BUCKET:-ironrag}
+  IRONRAG_CONTENT_STORAGE_S3_ENDPOINT: ${IRONRAG_CONTENT_STORAGE_S3_ENDPOINT:-http://s4core:9000}
+  IRONRAG_CONTENT_STORAGE_S3_REGION: ${IRONRAG_CONTENT_STORAGE_S3_REGION:-us-east-1}
+  IRONRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID: ${IRONRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID:-ironrag}
+  IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: ${IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY:-ironrag-dev-secret}
+  IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: ${IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN:-}
+  IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE: ${IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE:-true}
   IRONRAG_OTEL_ENABLED: ${IRONRAG_OTEL_ENABLED:-true}
   OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.namespace=ironrag}
+  # Logs are the only content-bearing signal (they carry query text and document
+  # chunk previews), so they are OFF by default — the shipped telemetry is then
+  # traces + metrics only, i.e. performance data with no document/query content.
+  # Set OTEL_LOGS_EXPORTER=otlp to also ship logs to your own collector.
+  OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-none}
   # Empty endpoint/protocol defer to the compiled-in diagnostics sink
   # (apps/api/observability.toml); set either to point at your own collector.
   OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 
-# ─── Memory containment (16 GiB host baseline, swap = 0) ─────────────────────
+# ─── Memory containment (4 GiB VM baseline, swap = 0) ────────────────────────
 # The steady-state sum of `memory` LIMITS is the real lever here: Compose does
 # NOT enforce `reservations` (only Swarm / k8s does), and cgroup v2 lets the
 # sum of caps exceed physical RAM. On a swapless host a combined resident set
-# above ~16 GiB trips the kernel's GLOBAL OOM killer, which then SIGKILLs the
-# largest-RSS bystander (historically arangod, mid-IVF-write → crash loop)
-# instead of the rebuildable worker. The previous anchors summed to ~21-23 GiB,
-# sized for a 24-32 GiB VM that was never provisioned; this set fits 16 GiB.
+# above physical RAM trips the kernel's GLOBAL OOM killer, which then SIGKILLs
+# the largest-RSS bystander instead of the rebuildable worker. The defaults
+# below are small so the stack fits a 4 GiB VM out of the box.
 #
-#   anchor    limit   services            counts toward steady Σ?
-#   frontend   256M   frontend            yes
-#   cache      768M   redis               yes
-#   db        1536M   postgres, startup   postgres: yes / startup: one-shot
-#   worker    3072M   worker              yes
-#   backend   3584M   backend             yes
-#   vector    5120M   arangodb            yes
+#   anchor    default  services            counts toward steady Σ?
+#   frontend   192M    frontend            yes
+#   cache      192M    redis               yes
+#   db        1024M    postgres, startup   postgres: yes / startup: one-shot
+#   worker     768M    worker              yes
+#   backend   1024M    backend             yes
 #
 # Steady Σ (repo services, one-shot startup excluded):
-#   5120 + 3584 + 3072 + 1536 + 768 + 256 = 14336 MiB ≈ 14.0 GiB.
-# Budget ceiling = 16 GiB − 1.5 GiB headroom (OS, page cache, cadvisor,
-# qemu-ga) = 14.5 GiB. The ~0.5 GiB slack absorbs the prod-only
-# confluence-connector add-on. `scripts/ops/check-mem-budget.sh` (wired into
-# `make check`) fails the build if this sum is exceeded, so a future edit
-# cannot silently re-oversubscribe the host.
-#
-# These caps plus the per-service `oom_score_adj` below make a 16 GiB host
-# correct by default. A 24-32 GiB host can layer `docker-compose.large.yml`
-# to restore the wider arango/backend/worker caps for big corpora — raise
-# `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES` in lock-step (see the multi-dim
-# vector policy in CLAUDE.md).
+#   1024 + 1024 + 768 + 192 + 192 = 3200 MiB ≈ 3.1 GiB, fits a 4 GiB VM.
+# `scripts/ops/check-mem-budget.sh` (wired into `make check`) parses the
+# defaults below and fails the build if this baseline sum is exceeded, so a
+# future edit cannot silently push the stack past a 4 GiB VM. Both the CPU and
+# memory limit of every role scale UP via the IRONRAG_*_CPUS /
+# IRONRAG_*_MEMORY_LIMIT env overrides for a bigger host (e.g. a 16 GiB stage),
+# without editing this file. These caps plus the per-service `oom_score_adj`
+# below keep the small default correct by default.
 x-ironrag-resources-frontend: &ironrag-resources-frontend
   limits:
-    cpus: "1.00"
-    memory: 256M
+    cpus: ${IRONRAG_FRONTEND_CPUS:-0.50}
+    memory: ${IRONRAG_FRONTEND_MEMORY_LIMIT:-192M}
   reservations:
-    cpus: "0.20"
-    memory: 64M
+    cpus: "0.10"
+    memory: 32M
 
 x-ironrag-resources-cache: &ironrag-resources-cache
   limits:
-    cpus: "1.00"
-    memory: 768M
+    cpus: ${IRONRAG_CACHE_CPUS:-0.50}
+    memory: ${IRONRAG_CACHE_MEMORY_LIMIT:-192M}
   reservations:
-    cpus: "0.20"
-    memory: 128M
+    cpus: "0.10"
+    memory: 64M
 
-# Postgres (relational store) and the one-shot startup migrator share this
-# tier. Postgres anon RSS is ~0.4 GiB (shared_buffers is shared page cache,
-# not counted here); 1.5 GiB covers work_mem spikes on complex queries.
+# Postgres (relational + pgvector knowledge plane) and the one-shot startup
+# migrator share this tier. The budget gives Postgres headroom for
+# HNSW/IVFFlat index builds and complex runtime graph scans.
 x-ironrag-resources-db: &ironrag-resources-db
   limits:
-    cpus: "2.00"
-    memory: 1536M
+    cpus: ${IRONRAG_DB_CPUS:-1.00}
+    memory: ${IRONRAG_DB_MEMORY_LIMIT:-1024M}
+  reservations:
+    cpus: "0.25"
+    memory: 256M
+
+# Ingest worker. The small 768M default is docling memory containment:
+# `auto_docling_max_concurrency_for_limits` (apps/api/src/integrations/docling/
+# mod.rs) derives the concurrency cap from (mem_mib*0.9 - 2048) / 2560, which
+# clamps to docling concurrency = 1 at this cap. A runaway docling/python
+# extraction then cgroup-OOMs the worker — whose job simply requeues — instead
+# of tripping a host global OOM. `oom_score_adj: 800` (below) makes the worker
+# the kernel's first sacrifice. Raise IRONRAG_WORKER_MEMORY_LIMIT on a bigger
+# host to lift the docling concurrency cap.
+x-ironrag-resources-worker: &ironrag-resources-worker
+  limits:
+    cpus: ${IRONRAG_WORKER_CPUS:-2.00}
+    memory: ${IRONRAG_WORKER_MEMORY_LIMIT:-768M}
   reservations:
     cpus: "0.50"
     memory: 256M
 
-# Ingest worker. 3 GiB is the canonical docling memory containment:
-# `auto_docling_max_concurrency_for_limits` (apps/api/src/integrations/docling/
-# mod.rs) derives the concurrency cap from (mem_mib*0.9 - 2048) / 2560, so a
-# 3 GiB worker still resolves to docling concurrency = 1 (identical outcome to
-# the old 4 GiB). A runaway docling/python extraction then cgroup-OOMs the
-# worker — whose job simply requeues — instead of tripping a host global OOM.
-# `oom_score_adj: 800` (below) makes the worker the kernel's first sacrifice.
-x-ironrag-resources-worker: &ironrag-resources-worker
-  limits:
-    cpus: "6.00"
-    memory: 3072M
-  reservations:
-    cpus: "2.00"
-    memory: 768M
-
-# API backend. Answer path only — no docling spawned here — so 3.5 GiB covers
-# the observed 1.7-3.1 GiB peak of concurrent grounded-answer turns with a
-# margin (a future global concurrent-turn semaphore can tighten this to 3 GiB).
+# API backend. Answer path only — no docling spawned here. The 1024M default
+# fits a 4 GiB VM for light concurrency; heavy concurrent grounded-answer turns
+# can peak higher (observed 1.7-3.1 GiB on a large corpus), so raise
+# IRONRAG_BACKEND_MEMORY_LIMIT on a bigger host.
 x-ironrag-resources-backend: &ironrag-resources-backend
   limits:
-    cpus: "6.00"
-    memory: 3584M
+    cpus: ${IRONRAG_BACKEND_CPUS:-2.00}
+    memory: ${IRONRAG_BACKEND_MEMORY_LIMIT:-1024M}
   reservations:
-    cpus: "2.00"
-    memory: 768M
+    cpus: "0.50"
+    memory: 256M
 
-# ArangoDB sits alone on the vector tier. The 5 GiB ceiling holds the IVF
-# vector-index build for the largest active per-(library,dim) shard
-# `knowledge_chunk_vector_d{dim}_l{libhex}`: idle arangod RSS is ~1.5 GiB and
-# an IVF build over a large shard adds ~1.5 GiB, leaving room for concurrent
-# query traffic. The builder fail-soft-caps its `nLists` to
-# `VECTOR_INDEX_TRAINING_BUDGET_BYTES` (default 3 GB; env-overridable via
-# `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES`) divided by the empirical
-# 50 MB/list, so a smaller cap yields a cheaper build, never a cgroup OOM. Do
-# not lower below the largest active shard's IVF build need; raise it (and the
-# training-budget env) in lock-step with a bigger model/corpus — see the
-# multi-dim vector policy in CLAUDE.md.
-x-ironrag-resources-vector: &ironrag-resources-vector
+# Bundled s4core object store (only under the `s4` profile, so NOT part of the
+# 4 GiB-VM baseline budget — check-mem-budget.sh skips profiled services). A
+# lightweight S3 server that streams blobs to disk; raise the cap for heavy
+# upload concurrency, or point IRONRAG_CONTENT_STORAGE_S3_ENDPOINT at an
+# external bucket and don't run s4core at all.
+x-ironrag-resources-s4core: &ironrag-resources-s4core
   limits:
-    cpus: "4.00"
-    memory: 5120M
+    cpus: ${IRONRAG_S4CORE_CPUS:-1.00}
+    memory: ${IRONRAG_S4CORE_MEMORY_LIMIT:-512M}
   reservations:
-    cpus: "1.00"
-    memory: 1G
+    cpus: "0.25"
+    memory: 128M
 
 services:
   postgres:
-    image: ${IRONRAG_POSTGRES_IMAGE:-postgres:18-alpine}
+    image: ${IRONRAG_POSTGRES_IMAGE:-pgvector/pgvector:pg18}
     restart: unless-stopped
-    # Postgres parallel-query gathers allocate dynamic-shared-memory
-    # segments in /dev/shm. The stock container mounts /dev/shm as a 64 MiB
-    # tmpfs, which a single large parallel aggregate (e.g. the graph
-    # topology document-link scan) or a burst of concurrent graph loads can
-    # exhaust, surfacing as `could not resize shared memory segment ... No
-    # space left on device` -> HTTP 500. 256 MiB gives parallel workers
-    # headroom. The application also pins the heaviest topology scans to a
-    # non-parallel plan (see runtime_graph_repository::begin_topology_scan_tx)
-    # so correctness never depends on this value alone.
+    # Postgres parallel-query gathers allocate dynamic-shared-memory segments
+    # in /dev/shm. The stock container mounts /dev/shm as a 64 MiB tmpfs, which
+    # a single large parallel aggregate (e.g. the graph topology document-link
+    # scan) or a burst of concurrent graph loads can exhaust, surfacing as
+    # `could not resize shared memory segment ... No space left on device` ->
+    # HTTP 500. 256 MiB gives parallel workers headroom. The application also
+    # pins the heaviest topology scans to a non-parallel plan (see
+    # runtime_graph_repository::begin_topology_scan_tx) so correctness never
+    # depends on this value alone.
     shm_size: ${IRONRAG_POSTGRES_SHM_SIZE:-256mb}
     environment:
       POSTGRES_PASSWORD: ${IRONRAG_POSTGRES_PASSWORD:-postgres}
@@ -181,7 +240,7 @@ services:
       resources:
         <<: *ironrag-resources-db
   redis:
-    image: ${IRONRAG_REDIS_IMAGE:-redis:8.6}
+    image: ${IRONRAG_REDIS_IMAGE:-redis:8.8}
     restart: unless-stopped
     command:
       - redis-server
@@ -204,61 +263,48 @@ services:
     deploy:
       resources:
         <<: *ironrag-resources-cache
-  arangodb:
-    image: ${IRONRAG_ARANGODB_IMAGE:-arangodb:3.12.4}
+  # Bundled S3-compatible object storage. Only created under the `s4` profile;
+  # the default filesystem stack never starts it (startup/backend/worker depend
+  # on it with `required: false`, so its absence is not an error).
+  s4core:
+    image: ${IRONRAG_S4CORE_IMAGE:-s4core/s4core:latest}
     restart: unless-stopped
+    profiles: ["s4"]
     environment:
-      ARANGO_ROOT_PASSWORD: ${IRONRAG_ARANGODB_PASSWORD:-ironrag-dev}
-    command:
-      - arangod
-      - --server.authentication=true
-      - --experimental-vector-index=true
-      - --database.directory=/var/lib/arangodb3
-      # Memory caps for small (≤ 8 GB) hosts. Without these, the default
-      # per-AQL-query memory limit is auto-sized to roughly half the host
-      # RAM (~4.6 GB on an 8 GB box) and five parallel queries can reserve
-      # 23 GB of virtual memory under concurrent load, enough to
-      # trigger the OOM killer on small hosts. 1 GB / query is
-      # the minimum that survives the retrieval workload on a large
-      # library: the vector-search + graph-traversal + full-scan diagnostic
-      # queries all materialize candidate sets big enough that 256 MB
-      # produced intermittent 500s on bench runs 2026-04-23. RocksDB buffers
-      # and block cache are capped separately so ingest writes don't bloat
-      # resident memory.
-      - --query.memory-limit=1073741824
-      - --query.cache-mode=demand
-      - --rocksdb.block-cache-size=536870912
-      - --rocksdb.total-write-buffer-size=268435456
+      S4_BIND: 0.0.0.0:9000
+      S4_ACCESS_KEY_ID: ${IRONRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID:-ironrag}
+      S4_SECRET_ACCESS_KEY: ${IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY:-ironrag-dev-secret}
+      S4_DATA_DIR: /data
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget -q --spider http://127.0.0.1:8529/_db/_system/_admin/aardvark/index.html || exit 1",
-        ]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9000/metrics >/dev/null 2>&1 || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
     expose:
-      - "8529"
+      - "9000"
     volumes:
-      - arangodb_data:/var/lib/arangodb3
-    # Most-protected container: killing arangod mid-IVF-write caused the
-    # crash loops in the 0.4.20 host-OOM incident. The kernel must pick this
-    # last. Paired with the 5 GiB `vector` cap + fail-soft IVF nLists sizing.
-    oom_score_adj: -900
+      - s4core_data:/data
     deploy:
       resources:
-        <<: *ironrag-resources-vector
+        <<: *ironrag-resources-s4core
   startup:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
+    # `build` is dev-only: the public install path (install.sh) ships only this
+    # file + `docker compose pull`, so the registry image is present and the
+    # build context is never needed. Local source builds set
+    # IRONRAG_BACKEND_IMAGE=ironrag-backend:local and run with --build.
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
     restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      arangodb:
+      s4core:
         condition: service_healthy
+        required: false
     stop_signal: SIGTERM
     stop_grace_period: 10m
     environment:
@@ -266,6 +312,8 @@ services:
       IRONRAG_SERVICE_ROLE: startup
       IRONRAG_SERVICE_NAME: ironrag-startup
       OTEL_SERVICE_NAME: ironrag-startup
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # One-shot migrator; neutral OOM priority — it exits before steady state
     # so it does not co-reside under load.
     oom_score_adj: 0
@@ -276,6 +324,14 @@ services:
         <<: *ironrag-resources-db
   backend:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        APP_VERSION: ${IRONRAG_VERSION:-0.0.0-dev}
+        DOCLING_VERSION: ${DOCLING_VERSION:-2.93.0}
+        TORCH_VERSION: ${TORCH_VERSION:-2.11.0+cpu}
+        TORCHVISION_VERSION: ${TORCHVISION_VERSION:-0.26.0+cpu}
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -292,6 +348,8 @@ services:
       OTEL_SERVICE_NAME: ironrag-backend
     expose:
       - "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
@@ -305,6 +363,9 @@ services:
         <<: *ironrag-resources-backend
   worker:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -323,6 +384,8 @@ services:
       OTEL_SERVICE_NAME: ironrag-worker
     expose:
       - "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
@@ -331,11 +394,28 @@ services:
       timeout: 5s
       retries: 6
       start_period: 15s
+    # Horizontal scale-out: run N ingest workers from one env var. Default 1
+    # keeps the baseline stack simple. Safe because job claiming uses
+    # `for update skip locked` with concurrency caps (see
+    # claim_next_queued_ingest_job), so replicas never double-process a job.
     deploy:
+      replicas: ${IRONRAG_WORKER_REPLICAS:-1}
       resources:
         <<: *ironrag-resources-worker
   frontend:
     image: ${IRONRAG_FRONTEND_IMAGE:-pipingspace/ironrag-frontend:latest}
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${IRONRAG_VERSION:-0.0.0-dev}
+        # Browser traces (web vitals, fetch/navigation spans — no document or
+        # query content) default to the maintainers' collector; set empty to
+        # disable, or point at your own OTLP/HTTP traces endpoint.
+        VITE_OTEL_EXPORTER_OTLP_ENDPOINT: ${VITE_OTEL_EXPORTER_OTLP_ENDPOINT:-https://otel.piping.space:4318/v1/traces}
+        VITE_OTEL_SERVICE_NAME: ${VITE_OTEL_SERVICE_NAME:-ironrag-web}
+        VITE_OTEL_SERVICE_VERSION: ${VITE_OTEL_SERVICE_VERSION:-${IRONRAG_VERSION:-0.0.0-dev}}
+        VITE_OTEL_DEPLOYMENT_ENVIRONMENT: ${VITE_OTEL_DEPLOYMENT_ENVIRONMENT:-production}
     restart: unless-stopped
     depends_on:
       backend:
@@ -357,5 +437,5 @@ services:
         <<: *ironrag-resources-frontend
 volumes:
   postgres_data:
-  arangodb_data:
   content_storage_data:
+  s4core_data:

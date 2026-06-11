@@ -98,6 +98,20 @@ impl AiCatalogService {
         .ok_or_else(|| ApiError::resource_not_found("model_preset", command.preset_id))?;
         Ok(map_model_preset_row(row))
     }
+
+    pub async fn delete_model_preset(
+        &self,
+        state: &AppState,
+        preset_id: Uuid,
+    ) -> Result<(), ApiError> {
+        let affected = ai_repository::delete_model_preset(&state.persistence.postgres, preset_id)
+            .await
+            .map_err(map_ai_delete_error)?;
+        if affected == 0 {
+            return Err(ApiError::resource_not_found("model_preset", preset_id));
+        }
+        Ok(())
+    }
 }
 
 fn map_model_preset_row(row: ai_repository::AiModelPresetRow) -> ModelPreset {

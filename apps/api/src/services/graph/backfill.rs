@@ -68,10 +68,64 @@ pub const BACKFILL_ALL_TERMINAL_BACKOFF: Duration = Duration::from_secs(300);
 /// documents that exceed the limit on the next window.
 pub const BACKFILL_BATCH_SIZE: i64 = 256;
 
-/// Concurrent reconcile fan-out inside a single pass. Reconcile is I/O
-/// bound (Postgres round-trips; the LLM is NOT invoked) so a small fan-out
-/// amortises round-trip latency without stressing the pool.
+/// Concurrent reconcile fan-out inside a single pass on a *small* library
+/// projection. Reconcile is I/O bound (Postgres round-trips; the LLM is
+/// NOT invoked) so a small fan-out amortises round-trip latency without
+/// stressing the pool.
+///
+/// This fan-out is only safe while the canonical projection is small. The
+/// first reconcile of a backfill candidate whose library snapshot still
+/// reports an empty graph takes the *full* projection path
+/// (`project_canonical_graph` → `list_admitted_runtime_graph_*_by_library`),
+/// which materialises every admitted node + edge row of the whole library
+/// into memory. On a large library (measured ~95.6k nodes + ~430.5k edges,
+/// ~260 MiB resident per full build) running four of those concurrently
+/// peaks at ~1.04 GiB and trips the worker's 1 GiB cgroup cap — an infinite
+/// OOM/restart loop because the worker dies before it can upsert the
+/// non-empty snapshot that would flip subsequent docs onto the bounded
+/// targeted path. [`graph_backfill_concurrency`] caps the fan-out to
+/// [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`] above
+/// [`BACKFILL_LARGE_PROJECTION_THRESHOLD`] so the peak stays bounded.
 pub const BACKFILL_CONCURRENCY: usize = 4;
+
+/// Fan-out used once the canonical projection is large enough that a single
+/// full reconcile build is memory-heavy. Forcing the first build to run
+/// alone keeps peak resident set near one full-build cost (~260 MiB on the
+/// measured 95.6k-node/430.5k-edge library) instead of `N ×` that. After the
+/// first candidate upserts a non-empty snapshot, every remaining candidate
+/// in the pass takes the bounded *targeted* projection path, so serial
+/// execution at this size costs throughput on a background pass only — never
+/// latency on a query.
+pub const BACKFILL_CONCURRENCY_LARGE_PROJECTION: usize = 1;
+
+/// Admitted-row count (nodes + edges of the active projection) at or above
+/// which the pass drops to [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`]. Set
+/// well below the measured OOM point: four concurrent full builds at
+/// ~95.6k + ~430.5k ≈ 526k admitted rows peaked at ~1.04 GiB, so the
+/// threshold is anchored at 100k combined rows — roughly one fifth of the
+/// observed failure size — to engage the safe fan-out long before the cap
+/// is in reach, while leaving genuinely small libraries on the faster
+/// four-way fan-out.
+pub const BACKFILL_LARGE_PROJECTION_THRESHOLD: i64 = 100_000;
+
+/// Chooses the reconcile fan-out for a backfill pass from the size of the
+/// active canonical projection (admitted node + edge count). Pure so the
+/// decision is unit-testable without a live database.
+///
+/// Returns [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`] once the combined
+/// admitted-row count reaches [`BACKFILL_LARGE_PROJECTION_THRESHOLD`],
+/// otherwise the faster [`BACKFILL_CONCURRENCY`]. Negative counts (which
+/// should not occur but are representable in `i64`) are treated as zero, so
+/// a malformed count never accidentally selects the unsafe fan-out.
+#[must_use]
+pub fn graph_backfill_concurrency(admitted_node_count: i64, admitted_edge_count: i64) -> usize {
+    let combined = admitted_node_count.max(0).saturating_add(admitted_edge_count.max(0));
+    if combined >= BACKFILL_LARGE_PROJECTION_THRESHOLD {
+        BACKFILL_CONCURRENCY_LARGE_PROJECTION
+    } else {
+        BACKFILL_CONCURRENCY
+    }
+}
 
 /// How many consecutive zero-contribution reconcile attempts against the
 /// same active revision we tolerate before flagging the document as
@@ -256,11 +310,36 @@ pub async fn run_library_graph_backfill(
         });
     }
 
+    // Size the reconcile fan-out from the *actual* admitted projection size,
+    // not the library snapshot counts: when the snapshot still reports an
+    // empty graph (the exact state that drives the OOM loop) those counts are
+    // zero even though the node/edge tables are full, so sizing off the
+    // snapshot would pick the unsafe fan-out in precisely the failure case.
+    // The admitted row count comes straight from the canonical tables for the
+    // active projection version.
+    let projection_scope =
+        crate::services::graph::projection::resolve_projection_scope(state, library_id)
+            .await
+            .context("failed to resolve active projection scope for backfill fan-out sizing")?;
+    let projection_counts = repositories::count_admitted_runtime_graph_projection(
+        &state.persistence.postgres,
+        library_id,
+        projection_scope.projection_version,
+    )
+    .await
+    .context("failed to count admitted graph rows for backfill fan-out sizing")?;
+    let concurrency =
+        graph_backfill_concurrency(projection_counts.node_count, projection_counts.edge_count);
+
     tracing::info!(
         %library_id,
         raw_candidates = raw_total,
         active_candidates = candidates.len(),
         skipped_by_marker = skipped_by_marker.len(),
+        projection_version = projection_scope.projection_version,
+        admitted_node_count = projection_counts.node_count,
+        admitted_edge_count = projection_counts.edge_count,
+        concurrency,
         "graph backfill pass: replaying reconcile for documents missing graph node"
     );
 
@@ -293,7 +372,7 @@ pub async fn run_library_graph_backfill(
                 ))
             }
         }))
-        .buffer_unordered(BACKFILL_CONCURRENCY)
+        .buffer_unordered(concurrency)
         .collect::<Vec<_>>()
         .await;
 
@@ -538,6 +617,45 @@ mod tests {
             // New revision — marker for revision_a must not apply.
             assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_b));
         });
+    }
+
+    #[test]
+    fn small_projection_keeps_fast_backfill_fan_out() {
+        // Well under the threshold → keep the four-way fan-out.
+        assert_eq!(graph_backfill_concurrency(0, 0), BACKFILL_CONCURRENCY);
+        assert_eq!(graph_backfill_concurrency(1_000, 5_000), BACKFILL_CONCURRENCY);
+        // Just below the threshold is still the fast path.
+        assert_eq!(
+            graph_backfill_concurrency(BACKFILL_LARGE_PROJECTION_THRESHOLD - 1, 0),
+            BACKFILL_CONCURRENCY
+        );
+    }
+
+    #[test]
+    fn large_projection_drops_to_serial_backfill_fan_out() {
+        // Exactly at the threshold engages the safe fan-out.
+        assert_eq!(
+            graph_backfill_concurrency(BACKFILL_LARGE_PROJECTION_THRESHOLD, 0),
+            BACKFILL_CONCURRENCY_LARGE_PROJECTION
+        );
+        // The measured OOM-trigger library (~95.6k nodes + ~430.5k edges)
+        // must select the serial fan-out.
+        assert_eq!(
+            graph_backfill_concurrency(95_598, 430_549),
+            BACKFILL_CONCURRENCY_LARGE_PROJECTION
+        );
+    }
+
+    #[test]
+    fn backfill_fan_out_sizing_ignores_negative_counts() {
+        // A malformed negative count must never select the unsafe fan-out
+        // for what is actually a large projection, and must clamp to zero
+        // rather than underflow.
+        assert_eq!(graph_backfill_concurrency(-1, -1), BACKFILL_CONCURRENCY);
+        assert_eq!(
+            graph_backfill_concurrency(-5, BACKFILL_LARGE_PROJECTION_THRESHOLD),
+            BACKFILL_CONCURRENCY_LARGE_PROJECTION
+        );
     }
 
     #[test]

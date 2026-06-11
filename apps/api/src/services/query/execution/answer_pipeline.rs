@@ -6,8 +6,11 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::{
-        query::QueryVerificationState,
-        query_ir::{EntityRole, QueryAct, QueryIR},
+        query::{QueryVerificationState, QueryVerificationWarning},
+        query_ir::{
+            EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct, QueryIR, QueryLanguage,
+            QueryScope,
+        },
     },
     infra::arangodb::document_store::KnowledgeDocumentRow,
     integrations::llm::ChatMessage,
@@ -22,12 +25,14 @@ use crate::{
 use super::question_intent::query_ir_has_focused_document_answer_intent;
 use super::technical_literals::{
     TechnicalLiteralIntent, detect_explicit_technical_literal_intent_from_query_ir,
-    detect_technical_literal_intent_from_query_ir, extract_explicit_path_literals,
-    extract_http_methods, extract_parameter_literals, extract_prefix_literals,
+    detect_technical_literal_intent_from_query_ir, extract_config_assignment_literals,
+    extract_config_section_literals, extract_explicit_path_literals, extract_http_methods,
+    extract_package_command_literals, extract_parameter_literals, extract_prefix_literals,
     extract_url_literals,
 };
 use super::tuning::{
     CLARIFY_DOMINANCE_RATIO, CLARIFY_MAX_VARIANTS, CLARIFY_MIN_DISTINCT_DOCUMENTS,
+    RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN, RELEASE_CLARIFY_MIN_ENTITIES,
     SINGLE_SHOT_CONFIDENT_ANSWER_CHARS, SINGLE_SHOT_MIN_ANSWER_CHARS,
     SINGLE_SHOT_RETRIEVAL_ESCALATION_MIN_DOCUMENTS,
 };
@@ -42,6 +47,15 @@ use super::{
 const COMPARE_OPERAND_PROBE_LIMIT: usize = 8;
 const COMPARE_OPERAND_PROBE_MAX_CHUNKS: usize = 6;
 const COMPARE_OPERAND_PROBE_MAX_CHUNKS_PER_OPERAND: usize = 2;
+const STRUCTURAL_COVERAGE_MIN_CONTEXT_ANCHORS: usize = 4;
+const STRUCTURAL_COVERAGE_MIN_CONTEXT_ANCHOR_LINES: usize = 2;
+const STRUCTURAL_COVERAGE_MIN_ANSWER_ANCHORS: usize = 2;
+const STRUCTURAL_COVERAGE_MAX_ANCHORS: usize = 64;
+const STRUCTURAL_COVERAGE_MAX_ANCHOR_CHARS: usize = 80;
+const STRUCTURAL_COVERAGE_FOCUS_MIN_TOKEN_CHARS: usize = 3;
+const PROVIDER_FREE_FALLBACK_ENTITY_LIMIT: usize = 8;
+const PROVIDER_FREE_FALLBACK_LITERAL_LIMIT: usize = 8;
+const PROVIDER_FREE_FALLBACK_TOKEN_MAX_CHARS: usize = 80;
 
 struct CanonicalAnswerCandidate {
     verification_stage: AnswerVerificationStage,
@@ -110,7 +124,7 @@ async fn prepare_answer_query_inner(
     });
     let (compile_result, planning_result) = tokio::join!(compile_future, planning_future);
     let plan_elapsed_ms = plan_started.elapsed().as_millis();
-    let (query_ir, query_compile_usage) = compile_result?;
+    let (mut query_ir, query_compile_usage) = compile_result?;
     let mut planning_stage = planning_result?;
     tracing::info!(
         stage = "answer.plan_done",
@@ -125,7 +139,11 @@ async fn prepare_answer_query_inner(
     // retrieval lanes search the standalone query instead of the bare
     // fragment. The expensive question-independent graph/document indexes are
     // reused, and the common path (resolved == raw) is byte-identical.
-    let retrieval_question = query_ir.effective_retrieval_query(&question).to_string();
+    let retrieval_question = guarded_followup_retrieval_question(
+        query_ir.effective_retrieval_query(&question),
+        &question,
+    )
+    .to_string();
     if retrieval_question != question {
         tracing::info!(
             stage = "answer.resolved_retrieval_query",
@@ -185,7 +203,21 @@ async fn prepare_answer_query_inner(
         "rerank done"
     );
     let stage_1_elapsed_ms = stage_1_started.elapsed().as_millis();
-
+    let document_index = rerank_stage.retrieval.planning.document_index.clone();
+    if let Some(inferred_query_ir) = super::infer_latest_version_query_ir_from_retrieved_evidence(
+        &query_ir,
+        &question,
+        &rerank_stage.retrieval.bundle.chunks,
+        &document_index,
+    ) {
+        tracing::info!(
+            stage = "answer.query_ir_evidence_repaired",
+            library_id = %library_id,
+            inferred_act = ?inferred_query_ir.act,
+            "repaired low-confidence fallback QueryIR from retrieved source evidence"
+        );
+        query_ir = inferred_query_ir;
+    }
     // IR-aware consolidation: if the compiler pinned the question to
     // one document (explicit hint / single-doc subject) or the
     // retrieval itself shows one document dominating the evidence,
@@ -201,7 +233,6 @@ async fn prepare_answer_query_inner(
     )
     .await;
     let consolidation_elapsed_ms = consolidation_started.elapsed().as_millis();
-    let document_index = rerank_stage.retrieval.planning.document_index.clone();
     let plan_keywords = rerank_stage.retrieval.planning.plan.keywords.clone();
     let stale_after_consolidation = super::retain_canonical_document_head_chunks(
         &mut rerank_stage.retrieval.bundle.chunks,
@@ -434,8 +465,10 @@ async fn prepare_answer_query_inner(
 }
 
 /// Runs the NL->IR compiler for the current question + conversation history.
-/// Compile failures are terminal for the turn: retrieval must not continue
-/// from a synthetic IR because that would hide binding/provider regressions.
+/// Provider failures are logged as operator-visible errors, then downgraded to
+/// a neutral provider-free IR so the canonical grounded-answer tool can still
+/// retrieve and verify evidence instead of forcing parent agents onto weaker
+/// ad hoc search/read fallbacks.
 async fn compile_query_ir(
     state: &AppState,
     library_id: Uuid,
@@ -478,9 +511,149 @@ async fn compile_query_ir(
                 ?error,
                 "query compile failed"
             );
-            Err(error)
+            if matches!(error, ApiError::ProviderFailure(_)) {
+                let fallback_ir = provider_free_fallback_query_ir(question);
+                tracing::error!(
+                    %library_id,
+                    fallback_act = ?fallback_ir.act,
+                    fallback_scope = ?fallback_ir.scope,
+                    "query compile provider failed; continuing with provider-free fallback IR"
+                );
+                Ok((fallback_ir, None))
+            } else {
+                Err(error)
+            }
         }
     }
+}
+
+fn provider_free_fallback_query_ir(question: &str) -> QueryIR {
+    let retrieval_query = question.trim().to_string();
+    QueryIR {
+        act: QueryAct::Describe,
+        scope: QueryScope::MultiDocument,
+        language: QueryLanguage::Auto,
+        target_types: Vec::new(),
+        target_entities: provider_free_fallback_entity_mentions(question),
+        literal_constraints: provider_free_fallback_literal_constraints(question),
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: None,
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: None,
+        retrieval_query: (!retrieval_query.is_empty()).then_some(retrieval_query),
+        confidence: 0.25,
+    }
+}
+
+fn provider_free_fallback_entity_mentions(question: &str) -> Vec<EntityMention> {
+    let mut mentions = Vec::new();
+    let mut seen = HashSet::new();
+    let tokens = structural_question_tokens(question);
+    let mut current = Vec::new();
+    for (index, token) in tokens.into_iter().enumerate() {
+        if token_has_fallback_entity_signal(&token, index) {
+            current.push(token);
+        } else {
+            push_provider_free_fallback_entity(&mut mentions, &mut seen, &mut current);
+        }
+        if mentions.len() >= PROVIDER_FREE_FALLBACK_ENTITY_LIMIT {
+            break;
+        }
+    }
+    push_provider_free_fallback_entity(&mut mentions, &mut seen, &mut current);
+    mentions
+}
+
+fn push_provider_free_fallback_entity(
+    mentions: &mut Vec<EntityMention>,
+    seen: &mut HashSet<String>,
+    current: &mut Vec<String>,
+) {
+    if mentions.len() >= PROVIDER_FREE_FALLBACK_ENTITY_LIMIT || current.is_empty() {
+        current.clear();
+        return;
+    }
+    let label =
+        current.join(" ").chars().take(PROVIDER_FREE_FALLBACK_TOKEN_MAX_CHARS).collect::<String>();
+    current.clear();
+    let label = label.trim();
+    if label.chars().count() < 2 || !label.chars().any(char::is_alphanumeric) {
+        return;
+    }
+    let key = label.to_lowercase();
+    if seen.insert(key) {
+        mentions.push(EntityMention { label: label.to_string(), role: EntityRole::Subject });
+    }
+}
+
+fn provider_free_fallback_literal_constraints(question: &str) -> Vec<LiteralSpan> {
+    let mut literals = Vec::new();
+    let mut seen = HashSet::new();
+    for token in structural_question_tokens(question) {
+        if literals.len() >= PROVIDER_FREE_FALLBACK_LITERAL_LIMIT {
+            break;
+        }
+        let kind = LiteralKind::infer(&token);
+        if !provider_free_literal_kind_is_structural(kind, &token) {
+            continue;
+        }
+        let key = token.to_lowercase();
+        if seen.insert(key) {
+            literals.push(LiteralSpan { text: token, kind });
+        }
+    }
+    literals
+}
+
+fn provider_free_literal_kind_is_structural(kind: LiteralKind, text: &str) -> bool {
+    matches!(kind, LiteralKind::Url | LiteralKind::Path | LiteralKind::Version)
+        || (matches!(kind, LiteralKind::Identifier | LiteralKind::NumericCode)
+            && text.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':') || ch.is_numeric()))
+}
+
+fn structural_question_tokens(question: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in question.chars() {
+        if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(take_provider_free_fallback_token(&current));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(take_provider_free_fallback_token(&current));
+    }
+    tokens
+}
+
+fn take_provider_free_fallback_token(value: &str) -> String {
+    value.chars().take(PROVIDER_FREE_FALLBACK_TOKEN_MAX_CHARS).collect()
+}
+
+fn token_has_fallback_entity_signal(token: &str, index: usize) -> bool {
+    if token.chars().count() < 2 {
+        return false;
+    }
+    if index == 0 && token_is_plain_titlecase(token) {
+        return false;
+    }
+    token.chars().any(char::is_uppercase)
+        || token.chars().any(char::is_numeric)
+        || token.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':'))
+}
+
+fn token_is_plain_titlecase(token: &str) -> bool {
+    let mut alphabetic = token.chars().filter(|ch| ch.is_alphabetic());
+    let Some(first) = alphabetic.next() else {
+        return false;
+    };
+    first.is_uppercase()
+        && alphabetic.all(|ch| ch.is_lowercase())
+        && token.chars().all(char::is_alphabetic)
 }
 
 /// `conversation_history` arrives pre-serialized as a plain multi-line string
@@ -627,6 +800,140 @@ pub(crate) async fn generate_answer_query(
             used_context_fallback = source_slice_answer.used_context_fallback,
             "deterministic ordered source-slice answer selected"
         );
+
+        // When the latest-version inventory lane produced this answer for a
+        // query that names NO explicit subject (no target_entities, no
+        // document_focus), probe the gathered evidence for distinct named
+        // entities that each span at least RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN
+        // of the release documents.  Two or more such entities means the
+        // release notes cover multiple distinct subjects — offer the user a
+        // clarifying question with those subjects as choices, grounded on the
+        // already-gathered evidence.  The gate reuses the lane's own
+        // predicates (no parallel re-derivation), and no product names or NL
+        // keywords are hardcoded here; the entity labels come entirely from
+        // the graph built during ingest.
+        if subjectless_release_inventory(
+            &prepared.query_ir,
+            super::answer::context_supports_latest_version_inventory(
+                &prepared.query_ir,
+                &prepared.structured.context_chunks,
+            ),
+        ) {
+            // Scope the probe to the exact units the deterministic answer
+            // was built from (post dominant-family retention + truncation),
+            // not the wider retrieval context — otherwise the clarify could
+            // offer subjects that the listed releases never mention.
+            let chunk_ids: &[Uuid] = &source_slice_answer.unit_chunk_ids;
+
+            if !chunk_ids.is_empty() {
+                let release_entities =
+                    query_release_evidence_entities(state, library_id, chunk_ids).await;
+                match release_entities {
+                    Ok(entities) if entities.len() >= RELEASE_CLARIFY_MIN_ENTITIES => {
+                        tracing::info!(
+                            stage = "answer.release_clarify_start",
+                            %execution_id,
+                            %library_id,
+                            entity_count = entities.len(),
+                            "release-lane entity probe found multiple subjects — routing to clarify"
+                        );
+                        let variants: Vec<String> =
+                            entities.into_iter().take(CLARIFY_MAX_VARIANTS).collect();
+                        // Ground the clarify turn on the deterministic inventory
+                        // itself, and PREPEND that inventory verbatim to the
+                        // returned clarification. The full flat list must stay
+                        // in the answer: tool callers are often agents (UI agent
+                        // loop, external MCP clients) that relay the tool answer
+                        // — a menu-only reply makes them re-query with a guessed
+                        // subject and degrades the final turn, while the full
+                        // list plus a trailing clarification serves both a human
+                        // and an agent in one round trip.
+                        let clarify_result = crate::services::query::agent_loop::run_clarify_turn(
+                            state,
+                            library_id,
+                            generation_question,
+                            conversation_history_messages,
+                            &variants,
+                            &source_slice_answer.answer,
+                        )
+                        .await;
+                        match clarify_result {
+                            Ok(clarify) if !clarify.answer.trim().is_empty() => {
+                                let combined_answer = format!(
+                                    "{}\n\n{}",
+                                    source_slice_answer.answer.trim_end(),
+                                    clarify.answer.trim_start()
+                                );
+                                tracing::info!(
+                                    stage = "answer.release_clarify_done",
+                                    %execution_id,
+                                    answer_len = combined_answer.len(),
+                                    "release clarify appended to the deterministic inventory"
+                                );
+                                let clarify_debug = clarify.debug_iterations.clone();
+                                persist_llm_context_snapshot(
+                                    state,
+                                    crate::services::query::llm_context_debug::LlmContextSnapshot {
+                                        execution_id,
+                                        library_id,
+                                        question: user_question.to_string(),
+                                        total_iterations: clarify.iterations,
+                                        iterations: clarify_debug,
+                                        final_answer: Some(combined_answer.clone()),
+                                        captured_at: chrono::Utc::now(),
+                                        query_ir: Some(
+                                            serde_json::to_value(&prepared.query_ir)
+                                                .unwrap_or(serde_json::Value::Null),
+                                        ),
+                                        agent_loop: None,
+                                        spans: Vec::new(),
+                                    },
+                                )
+                                .await?;
+                                return Ok(RuntimeAnswerQueryResult {
+                                    answer: combined_answer,
+                                    provider: clarify.provider,
+                                    usage_json: clarify.usage_json,
+                                });
+                            }
+                            Ok(_) => {
+                                tracing::info!(
+                                    stage = "answer.release_clarify_empty",
+                                    %execution_id,
+                                    "release clarify path returned empty — falling back to source-slice answer"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    stage = "answer.release_clarify_error",
+                                    %execution_id,
+                                    ?error,
+                                    "release clarify path failed — falling back to source-slice answer"
+                                );
+                            }
+                        }
+                    }
+                    Ok(entities) => {
+                        tracing::debug!(
+                            stage = "answer.release_clarify_skip",
+                            %execution_id,
+                            entity_count = entities.len(),
+                            min_required = RELEASE_CLARIFY_MIN_ENTITIES,
+                            "release-lane entity probe found too few subjects — skipping clarify"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            stage = "answer.release_clarify_probe_error",
+                            %execution_id,
+                            ?error,
+                            "release-lane entity probe failed — falling back to source-slice answer"
+                        );
+                    }
+                }
+            }
+        }
+
         let usage_json = serde_json::json!({
             "deterministic": true,
             "answer_kind": if source_slice_answer.used_context_fallback {
@@ -702,90 +1009,90 @@ pub(crate) async fn generate_answer_query(
     let mut canonical_candidate: Option<CanonicalAnswerCandidate> = None;
     let mut attempted_answer_generation = false;
 
-    // Post-retrieval disposition router: before burning the answer
-    // model on a single-shot attempt that will almost certainly
-    // hedge, check whether retrieval returned a *dominant* cluster
-    // of evidence or a *multi-modal* spread across several distinct
-    // subsystems / variants. In the latter case, returning ONE
-    // short clarifying question listing those variants is strictly
-    // more useful than a "scattered mentions" summary. See
-    // `classify_answer_disposition` for the structural signals —
-    // no hardcoded domain vocabulary is involved.
-    if should_try_single_shot {
-        if let AnswerDisposition::Clarify { variants } =
-            classify_answer_disposition(&prepared, answer_question)
-        {
-            let clarify_start = std::time::Instant::now();
-            tracing::info!(
-                stage = "answer.clarify_start",
-                %execution_id,
-                %library_id,
-                variant_count = variants.len(),
-                query_ir_act = ?prepared.query_ir.act,
-                query_ir_confidence = prepared.query_ir.confidence,
-                "post-retrieval router chose clarify path"
-            );
-            let clarify_result = crate::services::query::agent_loop::run_clarify_turn(
-                state,
-                library_id,
-                generation_question,
-                conversation_history_messages,
-                &variants,
-            )
-            .await;
-            match clarify_result {
-                Ok(clarify) => {
-                    if !clarify.answer.trim().is_empty() {
-                        tracing::info!(
-                            stage = "answer.clarify_done",
-                            %execution_id,
-                            answer_len = clarify.answer.len(),
-                            elapsed_ms = clarify_start.elapsed().as_millis(),
-                            "clarify path returned a question to the user"
-                        );
-                        let clarify_debug = clarify.debug_iterations.clone();
-                        persist_llm_context_snapshot(
-                            state,
-                            crate::services::query::llm_context_debug::LlmContextSnapshot {
-                                execution_id,
-                                library_id,
-                                question: user_question.to_string(),
-                                total_iterations: clarify.iterations,
-                                iterations: clarify_debug,
-                                final_answer: Some(clarify.answer.clone()),
-                                captured_at: chrono::Utc::now(),
-                                query_ir: Some(
-                                    serde_json::to_value(&prepared.query_ir)
-                                        .unwrap_or(serde_json::Value::Null),
-                                ),
-                                agent_loop: None,
-                                spans: Vec::new(),
-                            },
-                        )
-                        .await?;
-                        return Ok(RuntimeAnswerQueryResult {
-                            answer: clarify.answer,
-                            provider: clarify.provider,
-                            usage_json: clarify.usage_json,
-                        });
-                    }
+    // Post-retrieval disposition router: before answer generation,
+    // check whether retrieval returned a *dominant* cluster of
+    // evidence or a *multi-modal* spread across several distinct
+    // subsystems / variants. In the latter case, returning ONE short
+    // clarifying question listing those variants is strictly more
+    // useful than a "scattered mentions" summary. See
+    // `classify_answer_disposition` for the structural signals — no
+    // hardcoded domain vocabulary is involved.
+    if let AnswerDisposition::Clarify { variants } =
+        classify_answer_disposition(&prepared, answer_question)
+    {
+        let clarify_start = std::time::Instant::now();
+        tracing::info!(
+            stage = "answer.clarify_start",
+            %execution_id,
+            %library_id,
+            variant_count = variants.len(),
+            query_ir_act = ?prepared.query_ir.act,
+            query_ir_confidence = prepared.query_ir.confidence,
+            "post-retrieval router chose clarify path"
+        );
+        let clarify_result = crate::services::query::agent_loop::run_clarify_turn(
+            state,
+            library_id,
+            generation_question,
+            conversation_history_messages,
+            &variants,
+            &prepared.answer_context,
+        )
+        .await;
+        match clarify_result {
+            Ok(clarify) => {
+                if !clarify.answer.trim().is_empty() {
                     tracing::info!(
-                        stage = "answer.clarify_empty",
+                        stage = "answer.clarify_done",
                         %execution_id,
-                        "clarify path returned empty text — falling back to single-shot"
+                        answer_len = clarify.answer.len(),
+                        elapsed_ms = clarify_start.elapsed().as_millis(),
+                        "clarify path returned a question to the user"
                     );
+                    let clarify_debug = clarify.debug_iterations.clone();
+                    persist_llm_context_snapshot(
+                        state,
+                        crate::services::query::llm_context_debug::LlmContextSnapshot {
+                            execution_id,
+                            library_id,
+                            question: user_question.to_string(),
+                            total_iterations: clarify.iterations,
+                            iterations: clarify_debug,
+                            final_answer: Some(clarify.answer.clone()),
+                            captured_at: chrono::Utc::now(),
+                            query_ir: Some(
+                                serde_json::to_value(&prepared.query_ir)
+                                    .unwrap_or(serde_json::Value::Null),
+                            ),
+                            agent_loop: None,
+                            spans: Vec::new(),
+                        },
+                    )
+                    .await?;
+                    return Ok(RuntimeAnswerQueryResult {
+                        answer: clarify.answer,
+                        provider: clarify.provider,
+                        usage_json: clarify.usage_json,
+                    });
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        stage = "answer.clarify_error",
-                        %execution_id,
-                        ?error,
-                        "clarify path failed — falling back to single-shot"
-                    );
-                }
+                tracing::info!(
+                    stage = "answer.clarify_empty",
+                    %execution_id,
+                    "clarify path returned empty text — falling back to answer generation"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    stage = "answer.clarify_error",
+                    %execution_id,
+                    ?error,
+                    "clarify path failed — falling back to answer generation"
+                );
             }
         }
+    }
 
+    if should_try_single_shot {
         let single_shot_start = std::time::Instant::now();
         attempted_answer_generation = true;
         tracing::info!(
@@ -1118,6 +1425,89 @@ pub(crate) async fn generate_answer_query(
         });
     }
 
+    let preflight_prepared =
+        prepared_with_preflight_context_titles(&prepared, &preflight.canonical_answer_chunks);
+    if let AnswerDisposition::Clarify { variants } =
+        classify_answer_disposition(&preflight_prepared, answer_question)
+    {
+        let clarify_start = std::time::Instant::now();
+        tracing::info!(
+            stage = "answer.preflight_clarify_start",
+            %execution_id,
+            %library_id,
+            variant_count = variants.len(),
+            query_ir_act = ?prepared.query_ir.act,
+            query_ir_confidence = prepared.query_ir.confidence,
+            "canonical preflight evidence triggered clarify path"
+        );
+        let clarify_result = crate::services::query::agent_loop::run_clarify_turn(
+            state,
+            library_id,
+            generation_question,
+            conversation_history_messages,
+            &variants,
+            // Ground the clarify lead on the SAME canonical evidence the preflight
+            // single-shot answers from (`preflight.prompt_context`), not the
+            // title-only expansion — `prepared_with_preflight_context_titles` adds
+            // titles to the variant menu but does not put the canonical chunks into
+            // `answer_context`, so a lead grounded on the latter could cite variants
+            // it cannot actually support.
+            &preflight.prompt_context,
+        )
+        .await;
+        match clarify_result {
+            Ok(clarify) => {
+                if !clarify.answer.trim().is_empty() {
+                    tracing::info!(
+                        stage = "answer.preflight_clarify_done",
+                        %execution_id,
+                        answer_len = clarify.answer.len(),
+                        elapsed_ms = clarify_start.elapsed().as_millis(),
+                        "canonical preflight clarify path returned a question to the user"
+                    );
+                    let clarify_debug = clarify.debug_iterations.clone();
+                    persist_llm_context_snapshot(
+                        state,
+                        crate::services::query::llm_context_debug::LlmContextSnapshot {
+                            execution_id,
+                            library_id,
+                            question: user_question.to_string(),
+                            total_iterations: clarify.iterations,
+                            iterations: clarify_debug,
+                            final_answer: Some(clarify.answer.clone()),
+                            captured_at: chrono::Utc::now(),
+                            query_ir: Some(
+                                serde_json::to_value(&prepared.query_ir)
+                                    .unwrap_or(serde_json::Value::Null),
+                            ),
+                            agent_loop: None,
+                            spans: Vec::new(),
+                        },
+                    )
+                    .await?;
+                    return Ok(RuntimeAnswerQueryResult {
+                        answer: clarify.answer,
+                        provider: clarify.provider,
+                        usage_json: clarify.usage_json,
+                    });
+                }
+                tracing::info!(
+                    stage = "answer.preflight_clarify_empty",
+                    %execution_id,
+                    "canonical preflight clarify path returned empty text — falling back to answer generation"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    stage = "answer.preflight_clarify_error",
+                    %execution_id,
+                    ?error,
+                    "canonical preflight clarify path failed — falling back to answer generation"
+                );
+            }
+        }
+    }
+
     let has_conversation_history =
         conversation_history.map(str::trim).is_some_and(|value| !value.is_empty());
     let preflight_single_shot_coverage = evaluate_single_shot_evidence_coverage_for_context(
@@ -1438,6 +1828,29 @@ enum AnswerDisposition {
     Clarify { variants: Vec<String> },
 }
 
+fn prepared_with_preflight_context_titles(
+    prepared: &PreparedAnswerQueryResult,
+    canonical_answer_chunks: &[RuntimeMatchedChunk],
+) -> PreparedAnswerQueryResult {
+    let mut expanded = prepared.clone();
+    let mut seen = expanded
+        .structured
+        .retrieved_context_document_titles
+        .iter()
+        .map(|title| title.to_lowercase())
+        .collect::<HashSet<_>>();
+    for chunk in canonical_answer_chunks {
+        let title = chunk.document_label.trim();
+        if title.is_empty() {
+            continue;
+        }
+        if seen.insert(title.to_lowercase()) {
+            expanded.structured.retrieved_context_document_titles.push(title.to_string());
+        }
+    }
+    expanded
+}
+
 /// Classify whether the runtime should answer from the retrieved
 /// evidence or clarify with the user.
 ///
@@ -1584,6 +1997,14 @@ fn classify_answer_disposition_from_evidence(
         context_document_titles,
         &ranked,
     );
+    // The image-menu pathology (several same-page attachments offered as a
+    // "pick one" menu) is fixed upstream by `extract_query_specific_variants`,
+    // which now collapses same-parent attachments and excludes bare file
+    // artefacts BEFORE they reach this count. With that collapse in place the
+    // distinct-variant floor keeps its original shape: a genuine two-way
+    // ambiguity surfaced by the compiler (`compiler_requested_clarification`)
+    // is still a valid 2-variant clarification, while ordinary turns need the
+    // full `CLARIFY_MIN_DISTINCT_DOCUMENTS` floor.
     let required_variant_count =
         if compiler_requested_clarification { 2 } else { CLARIFY_MIN_DISTINCT_DOCUMENTS };
     if variants.len() < required_variant_count {
@@ -1674,6 +2095,9 @@ fn structural_clarify_allowed_without_compiler(ir: &QueryIR, user_question: &str
     use crate::domains::query_ir::QueryAct;
 
     match ir.act {
+        QueryAct::Describe => {
+            ir.confidence < 0.5 && question_is_terse_variant_selector(user_question)
+        }
         QueryAct::ConfigureHow => question_is_terse_variant_selector(user_question),
         QueryAct::RetrieveValue => question_is_terse_variant_selector(user_question),
         _ => false,
@@ -1707,8 +2131,10 @@ fn extract_query_specific_variants(
         if trimmed.is_empty() {
             continue;
         }
-        let lowered = trimmed.to_lowercase();
-        if label_matches_topic_tokens(&topic_tokens, &trimmed) && seen.insert(lowered) {
+        let Some(dedup_key) = clarify_variant_dedup_key(&trimmed) else {
+            continue;
+        };
+        if label_matches_topic_tokens(&topic_tokens, &trimmed) && seen.insert(dedup_key) {
             topical.push(trimmed);
         }
         if topical.len() >= CLARIFY_MAX_VARIANTS {
@@ -1720,8 +2146,10 @@ fn extract_query_specific_variants(
         if trimmed.is_empty() {
             continue;
         }
-        let lowered = trimmed.to_lowercase();
-        if label_matches_topic_tokens(&topic_tokens, &trimmed) && seen.insert(lowered) {
+        let Some(dedup_key) = clarify_variant_dedup_key(&trimmed) else {
+            continue;
+        };
+        if label_matches_topic_tokens(&topic_tokens, &trimmed) && seen.insert(dedup_key) {
             topical.push(trimmed);
         }
         if topical.len() >= CLARIFY_MAX_VARIANTS {
@@ -1736,8 +2164,10 @@ fn extract_query_specific_variants(
         if trimmed.is_empty() {
             continue;
         }
-        let lowered = trimmed.to_lowercase();
-        if label_matches_topic_tokens(&topic_tokens, &trimmed) && seen.insert(lowered) {
+        let Some(dedup_key) = clarify_variant_dedup_key(&trimmed) else {
+            continue;
+        };
+        if label_matches_topic_tokens(&topic_tokens, &trimmed) && seen.insert(dedup_key) {
             topical.push(trimmed);
         }
         if topical.len() >= CLARIFY_MAX_VARIANTS {
@@ -1749,6 +2179,71 @@ fn extract_query_specific_variants(
     }
 
     Vec::new()
+}
+
+/// Deduplication key for a candidate clarify-variant label.
+///
+/// Returns `None` when the label is an attachment artefact rather than a
+/// distinct logical document — image/file attachments are surfaced as
+/// retrieved documents titled like `"<page>: <file>.<ext>"` (or as a bare
+/// `"<file>.<ext>"`), and a menu of several same-page attachments is a worse
+/// UX than answering. `None` excludes the label from the variant menu.
+///
+/// Otherwise returns the collapse key: a trailing `": <filename>.<ext>"`
+/// qualifier is stripped so several attachments hanging off the same parent
+/// page collapse to one variant. Detection is purely structural — a
+/// `:` separator followed by a filename-shaped trailing token
+/// (`<non-space>.<2-5 alnum>`) — so it carries no natural-language keyword
+/// list and survives provider / language changes.
+fn clarify_variant_dedup_key(label: &str) -> Option<String> {
+    let trimmed = label.trim();
+    match trailing_filename_qualifier_prefix(trimmed) {
+        // `"X: file.png"` → collapse every same-prefix attachment onto `"x"`.
+        Some(prefix) if !prefix.is_empty() => Some(prefix.to_lowercase()),
+        // `"file.png"` with no logical prefix, or a bare filename token, is a
+        // pure attachment artefact — exclude it from the variant menu.
+        Some(_) => None,
+        None if token_is_filename_shaped(trimmed) => None,
+        None => Some(trimmed.to_lowercase()),
+    }
+}
+
+/// If `label` ends in a `": <filename>.<ext>"` qualifier, return the logical
+/// prefix that precedes the separating `:` (trimmed). `Some("")` means the
+/// qualifier consumed the whole label (no logical prefix). `None` means there
+/// is no such trailing qualifier.
+///
+/// "Filename-shaped" is structural: the trailing token after the `:` must
+/// match `<one-or-more-non-space>.<2..=5 ascii-alnum>` and contain no path
+/// separators — no extension allowlist, no language-specific tokens.
+fn trailing_filename_qualifier_prefix(label: &str) -> Option<&str> {
+    let (prefix, qualifier) = label.rsplit_once(':')?;
+    let qualifier = qualifier.trim();
+    if !token_is_filename_shaped(qualifier) {
+        return None;
+    }
+    Some(prefix.trim_end())
+}
+
+/// `true` when `token` looks like `name.ext` — a non-empty stem, a single
+/// trailing `.ext` of 2..=5 ascii-alphanumeric chars, no path separators, and
+/// no internal whitespace. Structural shape check only.
+fn token_is_filename_shaped(token: &str) -> bool {
+    if token.is_empty()
+        || token.contains('/')
+        || token.contains('\\')
+        || token.chars().any(char::is_whitespace)
+    {
+        return false;
+    }
+    let Some((stem, ext)) = token.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() {
+        return false;
+    }
+    let ext_len = ext.chars().count();
+    (2..=5).contains(&ext_len) && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
 
 fn clarification_focus_tokens<'a, I>(
@@ -2056,6 +2551,17 @@ fn should_use_single_shot_answer(
     if prepared.answer_context.trim().is_empty() {
         return false;
     }
+    if focused_configuration_inventory_waits_for_preflight(
+        &prepared.query_ir,
+        &prepared.answer_context,
+    ) {
+        tracing::info!(
+            stage = "answer.single_shot_coverage",
+            query_ir_act = ?prepared.query_ir.act,
+            "focused configuration inventory waits for canonical preflight"
+        );
+        return false;
+    }
     // Single-shot is evidence-gated, not act-blacklisted. The
     // prepared retrieval context is authoritative when it structurally
     // covers the operands required by the IR. Questions that still
@@ -2088,6 +2594,131 @@ fn should_use_single_shot_answer(
             false
         }
     }
+}
+
+fn focused_configuration_inventory_waits_for_preflight(
+    query_ir: &QueryIR,
+    answer_context: &str,
+) -> bool {
+    let literal_context = answer_context_without_evidence_metadata(answer_context);
+    let package_count = extract_package_command_literals(&literal_context, 4).len();
+    let configuration_path_count = count_configuration_file_paths(&literal_context, 16);
+    let section_count = extract_config_section_literals(&literal_context, 8).len();
+    let parameter_count = extract_parameter_literals(&literal_context, 32).len();
+
+    let carries_configuration_inventory = (package_count > 0 && configuration_path_count > 0)
+        || (configuration_path_count > 0 && section_count > 0 && parameter_count >= 2)
+        || (configuration_path_count > 0 && parameter_count >= 4)
+        || (section_count > 0 && parameter_count >= 6);
+    if !carries_configuration_inventory {
+        return false;
+    }
+
+    if low_confidence_unfocused_configuration_ir(query_ir)
+        || low_confidence_structural_configuration_ir(query_ir)
+    {
+        return true;
+    }
+
+    if !matches!(query_ir.act, QueryAct::ConfigureHow) {
+        return false;
+    }
+    let requests_configuration = query_ir.target_types.iter().any(|target_type| {
+        matches!(
+            super::question_intent::canonical_target_type_tag(target_type).as_str(),
+            "configuration_file" | "config_key"
+        )
+    });
+    if !requests_configuration {
+        return false;
+    }
+    query_ir.document_focus.is_some()
+        || !query_ir.target_entities.is_empty()
+        || !query_ir.literal_constraints.is_empty()
+        || !query_ir.conversation_refs.is_empty()
+}
+
+fn low_confidence_unfocused_configuration_ir(query_ir: &QueryIR) -> bool {
+    query_ir_is_low_confidence_unfocused_answer(query_ir)
+}
+
+fn low_confidence_structural_configuration_ir(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.35
+        && matches!(query_ir.scope, QueryScope::SingleDocument | QueryScope::MultiDocument)
+        && matches!(
+            query_ir.act,
+            QueryAct::Describe | QueryAct::ConfigureHow | QueryAct::RetrieveValue
+        )
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.comparison.is_none()
+        && query_ir.temporal_constraints.is_empty()
+        && query_ir.conversation_refs.is_empty()
+        && (!query_ir.target_entities.is_empty() || !query_ir.literal_constraints.is_empty())
+}
+
+fn answer_context_without_evidence_metadata(answer_context: &str) -> String {
+    let mut stripped = String::with_capacity(answer_context.len());
+    for line in answer_context.lines() {
+        stripped.push_str(strip_evidence_chunk_prefix(line));
+        stripped.push('\n');
+    }
+    stripped
+}
+
+fn strip_evidence_chunk_prefix(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    let candidate = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+    if !candidate.starts_with("[EVIDENCE_CHUNK ") {
+        return line;
+    }
+    candidate.find("] ").map(|close_index| &candidate[(close_index + 2)..]).unwrap_or(line)
+}
+
+fn count_configuration_file_paths(text: &str, limit: usize) -> usize {
+    let mut seen = HashSet::new();
+    for path in extract_explicit_path_literals(text, limit) {
+        if is_configuration_file_path(&path) {
+            seen.insert(path);
+        }
+    }
+    for token in text.split_whitespace() {
+        if seen.len() >= limit {
+            break;
+        }
+        let cleaned = clean_configuration_path_candidate(token);
+        if cleaned.starts_with('/') && is_configuration_file_path(cleaned) {
+            seen.insert(cleaned.to_string());
+        }
+    }
+    seen.len()
+}
+
+fn clean_configuration_path_candidate(token: &str) -> &str {
+    let mut value = token.trim();
+    loop {
+        let trimmed = value
+            .trim_start_matches(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(ch, '`' | '"' | '\'' | '(' | '[' | '{' | ',' | ';' | ':')
+            })
+            .trim_end_matches(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(ch, '`' | '"' | '\'' | ')' | ']' | '}' | ',' | ';' | ':' | '.')
+            });
+        if trimmed.len() == value.len() {
+            return trimmed;
+        }
+        value = trimmed;
+    }
+}
+
+fn is_configuration_file_path(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    [".conf", ".ini", ".cfg", ".properties", ".yaml", ".yml", ".toml", ".json"]
+        .iter()
+        .any(|extension| lowered.ends_with(extension))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2249,6 +2880,9 @@ fn single_shot_answer_is_acceptable(
     if answer_needs_literal_revision(verification) {
         return false;
     }
+    if answer_has_partial_coverage_warning(verification) {
+        return false;
+    }
     let verified = verification.generation.answer.trim();
     if verified.is_empty() {
         return false;
@@ -2376,20 +3010,48 @@ fn answer_omits_expected_technical_literals(
     grounding_context: &str,
 ) -> bool {
     let intent = detect_technical_literal_intent_from_query_ir("", query_ir);
+    let omits_assignment_examples =
+        answer_omits_focused_assignment_examples(answer, query_ir, grounding_context);
     if !intent.any() {
-        return false;
+        return omits_assignment_examples;
     }
     let context_literals = collect_intended_technical_literals(grounding_context, intent, 8);
-    if context_literals.is_empty() {
+    if context_literals.is_empty() && !omits_assignment_examples {
         return false;
     }
     if answer_omits_focused_configuration_paths(answer, query_ir, grounding_context) {
         return true;
     }
+    if answer_omits_focused_section_listing(answer, query_ir, grounding_context) {
+        return true;
+    }
     if answer_omits_focused_parameter_listing(answer, query_ir, grounding_context) {
         return true;
     }
+    if omits_assignment_examples {
+        return true;
+    }
     collect_intended_technical_literals(answer, intent, 2).is_empty()
+}
+
+fn answer_omits_focused_assignment_examples(
+    answer: &str,
+    query_ir: &QueryIR,
+    grounding_context: &str,
+) -> bool {
+    if !matches!(query_ir.scope, QueryScope::SingleDocument)
+        || !matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::Describe)
+    {
+        return false;
+    }
+    let expected = collect_context_config_assignment_literals(grounding_context, 24);
+    if expected.len() < 2 {
+        return false;
+    }
+    let actual = extract_config_assignment_literals(answer, expected.len().max(24))
+        .into_iter()
+        .collect::<HashSet<_>>();
+    expected.iter().any(|literal| !actual.contains(literal))
 }
 
 fn answer_omits_focused_configuration_paths(
@@ -2412,6 +3074,26 @@ fn answer_omits_focused_configuration_paths(
     expected.iter().any(|literal| !actual.contains(literal))
 }
 
+fn answer_omits_focused_section_listing(
+    answer: &str,
+    query_ir: &QueryIR,
+    grounding_context: &str,
+) -> bool {
+    if !matches!(query_ir.act, QueryAct::ConfigureHow) {
+        return false;
+    }
+    let expected = collect_focused_context_section_literals(grounding_context, query_ir, 16);
+    if expected.is_empty() {
+        return false;
+    }
+    let actual = collect_intended_technical_literals(
+        answer,
+        TechnicalLiteralIntent { wants_parameters: true, ..TechnicalLiteralIntent::default() },
+        expected.len().max(16),
+    );
+    expected.iter().any(|literal| !actual.contains(literal))
+}
+
 fn answer_omits_focused_parameter_listing(
     answer: &str,
     query_ir: &QueryIR,
@@ -2430,6 +3112,20 @@ fn answer_omits_focused_parameter_listing(
         expected.len().max(32),
     );
     expected.iter().any(|literal| !actual.contains(literal))
+}
+
+fn collect_focused_context_section_literals(
+    grounding_context: &str,
+    query_ir: &QueryIR,
+    limit: usize,
+) -> HashSet<String> {
+    collect_focused_context_literals(
+        grounding_context,
+        query_ir,
+        limit,
+        "Sections:",
+        extract_config_section_literals,
+    )
 }
 
 fn collect_focused_context_parameter_literals(
@@ -2458,6 +3154,13 @@ fn collect_focused_context_path_literals(
         "Paths:",
         extract_explicit_path_literals,
     )
+}
+
+fn collect_context_config_assignment_literals(
+    grounding_context: &str,
+    limit: usize,
+) -> HashSet<String> {
+    extract_config_assignment_literals(grounding_context, limit).into_iter().collect()
 }
 
 fn collect_focused_context_literals(
@@ -2647,6 +3350,7 @@ fn collect_intended_technical_literals(
         literals.extend(extract_http_methods(text, limit));
     }
     if intent.wants_parameters {
+        literals.extend(extract_config_section_literals(text, limit));
         literals.extend(extract_parameter_literals(text, limit));
     }
     literals
@@ -2656,6 +3360,10 @@ fn answer_needs_literal_revision(verification: &AnswerVerificationStage) -> bool
     verification.verification.warnings.iter().any(|warning| {
         warning.code == "unsupported_literal" || warning.code == "unsupported_canonical_claim"
     })
+}
+
+fn answer_has_partial_coverage_warning(verification: &AnswerVerificationStage) -> bool {
+    verification.verification.warnings.iter().any(|warning| warning.code == "partial_coverage")
 }
 
 pub(crate) fn literal_revision_targets(
@@ -2745,6 +3453,38 @@ fn utf8_char_len(byte: u8) -> usize {
     } else {
         4
     }
+}
+
+/// Deterministic safety net for the compiler's resolved `retrieval_query` on
+/// scoped follow-ups. The effective question for a context-dependent follow-up
+/// carries the recovered history subject in its `scope:` segment; the compiler
+/// is prompted to fold that subject into `retrieval_query` ({S, R}), but an
+/// LLM miss can emit the bare refinement R alone — retrieval then searches a
+/// subject-less fragment and drifts off-topic. When the question is scoped and
+/// the resolved query shares ZERO normalized tokens with the scope segment,
+/// distrust the rewrite and search the full scoped question instead (it holds
+/// both S and R verbatim). Plain questions and subject-preserving rewrites are
+/// untouched. Structural token overlap only — no language assumptions.
+fn guarded_followup_retrieval_question<'a>(resolved: &'a str, question: &'a str) -> &'a str {
+    if resolved.trim() == question.trim() {
+        return resolved;
+    }
+    let Some(scope) = crate::services::query::effective_query::scope_segment(question) else {
+        return resolved;
+    };
+    let scope_tokens = crate::shared::text_tokens::normalized_alnum_tokens(scope, 3);
+    if scope_tokens.is_empty() {
+        return resolved;
+    }
+    let resolved_tokens = crate::shared::text_tokens::normalized_alnum_tokens(resolved, 3);
+    if resolved_tokens.iter().any(|token| scope_tokens.contains(token)) {
+        return resolved;
+    }
+    tracing::warn!(
+        stage = "answer.retrieval_query_subject_guard",
+        "compiler retrieval_query shares no tokens with the follow-up scope — searching the scoped question instead"
+    );
+    question
 }
 
 fn answer_generation_question<'a>(effective_question: &'a str, user_question: &'a str) -> &'a str {
@@ -3031,7 +3771,7 @@ pub(crate) async fn verify_generated_answer(
     question: &str,
     generation: AnswerGenerationStage,
 ) -> anyhow::Result<AnswerVerificationStage> {
-    let verification = verify_answer_against_canonical_evidence(
+    let mut verification = verify_answer_against_canonical_evidence(
         question,
         &generation.answer,
         &generation.intent_profile,
@@ -3039,6 +3779,13 @@ pub(crate) async fn verify_generated_answer(
         &generation.canonical_answer_chunks,
         &generation.prompt_context,
         &generation.assistant_grounding,
+    );
+    apply_structural_coverage_warning(
+        question,
+        &generation.answer,
+        &generation.query_ir,
+        &generation.prompt_context,
+        &mut verification,
     );
     super::persist_query_verification(
         state,
@@ -3076,23 +3823,374 @@ pub(crate) async fn verify_generated_answer(
     Ok(AnswerVerificationStage { generation, verification })
 }
 
+fn apply_structural_coverage_warning(
+    question: &str,
+    answer: &str,
+    query_ir: &QueryIR,
+    prompt_context: &str,
+    verification: &mut super::RuntimeAnswerVerification,
+) {
+    if !answer_omits_structural_context_coverage(question, answer, query_ir, prompt_context) {
+        return;
+    }
+    if verification.warnings.iter().any(|warning| warning.code == "partial_coverage") {
+        return;
+    }
+    verification.warnings.push(QueryVerificationWarning {
+        code: "partial_coverage".to_string(),
+        message: "Answer omitted structural anchors that were present in retrieved evidence."
+            .to_string(),
+        related_segment_id: None,
+        related_fact_id: None,
+    });
+    if matches!(verification.state, QueryVerificationState::Verified) {
+        verification.state = QueryVerificationState::PartiallySupported;
+    }
+}
+
+fn answer_omits_structural_context_coverage(
+    question: &str,
+    answer: &str,
+    query_ir: &QueryIR,
+    prompt_context: &str,
+) -> bool {
+    if !query_ir_needs_structural_coverage_guard(query_ir) {
+        return false;
+    }
+    let anchors = collect_structural_coverage_anchors(question, query_ir, prompt_context);
+    if anchors.items.len() < STRUCTURAL_COVERAGE_MIN_CONTEXT_ANCHORS
+        || anchors.line_count < STRUCTURAL_COVERAGE_MIN_CONTEXT_ANCHOR_LINES
+    {
+        return false;
+    }
+    let answer_lower = answer.to_lowercase();
+    let answer_tokens =
+        crate::services::query::text_match::normalized_alnum_tokens(&answer_lower, 1);
+    let covered = anchors
+        .items
+        .iter()
+        .filter(|anchor| structural_answer_contains_anchor(&answer_lower, &answer_tokens, anchor))
+        .take(STRUCTURAL_COVERAGE_MIN_ANSWER_ANCHORS)
+        .count();
+    covered < STRUCTURAL_COVERAGE_MIN_ANSWER_ANCHORS
+}
+
+fn query_ir_needs_structural_coverage_guard(query_ir: &QueryIR) -> bool {
+    if matches!(query_ir.act, QueryAct::Compare | QueryAct::Enumerate | QueryAct::Meta) {
+        return false;
+    }
+    let explicit_structural_target = query_ir.target_types.iter().any(|target_type| {
+        matches!(
+            super::question_intent::canonical_target_type_tag(target_type).as_str(),
+            "procedure" | "configuration_file" | "config_key" | "parameter"
+        )
+    });
+    explicit_structural_target || query_ir_is_low_confidence_unfocused_answer(query_ir)
+}
+
+fn query_ir_is_low_confidence_unfocused_answer(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.35
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.target_entities.is_empty()
+        && query_ir.literal_constraints.is_empty()
+        && query_ir.temporal_constraints.is_empty()
+        && query_ir.conversation_refs.is_empty()
+}
+
+#[derive(Debug, Default)]
+struct StructuralCoverageAnchors {
+    items: Vec<String>,
+    line_count: usize,
+}
+
+fn collect_structural_coverage_anchors(
+    question: &str,
+    query_ir: &QueryIR,
+    prompt_context: &str,
+) -> StructuralCoverageAnchors {
+    let mut seen = HashSet::<String>::new();
+    let mut items = Vec::<String>::new();
+    let mut line_count = 0usize;
+    let focus_tokens = structural_coverage_focus_tokens(question, query_ir);
+    let mut focused_graph_block = false;
+    for line in prompt_context.lines() {
+        if line.trim_start().starts_with("[graph-evidence") {
+            focused_graph_block = structural_coverage_line_matches_focus(&focus_tokens, line);
+        }
+        let line_matches_focus =
+            focused_graph_block || structural_coverage_line_matches_focus(&focus_tokens, line);
+        if !line_matches_focus {
+            continue;
+        }
+        let before = items.len();
+        push_structural_anchor_literals(line, &mut seen, &mut items);
+        if items.len() > before {
+            line_count += 1;
+        }
+        if items.len() >= STRUCTURAL_COVERAGE_MAX_ANCHORS {
+            break;
+        }
+    }
+    StructuralCoverageAnchors { items, line_count }
+}
+
+fn structural_coverage_focus_tokens(question: &str, query_ir: &QueryIR) -> BTreeSet<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut tokens = BTreeSet::<String>::new();
+    for text in [question, query_ir.effective_retrieval_query(question)] {
+        for token in crate::services::query::text_match::normalized_alnum_tokens(
+            text,
+            STRUCTURAL_COVERAGE_FOCUS_MIN_TOKEN_CHARS,
+        ) {
+            if seen.insert(token.clone()) {
+                tokens.insert(token);
+            }
+        }
+    }
+    tokens
+}
+
+fn structural_coverage_line_matches_focus(focus_tokens: &BTreeSet<String>, line: &str) -> bool {
+    if focus_tokens.is_empty() {
+        return true;
+    }
+    let line_tokens = crate::services::query::text_match::normalized_alnum_tokens(
+        line,
+        STRUCTURAL_COVERAGE_FOCUS_MIN_TOKEN_CHARS,
+    );
+    if line_tokens.is_empty() {
+        return false;
+    }
+    crate::services::query::text_match::near_token_overlap_count(focus_tokens, &line_tokens) >= 1
+}
+
+fn push_structural_anchor_literals(text: &str, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+    for literal in structural_anchor_literal_candidates(text) {
+        if out.len() >= STRUCTURAL_COVERAGE_MAX_ANCHORS {
+            return;
+        }
+        let Some(anchor) = normalize_structural_coverage_anchor(&literal) else {
+            continue;
+        };
+        if seen.insert(anchor.clone()) {
+            out.push(anchor);
+        }
+    }
+}
+
+fn structural_anchor_literal_candidates(text: &str) -> Vec<String> {
+    let mut candidates = Vec::<String>::new();
+    candidates.extend(extract_delimited_spans(text, '`', '`'));
+    candidates.extend(extract_delimited_spans(text, '"', '"'));
+    candidates.extend(extract_delimited_spans(text, '\'', '\''));
+    candidates.extend(extract_delimited_spans(text, '«', '»'));
+    candidates.extend(extract_delimited_spans(text, '“', '”'));
+    candidates.extend(extract_explicit_path_literals(text, 16));
+    candidates.extend(extract_parameter_literals(text, 16));
+    candidates.extend(extract_config_section_literals(text, 16));
+    candidates
+}
+
+fn extract_delimited_spans(text: &str, open: char, close: char) -> Vec<String> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        if start.is_none() {
+            if ch == open {
+                start = Some(index + ch.len_utf8());
+            }
+            continue;
+        }
+        if ch == close
+            && let Some(open_index) = start.take()
+            && open_index <= index
+        {
+            let value = text[open_index..index].trim();
+            if !value.is_empty() {
+                spans.push(value.to_string());
+            }
+        }
+    }
+    spans
+}
+
+fn normalize_structural_coverage_anchor(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | ':' | '.')
+    });
+    if trimmed.chars().count() > STRUCTURAL_COVERAGE_MAX_ANCHOR_CHARS
+        || !trimmed.chars().any(char::is_alphanumeric)
+        || structural_coverage_anchor_is_metadata(trimmed)
+    {
+        return None;
+    }
+    let token_count = crate::services::query::text_match::normalized_alnum_tokens(trimmed, 1).len();
+    if !(1..=8).contains(&token_count) {
+        return None;
+    }
+    Some(trimmed.to_lowercase())
+}
+
+fn structural_coverage_anchor_is_metadata(value: &str) -> bool {
+    let lowered = value.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        return true;
+    }
+    if lowered.starts_with("http://")
+        || lowered.starts_with("https://")
+        || lowered.starts_with("//")
+        || lowered.starts_with("confluence:")
+        || lowered.contains("://")
+    {
+        return true;
+    }
+    matches!(
+        lowered.as_str(),
+        "answer"
+            | "api"
+            | "attachment"
+            | "bundle"
+            | "canonical"
+            | "chunk"
+            | "chunk_index"
+            | "confidence"
+            | "coverage"
+            | "document"
+            | "evidence"
+            | "evidence_chunk"
+            | "execution"
+            | "graph"
+            | "graph-evidence"
+            | "id"
+            | "metadata_block"
+            | "mode"
+            | "page"
+            | "query"
+            | "reference_lexical"
+            | "request"
+            | "resolved"
+            | "retrieved"
+            | "scope"
+            | "source"
+            | "strategy"
+            | "target"
+            | "tool"
+    )
+}
+
+fn structural_answer_contains_anchor(
+    answer_lower: &str,
+    answer_tokens: &BTreeSet<String>,
+    anchor: &str,
+) -> bool {
+    let anchor_tokens = crate::services::query::text_match::normalized_alnum_tokens(anchor, 1);
+    if anchor_tokens.len() == 1
+        && let Some(token) = anchor_tokens.iter().next()
+    {
+        return answer_tokens.contains(token);
+    }
+    answer_lower.contains(anchor)
+}
+
+/// Structural gate for the release-lane clarify probe: the deterministic
+/// latest-version inventory lane fired (either the explicit IR predicate or
+/// the context-shape fallback — the same two predicates the lane itself
+/// uses), and the compiled query carries no scoping subject.  "No subject"
+/// is judged by the lane's own scope extractor (`latest_version_scope_terms`
+/// covers target entities, document focus AND non-version literals), so a
+/// subject compiled as a literal constraint also suppresses the clarify —
+/// the inventory was already scoped to it.
+fn subjectless_release_inventory(ir: &QueryIR, context_supports_inventory: bool) -> bool {
+    (query_requests_latest_versions(ir) || context_supports_inventory)
+        && crate::services::query::latest_versions::latest_version_scope_terms(ir).is_empty()
+}
+
+/// Query `runtime_graph_evidence` for entity labels that appear across
+/// multiple distinct source documents within the given chunk set.
+/// Returns labels ranked by distinct-document span (descending), filtered
+/// to those meeting `RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN`.  The only
+/// semantic filter is on the closed `RuntimeNodeType` vocabulary:
+/// `document` nodes are structurally 1:1 with a source document (schema
+/// CHECK constraint) and `attribute` nodes are value-properties, so
+/// neither can be a standalone subject choice.  No NL keywords, entity
+/// names, or language-specific filtering — the cross-document span is
+/// the ranking signal.
+async fn query_release_evidence_entities(
+    state: &AppState,
+    library_id: Uuid,
+    chunk_ids: &[Uuid],
+) -> Result<Vec<String>, sqlx::Error> {
+    if chunk_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Build a parameterised ANY($1) query over the chunk_ids slice.
+    // sqlx does not support passing Vec<Uuid> as an array to ANY() with
+    // the plain `query!` macro when the element count is dynamic, so we
+    // use the runtime `query_as` builder with explicit type annotation.
+    #[derive(sqlx::FromRow)]
+    struct EntityRow {
+        label: String,
+        #[allow(dead_code)]
+        doc_count: i64,
+    }
+    let rows = sqlx::query_as::<_, EntityRow>(
+        "SELECT n.label, COUNT(DISTINCT e.document_id) AS doc_count
+         FROM runtime_graph_node n
+         JOIN runtime_graph_evidence e
+           ON e.target_id = n.id AND e.target_kind = 'node'
+         WHERE e.chunk_id = ANY($1)
+           AND e.library_id = $2
+           AND n.library_id = $2
+           AND n.node_type NOT IN ('document', 'attribute')
+         GROUP BY n.id, n.label
+         HAVING COUNT(DISTINCT e.document_id) >= $3
+         ORDER BY COUNT(DISTINCT e.document_id) DESC, n.support_count DESC
+         LIMIT $4",
+    )
+    .bind(chunk_ids)
+    .bind(library_id)
+    .bind(RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN as i64)
+    .bind(CLARIFY_MAX_VARIANTS as i64 * 2) // fetch extra for dedup headroom
+    .fetch_all(&state.persistence.postgres)
+    .await?;
+
+    // Dedup by normalised label (trim + lowercase) to suppress near-duplicates
+    // that differ only in case or surrounding whitespace.
+    let mut seen: HashSet<String> = HashSet::new();
+    let labels = rows
+        .into_iter()
+        .filter_map(|row| {
+            let key = row.label.trim().to_lowercase();
+            if seen.insert(key) { Some(row.label) } else { None }
+        })
+        .collect();
+    Ok(labels)
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
 
     use super::{
-        AnswerDisposition, answer_generation_question, classify_answer_disposition,
-        classify_answer_disposition_from_evidence, classify_answer_disposition_from_groups,
+        AnswerDisposition, answer_generation_question, clarify_variant_dedup_key,
+        classify_answer_disposition, classify_answer_disposition_from_evidence,
+        classify_answer_disposition_from_groups, extract_query_specific_variants,
         literal_revision_can_replace_answer, literal_revision_targets,
-        selected_runtime_answer_chunks, selected_runtime_grounding_evidence,
-        strip_trailing_inventory_meta_paragraph, verify_answer_against_canonical_evidence,
+        provider_free_fallback_query_ir, selected_runtime_answer_chunks,
+        selected_runtime_grounding_evidence, strip_trailing_inventory_meta_paragraph,
+        verify_answer_against_canonical_evidence,
     };
     use crate::domains::query::{GroupedReference, GroupedReferenceKind, QueryVerificationState};
     use crate::domains::query_ir::{
-        ClarificationReason, ClarificationSpec, ComparisonSpec, ConversationRefKind, EntityMention,
-        EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope, UnresolvedRef,
+        ClarificationReason, ClarificationSpec, ComparisonSpec, ConversationRefKind, DocumentHint,
+        EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct, QueryIR, QueryLanguage,
+        QueryScope, UnresolvedRef,
     };
     use crate::services::query::assistant_grounding::AssistantGroundingEvidence;
+    use crate::services::query::execution::RuntimeAnswerVerification;
     use crate::services::query::execution::{
         ConsolidationDiagnostics, FocusReason, RuntimeRetrievedDocumentBrief,
     };
@@ -3429,6 +4527,117 @@ mod tests {
     }
 
     #[test]
+    fn focused_configuration_inventory_waits_for_canonical_preflight() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types =
+            vec!["configuration_file".to_string(), "config_key".to_string(), "concept".to_string()];
+        ir.document_focus = Some(DocumentHint { hint: "Provider Alpha setup".to_string() });
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        let mut prepared = prepared_for_single_shot(ir);
+        prepared.answer_context = r#"
+[EVIDENCE_CHUNK document="target"] Provider Alpha setup installs `alpha-connector`.
+Use `/opt/alpha/modules/connector/connector.conf`.
+[Main]
+endpointUrl = https://alpha.example/api
+partnerId = alpha-partner
+[UI.ScanPanel.qrCode]
+visible = true
+"#
+        .to_string();
+
+        assert!(
+            !super::should_use_single_shot_answer("q", &prepared, None),
+            "focused configuration inventories need canonical preflight so the answer can keep package, file, section, and parameter coverage together"
+        );
+    }
+
+    #[test]
+    fn low_confidence_structural_configuration_inventory_waits_for_canonical_preflight() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
+        ir.target_types.clear();
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        ir.literal_constraints =
+            vec![LiteralSpan { text: "alphaMode".to_string(), kind: LiteralKind::Identifier }];
+        ir.temporal_constraints.clear();
+        ir.document_focus = None;
+        ir.source_slice = None;
+        ir.conversation_refs.clear();
+        let mut prepared = prepared_for_single_shot(ir);
+        prepared.answer_context = r#"
+[EVIDENCE_CHUNK document="target"] Provider Alpha setup installs `alpha-connector`.
+Use `/opt/alpha/modules/connector/connector.conf`.
+[Main]
+endpointUrl = https://alpha.example/api
+partnerId = alpha-partner
+[UI.ScanPanel.qrCode]
+visible = true
+"#
+        .to_string();
+
+        assert!(
+            !super::should_use_single_shot_answer("q", &prepared, None),
+            "low-confidence untyped compiler output must not bypass canonical configuration coverage when the evidence itself carries a setup inventory"
+        );
+    }
+
+    #[test]
+    fn low_confidence_section_parameter_inventory_waits_for_canonical_preflight_without_path() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
+        ir.target_types.clear();
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        ir.literal_constraints.clear();
+        ir.temporal_constraints.clear();
+        ir.document_focus = None;
+        ir.source_slice = None;
+        ir.conversation_refs.clear();
+        let mut prepared = prepared_for_single_shot(ir);
+        prepared.answer_context = r#"
+[EVIDENCE_CHUNK document="target"] Provider Alpha configuration fragment.
+[Main]
+endpointUrl
+partnerId
+secretKey
+currency
+timeout
+visible
+"#
+        .to_string();
+
+        assert!(
+            !super::should_use_single_shot_answer("q", &prepared, None),
+            "section-scoped parameter inventories need canonical preflight even when the file path did not fit in the packed context"
+        );
+    }
+
+    #[test]
+    fn focused_configuration_single_setting_can_use_initial_fast_path() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types =
+            vec!["configuration_file".to_string(), "config_key".to_string(), "concept".to_string()];
+        ir.document_focus = Some(DocumentHint { hint: "Provider Alpha setup".to_string() });
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        let mut prepared = prepared_for_single_shot(ir);
+        prepared.answer_context = r#"
+[EVIDENCE_CHUNK document="target"] Provider Alpha setup uses `/opt/alpha/display/display.ini`.
+[UI.ScanPanel.qrCode]
+visible = true
+"#
+        .to_string();
+
+        assert!(
+            !super::focused_configuration_inventory_waits_for_preflight(
+                &prepared.query_ir,
+                &prepared.answer_context,
+            ),
+            "a focused single-setting fragment is not a broader configuration inventory"
+        );
+    }
+
+    #[test]
     fn disposition_answers_when_consolidation_committed_focused_document() {
         let mut ir = sample_ir(
             0.74,
@@ -3552,6 +4761,115 @@ mod tests {
     }
 
     #[test]
+    fn low_confidence_unfocused_answer_requires_structural_anchor_coverage() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
+        ir.target_types.clear();
+        ir.target_entities.clear();
+        ir.literal_constraints.clear();
+        ir.temporal_constraints.clear();
+        ir.document_focus = None;
+        ir.source_slice = None;
+        ir.conversation_refs.clear();
+        let context = r#"
+Retrieved graph evidence
+[graph-evidence target="FocusTokenA P0"]
+1. Choose "A0", then press "B1".
+[graph-evidence target="FocusTokenA P1"]
+2. If state is "C2", use "D3".
+EVIDENCE_CHUNK blocks
+- [EVIDENCE_CHUNK document="FocusTokenA D0" chunk_index=0] Dialog "E4" offers "F5".
+"#;
+
+        assert!(super::answer_omits_structural_context_coverage(
+            "FocusTokenA requested state coverage",
+            "Use the available fallback from the selected source.",
+            &ir,
+            context,
+        ));
+        assert!(!super::answer_omits_structural_context_coverage(
+            "FocusTokenA requested state coverage",
+            "Choose `A0`, then use `D3` for the alternate state.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn structural_anchor_coverage_uses_query_aligned_context() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
+        ir.target_types.clear();
+        ir.target_entities.clear();
+        ir.literal_constraints.clear();
+        ir.temporal_constraints.clear();
+        ir.document_focus = None;
+        ir.source_slice = None;
+        ir.conversation_refs.clear();
+        let question = "FocusTokenA requires structural coverage";
+        let context = r#"
+Retrieved graph evidence
+[graph-evidence target="NoiseTokenZ"]
+1. Choose "A0", then press "B1".
+[graph-evidence target="FocusTokenA"]
+2. If state is "C2", use "D3".
+EVIDENCE_CHUNK blocks
+- [EVIDENCE_CHUNK document="FocusTokenA runbook" chunk_index=0] Dialog "E4" offers "F5".
+"#;
+
+        assert!(super::answer_omits_structural_context_coverage(
+            question,
+            "Choose `A0`, then press `B1`.",
+            &ir,
+            context,
+        ));
+        assert!(!super::answer_omits_structural_context_coverage(
+            question,
+            "Use `C2` with `D3`, then handle `E4` and `F5`.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn structural_anchor_coverage_uses_token_boundaries_for_single_token_anchors() {
+        let answer_tokens =
+            crate::services::query::text_match::normalized_alnum_tokens("A10x B20x", 1);
+
+        assert!(!super::structural_answer_contains_anchor("a10x b20x", &answer_tokens, "A10",));
+        assert!(super::structural_answer_contains_anchor("a10x b20x", &answer_tokens, "A10x",));
+    }
+
+    #[test]
+    fn structural_anchor_coverage_warning_marks_verified_answer_partial() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
+        ir.target_types.clear();
+        ir.target_entities.clear();
+        ir.literal_constraints.clear();
+        ir.temporal_constraints.clear();
+        ir.document_focus = None;
+        ir.source_slice = None;
+        ir.conversation_refs.clear();
+        let mut verification = RuntimeAnswerVerification {
+            state: QueryVerificationState::Verified,
+            warnings: Vec::new(),
+            unsupported_literals: Vec::new(),
+        };
+
+        super::apply_structural_coverage_warning(
+            "FocusTokenA status coverage",
+            "Use the available fallback from the selected source.",
+            &ir,
+            r#"
+[graph-evidence target="FocusTokenA P0"] Choose "A0", then press "B1".
+[graph-evidence target="FocusTokenA P1"] If state is "C2", use "D3".
+"#,
+            &mut verification,
+        );
+
+        assert_eq!(verification.state, QueryVerificationState::PartiallySupported);
+        assert!(verification.warnings.iter().any(|warning| warning.code == "partial_coverage"));
+    }
+
+    #[test]
     fn configure_setup_answer_requires_focused_parameter_coverage() {
         let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
         ir.target_types =
@@ -3592,6 +4910,37 @@ Exact technical literals
         );
         assert!(!super::answer_omits_expected_technical_literals(
             "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, and set `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn configure_setup_answer_requires_focused_section_coverage() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types =
+            vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        let context = r#"
+Exact technical literals
+- Document: `Provider Alpha setup`
+  Paths: `/opt/alpha/modules/connector/connector.conf`
+  Sections:
+    - `[CFG]`
+    - `[UI.ScanPanel.qrCode]`
+  Parameters:
+    - `endpointUrl`
+    - `partnerId`
+"#;
+
+        assert!(super::answer_omits_expected_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, and set `endpointUrl`, `partnerId`.",
+            &ir,
+            context,
+        ));
+        assert!(!super::answer_omits_expected_technical_literals(
+            "Install `alpha-connector`, edit `/opt/alpha/modules/connector/connector.conf`, use `[CFG]` and `[UI.ScanPanel.qrCode]`, and set `endpointUrl`, `partnerId`.",
             &ir,
             context,
         ));
@@ -3665,6 +5014,57 @@ Prepared segments
         assert!(!expected.contains("backupBeforeChange"));
         assert!(!super::answer_omits_expected_technical_literals(
             "Set `endpointUrl`, `partnerId`, `secretKey`, and `retryTimeout`.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn configure_setup_answer_requires_assignment_example_coverage() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types = vec!["configuration_file".to_string(), "config_key".to_string()];
+        let context = r#"
+EVIDENCE_CHUNK blocks
+- [EVIDENCE_CHUNK document="Provider Alpha setup" chunk_index=2] Example:
+[Main]
+alphaFlag = true
+[UI.Component]
+visible = true
+"#;
+
+        assert!(super::answer_omits_expected_technical_literals(
+            "Set `alphaFlag = true`.",
+            &ir,
+            context,
+        ));
+        assert!(!super::answer_omits_expected_technical_literals(
+            "Set `alphaFlag = true` and `visible = true`.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
+    fn low_confidence_describe_answer_requires_assignment_example_coverage() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
+        ir.target_types.clear();
+        ir.target_entities.clear();
+        let context = r#"
+EVIDENCE_CHUNK blocks
+- [EVIDENCE_CHUNK document="Provider Alpha setup" chunk_index=2] Example:
+[Main]
+alphaFlag = true
+[Check]
+printSlip = false
+"#;
+
+        assert!(super::answer_omits_expected_technical_literals(
+            "The context contains `alphaFlag = true`.",
+            &ir,
+            context,
+        ));
+        assert!(!super::answer_omits_expected_technical_literals(
+            "The context contains `alphaFlag = true` and `printSlip = false`.",
             &ir,
             context,
         ));
@@ -3881,6 +5281,52 @@ Prepared segments
     }
 
     #[test]
+    fn provider_free_fallback_ir_preserves_retrieval_question_without_clarifying() {
+        let ir = provider_free_fallback_query_ir("  Describe ABC ConnectorX with `/v2/pay`  ");
+
+        assert_eq!(ir.act, QueryAct::Describe);
+        assert_eq!(ir.scope, QueryScope::MultiDocument);
+        assert_eq!(ir.language, QueryLanguage::Auto);
+        assert_eq!(
+            ir.effective_retrieval_query("unused"),
+            "Describe ABC ConnectorX with `/v2/pay`"
+        );
+        assert!(ir.target_entities.iter().any(|entity| entity.label == "ABC ConnectorX"));
+        assert!(ir.literal_constraints.iter().any(|literal| literal.text == "/v2/pay"));
+        assert!(ir.needs_clarification.is_none());
+        assert!(ir.confidence < 0.5);
+    }
+
+    #[test]
+    fn provider_free_fallback_ir_stays_on_answer_path_with_retrieved_evidence() {
+        let ir = provider_free_fallback_query_ir("describe S");
+        let disposition =
+            classify_answer_disposition_from_groups("describe S", &ir, &[], &sample_groups());
+
+        assert!(matches!(disposition, AnswerDisposition::Answer));
+    }
+
+    #[test]
+    fn disposition_clarifies_low_confidence_terse_describe_with_multi_document_variants() {
+        let disposition = classify_answer_disposition_from_groups(
+            "provider configure",
+            &sample_ir_with_act(QueryAct::Describe, 0.25, None),
+            &[],
+            &sample_groups(),
+        );
+
+        match disposition {
+            AnswerDisposition::Clarify { variants } => {
+                assert_eq!(variants.len(), 3);
+                assert_eq!(variants[0], "Provider A configuration");
+            }
+            AnswerDisposition::Answer => {
+                panic!("expected clarify disposition for terse describe with balanced variants")
+            }
+        }
+    }
+
+    #[test]
     fn disposition_can_clarify_when_compiler_explicitly_requests_it() {
         let disposition = classify_answer_disposition_from_groups(
             "how do i configure provider payments?",
@@ -3941,6 +5387,93 @@ Prepared segments
         assert!(
             matches!(disposition, AnswerDisposition::Answer),
             "a non-terse retrieve-value question with a structured target entity is already anchored"
+        );
+    }
+
+    #[test]
+    fn clarify_variant_dedup_key_collapses_same_page_attachments() {
+        // Several image attachments hanging off the same parent page share a
+        // logical prefix and differ only in the trailing filename qualifier.
+        // They must collapse to one dedup key so they cannot pad a clarify
+        // menu with near-duplicate "variants".
+        let a = clarify_variant_dedup_key("Payment setup: screen-a.png");
+        let b = clarify_variant_dedup_key("Payment setup: screen-b.png");
+        assert_eq!(a, b);
+        assert_eq!(a.as_deref(), Some("payment setup"));
+    }
+
+    #[test]
+    fn clarify_variant_dedup_key_excludes_bare_attachment_titles() {
+        // A title that is only a filename is an attachment artefact with no
+        // logical document behind it — exclude it from the menu entirely.
+        assert_eq!(clarify_variant_dedup_key("diagram.png"), None);
+        assert_eq!(clarify_variant_dedup_key("v2-config.jpeg"), None);
+    }
+
+    #[test]
+    fn clarify_variant_dedup_key_keeps_ordinary_titles() {
+        // A normal prose title (no trailing filename qualifier) is a distinct
+        // logical document and keeps its own dedup key. A title that merely
+        // ends with a filename-shaped word but has no `:` separator is prose,
+        // not an attachment qualifier, and is preserved verbatim.
+        assert_eq!(
+            clarify_variant_dedup_key("Provider Alpha configuration"),
+            Some("provider alpha configuration".to_string())
+        );
+        assert_eq!(
+            clarify_variant_dedup_key("How to edit config.ini"),
+            Some("how to edit config.ini".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_variants_collapses_same_page_image_attachments() {
+        // Five same-page image attachments share a title prefix; after the
+        // structural collapse only one logical variant survives.
+        let documents = vec![
+            retrieved_doc("Payment setup: a.png", "page#1"),
+            retrieved_doc("Payment setup: b.png", "page#1"),
+            retrieved_doc("Payment setup: c.png", "page#1"),
+            retrieved_doc("Payment setup: d.png", "page#1"),
+            retrieved_doc("Payment setup: e.png", "page#1"),
+        ];
+
+        let variants = extract_query_specific_variants("payment setup", &documents, &[], &[]);
+
+        assert!(
+            variants.len() <= 1,
+            "same-page image attachments must collapse to at most one variant, got {variants:?}"
+        );
+    }
+
+    #[test]
+    fn disposition_answers_for_same_page_image_attachments() {
+        // (a) N same-page image-attachment documents sharing a title prefix
+        // must NOT manufacture a clarify menu of near-duplicates; they
+        // collapse below the distinct-document floor and fall through to
+        // Answer.
+        let groups = (0..5)
+            .map(|index| GroupedReference {
+                id: format!("document:{index}"),
+                kind: GroupedReferenceKind::Document,
+                rank: index + 1,
+                title: format!("Payment setup: attachment-{index}.png"),
+                excerpt: None,
+                evidence_count: 2,
+                support_ids: vec![format!("chunk:{index}")],
+            })
+            .collect::<Vec<_>>();
+
+        let disposition = classify_answer_disposition_from_groups(
+            "payment setup",
+            &sample_ir_with_act(QueryAct::ConfigureHow, 0.3, None),
+            &[],
+            &groups,
+        );
+
+        assert!(
+            matches!(disposition, AnswerDisposition::Answer),
+            "near-duplicate image attachments must answer, not clarify"
         );
     }
 
@@ -4981,5 +6514,123 @@ Prepared segments
                 panic!("expected clarify disposition with multiple fuzzy topic matches")
             }
         }
+    }
+
+    // ── follow-up retrieval-query subject guard tests ───────────────────────
+
+    use super::guarded_followup_retrieval_question;
+
+    #[test]
+    fn subject_guard_falls_back_when_rewrite_drops_the_scope_subject() {
+        let question =
+            "scope: Alpha Suite update procedure\nquestion: give the detailed instruction";
+        // Compiler rewrite kept only the refinement — zero scope tokens.
+        let resolved = "detailed instruction steps";
+        assert_eq!(guarded_followup_retrieval_question(resolved, question), question);
+    }
+
+    #[test]
+    fn subject_guard_trusts_rewrite_that_retains_a_subject_token() {
+        let question =
+            "scope: Alpha Suite update procedure\nquestion: give the detailed instruction";
+        let resolved = "Alpha Suite detailed update instruction";
+        assert_eq!(guarded_followup_retrieval_question(resolved, question), resolved);
+    }
+
+    #[test]
+    fn subject_guard_ignores_plain_unscoped_questions() {
+        let question = "how to configure Alpha Suite exports?";
+        let resolved = "Alpha Suite export configuration";
+        assert_eq!(guarded_followup_retrieval_question(resolved, question), resolved);
+    }
+
+    #[test]
+    fn subject_guard_passes_through_identity_resolution() {
+        let question =
+            "scope: Alpha Suite update procedure\nquestion: give the detailed instruction";
+        assert_eq!(guarded_followup_retrieval_question(question, question), question);
+    }
+
+    // ── release-lane entity clarify gate tests ──────────────────────────────
+
+    use super::subjectless_release_inventory;
+
+    /// Build a QueryIR that looks like a compiled "what's new in recent
+    /// releases?" query: Enumerate act over release/version target types
+    /// with no explicit subject named.
+    fn release_inventory_ir() -> QueryIR {
+        let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.94, None);
+        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir.target_entities = Vec::new();
+        ir.source_slice = None;
+        ir
+    }
+
+    #[test]
+    fn release_clarify_gate_fires_for_subjectless_release_inventory() {
+        let ir = release_inventory_ir();
+        assert!(subjectless_release_inventory(&ir, false));
+    }
+
+    #[test]
+    fn release_clarify_gate_skips_when_query_names_a_subject() {
+        let mut ir = release_inventory_ir();
+        ir.target_entities =
+            vec![EntityMention { label: "Alpha Suite".to_string(), role: EntityRole::Subject }];
+        assert!(!subjectless_release_inventory(&ir, false));
+    }
+
+    #[test]
+    fn release_clarify_gate_skips_when_query_has_document_focus() {
+        let mut ir = release_inventory_ir();
+        ir.document_focus = Some(crate::domains::query_ir::DocumentHint {
+            hint: "release notes archive".to_string(),
+        });
+        assert!(!subjectless_release_inventory(&ir, false));
+    }
+
+    #[test]
+    fn release_clarify_gate_skips_when_subject_is_a_literal_constraint() {
+        // A subject compiled as a literal (identifier) also scopes the
+        // inventory lane via latest_version_scope_terms, so the gate must
+        // treat the query as subject-bearing and skip the clarify probe.
+        let mut ir = release_inventory_ir();
+        ir.literal_constraints =
+            vec![LiteralSpan { text: "alpha_suite".to_string(), kind: LiteralKind::Identifier }];
+        assert!(!subjectless_release_inventory(&ir, false));
+    }
+
+    #[test]
+    fn release_clarify_gate_ignores_version_and_numeric_literals() {
+        // Version/numeric literals parameterize the slice (e.g. "last 3
+        // releases") — they are not subjects and must not suppress clarify.
+        let mut ir = release_inventory_ir();
+        ir.literal_constraints =
+            vec![LiteralSpan { text: "3".to_string(), kind: LiteralKind::NumericCode }];
+        assert!(subjectless_release_inventory(&ir, false));
+    }
+
+    #[test]
+    fn release_clarify_gate_skips_for_non_inventory_query() {
+        // A plain procedure query (no release/version target types, no
+        // context inventory shape) must never reach the clarify probe.
+        let ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.94, None);
+        assert!(!subjectless_release_inventory(&ir, false));
+    }
+
+    #[test]
+    fn release_clarify_gate_fires_via_context_inventory_fallback() {
+        // The inferred context-shape fallback (low-confidence subjectless
+        // query whose context looks like a version family) also qualifies.
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.2, None);
+        ir.target_entities = Vec::new();
+        assert!(subjectless_release_inventory(&ir, true));
+    }
+
+    #[test]
+    fn release_clarify_gate_requires_inventory_lane_even_when_subjectless() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.2, None);
+        ir.target_entities = Vec::new();
+        assert!(!subjectless_release_inventory(&ir, false));
     }
 }

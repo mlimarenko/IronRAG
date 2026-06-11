@@ -16,6 +16,11 @@ pub struct CreateDocumentCommand {
     pub external_key: Option<String>,
     pub file_name: Option<String>,
     pub created_by_principal_id: Option<Uuid>,
+    /// Connector-declared structural parent identity. When set and a sibling
+    /// document with this `external_key` already exists in the same library,
+    /// admission resolves it to `parent_document_id`; otherwise it is recorded
+    /// as a pending key for the deferred resolver to reconcile later.
+    pub parent_external_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +138,9 @@ pub struct AdmitDocumentCommand {
     pub request_surface: String,
     pub source_identity: Option<String>,
     pub revision: Option<RevisionAdmissionMetadata>,
+    /// Connector-declared structural parent identity, threaded into
+    /// [`CreateDocumentCommand::parent_external_key`] at admission.
+    pub parent_external_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +176,9 @@ pub struct UploadInlineDocumentCommand {
     pub document_hint: Option<String>,
     pub mime_type: Option<String>,
     pub file_bytes: Vec<u8>,
+    /// Optional connector-declared structural parent identity from the
+    /// multipart `parent_external_key` field; threaded through admission.
+    pub parent_external_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]

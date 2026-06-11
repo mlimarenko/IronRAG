@@ -16,7 +16,12 @@ use crate::{
             document_store::ArangoDocumentStore, graph_store::ArangoGraphStore,
             search_store::ArangoSearchStore,
         },
+        knowledge_plane::{ContextStoreRef, DocumentStoreRef, GraphStoreRef, SearchStoreRef},
         persistence::Persistence,
+        postgres::{
+            pg_context_store::PgContextStore, pg_document_store::PgDocumentStore,
+            pg_graph_store::PgGraphStore, pg_search_store::PgSearchStore,
+        },
     },
     integrations::llm::{LlmGateway, UnifiedGateway},
     services::{
@@ -232,10 +237,10 @@ pub struct AppState {
     pub ui_session_cookie: UiSessionCookieConfig,
     pub arango_runtime: ArangoRuntimeSettings,
     pub graph_runtime: GraphRuntimeSettings,
-    pub arango_document_store: ArangoDocumentStore,
-    pub arango_graph_store: ArangoGraphStore,
-    pub arango_search_store: ArangoSearchStore,
-    pub arango_context_store: ArangoContextStore,
+    pub arango_document_store: DocumentStoreRef,
+    pub arango_graph_store: GraphStoreRef,
+    pub arango_search_store: SearchStoreRef,
+    pub arango_context_store: ContextStoreRef,
     pub retrieval_intelligence: RetrievalIntelligenceSettings,
     pub agent_runtime_settings: AgentRuntimeSettings,
     pub retrieval_intelligence_services: RetrievalIntelligenceServices,
@@ -284,7 +289,8 @@ impl AppState {
             ttl_hours: settings.ui_session_ttl_hours,
             secure: public_origin_settings.session_cookie_secure,
         };
-        let graph_runtime = GraphRuntimeSettings { backend_name: "arangodb".to_string() };
+        let graph_runtime =
+            GraphRuntimeSettings { backend_name: settings.knowledge_plane_backend.clone() };
         let arango_runtime = ArangoRuntimeSettings {
             url: settings.arangodb_url.clone(),
             database: settings.arangodb_database.clone(),
@@ -292,17 +298,35 @@ impl AppState {
             bootstrap_views: settings.arangodb_bootstrap_views,
             bootstrap_graph: settings.arangodb_bootstrap_graph,
         };
-        let arango_document_store = ArangoDocumentStore::new(Arc::clone(&arango_client));
-        let arango_graph_store = ArangoGraphStore::new(Arc::clone(&arango_client));
-        let arango_search_store = ArangoSearchStore::new(
-            Arc::clone(&arango_client),
-            crate::infra::arangodb::search_store::VectorIndexParams {
-                n_lists: settings.arangodb_vector_index_n_lists,
-                default_n_probe: settings.arangodb_vector_index_default_n_probe,
-                training_iterations: settings.arangodb_vector_index_training_iterations,
-            },
-        );
-        let arango_context_store = ArangoContextStore::new(Arc::clone(&arango_client));
+        let (
+            arango_document_store,
+            arango_graph_store,
+            arango_search_store,
+            arango_context_store,
+        ): (DocumentStoreRef, GraphStoreRef, SearchStoreRef, ContextStoreRef) =
+            match settings.knowledge_plane_backend.as_str() {
+                "arango" => (
+                    Arc::new(ArangoDocumentStore::new(Arc::clone(&arango_client))),
+                    Arc::new(ArangoGraphStore::new(Arc::clone(&arango_client))),
+                    Arc::new(ArangoSearchStore::new(
+                        Arc::clone(&arango_client),
+                        crate::infra::arangodb::search_store::VectorIndexParams {
+                            n_lists: settings.arangodb_vector_index_n_lists,
+                            default_n_probe: settings.arangodb_vector_index_default_n_probe,
+                            training_iterations: settings
+                                .arangodb_vector_index_training_iterations,
+                        },
+                    )),
+                    Arc::new(ArangoContextStore::new(Arc::clone(&arango_client))),
+                ),
+                "postgres" => (
+                    Arc::new(PgDocumentStore { pool: persistence.postgres.clone() }),
+                    Arc::new(PgGraphStore { pool: persistence.postgres.clone() }),
+                    Arc::new(PgSearchStore { pool: persistence.postgres.clone() }),
+                    Arc::new(PgContextStore { pool: persistence.postgres.clone() }),
+                ),
+                backend => anyhow::bail!("unsupported knowledge_plane_backend `{backend}`"),
+            };
         let retrieval_intelligence = RetrievalIntelligenceSettings {
             query_intent_cache_ttl_hours: settings.query_intent_cache_ttl_hours,
             query_intent_cache_max_entries_per_library: settings

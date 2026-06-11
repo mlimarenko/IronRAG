@@ -1,3 +1,4 @@
+pub mod acronym_alias_backfill;
 pub(crate) mod backfill;
 pub(crate) mod canonical_projection;
 pub mod community_detection;

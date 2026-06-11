@@ -23,7 +23,7 @@ Exit codes
 1  p95 latency breaches the gate, a quality gate fails, or required env vars
    are missing
 
-SLO gate reference: CLAUDE.md §6 Concurrency — "p95 ≤ 30 s" for a full turn;
+SLO gate reference: the project concurrency SLO — "p95 ≤ 30 s" for a full turn;
 this script uses a 28 000 ms gate (28 s) to match WALL_CLOCK_DEADLINE in
 mcp_agent/turn.rs, with a 2 s margin before the constitution threshold.
 """
@@ -52,9 +52,9 @@ from urllib import request as urllib_request
 DEFAULT_BASE_URL = "http://localhost:19000"
 DEFAULT_QUESTIONS_PATH = "scripts/bench/grounded-queries.md"
 
-# Constitution gate: CLAUDE.md §6 Concurrency — p95 ≤ 30 s per turn.
+# Concurrency SLO gate: p95 <= 30 s per turn.
 # We enforce 28 s here to match WALL_CLOCK_DEADLINE in mcp_agent/turn.rs,
-# providing a 2 s margin before the constitution threshold.
+# providing a 2 s margin before the SLO threshold.
 P95_GATE_MS = 28_000
 DEFAULT_EXPECTED_VERIFICATION: str | None = None
 DEFAULT_MIN_REFERENCES = 1

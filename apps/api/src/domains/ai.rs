@@ -118,6 +118,8 @@ pub struct ModelCatalogEntry {
     pub model_name: String,
     pub capability_kind: String,
     pub modality_kind: String,
+    pub lifecycle_state: String,
+    pub metadata_json: serde_json::Value,
     pub allowed_binding_purposes: Vec<AiBindingPurpose>,
     pub context_window: Option<i32>,
     pub max_output_tokens: Option<i32>,

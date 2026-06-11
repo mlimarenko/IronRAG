@@ -10,6 +10,7 @@ import type { TFunction } from "i18next";
 import { toast } from "sonner";
 
 import { documentsApi } from "@/shared/api";
+import { buildUploadFailureNotice } from "@/shared/lib/document-processing";
 import type { DocumentItem, Library } from "@/shared/types";
 
 import {
@@ -74,11 +75,18 @@ export function useUploadQueueController({
           ),
         );
       } catch (err) {
-        const message = errorMessage(err, t("documents.uploadFailed"));
+        const notice = buildUploadFailureNotice(err, errorMessage(err, t("documents.uploadFailed")), t);
         setUploadQueue((prev) =>
           prev.map((item) =>
             item.name === candidate.name
-              ? { ...item, state: "error", error: message }
+              ? {
+                  ...item,
+                  state: "error",
+                  error: notice.summary,
+                  errorAction: notice.action,
+                  errorDiagnosticCode: notice.diagnosticCode,
+                  errorDiagnosticMessage: notice.diagnosticMessage,
+                }
               : item,
           ),
         );
@@ -99,11 +107,22 @@ export function useUploadQueueController({
           ),
         );
       } catch (err) {
-        const message = errorMessage(err, t("documents.replaceFileFailed"));
+        const notice = buildUploadFailureNotice(
+          err,
+          errorMessage(err, t("documents.replaceFileFailed")),
+          t,
+        );
         setUploadQueue((prev) =>
           prev.map((item) =>
             item.name === uploadName
-              ? { ...item, state: "error", error: message }
+              ? {
+                  ...item,
+                  state: "error",
+                  error: notice.summary,
+                  errorAction: notice.action,
+                  errorDiagnosticCode: notice.diagnosticCode,
+                  errorDiagnosticMessage: notice.diagnosticMessage,
+                }
               : item,
           ),
         );
@@ -117,7 +136,12 @@ export function useUploadQueueController({
     setUploadQueue((prev) => {
       const failed = prev.filter((item) => item.state === "error");
       if (failed.length > 0) {
-        toast.error(t("documents.uploadBatchFailed", { count: failed.length }));
+        const firstFailure = failed[0];
+        toast.error(
+          firstFailure?.errorAction
+            ? `${t("documents.uploadBatchFailed", { count: failed.length })}: ${firstFailure.errorAction}`
+            : t("documents.uploadBatchFailed", { count: failed.length }),
+        );
       }
       return failed;
     });

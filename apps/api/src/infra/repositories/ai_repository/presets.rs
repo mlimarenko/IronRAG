@@ -65,25 +65,31 @@ pub async fn list_visible_model_presets(
         (Some(workspace_id), Some(library_id)) => {
             sqlx::query_as::<_, AiModelPresetRow>(
                 "select
-                    id,
-                    scope_kind::text as scope_kind,
-                    workspace_id,
-                    library_id,
-                    model_catalog_id,
-                    preset_name,
-                    system_prompt,
-                    temperature,
-                    top_p,
-                    max_output_tokens_override,
-                    extra_parameters_json,
-                    created_by_principal_id,
-                    created_at,
-                    updated_at
-                 from ai_model_preset
-                 where scope_kind = 'instance'
-                    or (scope_kind = 'workspace' and workspace_id = $1)
-                    or (scope_kind = 'library' and library_id = $2)
-                 order by created_at desc, id desc",
+                    preset.id,
+                    preset.scope_kind::text as scope_kind,
+                    preset.workspace_id,
+                    preset.library_id,
+                    preset.model_catalog_id,
+                    preset.preset_name,
+                    preset.system_prompt,
+                    preset.temperature,
+                    preset.top_p,
+                    preset.max_output_tokens_override,
+                    preset.extra_parameters_json,
+                    preset.created_by_principal_id,
+                    preset.created_at,
+                    preset.updated_at
+                 from ai_model_preset preset
+                 join ai_model_catalog model on model.id = preset.model_catalog_id
+                 join ai_provider_catalog provider on provider.id = model.provider_catalog_id
+                 where provider.lifecycle_state = 'active'
+                   and model.lifecycle_state = 'active'
+                   and (
+                        preset.scope_kind = 'instance'
+                        or (preset.scope_kind = 'workspace' and preset.workspace_id = $1)
+                        or (preset.scope_kind = 'library' and preset.library_id = $2)
+                   )
+                 order by preset.created_at desc, preset.id desc",
             )
             .bind(workspace_id)
             .bind(library_id)
@@ -93,24 +99,30 @@ pub async fn list_visible_model_presets(
         (Some(workspace_id), None) => {
             sqlx::query_as::<_, AiModelPresetRow>(
                 "select
-                    id,
-                    scope_kind::text as scope_kind,
-                    workspace_id,
-                    library_id,
-                    model_catalog_id,
-                    preset_name,
-                    system_prompt,
-                    temperature,
-                    top_p,
-                    max_output_tokens_override,
-                    extra_parameters_json,
-                    created_by_principal_id,
-                    created_at,
-                    updated_at
-                 from ai_model_preset
-                 where scope_kind = 'instance'
-                    or (scope_kind = 'workspace' and workspace_id = $1)
-                 order by created_at desc, id desc",
+                    preset.id,
+                    preset.scope_kind::text as scope_kind,
+                    preset.workspace_id,
+                    preset.library_id,
+                    preset.model_catalog_id,
+                    preset.preset_name,
+                    preset.system_prompt,
+                    preset.temperature,
+                    preset.top_p,
+                    preset.max_output_tokens_override,
+                    preset.extra_parameters_json,
+                    preset.created_by_principal_id,
+                    preset.created_at,
+                    preset.updated_at
+                 from ai_model_preset preset
+                 join ai_model_catalog model on model.id = preset.model_catalog_id
+                 join ai_provider_catalog provider on provider.id = model.provider_catalog_id
+                 where provider.lifecycle_state = 'active'
+                   and model.lifecycle_state = 'active'
+                   and (
+                        preset.scope_kind = 'instance'
+                        or (preset.scope_kind = 'workspace' and preset.workspace_id = $1)
+                   )
+                 order by preset.created_at desc, preset.id desc",
             )
             .bind(workspace_id)
             .fetch_all(postgres)
@@ -119,23 +131,27 @@ pub async fn list_visible_model_presets(
         (None, None) => {
             sqlx::query_as::<_, AiModelPresetRow>(
                 "select
-                    id,
-                    scope_kind::text as scope_kind,
-                    workspace_id,
-                    library_id,
-                    model_catalog_id,
-                    preset_name,
-                    system_prompt,
-                    temperature,
-                    top_p,
-                    max_output_tokens_override,
-                    extra_parameters_json,
-                    created_by_principal_id,
-                    created_at,
-                    updated_at
-                 from ai_model_preset
-                 where scope_kind = 'instance'
-                 order by created_at desc, id desc",
+                    preset.id,
+                    preset.scope_kind::text as scope_kind,
+                    preset.workspace_id,
+                    preset.library_id,
+                    preset.model_catalog_id,
+                    preset.preset_name,
+                    preset.system_prompt,
+                    preset.temperature,
+                    preset.top_p,
+                    preset.max_output_tokens_override,
+                    preset.extra_parameters_json,
+                    preset.created_by_principal_id,
+                    preset.created_at,
+                    preset.updated_at
+                 from ai_model_preset preset
+                 join ai_model_catalog model on model.id = preset.model_catalog_id
+                 join ai_provider_catalog provider on provider.id = model.provider_catalog_id
+                 where provider.lifecycle_state = 'active'
+                   and model.lifecycle_state = 'active'
+                   and preset.scope_kind = 'instance'
+                 order by preset.created_at desc, preset.id desc",
             )
             .fetch_all(postgres)
             .await
@@ -158,10 +174,16 @@ pub async fn list_visible_model_presets(
                     preset.created_at,
                     preset.updated_at
                  from ai_model_preset preset
+                 join ai_model_catalog model on model.id = preset.model_catalog_id
+                 join ai_provider_catalog provider on provider.id = model.provider_catalog_id
                  join catalog_library library on library.id = $1
-                 where preset.scope_kind = 'instance'
-                    or (preset.scope_kind = 'workspace' and preset.workspace_id = library.workspace_id)
-                    or (preset.scope_kind = 'library' and preset.library_id = library.id)
+                 where provider.lifecycle_state = 'active'
+                   and model.lifecycle_state = 'active'
+                   and (
+                        preset.scope_kind = 'instance'
+                        or (preset.scope_kind = 'workspace' and preset.workspace_id = library.workspace_id)
+                        or (preset.scope_kind = 'library' and preset.library_id = library.id)
+                   )
                  order by preset.created_at desc, preset.id desc",
             )
             .bind(library_id)
@@ -308,4 +330,12 @@ pub async fn update_model_preset(
     .bind(extra_parameters_json)
     .fetch_optional(postgres)
     .await
+}
+
+pub async fn delete_model_preset(postgres: &PgPool, preset_id: Uuid) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("delete from ai_model_preset where id = $1")
+        .bind(preset_id)
+        .execute(postgres)
+        .await?;
+    Ok(result.rows_affected())
 }

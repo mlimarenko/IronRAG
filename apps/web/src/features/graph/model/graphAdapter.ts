@@ -1,4 +1,5 @@
 import type { KnowledgeGraphTopologyResponse } from '@/shared/types/graph-topology';
+import type { GraphLayoutType } from '@/features/graph/model/config';
 import type {
   ContentDocumentDetailResponse,
   ContentRevision,
@@ -83,23 +84,40 @@ function countConnectedComponents(nodes: GraphNode[], edges: GraphEdge[]): numbe
   return componentCount;
 }
 
-type GraphLayoutHint = 'sectors' | 'bands' | 'components' | 'rings' | 'clusters';
-
 function recommendGraphLayout(
   nodes: GraphNode[],
   edges: GraphEdge[],
-): GraphLayoutHint {
-  if (nodes.length === 0) return 'bands';
+): GraphLayoutType {
+  if (nodes.length === 0) return 'sectors';
 
   const typeCount = new Set(nodes.map((node) => node.type)).size;
+  const documentCount = nodes.reduce(
+    (count, node) => count + (node.type === 'document' ? 1 : 0),
+    0,
+  );
   const componentCount = countConnectedComponents(nodes, edges);
+  const edgeDensity = edges.length / nodes.length;
 
   if (componentCount >= 6 && edges.length < nodes.length * 2.2) {
-    return 'components';
+    return 'circlepack';
   }
 
-  if (nodes.length > 320 || edges.length > nodes.length * 2.8 || typeCount >= 6) {
-    return 'bands';
+  if (nodes.length > 2000 || edgeDensity > 3.2) {
+    if (edgeDensity > 4.2) return 'hubs';
+    if (documentCount > 0) return 'sources';
+    return 'radial';
+  }
+
+  if (documentCount > 0 && nodes.length > 120) {
+    return 'sources';
+  }
+
+  if (typeCount >= 6) {
+    return 'circlepack';
+  }
+
+  if (edgeDensity > 2.4) {
+    return 'hubs';
   }
 
   return 'sectors';

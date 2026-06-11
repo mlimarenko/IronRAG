@@ -1,20 +1,9 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { Copy, Terminal, Code2, Brain } from 'lucide-react';
-import { toast } from 'sonner';
 import { Button } from '@/shared/components/ui/button';
-import { Checkbox } from '@/shared/components/ui/checkbox';
 import { DataState } from '@/shared/components/DataState';
-import { adminApi, queries } from '@/shared/api';
-import { errorMessage } from '@/shared/lib/errorMessage';
-import type { Library } from '@/shared/types';
-
-type McpTabProps = {
-  t: TFunction;
-  active: boolean;
-  activeLibrary: Library | null;
-  refreshSession: () => Promise<void>;
-};
+import { queries } from '@/shared/api';
 
 type McpClientConfig = {
   name: string;
@@ -78,48 +67,34 @@ function getMcpConfigs(origin: string): McpClientConfig[] {
   ];
 }
 
-export function McpTab({ t, active, activeLibrary, refreshSession }: McpTabProps) {
-  const activeLibraryId = activeLibrary?.id;
+type McpConnectGuideProps = {
+  t: TFunction;
+  libraryId?: string;
+};
+
+/**
+ * Pure MCP connect guide (RM-06): server URLs, parity notice, the canonical
+ * per-library system-prompt preview, and per-client config snippets. The live
+ * document-hint toggle no longer lives here — it moved to the Library Hub MCP
+ * section, next to the library it configures.
+ */
+export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
   const promptQuery = useQuery({
     ...queries.getAssistantSystemPromptOptions(
-      activeLibraryId ? { query: { libraryId: activeLibraryId } } : {},
+      libraryId ? { query: { libraryId } } : {},
     ),
-    enabled: active,
-  });
-  const mcpSettingsMutation = useMutation({
-    mutationFn: (includeDocumentHintInMcpAnswers: boolean) => {
-      if (!activeLibraryId) {
-        throw new Error('No active library');
-      }
-      return adminApi.updateLibraryMcpSettings(activeLibraryId, {
-        includeDocumentHintInMcpAnswers,
-      });
-    },
-    onSuccess: () => refreshSession(),
-    onError: (error: unknown) => {
-      toast.error(errorMessage(error, 'Failed to update MCP settings'));
-    },
   });
   const promptResponse = promptQuery.data as
     | { rendered?: string | null; template?: string }
     | undefined;
-  const systemPrompt =
-    promptResponse?.rendered ?? promptResponse?.template ?? null;
-  const loading = promptQuery.isLoading && active;
+  const systemPrompt = promptResponse?.rendered ?? promptResponse?.template ?? null;
 
   const origin = window.location.origin;
   const configs = getMcpConfigs(origin);
-  const includeDocumentHintChecked = mcpSettingsMutation.isPending
-    ? mcpSettingsMutation.variables
-    : activeLibrary?.includeDocumentHintInMcpAnswers ?? false;
 
   return (
     <>
-      <div className="mb-5">
-        <h2 className="text-base font-bold tracking-tight">{t('admin.mcpTitle')}</h2>
-        <p className="text-sm text-muted-foreground mt-1">{t('admin.mcpDesc')}</p>
-      </div>
-      <div className="grid grid-cols-2 gap-3 mb-4 text-xs">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 text-xs">
         <div className="workbench-surface p-4">
           <div className="section-label mb-1.5">{t('admin.mcpServerUrl')}</div>
           <code className="font-mono text-xs font-bold">{origin}/v1/mcp</code>
@@ -129,34 +104,15 @@ export function McpTab({ t, active, activeLibrary, refreshSession }: McpTabProps
           <code className="font-mono text-xs font-bold">{origin}/v1/mcp/capabilities</code>
         </div>
       </div>
-      <div className="workbench-surface p-4 mb-6 text-xs leading-relaxed">
+      <div className="workbench-surface p-4 text-xs leading-relaxed">
         <div className="section-label mb-1.5">{t('admin.mcpParityTitle')}</div>
         <p className="text-muted-foreground">{t('admin.mcpParityDesc')}</p>
       </div>
-      <div className="workbench-surface p-4 mb-4">
-        <label className="flex items-start gap-3">
-          <Checkbox
-            checked={includeDocumentHintChecked}
-            disabled={!activeLibraryId || mcpSettingsMutation.isPending}
-            onCheckedChange={(checked) => {
-              mcpSettingsMutation.mutate(checked === true);
-            }}
-          />
-          <span className="min-w-0">
-            <span className="block text-sm font-semibold">
-              {t('admin.mcp.includeDocumentHint')}
-            </span>
-            <span className="mt-1 block text-xs text-muted-foreground">
-              {t('admin.mcp.includeDocumentHintHelp')}
-            </span>
-          </span>
-        </label>
-      </div>
-      <div className="workbench-surface p-4 mb-4">
-        <div className="flex items-center justify-between mb-2">
+      <div className="workbench-surface p-4">
+        <div className="mb-2 flex items-center justify-between">
           <div>
             <div className="section-label">{t('admin.mcpSystemPromptTitle')}</div>
-            <p className="text-xs text-muted-foreground mt-1">{t('admin.mcpSystemPromptDesc')}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{t('admin.mcpSystemPromptDesc')}</p>
           </div>
           <Button
             variant="outline"
@@ -166,12 +122,12 @@ export function McpTab({ t, active, activeLibrary, refreshSession }: McpTabProps
               if (systemPrompt) void navigator.clipboard.writeText(systemPrompt);
             }}
           >
-            <Copy className="h-3 w-3 mr-1.5" /> {t('admin.copy')}
+            <Copy className="mr-1.5 h-3 w-3" /> {t('admin.copy')}
           </Button>
         </div>
-        <DataState query={{ isLoading: loading, error: promptQuery.error, data: systemPrompt ?? undefined }}>
+        <DataState query={{ isLoading: promptQuery.isLoading, error: promptQuery.error, data: systemPrompt ?? undefined }}>
           {(prompt) => (
-            <pre className="text-xs bg-surface-sunken p-4 rounded-xl overflow-x-auto overflow-y-auto max-h-96 font-mono leading-relaxed border border-border/50 whitespace-pre-wrap">
+            <pre className="max-h-96 overflow-x-auto overflow-y-auto whitespace-pre-wrap rounded-xl border border-border/50 bg-surface-sunken p-4 font-mono text-xs leading-relaxed">
               {prompt}
             </pre>
           )}
@@ -183,23 +139,23 @@ export function McpTab({ t, active, activeLibrary, refreshSession }: McpTabProps
             key={cfg.name}
             className="workbench-surface overflow-hidden transition-shadow duration-200 hover:shadow-lifted"
           >
-            <div className="flex items-center gap-2.5 p-4 border-b">
-              <div className="w-8 h-8 rounded-xl bg-surface-sunken flex items-center justify-center">
+            <div className="flex items-center gap-2.5 border-b p-4">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-surface-sunken">
                 <cfg.icon className="h-4 w-4 text-muted-foreground" />
               </div>
               <h3 className="text-sm font-bold">{cfg.name}</h3>
             </div>
             <div className="p-4">
-              <pre className="text-xs bg-surface-sunken p-4 rounded-xl overflow-x-auto font-mono leading-relaxed border border-border/50">
+              <pre className="overflow-x-auto rounded-xl border border-border/50 bg-surface-sunken p-4 font-mono text-xs leading-relaxed">
                 {cfg.config}
               </pre>
-              <div className="flex gap-2 mt-3">
+              <div className="mt-3 flex gap-2">
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => void navigator.clipboard.writeText(cfg.config)}
                 >
-                  <Copy className="h-3 w-3 mr-1.5" /> {t('admin.copy')}
+                  <Copy className="mr-1.5 h-3 w-3" /> {t('admin.copy')}
                 </Button>
               </div>
             </div>

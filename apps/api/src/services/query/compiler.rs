@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::sync::LazyLock;
+use std::{collections::BTreeSet, sync::LazyLock};
 use uuid::Uuid;
 
 use crate::{
@@ -38,9 +38,9 @@ use crate::{
     domains::{
         ai::AiBindingPurpose,
         query_ir::{
-            ClarificationReason, ConversationRefKind, QUERY_IR_SCHEMA_VERSION, QueryAct, QueryIR,
-            SourceSliceDirection, SourceSliceFilter, SourceSliceSpec, UnresolvedRef,
-            VerificationLevel, query_ir_json_schema,
+            ClarificationReason, ConversationRefKind, EntityRole, QUERY_IR_SCHEMA_VERSION,
+            QueryAct, QueryIR, QueryScope, SourceSliceDirection, SourceSliceFilter,
+            SourceSliceSpec, UnresolvedRef, VerificationLevel, query_ir_json_schema,
         },
     },
     infra::repositories::query_ir_cache_repository::{get_query_ir_cache, upsert_query_ir_cache},
@@ -54,6 +54,22 @@ use crate::{
 
 /// Canonical Redis key prefix for the hot IR cache.
 const REDIS_IR_CACHE_PREFIX: &str = "ir_cache";
+const STRUCTURAL_CONFIGURATION_REPAIR_CONFIDENCE: f32 = 0.65;
+const STRUCTURAL_CONFIGURATION_TARGET_TYPES: [&str; 3] =
+    ["configuration_file", "config_key", "parameter"];
+
+/// Minimum compiler confidence at which an over-eager single-document focus is
+/// trusted enough to downgrade. Below this the IR is treated as genuinely
+/// uncertain and the focus is left untouched so a clarify / stub path can run.
+const OVEREAGER_FOCUS_DOWNGRADE_MIN_CONFIDENCE: f32 = 0.6;
+
+/// Ontology target tags that, when present, indicate the user is structurally
+/// referencing a document object (its title / a heading) rather than merely
+/// naming a product or module. Their presence keeps a `document_focus` pin.
+const EXPLICIT_DOCUMENT_REFERENCE_TARGET_TYPES: [&str; 3] =
+    ["document", "primary_heading", "secondary_heading"];
+const CONFIGURATION_FILE_EXTENSIONS: [&str; 8] =
+    [".conf", ".ini", ".cfg", ".properties", ".yaml", ".yml", ".toml", ".json"];
 
 /// Hot-tier TTL. Chosen so even low-traffic libraries see regular warm
 /// reads without pinning stale IR past a day.
@@ -703,6 +719,8 @@ fn normalize_compiled_ir(
     repair_history_backed_elliptic_ref(question, history, &mut ir);
     normalize_latest_version_source_slice(&mut ir);
     normalize_source_slice_filter(&mut ir);
+    normalize_structural_configuration_request(question, &mut ir);
+    downgrade_overeager_single_document_focus(&mut ir);
 
     let stateless_with_explicit_target =
         history.is_empty() && stateless_ir_has_explicit_target(&ir);
@@ -770,6 +788,293 @@ fn normalize_source_slice_filter(ir: &mut QueryIR) {
     };
     if let Some(slice) = ir.source_slice.as_mut() {
         slice.filter = filter;
+    }
+}
+
+fn normalize_structural_configuration_request(question: &str, ir: &mut QueryIR) {
+    if !compiled_ir_is_low_confidence_unfocused_description(ir)
+        || !question_has_structural_configuration_surface(question)
+    {
+        return;
+    }
+    tracing::info!(
+        target: "ironrag::query_compile",
+        question_len = question.len(),
+        confidence = ir.confidence,
+        "query compile repaired structural configuration request"
+    );
+    ir.act = QueryAct::ConfigureHow;
+    ir.confidence = ir.confidence.max(STRUCTURAL_CONFIGURATION_REPAIR_CONFIDENCE);
+    ir.needs_clarification = None;
+    for target_type in STRUCTURAL_CONFIGURATION_TARGET_TYPES {
+        push_target_type_once(&mut ir.target_types, target_type);
+    }
+}
+
+/// Drop an over-eager single-document focus when the IR describes a generic,
+/// directly-answerable question that merely *names* a product / module /
+/// subsystem rather than *referencing a specific document*.
+///
+/// Root cause: a question that names a module ("how do I update `<Module>`")
+/// makes the compiler emit `scope = single_document` + a `document_focus.hint`
+/// equal to that module name, which then hard-locks retrieval onto whichever
+/// single document's TITLE matches — often a thin overview stub — so the
+/// answer pipeline reports "not in the available context".
+///
+/// This repair is the conservative, deterministic half of the fix (the
+/// retrieval-side coverage fallback re-broadens after the fact). It fires
+/// ONLY on a clearly-generic shape and leaves genuinely document-scoped
+/// questions untouched. The discriminator is entirely structural / typed —
+/// no natural-language keyword list:
+///
+/// - high compiler confidence (the question is pinned, not a guess);
+/// - a concrete answerable act (`describe` / `configure_how` / `enumerate`);
+/// - a resolved subject entity (the named component) and no comparison;
+/// - NO explicit document reference: no exact technical literal (a literal
+///   the user quoted verbatim such as a path / URL / version / identifier),
+///   no `document` / heading ontology target type, and a `document_focus.hint`
+///   that carries no path separator or known configuration-file extension
+///   (i.e. it is a bare name, not a filename / title token).
+///
+/// When all hold, the focus pin is the product of naming a component, so we
+/// drop `document_focus` and widen `scope` to `MultiDocument` — the codebase's
+/// canonical broadened state (mirrors the latest-release inference at
+/// `retrieve.rs`) — so retrieval can draw from every relevant document.
+fn downgrade_overeager_single_document_focus(ir: &mut QueryIR) {
+    if !compiled_ir_is_generic_overeager_single_document_focus(ir) {
+        return;
+    }
+    tracing::info!(
+        target: "ironrag::query_compile",
+        act = ir.act.as_str(),
+        scope = ir.scope.as_str(),
+        confidence = ir.confidence,
+        target_entities_count = ir.target_entities.len(),
+        "query compile downgraded over-eager single_document focus to multi_document"
+    );
+    ir.document_focus = None;
+    ir.scope = QueryScope::MultiDocument;
+}
+
+/// Structural predicate for [`downgrade_overeager_single_document_focus`].
+///
+/// All conditions are typed / structural so the guard cannot drift into a
+/// natural-language keyword list. Kept as its own function so it is directly
+/// unit-testable against synthetic [`QueryIR`] inputs.
+fn compiled_ir_is_generic_overeager_single_document_focus(ir: &QueryIR) -> bool {
+    matches!(ir.scope, QueryScope::SingleDocument)
+        && ir.document_focus.is_some()
+        && ir.confidence >= OVEREAGER_FOCUS_DOWNGRADE_MIN_CONFIDENCE
+        && matches!(ir.act, QueryAct::Describe | QueryAct::ConfigureHow | QueryAct::Enumerate)
+        && ir.comparison.is_none()
+        && ir.source_slice.is_none()
+        && ir.target_entities.iter().any(|mention| matches!(mention.role, EntityRole::Subject))
+        && !ir_has_explicit_document_reference(ir)
+}
+
+/// `true` when the IR carries a structural signal that the user referenced a
+/// specific document object (a quoted technical literal, a `document` / heading
+/// ontology target type, or a `document_focus.hint` shaped like a filename /
+/// path token) rather than merely naming a product / module by its bare name.
+fn ir_has_explicit_document_reference(ir: &QueryIR) -> bool {
+    if ir.has_exact_technical_literal() {
+        return true;
+    }
+    if ir.target_types.iter().any(|target_type| {
+        EXPLICIT_DOCUMENT_REFERENCE_TARGET_TYPES.iter().any(|reference| reference == target_type)
+    }) {
+        return true;
+    }
+    ir.document_focus
+        .as_ref()
+        .is_some_and(|focus| document_focus_hint_is_explicit_reference(&focus.hint))
+}
+
+/// A `document_focus.hint` is an explicit document reference when it looks like
+/// a filename / path rather than a bare component name: it contains a path
+/// separator or ends in a known configuration-file extension.
+fn document_focus_hint_is_explicit_reference(hint: &str) -> bool {
+    let trimmed = hint.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return true;
+    }
+    let lowered = trimmed.to_lowercase();
+    CONFIGURATION_FILE_EXTENSIONS.iter().any(|extension| lowered.ends_with(extension))
+}
+
+fn compiled_ir_is_low_confidence_unfocused_description(ir: &QueryIR) -> bool {
+    ir.confidence <= 0.35
+        && matches!(ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
+        && ir.comparison.is_none()
+        && ir.source_slice.is_none()
+        && ir.document_focus.is_none()
+        && ir.target_types.is_empty()
+        && ir.target_entities.is_empty()
+        && ir.literal_constraints.is_empty()
+        && ir.temporal_constraints.is_empty()
+        && ir.conversation_refs.is_empty()
+}
+
+fn question_has_structural_configuration_surface(question: &str) -> bool {
+    let path_count = count_configuration_file_path_literals(question, 8);
+    let section_count = count_configuration_section_literals(question, 8);
+    let assignment_count = count_configuration_assignment_literals(question, 8);
+    let identifier_count = count_identifier_like_backtick_literals(question, 32);
+    let has_configuration_surface = path_count > 0 || section_count > 0 || assignment_count > 0;
+    has_configuration_surface
+        && (path_count.saturating_add(section_count).saturating_add(assignment_count) >= 2
+            || identifier_count >= 2
+            || assignment_count >= 1)
+}
+
+fn count_configuration_file_path_literals(text: &str, limit: usize) -> usize {
+    if limit == 0 {
+        return 0;
+    }
+    let mut seen = BTreeSet::new();
+    for literal in backtick_literals(text).into_iter().chain(whitespace_literals(text)) {
+        let normalized = literal.trim_matches(literal_boundary_char).to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if configuration_file_path_literal(&normalized) && seen.insert(normalized) {
+            if seen.len() >= limit {
+                break;
+            }
+        }
+    }
+    seen.len()
+}
+
+fn count_configuration_section_literals(text: &str, limit: usize) -> usize {
+    if limit == 0 {
+        return 0;
+    }
+    let mut seen = BTreeSet::new();
+    for literal in backtick_literals(text).into_iter().chain(whitespace_literals(text)) {
+        let cleaned = literal.trim_matches(non_section_literal_boundary_char);
+        if cleaned.len() <= 2 || !cleaned.starts_with('[') || !cleaned.ends_with(']') {
+            continue;
+        }
+        if cleaned.chars().any(char::is_alphanumeric) && seen.insert(cleaned.to_string()) {
+            if seen.len() >= limit {
+                break;
+            }
+        }
+    }
+    seen.len()
+}
+
+fn count_configuration_assignment_literals(text: &str, limit: usize) -> usize {
+    if limit == 0 {
+        return 0;
+    }
+    let mut seen = BTreeSet::new();
+    for literal in backtick_literals(text).into_iter().chain(whitespace_literals(text)) {
+        let Some((name, _)) = literal.split_once('=') else {
+            continue;
+        };
+        let name = name.trim_matches(literal_boundary_char);
+        if identifier_like_literal(name) && seen.insert(name.to_string()) {
+            if seen.len() >= limit {
+                break;
+            }
+        }
+    }
+    seen.len()
+}
+
+fn count_identifier_like_backtick_literals(text: &str, limit: usize) -> usize {
+    if limit == 0 {
+        return 0;
+    }
+    let mut seen = BTreeSet::new();
+    for literal in backtick_literals(text) {
+        let cleaned = literal.trim_matches(literal_boundary_char);
+        if identifier_like_literal(cleaned) && seen.insert(cleaned.to_string()) {
+            if seen.len() >= limit {
+                break;
+            }
+        }
+    }
+    seen.len()
+}
+
+fn configuration_file_path_literal(value: &str) -> bool {
+    let has_path_separator = value.contains('/') || value.contains('\\');
+    let has_config_extension =
+        CONFIGURATION_FILE_EXTENSIONS.iter().any(|extension| value.ends_with(extension));
+    has_path_separator && has_config_extension
+}
+
+fn identifier_like_literal(value: &str) -> bool {
+    let value = value.trim();
+    if !(2..=96).contains(&value.chars().count()) {
+        return false;
+    }
+    let mut has_alphanumeric = false;
+    let mut has_letter = false;
+    let mut has_digit = false;
+    let mut has_lowercase = false;
+    let mut has_uppercase = false;
+    let mut has_structural_separator = false;
+    for ch in value.chars() {
+        if ch.is_alphanumeric() {
+            has_alphanumeric = true;
+            has_letter |= ch.is_alphabetic();
+            has_digit |= ch.is_numeric();
+            has_lowercase |= ch.is_lowercase();
+            has_uppercase |= ch.is_uppercase();
+            continue;
+        }
+        if matches!(ch, '_' | '-' | '.' | ':') {
+            has_structural_separator = true;
+            continue;
+        }
+        return false;
+    }
+    has_alphanumeric
+        && has_letter
+        && (has_digit || has_structural_separator || (has_lowercase && has_uppercase))
+}
+
+fn backtick_literals(text: &str) -> Vec<&str> {
+    let mut literals = Vec::new();
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        if ch != '`' {
+            continue;
+        }
+        if let Some(open) = start.take() {
+            let literal = text[open..index].trim();
+            if !literal.is_empty() {
+                literals.push(literal);
+            }
+        } else {
+            start = Some(index + ch.len_utf8());
+        }
+    }
+    literals
+}
+
+fn whitespace_literals(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace()
+}
+
+fn literal_boundary_char(ch: char) -> bool {
+    matches!(ch, '`' | '"' | '\'' | ',' | ';' | ':' | '.' | '(' | ')' | '[' | ']' | '{' | '}')
+}
+
+fn non_section_literal_boundary_char(ch: char) -> bool {
+    matches!(ch, '`' | '"' | '\'' | ',' | ';' | ':' | '.' | '(' | ')' | '{' | '}')
+}
+
+fn push_target_type_once(target_types: &mut Vec<String>, target_type: &str) {
+    if !target_types.iter().any(|current| current.trim().eq_ignore_ascii_case(target_type)) {
+        target_types.push(target_type.to_string());
     }
 }
 
@@ -1097,10 +1402,26 @@ Guiding principles:\n\
 or `follow_up` (refers to prior turn). When the current question is a short disambiguating \
 selection for a prior substantive request, keep the prior request's act and use the current \
 selection as the target; do not downgrade the act to `follow_up` just because the selection needs \
-prior context.\n\
+prior context. Requests for an artifact-shaped output such as a complete example, template, \
+snippet, or file block for configuring a subject are still `configure_how`; do not downgrade them \
+to `describe` merely because the user also forbids invented values or asks to use only retrieved \
+fragments. For configuration-shaped artifacts, include `configuration_file` and `config_key` in \
+`target_types` when the wording asks for files, sections, settings, parameters, or literal \
+configuration values.\n\
 2. `scope` is `multi_document` ONLY when the user explicitly names or clearly implies two or more \
 documents / modules / subjects; `library_meta` when the question is about the library itself. \
 Default is `single_document`.\n\
+`document_focus` is a separate, narrower signal: set it (and keep `scope` = `single_document`) \
+ONLY when the user EXPLICITLY references one specific document — a document title, a file name, a \
+path-shaped identifier, a heading, or a phrasing that points inside one named document or page. A \
+question that merely NAMES a product / module / subsystem / feature is NOT a document reference: \
+emit that name as a `target_entities` mention (role `subject`) and leave `document_focus` null so \
+retrieval can draw from every relevant document. Decide structurally, not by topic: a bare \
+component name (token `S` alone) is a subject entity; a filename / path / heading / explicit \
+in-document pointer (`S.conf`, `/v2/pay`) is a `document_focus`. A \
+general how-to / describe / configure / enumerate question about a named component therefore stays \
+library-scoped (`single_document` scope, no `document_focus`) unless the user also pins a concrete \
+document identifier.\n\
 3. `literal_constraints` captures verbatim strings the user quoted — URLs, file paths, parameter \
 names, code identifiers, version numbers. If the user did not quote anything verbatim, the array \
 is empty.\n\
@@ -1206,7 +1527,7 @@ fn preview(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domains::query_ir::{QueryLanguage, QueryScope};
+    use crate::domains::query_ir::QueryLanguage;
     use crate::integrations::llm::{
         ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
         EmbeddingResponse, VisionRequest, VisionResponse,
@@ -1315,6 +1636,245 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repairs_structural_configuration_request_from_unfocused_provider_ir() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": [],
+            "target_entities": [],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.25
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+        let question = "scope: Provider Alpha setup was selected earlier\nliteral anchors: `/opt/alpha/alpha.conf`, `[Main]`, `alphaEndpoint`, `alphaSecret`, `printSlip`\nquestion: Provider Alpha setup parameter inventory";
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, question, &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
+        assert!(outcome.ir.confidence >= STRUCTURAL_CONFIGURATION_REPAIR_CONFIDENCE);
+        for target_type in STRUCTURAL_CONFIGURATION_TARGET_TYPES {
+            assert!(
+                outcome.ir.target_types.iter().any(|value| value == target_type),
+                "{:?}",
+                outcome.ir.target_types
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn low_confidence_plain_question_without_configuration_surface_stays_unfocused() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": [],
+            "target_entities": [],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.25
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "Alpha Suite X9 2.3.4 2.3.5", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.act, QueryAct::Describe);
+        assert!(outcome.ir.target_types.is_empty());
+    }
+
+    #[tokio::test]
+    async fn downgrades_overeager_single_document_focus_for_generic_named_component() {
+        // High-confidence configure_how about a named module that the model
+        // over-pinned to a single document by echoing the module name as the
+        // focus hint. No quoted literal, no document/heading target type, and
+        // the hint is a bare name -> the pin is a false trigger and must drop.
+        let ir_json = json!({
+            "act": "configure_how",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["procedure"],
+            "target_entities": [{"label": "S", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "S"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.9
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "how do I update S", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.scope, QueryScope::MultiDocument);
+        assert!(outcome.ir.document_focus.is_none());
+        assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
+    }
+
+    #[tokio::test]
+    async fn preserves_single_document_focus_when_user_quotes_a_technical_literal() {
+        // Same generic shape, but the user quoted a path-shaped literal — an
+        // explicit reference to a specific document/object — so the pin stays.
+        let ir_json = json!({
+            "act": "configure_how",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["procedure"],
+            "target_entities": [{"label": "S", "role": "subject"}],
+            "literal_constraints": [{"text": "/v2/pay", "kind": "path"}],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "S"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.9
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "how do I configure /v2/pay", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
+        assert!(outcome.ir.document_focus.is_some());
+    }
+
+    #[tokio::test]
+    async fn preserves_single_document_focus_when_focus_hint_is_a_filename() {
+        // The focus hint itself is a filename / path token — a structural
+        // document reference — so it is a genuine single-document pin.
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["procedure"],
+            "target_entities": [{"label": "S", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "S.conf"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.9
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "describe S.conf", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
+        assert_eq!(
+            outcome.ir.document_focus.as_ref().map(|focus| focus.hint.as_str()),
+            Some("S.conf")
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_single_document_focus_when_target_type_is_document() {
+        // A `document` ontology target type is an explicit document reference
+        // even when the focus hint is a bare name.
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["document"],
+            "target_entities": [{"label": "S", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "S"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.9
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome = service
+            .compile_with_gateway(&gateway, &binding, "describe the S document", &[])
+            .await
+            .expect("compile ok");
+
+        assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
+        assert!(outcome.ir.document_focus.is_some());
+    }
+
+    #[tokio::test]
+    async fn keeps_low_confidence_single_document_focus_untouched() {
+        // Below the downgrade confidence floor the IR is treated as genuinely
+        // uncertain; the focus is left alone for the clarify / stub path.
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["procedure"],
+            "target_entities": [{"label": "S", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "S"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.4
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+        let service = QueryCompilerService;
+        let binding = sample_binding();
+
+        let outcome =
+            service.compile_with_gateway(&gateway, &binding, "S", &[]).await.expect("compile ok");
+
+        assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
+        assert!(outcome.ir.document_focus.is_some());
+    }
+
+    #[tokio::test]
     async fn normalizes_broad_latest_release_ir_to_release_tail_slice() {
         let ir_json = json!({
             "act": "enumerate",
@@ -1344,7 +1904,7 @@ mod tests {
         assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
         let slice = outcome.ir.source_slice.expect("latest release requests need ordered context");
         assert_eq!(slice.direction, SourceSliceDirection::Tail);
-        assert_eq!(slice.count, Some(5));
+        assert_eq!(slice.count, Some(10));
         assert_eq!(slice.filter, SourceSliceFilter::ReleaseMarker);
     }
 
@@ -1841,6 +2401,14 @@ mod tests {
         assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("short disambiguating selection"));
         assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("keep the prior request's act"));
         assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("do not downgrade the act to `follow_up`"));
+    }
+
+    #[test]
+    fn compiler_prompt_keeps_configuration_artifact_requests_as_configure_how() {
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("artifact-shaped output"));
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("still `configure_how`"));
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("do not downgrade them to `describe`"));
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("`configuration_file` and `config_key`"));
     }
 
     // -----------------------------------------------------------------

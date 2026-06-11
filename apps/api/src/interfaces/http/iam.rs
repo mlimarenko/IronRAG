@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -18,11 +18,13 @@ use self::{
         setup_bootstrap_admin,
     },
     types::{
-        CreateGrantRequest, GrantResponse, IamGrantResourceKind, IamPermissionKind,
-        IamPrincipalKind, ListGrantsQuery, ListTokensQuery, MeResponse, MintTokenRequest,
-        MintTokenResponse, PrincipalResponse, TokenGrantSummaryResponse, TokenIssuerResponse,
+        CreateGrantRequest, CreateUserRequest, GrantResponse, IamGrantResourceKind,
+        IamPermissionKind, IamPrincipalKind, ListGrantsQuery, ListTokensQuery, MeResponse,
+        MintTokenRequest, MintTokenResponse, PrincipalResponse, SetUserAccessRequest,
+        SetUserRoleRequest, SystemRole, TokenGrantSummaryResponse, TokenIssuerResponse,
         TokenLibrarySummaryResponse, TokenResponse, TokenScopeKind, TokenScopeResponse,
-        TokenWorkspaceSummaryResponse, UserResponse, WorkspaceMembershipResponse,
+        TokenWorkspaceSummaryResponse, UserAccessResponse, UserLibraryAccessResponse, UserResponse,
+        UserWorkspaceAccessResponse, WorkspaceMembershipResponse,
     },
 };
 use crate::{
@@ -51,6 +53,9 @@ pub fn router() -> Router<AppState> {
         .route("/iam/session", get(get_session))
         .route("/iam/session/logout", post(logout_session))
         .route("/iam/me", get(get_me))
+        .route("/iam/users", get(list_users).post(create_user))
+        .route("/iam/users/{principal_id}/role", patch(set_user_role))
+        .route("/iam/users/{principal_id}/access", get(get_user_access).put(set_user_access))
         .route("/iam/tokens", get(list_tokens).post(mint_token))
         .route("/iam/tokens/{token_principal_id}", delete(delete_token))
         .route("/iam/tokens/{token_principal_id}/revoke", post(revoke_token))
@@ -116,6 +121,536 @@ pub async fn get_me(
             .map(map_grant_domain)
             .collect::<Result<Vec<_>, _>>()?,
     }))
+}
+
+/// Pure last-admin guard.
+///
+/// Returns `true` when changing `current_role` to `next_role` would remove the
+/// final administrator (i.e. the caller is demoting an admin and `admin_count`
+/// — the number of admins counted *before* the change — is at most one). A
+/// no-op `admin → admin` update never trips the guard.
+fn would_demote_last_admin(
+    current_role: iam_repository::SystemRole,
+    next_role: iam_repository::SystemRole,
+    admin_count: i64,
+) -> bool {
+    current_role == iam_repository::SystemRole::Admin
+        && next_role != iam_repository::SystemRole::Admin
+        && admin_count <= 1
+}
+
+/// Loads the caller's user row and enforces the `admin` system role.
+///
+/// User management is gated on the *current principal's* role (not on the
+/// grant-derived token scopes), matching the owner-confirmed RBAC model. API
+/// tokens and non-user principals have no `iam_user` row and are therefore
+/// rejected.
+async fn require_system_admin(
+    state: &AppState,
+    auth: &AuthContext,
+) -> Result<iam_repository::IamUserRow, ApiError> {
+    let user =
+        iam_repository::get_user_by_principal_id(&state.persistence.postgres, auth.principal_id)
+            .await
+            .map_err(|error| {
+                error!(
+                    auth_principal_id = %auth.principal_id,
+                    ?error,
+                    "failed to load caller for system-admin check",
+                );
+                ApiError::Internal
+            })?
+            .ok_or(ApiError::Unauthorized)?;
+    if user.system_role() != iam_repository::SystemRole::Admin {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(user)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/iam/users",
+    tag = "iam",
+    operation_id = "listIamUsers",
+    responses(
+        (status = 200, description = "All user principals with their system roles", body = [UserResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.list_users", skip_all)]
+pub async fn list_users(
+    auth: AuthContext,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<UserResponse>>, ApiError> {
+    require_system_admin(&state, &auth).await?;
+
+    let rows = iam_repository::list_users(&state.persistence.postgres).await.map_err(|error| {
+        error!(auth_principal_id = %auth.principal_id, ?error, "failed to list users");
+        ApiError::Internal
+    })?;
+
+    Ok(Json(rows.into_iter().map(map_user_row).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/iam/users",
+    tag = "iam",
+    operation_id = "createIamUser",
+    request_body = crate::interfaces::http::iam::types::CreateUserRequest,
+    responses(
+        (status = 200, description = "Newly created user", body = UserResponse),
+        (status = 400, description = "Invalid request payload"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 409, description = "Login or email already exists"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.create_user", skip_all)]
+pub async fn create_user(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Json(payload): Json<CreateUserRequest>,
+) -> Result<Json<UserResponse>, ApiError> {
+    require_system_admin(&state, &auth).await?;
+    let request_id = request_id.map(|value| value.0.0);
+
+    let login = payload.login.trim().to_ascii_lowercase();
+    if login.is_empty() {
+        return Err(ApiError::BadRequest("login must not be empty".into()));
+    }
+    if login.bytes().any(|byte| !matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')) {
+        return Err(ApiError::BadRequest(
+            "login must contain only lowercase letters, digits, '.', '_' or '-'".into(),
+        ));
+    }
+    let email = payload.email.trim().to_string();
+    if email.is_empty() {
+        return Err(ApiError::BadRequest("email must not be empty".into()));
+    }
+    let display_name = {
+        let trimmed = payload.display_name.trim();
+        if trimmed.is_empty() { login.clone() } else { trimmed.to_string() }
+    };
+    let password = payload.password.trim().to_string();
+    if password.len() < 8 {
+        return Err(ApiError::BadRequest("password must be at least 8 characters long".into()));
+    }
+
+    if iam_repository::get_user_by_login(&state.persistence.postgres, &login)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, ?error, "failed to check login uniqueness");
+            ApiError::Internal
+        })?
+        .is_some()
+    {
+        return Err(ApiError::Conflict("a user with this login already exists".to_string()));
+    }
+    if iam_repository::get_user_by_email(&state.persistence.postgres, &email)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, ?error, "failed to check email uniqueness");
+            ApiError::Internal
+        })?
+        .is_some()
+    {
+        return Err(ApiError::Conflict("a user with this email already exists".to_string()));
+    }
+
+    let password_hash = crate::services::iam::service::hash_password(&password)?;
+    let role = map_route_system_role_to_repo(payload.role);
+    let row = iam_repository::create_user(
+        &state.persistence.postgres,
+        &login,
+        &email,
+        &display_name,
+        &password_hash,
+        role,
+    )
+    .await
+    .map_err(|error| {
+        error!(auth_principal_id = %auth.principal_id, ?error, "failed to create user");
+        ApiError::Internal
+    })?;
+
+    record_iam_audit_event(
+        &state,
+        &auth,
+        request_id,
+        "iam.user.create",
+        "succeeded",
+        Some(format!("user {} created", row.login)),
+        Some(format!(
+            "principal {} created user {} with role {}",
+            auth.principal_id, row.principal_id, row.role,
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "principal".to_string(),
+            subject_id: row.principal_id,
+            workspace_id: None,
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(Json(map_user_row(row)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/iam/users/{principalId}/role",
+    tag = "iam",
+    operation_id = "setIamUserRole",
+    params(("principalId" = uuid::Uuid, Path, description = "User principal id whose role changes")),
+    request_body = crate::interfaces::http::iam::types::SetUserRoleRequest,
+    responses(
+        (status = 200, description = "Updated user", body = UserResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "User not found"),
+        (status = 409, description = "Would demote the last remaining administrator"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.set_user_role",
+    skip_all,
+    fields(principal_id = %principal_id)
+)]
+pub async fn set_user_role(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(principal_id): Path<Uuid>,
+    Json(payload): Json<SetUserRoleRequest>,
+) -> Result<Json<UserResponse>, ApiError> {
+    require_system_admin(&state, &auth).await?;
+    let request_id = request_id.map(|value| value.0.0);
+    let next_role = map_route_system_role_to_repo(payload.role);
+
+    let current = iam_repository::get_user_by_principal_id(&state.persistence.postgres, principal_id)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to load user for role change");
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("user", principal_id))?;
+
+    // Last-admin guard: blocking the demotion of the final administrator keeps
+    // the instance manageable. Counting before the update keeps the check
+    // idempotent (a no-op admin→admin update is always allowed).
+    if current.system_role() == iam_repository::SystemRole::Admin
+        && next_role != iam_repository::SystemRole::Admin
+    {
+        let admin_count = iam_repository::count_admin_users(&state.persistence.postgres)
+            .await
+            .map_err(|error| {
+                error!(auth_principal_id = %auth.principal_id, ?error, "failed to count admins");
+                ApiError::Internal
+            })?;
+        if would_demote_last_admin(current.system_role(), next_role, admin_count) {
+            return Err(ApiError::Conflict(
+                "cannot demote the last remaining administrator".to_string(),
+            ));
+        }
+    }
+
+    let row = iam_repository::set_user_role(&state.persistence.postgres, principal_id, next_role)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to set user role");
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("user", principal_id))?;
+
+    record_iam_audit_event(
+        &state,
+        &auth,
+        request_id,
+        "iam.user.set_role",
+        "succeeded",
+        Some(format!("user {} role set to {}", row.login, row.role)),
+        Some(format!(
+            "principal {} set user {} role to {}",
+            auth.principal_id, principal_id, row.role
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "principal".to_string(),
+            subject_id: principal_id,
+            workspace_id: None,
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(Json(map_user_row(row)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/iam/users/{principalId}/access",
+    tag = "iam",
+    operation_id = "getIamUserAccess",
+    params(("principalId" = uuid::Uuid, Path, description = "User principal id whose access is read")),
+    responses(
+        (status = 200, description = "The user's workspace and library access grants", body = UserAccessResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "User not found"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_user_access",
+    skip_all,
+    fields(principal_id = %principal_id)
+)]
+pub async fn get_user_access(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(principal_id): Path<Uuid>,
+) -> Result<Json<UserAccessResponse>, ApiError> {
+    require_system_admin(&state, &auth).await?;
+
+    // Confirm the target principal is a real user so callers get a clean 404
+    // rather than an empty access list for a typo'd id.
+    iam_repository::get_user_by_principal_id(&state.persistence.postgres, principal_id)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to load user for access read");
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("user", principal_id))?;
+
+    let access = load_user_access(&state, principal_id).await?;
+    Ok(Json(access))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/iam/users/{principalId}/access",
+    tag = "iam",
+    operation_id = "setIamUserAccess",
+    params(("principalId" = uuid::Uuid, Path, description = "User principal id whose access is set")),
+    request_body = crate::interfaces::http::iam::types::SetUserAccessRequest,
+    responses(
+        (status = 200, description = "The user's access after reconciliation", body = UserAccessResponse),
+        (status = 400, description = "Invalid permission kind for a resource"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "User, workspace or library not found"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.set_user_access",
+    skip_all,
+    fields(principal_id = %principal_id)
+)]
+pub async fn set_user_access(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(principal_id): Path<Uuid>,
+    Json(payload): Json<SetUserAccessRequest>,
+) -> Result<Json<UserAccessResponse>, ApiError> {
+    require_system_admin(&state, &auth).await?;
+    let request_id = request_id.map(|value| value.0.0);
+
+    iam_repository::get_user_by_principal_id(&state.persistence.postgres, principal_id)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to load user for access write");
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("user", principal_id))?;
+
+    // Build the desired (resource_kind, resource_id, permission_kind) set,
+    // validating each permission against its resource kind and that each
+    // referenced workspace/library exists.
+    let mut desired: BTreeSet<(&'static str, Uuid, String)> = BTreeSet::new();
+    for entry in &payload.workspaces {
+        validate_permission_kind_for_resource(
+            IamGrantResourceKind::Workspace,
+            entry.permission_kind.clone(),
+        )?;
+        catalog_repository::get_workspace_by_id(&state.persistence.postgres, entry.workspace_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("workspace", entry.workspace_id))?;
+        desired.insert((
+            "workspace",
+            entry.workspace_id,
+            entry.permission_kind.as_str().to_string(),
+        ));
+    }
+    for entry in &payload.libraries {
+        validate_permission_kind_for_resource(
+            IamGrantResourceKind::Library,
+            entry.permission_kind.clone(),
+        )?;
+        catalog_repository::get_library_by_id(&state.persistence.postgres, entry.library_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("library", entry.library_id))?;
+        desired.insert(("library", entry.library_id, entry.permission_kind.as_str().to_string()));
+    }
+
+    // Reconcile against the user's existing workspace/library grants. Only these
+    // two resource kinds are managed here; system/document/etc. grants are left
+    // untouched so this endpoint cannot be used to escalate to admin.
+    let existing = iam_repository::list_grants_by_principal(&state.persistence.postgres, principal_id)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to list grants for access reconcile");
+            ApiError::Internal
+        })?;
+
+    let mut keep: BTreeSet<(&'static str, Uuid, String)> = BTreeSet::new();
+    for grant in &existing {
+        let kind = match grant.resource_kind.as_str() {
+            "workspace" => "workspace",
+            "library" => "library",
+            _ => continue,
+        };
+        let key = (kind, grant.resource_id, grant.permission_kind.clone());
+        if desired.contains(&key) {
+            keep.insert(key);
+        } else {
+            // No longer desired: revoke it.
+            state.canonical_services.iam.revoke_grant(&state, grant.id).await.map_err(|error| {
+                error!(auth_principal_id = %auth.principal_id, %principal_id, grant_id = %grant.id, ?error, "failed to revoke grant during access reconcile");
+                error
+            })?;
+        }
+    }
+
+    for (kind, resource_id, permission_kind) in &desired {
+        if keep.contains(&(*kind, *resource_id, permission_kind.clone())) {
+            continue;
+        }
+        let resource_kind = match *kind {
+            "workspace" => GrantResourceKind::Workspace,
+            _ => GrantResourceKind::Library,
+        };
+        state
+            .canonical_services
+            .iam
+            .create_grant(
+                &state,
+                CreateGrantCommand {
+                    principal_id,
+                    resource_kind,
+                    resource_id: *resource_id,
+                    permission_kind: permission_kind.clone(),
+                    granted_by_principal_id: Some(auth.principal_id),
+                    expires_at: None,
+                },
+            )
+            .await
+            .map_err(|error| {
+                error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to create grant during access reconcile");
+                ApiError::Internal
+            })?;
+    }
+
+    record_iam_audit_event(
+        &state,
+        &auth,
+        request_id,
+        "iam.user.set_access",
+        "succeeded",
+        Some("user access updated".to_string()),
+        Some(format!(
+            "principal {} set access for user {} ({} workspace, {} library grants)",
+            auth.principal_id,
+            principal_id,
+            payload.workspaces.len(),
+            payload.libraries.len(),
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "principal".to_string(),
+            subject_id: principal_id,
+            workspace_id: None,
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
+    let access = load_user_access(&state, principal_id).await?;
+    Ok(Json(access))
+}
+
+/// Loads a user's workspace- and library-scoped grants, joined with display
+/// names, for the per-user access editor.
+async fn load_user_access(
+    state: &AppState,
+    principal_id: Uuid,
+) -> Result<UserAccessResponse, ApiError> {
+    let grants = iam_repository::list_resolved_grants_by_principal(
+        &state.persistence.postgres,
+        principal_id,
+    )
+    .await
+    .map_err(|error| {
+        error!(%principal_id, ?error, "failed to resolve grants for user access");
+        ApiError::Internal
+    })?;
+
+    let workspace_rows = catalog_repository::list_workspaces(&state.persistence.postgres)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let workspace_names: BTreeMap<Uuid, String> =
+        workspace_rows.into_iter().map(|row| (row.id, row.display_name)).collect();
+    let library_rows = catalog_repository::list_libraries(&state.persistence.postgres, None)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let library_names: BTreeMap<Uuid, (Uuid, String)> = library_rows
+        .into_iter()
+        .map(|row| (row.id, (row.workspace_id, row.display_name)))
+        .collect();
+
+    let mut workspaces = Vec::new();
+    let mut libraries = Vec::new();
+    for grant in grants {
+        match grant.resource_kind.as_str() {
+            "workspace" => {
+                let display_name = workspace_names
+                    .get(&grant.resource_id)
+                    .cloned()
+                    .unwrap_or_else(|| grant.resource_id.to_string());
+                workspaces.push(UserWorkspaceAccessResponse {
+                    grant_id: grant.id,
+                    workspace_id: grant.resource_id,
+                    display_name,
+                    permission_kind: map_permission_kind(&grant.permission_kind)?,
+                });
+            }
+            "library" => {
+                let (workspace_id, display_name) =
+                    library_names.get(&grant.resource_id).cloned().unwrap_or((
+                        grant.workspace_id.unwrap_or_default(),
+                        grant.resource_id.to_string(),
+                    ));
+                libraries.push(UserLibraryAccessResponse {
+                    grant_id: grant.id,
+                    library_id: grant.resource_id,
+                    workspace_id,
+                    display_name,
+                    permission_kind: map_permission_kind(&grant.permission_kind)?,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(UserAccessResponse { principal_id, workspaces, libraries })
 }
 
 #[utoipa::path(
@@ -1171,13 +1706,31 @@ fn map_principal_row(row: iam_repository::IamPrincipalRow) -> Result<PrincipalRe
 }
 
 fn map_user_row(row: iam_repository::IamUserRow) -> UserResponse {
+    let role = map_route_system_role_from_repo(row.system_role());
     UserResponse {
         principal_id: row.principal_id,
         login: row.login,
         email: row.email,
         display_name: row.display_name,
+        role,
         auth_provider_kind: row.auth_provider_kind,
         external_subject: row.external_subject,
+    }
+}
+
+fn map_route_system_role_from_repo(role: iam_repository::SystemRole) -> SystemRole {
+    match role {
+        iam_repository::SystemRole::Viewer => SystemRole::Viewer,
+        iam_repository::SystemRole::Operator => SystemRole::Operator,
+        iam_repository::SystemRole::Admin => SystemRole::Admin,
+    }
+}
+
+fn map_route_system_role_to_repo(role: SystemRole) -> iam_repository::SystemRole {
+    match role {
+        SystemRole::Viewer => iam_repository::SystemRole::Viewer,
+        SystemRole::Operator => iam_repository::SystemRole::Operator,
+        SystemRole::Admin => iam_repository::SystemRole::Admin,
     }
 }
 
@@ -1368,11 +1921,23 @@ fn map_principal_row_contract(
 }
 
 fn map_user_row_contract(row: iam_repository::IamUserRow) -> ironrag_contracts::auth::UserProfile {
+    let role = map_system_role_contract(row.system_role());
     ironrag_contracts::auth::UserProfile {
         principal_id: row.principal_id,
         login: Some(row.login),
         email: Some(row.email),
         display_name: Some(row.display_name),
+        role,
+    }
+}
+
+pub(crate) fn map_system_role_contract(
+    role: iam_repository::SystemRole,
+) -> ironrag_contracts::auth::SystemRole {
+    match role {
+        iam_repository::SystemRole::Viewer => ironrag_contracts::auth::SystemRole::Viewer,
+        iam_repository::SystemRole::Operator => ironrag_contracts::auth::SystemRole::Operator,
+        iam_repository::SystemRole::Admin => ironrag_contracts::auth::SystemRole::Admin,
     }
 }
 
@@ -1586,7 +2151,60 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: [workspace_id].into_iter().collect(),
             is_system_admin: false,
+            system_role: None,
         }
+    }
+
+    #[test]
+    fn system_role_route_to_repo_round_trips() {
+        for (route, repo) in [
+            (SystemRole::Viewer, iam_repository::SystemRole::Viewer),
+            (SystemRole::Operator, iam_repository::SystemRole::Operator),
+            (SystemRole::Admin, iam_repository::SystemRole::Admin),
+        ] {
+            assert_eq!(map_route_system_role_to_repo(route), repo);
+            assert_eq!(map_route_system_role_from_repo(repo), route);
+        }
+    }
+
+    #[test]
+    fn repo_system_role_string_round_trips() {
+        for repo in [
+            iam_repository::SystemRole::Viewer,
+            iam_repository::SystemRole::Operator,
+            iam_repository::SystemRole::Admin,
+        ] {
+            assert_eq!(iam_repository::SystemRole::from_str(repo.as_str()), Some(repo));
+        }
+        assert_eq!(iam_repository::SystemRole::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn last_admin_guard_blocks_demoting_the_final_admin() {
+        // Demoting the only admin is blocked.
+        assert!(would_demote_last_admin(
+            iam_repository::SystemRole::Admin,
+            iam_repository::SystemRole::Operator,
+            1,
+        ));
+        // With two admins, demoting one is allowed.
+        assert!(!would_demote_last_admin(
+            iam_repository::SystemRole::Admin,
+            iam_repository::SystemRole::Viewer,
+            2,
+        ));
+        // A no-op admin→admin update is never a demotion.
+        assert!(!would_demote_last_admin(
+            iam_repository::SystemRole::Admin,
+            iam_repository::SystemRole::Admin,
+            1,
+        ));
+        // Promoting a non-admin is never a demotion.
+        assert!(!would_demote_last_admin(
+            iam_repository::SystemRole::Viewer,
+            iam_repository::SystemRole::Admin,
+            1,
+        ));
     }
 
     #[test]

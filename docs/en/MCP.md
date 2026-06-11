@@ -90,6 +90,7 @@ Response shape: tool text contains the answer; structured output contains `execu
 |------|-------------|---------------------|
 | `search_documents` | Search library memory and return document-level candidates. Optionally scope the search to one or more library refs via `libraries`. | `query` |
 | `read_document` | Read one document in full or as an excerpt. | `documentId` |
+| `view_document_image` | Fetch the original image bytes (PNG/JPEG/etc.) backing an image-attachment document so a vision-capable model can inspect it directly. Only advertised when the active Agent binding points at a multimodal model. | `documentId` |
 | `list_documents` | List documents in a library, optionally filtered by processing status. | `library` (optional) |
 | `upload_documents` | Create one or more new documents in a library. | `library`, `documents` |
 | `update_document` | Append to or replace an existing document. | `library`, `documentId`, `operationKind` |
@@ -121,7 +122,7 @@ Response shape: tool text contains the answer; structured output contains `execu
 | `get_runtime_execution` | Load the runtime lifecycle summary for one runtime execution. | `runtimeExecutionId` |
 | `get_runtime_execution_trace` | Load the full stage, action, and policy trace for one runtime execution. | `runtimeExecutionId` |
 
-Under the hood, MCP calls the same services as the web app: Postgres for control state, ArangoDB for graph and document truth, and Redis-backed workers for ingestion.
+Under the hood, MCP calls the same services as the web app: PostgreSQL for control state and knowledge-plane data, plus Redis-backed workers for ingestion.
 
 ## Graph Tool Quality Contract
 

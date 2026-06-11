@@ -42,6 +42,22 @@ function auditResultKind(value: string): AuditEvent['resultKind'] {
   throw new Error(`Audit event response has invalid resultKind: ${value}`);
 }
 
+function auditActorLabel(raw: AuditEventResponse): string {
+  const actor = raw.actorPrincipal;
+  if (!actor) {
+    return raw.actorPrincipalId ?? 'system';
+  }
+
+  const displayLabel = actor.displayLabel.trim();
+  const displayName = actor.displayName?.trim();
+  const login = actor.login?.trim();
+  const primary = displayLabel || displayName || login || actor.id;
+  if (login && login !== primary) {
+    return `${primary} (${login})`;
+  }
+  return primary;
+}
+
 export function mapToken(raw: TokenResponse): APIToken {
   const scope: APIToken['scope'] = {
     kind: raw.scope.kind,
@@ -113,6 +129,7 @@ export function mapPricing(
   const provider = model ? providers.find((p) => p.id === model.providerCatalogId) : undefined;
   const pricing: PricingRule = {
     id: raw.id,
+    modelCatalogId: raw.modelCatalogId ?? '',
     provider: provider?.displayName ?? '',
     model: model?.modelName ?? raw.modelCatalogId ?? '',
     billingUnit: raw.billingUnit ?? '',
@@ -123,6 +140,9 @@ export function mapPricing(
       : '',
     sourceOrigin: raw.catalogScope ?? 'catalog',
   };
+  if (raw.workspaceId) {
+    pricing.workspaceId = raw.workspaceId;
+  }
   if (raw.effectiveTo) {
     pricing.effectiveTo = new Date(raw.effectiveTo).toISOString().slice(0, 10);
   }
@@ -186,7 +206,7 @@ export function mapAudit(raw: AuditEventResponse): AuditEvent {
     message: raw.redactedMessage ?? raw.actionKind,
     subjectSummary:
       raw.subjects.map((s) => `${s.subjectKind}:${s.subjectId}`).join(', ') || '',
-    actor: raw.actorPrincipalId ?? 'system',
+    actor: auditActorLabel(raw),
   };
   if (assistantCall) {
     event.assistantCall = assistantCall;

@@ -193,7 +193,10 @@ async function runQueueJobCommand(
   return latestQueue;
 }
 
-export function IngestQueueTab({ t, active }: IngestQueueTabProps) {
+export function IngestQueueTab({
+  t,
+  active,
+}: IngestQueueTabProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { workspaces, setActiveWorkspace, setActiveLibrary } = useApp();
@@ -521,7 +524,9 @@ export function IngestQueueTab({ t, active }: IngestQueueTabProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="mb-4 flex shrink-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+      <div
+        className="mb-4 flex shrink-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between"
+      >
         <div>
           <h2 className="flex items-center gap-2 text-base font-bold tracking-tight">
             <ListOrdered className="h-4 w-4 text-muted-foreground" />

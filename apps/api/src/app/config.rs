@@ -96,6 +96,7 @@ pub struct Settings {
     pub service_role: String,
     pub database_url: String,
     pub database_max_connections: u32,
+    pub knowledge_plane_backend: String,
     pub redis_url: String,
     pub arangodb_url: String,
     pub arangodb_database: String,
@@ -270,6 +271,8 @@ impl Settings {
         settings.dependency_redis_mode = settings.dependency_redis_mode.trim().to_ascii_lowercase();
         settings.dependency_arangodb_mode =
             settings.dependency_arangodb_mode.trim().to_ascii_lowercase();
+        settings.knowledge_plane_backend =
+            settings.knowledge_plane_backend.trim().to_ascii_lowercase();
         settings.dependency_object_storage_mode =
             settings.dependency_object_storage_mode.trim().to_ascii_lowercase();
         settings.content_storage_provider =
@@ -281,6 +284,7 @@ impl Settings {
         validate_service_role(&settings).map_err(config::ConfigError::Message)?;
         validate_startup_authority_mode(&settings).map_err(config::ConfigError::Message)?;
         validate_dependency_modes(&settings).map_err(config::ConfigError::Message)?;
+        validate_knowledge_plane_backend(&settings).map_err(config::ConfigError::Message)?;
         validate_content_storage_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
         validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
@@ -450,6 +454,17 @@ impl Settings {
                 self.ui_bootstrap_vision_provider_kind.as_deref(),
                 self.ui_bootstrap_vision_model_name.as_deref(),
             ),
+            // The in-product agent turn orchestrates grounded answers with the
+            // same chat model as `query_answer` (MCP-UI parity: the UI agent and
+            // external MCP clients share one answer tool surface). Default the
+            // `agent` binding to the query_answer provider/model so a clean stack
+            // resolves an active agent binding without extra operator config;
+            // operators can still override per-workspace/library via the UI.
+            resolved_ui_bootstrap_ai_binding_default(
+                "agent",
+                self.ui_bootstrap_query_answer_provider_kind.as_deref(),
+                self.ui_bootstrap_query_answer_model_name.as_deref(),
+            ),
         ]
         .into_iter()
         .flatten()
@@ -530,6 +545,7 @@ fn settings_config_builder()
         .set_default("environment", "local")?
         .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/ironrag")?
         .set_default("database_max_connections", 64)?
+        .set_default("knowledge_plane_backend", "arango")?
         .set_default("redis_url", "redis://127.0.0.1:6379")?
         .set_default("arangodb_url", "http://127.0.0.1:8529")?
         .set_default("arangodb_database", "ironrag")?
@@ -662,6 +678,13 @@ fn validate_dependency_modes(settings: &Settings) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_knowledge_plane_backend(settings: &Settings) -> Result<(), String> {
+    match settings.knowledge_plane_backend.as_str() {
+        "arango" | "postgres" => Ok(()),
+        _ => Err("knowledge_plane_backend must be one of: arango, postgres".into()),
+    }
 }
 
 fn validate_content_storage_settings(settings: &Settings) -> Result<(), String> {

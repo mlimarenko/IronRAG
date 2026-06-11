@@ -589,6 +589,34 @@ impl ContentService {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
             .unwrap_or_else(|| Uuid::now_v7().to_string());
+        let parent_external_key = command
+            .parent_external_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        // Resolve the declared parent key to a concrete parent document when the
+        // sibling already exists in this library. When it does not exist yet
+        // (out-of-order connector sync), the key is recorded as pending and the
+        // deferred resolver reconciles it later.
+        let parent_document_id = match parent_external_key.as_deref() {
+            Some(key) => content_repository::get_document_by_external_key(
+                &state.persistence.postgres,
+                command.library_id,
+                key,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .map(|row| row.id),
+            None => None,
+        };
+        // The role is finalized once a revision lands and its media class is
+        // known (promote path / backfill). At shell-creation the media class is
+        // unknown, so a child gets the provisional peer role `attachment`: never
+        // a wrong demotion to `attached_context`, and `primary` when it has no
+        // declared parent at all.
+        let document_role =
+            crate::domains::content::derive_document_role(parent_external_key.is_some(), false);
         let row = content_repository::create_document(
             &state.persistence.postgres,
             &NewContentDocument {
@@ -597,6 +625,9 @@ impl ContentService {
                 external_key: &external_key,
                 document_state: "active",
                 created_by_principal_id: command.created_by_principal_id,
+                parent_external_key: parent_external_key.as_deref(),
+                parent_document_id,
+                document_role,
             },
         )
         .await

@@ -711,7 +711,30 @@ describe('DocumentsInspectorPanel', () => {
     const errorBlocks = Array.from(container.querySelectorAll('.inline-error'));
     expect(errorBlocks).toHaveLength(1);
     expect(errorBlocks[0]?.textContent).not.toContain('Error');
+    expect(errorBlocks[0]?.textContent).toContain('Processing failed');
+    expect(errorBlocks[0]?.textContent).toContain('document parser could not extract');
+    expect(errorBlocks[0]?.textContent).toContain('Diagnostics');
     expect(errorBlocks[0]?.textContent).toContain('Parser failed on page 2');
+  });
+
+  it('renders upload extraction failures with guidance before diagnostics', async () => {
+    await renderPanel({
+      selectedDoc: buildSelectedDoc({
+        status: 'failed',
+        readiness: 'failed',
+        failureCode: 'upload_extraction_failed',
+        failureMessage: 'Upload extraction failed',
+        statusReason: 'The file was accepted, but text or structured content could not be extracted from it.',
+      }),
+    });
+
+    const notice = container.querySelector('[data-testid="document-failure-notice"]');
+    expect(notice?.textContent).toContain('Processing failed');
+    expect(notice?.textContent).toContain('could not be extracted');
+    expect(notice?.textContent).toContain('How to fix');
+    expect(notice?.textContent).toContain('Retry the upload');
+    expect(notice?.textContent).toContain('Diagnostics');
+    expect(notice?.textContent).toContain('upload_extraction_failed');
   });
 
   it('renders the same failed-document error in the mobile drawer presentation', async () => {

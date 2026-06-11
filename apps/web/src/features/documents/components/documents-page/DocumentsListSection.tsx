@@ -1,6 +1,6 @@
 import type { TFunction } from "i18next";
 import type { Dispatch, SetStateAction } from "react";
-import { FileText, Loader2, RotateCw, Upload, XCircle } from "lucide-react";
+import { FileText, Loader2, MousePointerSquareDashed, RotateCw, Upload, XCircle } from "lucide-react";
 
 import type {
   DocumentListPageResponse,
@@ -47,6 +47,7 @@ type PaginationState = {
 type DocumentsListSectionProps = {
   activeLibrary: Library;
   activateListPollGrace: () => void;
+  canUpload: boolean;
   debouncedSearch: string;
   errorMessage: (error: unknown, fallback: string) => string;
   filteredTotal: number | null;
@@ -64,6 +65,7 @@ type DocumentsListSectionProps = {
   searchQuery: string;
   selectedDoc: DocumentItem | null;
   selectDoc: (doc: DocumentItem) => void;
+  showDetailColumns: boolean;
   sortBy: DocumentListSortKey;
   sortOrder: DocumentListSortOrder;
   sortValue: SortValue;
@@ -98,14 +100,21 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
     updateSearchParamState: props.updateSearchParamState,
   });
 
+  // The drop target is only live for roles that can upload; viewers get the
+  // ordinary list with no ghost drag affordance (DOC-01 / role matrix §8).
+  const dropTargetProps = props.canUpload ? props.uploadController.dropTargetProps : {};
+  const dragActive = props.canUpload && props.uploadController.dragOver;
+
   return (
     <>
       <DocumentsFiltersBar
         libraryCost={props.libraryCost}
         onCancelSelection={list.clearSelection}
         onStartSelection={() => list.setSelectionMode(true)}
+        onToggleDetailColumns={list.toggleDetailColumns}
         searchQuery={props.searchQuery}
         selectionMode={list.selectionMode}
+        showDetailColumns={props.showDetailColumns}
         statusBucket={props.statusBucket}
         statusCounts={props.statusCounts ?? null}
         t={props.t}
@@ -113,8 +122,8 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
         workspaceCost={props.workspaceCost}
       />
       <div
-        className={`flex-1 min-w-0 overflow-hidden ${props.uploadController.dragOver ? "ring-2 ring-primary ring-inset bg-primary/5" : ""}`}
-        {...props.uploadController.dropTargetProps}
+        className={`relative flex-1 min-w-0 overflow-hidden ${dragActive ? "ring-2 ring-primary ring-inset bg-primary/5" : ""}`}
+        {...dropTargetProps}
       >
         {list.bulkProgress && (
           <div className="mx-4 mt-4">
@@ -134,7 +143,7 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
             total={props.filteredTotal ?? props.items.length}
           />
         )}
-        {props.uploadController.dragOver && <DropOverlay t={props.t} />}
+        {dragActive && <DropOverlay t={props.t} />}
         <DataState
           query={{
             isLoading: props.isLoading && props.items.length === 0,
@@ -155,7 +164,13 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
           emptyCheck={() =>
             props.items.length === 0 && props.pendingUploads.length === 0
           }
-          emptyRender={<EmptyState searchQuery={props.searchQuery} t={props.t} />}
+          emptyRender={
+            <EmptyState
+              canUpload={props.canUpload}
+              searchQuery={props.searchQuery}
+              t={props.t}
+            />
+          }
         >
           {() => (
             <div className="flex h-full min-h-0 flex-col">
@@ -175,10 +190,14 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
                   selectedIds={list.selectedIds}
                   selectionMode={list.selectionMode}
                   setSelectedIds={list.setSelectedIds}
+                  showDetailColumns={props.showDetailColumns}
                   sortBy={props.sortBy}
                   sortOrder={props.sortOrder}
                   t={props.t}
                 />
+                {props.canUpload && !list.selectionMode && (
+                  <DragHintFooter t={props.t} />
+                )}
               </div>
               {props.pagination.show && (
                 <DocumentsPaginationFooter
@@ -246,6 +265,20 @@ function DropOverlay({ t }: { t: TFunction }) {
   );
 }
 
+/**
+ * Persistent, low-key hint that the list is also a drop target (DOC-02). It
+ * sits under the table so the affordance is discoverable before the user ever
+ * begins a drag, which is exactly when the DropOverlay is invisible.
+ */
+function DragHintFooter({ t }: { t: TFunction }) {
+  return (
+    <div className="mx-4 my-3 flex items-center justify-center gap-2 rounded-xl border border-dashed border-border/70 bg-surface-sunken/40 px-4 py-2.5 text-xs text-muted-foreground">
+      <MousePointerSquareDashed className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+      <span>{t("documents.dragHint")}</span>
+    </div>
+  );
+}
+
 function LoadingState({ t }: { t: TFunction }) {
   return (
     <div className="empty-state py-20">
@@ -284,9 +317,11 @@ function ErrorState({
 }
 
 function EmptyState({
+  canUpload,
   searchQuery,
   t,
 }: {
+  canUpload: boolean;
   searchQuery: string;
   t: TFunction;
 }) {
@@ -303,6 +338,17 @@ function EmptyState({
           ? t("documents.noMatchingDocsDesc")
           : t("documents.noDocsDesc")}
       </p>
+      {!searchQuery && canUpload && (
+        <div className="mt-6 flex flex-col items-center gap-2 rounded-2xl border-2 border-dashed border-border/70 bg-surface-sunken/40 px-8 py-6">
+          <Upload className="h-6 w-6 text-primary/70" />
+          <p className="text-sm font-semibold text-foreground">
+            {t("documents.dropZoneTitle")}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {t("documents.dropZoneHint")}
+          </p>
+        </div>
+      )}
     </div>
   );
 }

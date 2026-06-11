@@ -213,6 +213,8 @@ impl QueryGroundingFixture {
                 external_key: format!("grounding-{document_id}"),
                 file_name: None,
                 title: Some("Grounding Document".to_string()),
+                source_uri: None,
+                document_hint: None,
                 document_state: "active".to_string(),
                 active_revision_id: Some(revision_id),
                 readable_revision_id: Some(revision_id),
@@ -220,6 +222,8 @@ impl QueryGroundingFixture {
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
+                parent_document_id: None,
+                document_role: "primary".to_string(),
             })
             .await
             .context("failed to insert grounding document")?;
@@ -572,6 +576,8 @@ impl QueryGroundingAppFixture {
                     external_key: format!("grounding-detail-{document_id}"),
                     file_name: None,
                     title: Some("Grounding Detail Document".to_string()),
+                    source_uri: None,
+                    document_hint: None,
                     document_state: "active".to_string(),
                     active_revision_id: Some(active_revision_id),
                     readable_revision_id: Some(active_revision_id),
@@ -579,6 +585,8 @@ impl QueryGroundingAppFixture {
                     created_at: now,
                     updated_at: now,
                     deleted_at: None,
+                    parent_document_id: None,
+                    document_role: "primary".to_string(),
                 })
                 .await
                 .context("failed to seed grounding detail document")?;

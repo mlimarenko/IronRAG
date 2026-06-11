@@ -1,9 +1,9 @@
 # Running IronRAG with Ollama
 
 This guide documents the local Ollama integration: which models work for
-which binding purpose, how Arango's vector index interacts with the
-embedding dimension you pick, the operational gotchas, and a known-good
-preset that runs comfortably on a 12 GB consumer GPU.
+which binding purpose, how PostgreSQL vector storage interacts with the
+embedding dimension you pick, operational gotchas, and an example preset
+for a 12 GB consumer GPU.
 
 ## Why Ollama
 
@@ -26,7 +26,8 @@ The Ollama provider catalog row ships with the IronRAG bootstrap and
 defaults to `http://localhost:11434/v1` with no API key. You only need
 to create a credential pointing at a reachable Ollama host (from inside
 the backend container that probably means `host.docker.internal:11434`)
-and the model catalog auto-syncs `GET /api/tags` into IronRAG's catalog.
+and the model catalog auto-syncs the OpenAI-compatible model list
+(`GET /v1/models` against the credential base URL) into IronRAG's catalog.
 
 ```bash
 curl -sS -X POST http://localhost:19000/v1/ai/credentials \
@@ -46,7 +47,7 @@ model list and registers every model with `capability_kind=chat` and
 `capability_kind=embedding`. Vision-capable models (`qwen3-vl:*`) also
 get `vision` in their `allowedBindingPurposes`.
 
-## Recommended preset (12 GB VRAM, single GPU)
+## Example preset (12 GB VRAM, single GPU)
 
 Benchmarked WARM on RTX 5070 (12 GB) against a representative
 extract-graph prompt over a Rust source chunk:
@@ -111,79 +112,30 @@ markdown file needs ~5 minutes of continuous progress just to fit
 inside the timeout — any GPU contention or model swap pushes it over.
 Bump to **1800 s** for local-Ollama runs:
 
-```yaml
-# docker-compose-local.yml — ironrag-app-env anchor
-IRONRAG_RUNTIME_GRAPH_EXTRACT_IDLE_TIMEOUT_SECONDS: 1800
+```bash
+# .env — read automatically by docker compose
+IRONRAG_RUNTIME_GRAPH_EXTRACT_IDLE_TIMEOUT_SECONDS=1800
 ```
 
 Restart `backend` *and* `worker` together; if you also touch `frontend`
-remember the per-CLAUDE.md rule that nginx upstream can cache stale
-IPs — recreate the frontend too.
+note that the frontend nginx upstream can cache a stale backend IP —
+recreate the frontend too.
 
-## Vector dimensions: instance-wide, not per-library
+## Vector dimensions: per library
 
-This is the part most operators get wrong on the first try.
-
-Arango's vector indexes (`knowledge_chunk_vector_index`,
-`knowledge_entity_vector_index`) are built with a **fixed dimension at
-creation time**. The index is **instance-wide**: there is no per-library
-or per-workspace vector index. Every library on the deployment shares
-the same chunk-vector dimension.
+PostgreSQL stores chunk and entity embeddings in per-`(library, dim)`
+pgvector relations tracked by a vector manifest. A deployment can hold
+libraries with different active embedding dimensions at the same time.
 
 What this means in practice:
 
-- The first embedding model registered with the deployment determines
-  the index dimension. Bootstrap defaults to `text-embedding-3-large`
-  (3072 dims) unless you override the bootstrap env vars.
-- Switching to a different-dimension embedding model — say, swapping
-  the bootstrap default for `qwen3-embedding:0.6b` (1024 dims) on the
-  IDE workspace — requires rebuilding the index to the new dimension.
-- The rebuild is **instance-wide** too: `ironrag-maintenance rebuild vector-plane --source-library
-  <library-uuid>` reads the target library's active binding to get the
-  new dimension, then re-embeds every library that has live vector
-  material so they all land in the same index.
-
-### Failure mode when bindings disagree
-
-If one library wants 1024 dims and another wants 3072 dims, the rebuild
-refuses:
-
-```
-cannot rebuild Arango vector plane to 1024 dimensions:
-library <uuid> active vector binding produces 3072 dimensions
-```
-
-The system is honest about it — you cannot mix dimensions in a single
-deployment.
-
-### How to fix it
-
-Two options, both supported:
-
-1. **Pick one embedding model for the whole deployment.** Set the
-   instance-level `embed_chunk` and `query_retrieve` bindings to the
-   model you want, then run `ironrag-maintenance rebuild vector-plane --source-library` against any
-   library that has material. Workspaces inherit the instance binding
-   unless they override at workspace/library scope.
-
-2. **Quiet the disagreeing libraries first.** Hard-delete documents
-   from any library still pointing at the old dimension (its vectors
-   in `knowledge_chunk_vector` get cleared), then run the rebuild. The
-   rebuild's precondition check skips libraries with no live material,
-   so once they are empty the dimension mismatch goes away.
-
-In both cases the rebuild atomically:
-
-1. Drops `knowledge_chunk_vector_index` and
-   `knowledge_entity_vector_index`.
-2. Truncates the two vector collections if the dimension changed.
-3. Re-embeds every chunk/entity of every library with material, using
-   that library's active binding.
-4. Recreates the indexes with the new dimension.
-
-There is no online mode — the rebuild blocks vector writes while it
-runs. For our local IDE workspace at ~800 chunks this is a 30-second
-operation; at 100k-chunk scale it is minutes.
+- The active `embed_chunk` / `query_retrieve` binding for a library
+  determines that library's embedding dimension.
+- Switching one library from a 3072-dimensional embedding model to a
+  1024-dimensional Ollama embedding model does not require the whole
+  deployment to use 1024 dimensions.
+- Existing vector material for the affected library still has to be
+  rebuilt before retrieval uses the new embedding model.
 
 ### Running the rebuild
 
@@ -194,13 +146,13 @@ docker exec ironrag-backend-1 \
   ironrag-maintenance rebuild vector-plane --source-library <library-uuid>
 ```
 
-Pick any library whose active binding you want to become the new
-deployment-wide dimension. The rebuild log line summarises what changed:
+Pick the library whose active binding should drive the rebuild. The
+rebuild updates vector material for the affected `(library, dim)` lane:
 
 ```
-Arango vector-plane rebuild completed
+vector-plane rebuild completed
   library_id=…  previous_dimensions=Some(3072)  target_dimensions=1024
-  indexes_recreated=true  libraries_rebuilt=1
+  libraries_rebuilt=1
   chunk_embeddings_rebuilt=820  graph_node_embeddings_rebuilt=0
 ```
 
@@ -208,12 +160,12 @@ Arango vector-plane rebuild completed
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ProviderUnavailable: failed to resolve chunk embedding dimensions for <uuid>` during ingest | Embedding model returned a vector whose dimension does not match the live Arango index | Run `ironrag-maintenance rebuild vector-plane --source-library`. If the rebuild errors with a dimension-mismatch line, address the disagreeing library first (see above). |
+| `ProviderUnavailable: failed to resolve chunk embedding dimensions for <uuid>` during ingest | The embedding model returned vectors whose dimension does not match the active library binding or vector manifest lane | Check the library's `embed_chunk` and `query_retrieve` bindings, then run `ironrag-maintenance rebuild vector-plane --source-library` for the affected library. |
 | `graph extraction idle timeout: no chunk completed for revision … within 300s` | Local LLM is slower than the timeout assumes | Bump `IRONRAG_RUNTIME_GRAPH_EXTRACT_IDLE_TIMEOUT_SECONDS` in the docker-compose env. Worker restart required. |
 | qwen3:* extract bindings return empty JSON | Model emits 800 tokens of `<thinking>` before content; OpenAI-compatible API does not honor `/no_think` | Pick a non-thinking model (llama3.1:8b, phi4-mini, gemma3:4b). |
 | First call after 5 min idle is ~10× slower | `OLLAMA_KEEP_ALIVE=5m` evicted the model from VRAM | Increase `OLLAMA_KEEP_ALIVE` in Ollama's compose file, or accept the warmup as part of cold-start latency. |
 | Vision binding times out on small images | `qwen3-vl:4b` ships with `num_ctx=4096`; some PDF page images encode to longer prompts | Set `num_ctx: 8192` in the vision preset's `extraParametersJson`. |
-| Backend health says OK at port 19000 but every `/v1/*` returns 404 | Frontend nginx is still pointing at a stale backend Docker IP after a `--force-recreate backend` | Recreate the frontend too — per CLAUDE.md, backend and frontend must be recreated together. |
+| Backend health says OK at port 19000 but every `/v1/*` returns 404 | Frontend nginx is still pointing at a stale backend Docker IP after a `--force-recreate backend` | Recreate the frontend too — backend and frontend must be recreated together. |
 
 ## Quick benchmark recipe
 
@@ -262,9 +214,9 @@ parallel vision call will evict one of them.
 
 ## See also
 
-- `apps/api/src/bin/vector_rebuild.rs` — the rebuild CLI source.
-- `apps/api/src/services/query/search.rs:450` —
-  `rebuild_vector_plane_from_library_binding`, the rebuild flow
+- `apps/api/src/bin/ironrag_maintenance.rs` — the rebuild CLI source.
+- `apps/api/src/services/query/search.rs:470` —
+  `rebuild_vector_plane_for_library`, the rebuild flow
   including the precondition check.
 - `apps/api/src/services/query/vector_dimensions.rs` — the dimension
   validation that fails-loud when a binding produces vectors that do

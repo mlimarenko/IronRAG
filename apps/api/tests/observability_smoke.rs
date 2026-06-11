@@ -37,7 +37,7 @@ async fn init_tracing_child_disabled_by_flag() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    ironrag_backend::observability::init_tracing()?;
+    ironrag_backend::observability::init_tracing(None)?;
     ironrag_backend::observability::shutdown_tracing().await;
     Ok(())
 }
@@ -48,7 +48,7 @@ async fn init_tracing_child_with_fake_endpoint() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    ironrag_backend::observability::init_tracing()?;
+    ironrag_backend::observability::init_tracing(None)?;
     ironrag_backend::observability::shutdown_tracing().await;
     Ok(())
 }

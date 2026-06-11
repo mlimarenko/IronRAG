@@ -17,18 +17,21 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::header,
+    http::{StatusCode, header},
     response::Response,
     routing::MethodRouter,
 };
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
+use tokio::io::AsyncWriteExt;
 use tokio_util::io::StreamReader;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::ops::{ASYNC_OP_STATUS_FAILED, ASYNC_OP_STATUS_PROCESSING, ASYNC_OP_STATUS_READY},
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -42,11 +45,17 @@ use crate::{
         export_library_archive, export_workspace_archive, restore_library_archive,
         restore_workspace_archive,
     },
+    services::ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
 };
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExportQuery {
-    /// Comma-separated list of include kinds. Defaults to everything.
+    /// Comma-separated include kinds. Valid values: `library_data`
+    /// (content + runtime graph + knowledge tables), `blobs` (original
+    /// source files, requires `library_data`), `workspace` (the owning
+    /// `catalog_workspace` row) and `ai_config` (portable AI configuration:
+    /// provider/model catalogs, prices, credentials without `api_key`,
+    /// presets and bindings). Defaults to `library_data,blobs`.
     include: Option<String>,
 }
 
@@ -67,6 +76,16 @@ pub struct SnapshotImportReportResponse {
     pub arango_edges_by_store: BTreeMap<String, u64>,
     pub skipped_arango_edges_by_store: BTreeMap<String, u64>,
     pub blobs_restored: u64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotImportAcceptedResponse {
+    pub operation_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub overwrite_mode: OverwriteMode,
+    pub archive_bytes: u64,
 }
 
 impl From<SnapshotImportReport> for SnapshotImportReportResponse {
@@ -134,6 +153,143 @@ impl From<WorkspaceSnapshotImportReport> for WorkspaceSnapshotImportReportRespon
                 .collect(),
         }
     }
+}
+
+struct SnapshotBodySpool {
+    _temp_file: tempfile::NamedTempFile,
+    path: PathBuf,
+    bytes_written: u64,
+}
+
+impl SnapshotBodySpool {
+    async fn open(&self) -> Result<tokio::fs::File, ApiError> {
+        tokio::fs::File::open(&self.path)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "open spooled snapshot body"))
+    }
+}
+
+async fn spool_snapshot_body(
+    body: Body,
+    snapshot_kind: &'static str,
+) -> Result<SnapshotBodySpool, ApiError> {
+    let temp_file = tempfile::Builder::new()
+        .prefix("ironrag-snapshot-import-")
+        .tempfile()
+        .map_err(|error| ApiError::internal_with_log(error, "create snapshot import temp file"))?;
+    let path = temp_file.path().to_path_buf();
+    let writer = temp_file
+        .reopen()
+        .map_err(|error| ApiError::internal_with_log(error, "open snapshot import temp file"))?;
+    let mut writer = tokio::fs::File::from_std(writer);
+
+    let body_stream = body
+        .into_data_stream()
+        .map_err(|error| std::io::Error::other(format!("body stream error: {error}")));
+    let mut reader = StreamReader::new(body_stream);
+    let bytes_written = tokio::io::copy(&mut reader, &mut writer)
+        .await
+        .map_err(|error| ApiError::BadRequest(format!("failed to read snapshot body: {error}")))?;
+    writer
+        .flush()
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "flush snapshot import temp file"))?;
+    drop(writer);
+
+    tracing::info!(
+        snapshot_kind,
+        archive_bytes = bytes_written,
+        "snapshot import request body spooled",
+    );
+
+    Ok(SnapshotBodySpool { _temp_file: temp_file, path, bytes_written })
+}
+
+fn spawn_library_snapshot_import_worker(
+    state: AppState,
+    operation_id: Uuid,
+    library_id: Uuid,
+    spooled: SnapshotBodySpool,
+    overwrite: OverwriteMode,
+) {
+    tokio::spawn(
+        async move {
+            let archive_bytes = spooled.bytes_written;
+            let result = async {
+                let reader = spooled.open().await?;
+                restore_library_archive(&state, library_id, reader, overwrite)
+                    .await
+                    .map_err(ApiError::from)
+            }
+            .await;
+
+            match result {
+                Ok(report) => {
+                    tracing::info!(
+                        library_id = %report.library_id,
+                        operation_id = %operation_id,
+                        archive_bytes,
+                        "snapshot import restored from spooled request body",
+                    );
+                    if let Err(error) = state
+                        .canonical_services
+                        .ops
+                        .update_async_operation(
+                            &state,
+                            UpdateAsyncOperationCommand {
+                                operation_id,
+                                status: ASYNC_OP_STATUS_READY.to_string(),
+                                completed_at: Some(chrono::Utc::now()),
+                                failure_code: None,
+                            },
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            %operation_id,
+                            %library_id,
+                            error = ?error,
+                            "failed to mark snapshot import operation ready",
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %operation_id,
+                        %library_id,
+                        error = ?error,
+                        "snapshot import worker failed",
+                    );
+                    if let Err(update_error) = state
+                        .canonical_services
+                        .ops
+                        .update_async_operation(
+                            &state,
+                            UpdateAsyncOperationCommand {
+                                operation_id,
+                                status: ASYNC_OP_STATUS_FAILED.to_string(),
+                                completed_at: Some(chrono::Utc::now()),
+                                failure_code: Some("snapshot_import_failed".to_string()),
+                            },
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            %operation_id,
+                            %library_id,
+                            error = ?update_error,
+                            "failed to mark snapshot import operation failed",
+                        );
+                    }
+                }
+            }
+        }
+        .instrument(tracing::info_span!(
+            "snapshot.library_import.worker",
+            %operation_id,
+            %library_id,
+        )),
+    );
 }
 
 /// Streams a library snapshot as `application/zstd` (tar.zst).
@@ -248,7 +404,7 @@ pub async fn export_library_snapshot(
         description = "tar.zst archive previously emitted by GET /v1/content/libraries/{libraryId}/snapshot",
     ),
     responses(
-        (status = 200, description = "Snapshot import report (per-table row counts, blob count, applied overwrite mode)", body = SnapshotImportReportResponse),
+        (status = 202, description = "Snapshot import accepted; poll /v1/ops/operations/{operationId}", body = SnapshotImportAcceptedResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
         (status = 404, description = "Library not found"),
@@ -261,23 +417,48 @@ pub async fn import_library_snapshot(
     Path(library_id): Path<Uuid>,
     Query(query): Query<ImportQuery>,
     body: Body,
-) -> Result<Json<SnapshotImportReportResponse>, ApiError> {
-    load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
+) -> Result<(StatusCode, Json<SnapshotImportAcceptedResponse>), ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
 
     let overwrite = OverwriteMode::parse(query.overwrite.as_deref().unwrap_or(""))
         .map_err(|error| ApiError::BadRequest(format!("invalid overwrite: {error}")))?;
 
-    // Wrap the axum body stream into an AsyncRead for tokio-tar.
-    let body_stream = body
-        .into_data_stream()
-        .map_err(|error| std::io::Error::other(format!("body stream error: {error}")));
-    let reader = StreamReader::new(body_stream);
+    let spooled = spool_snapshot_body(body, "library").await?;
+    let archive_bytes = spooled.bytes_written;
+    let operation = state
+        .canonical_services
+        .ops
+        .create_async_operation(
+            &state,
+            CreateAsyncOperationCommand {
+                workspace_id: library.workspace_id,
+                library_id: Some(library.id),
+                operation_kind: "snapshot_import".to_string(),
+                surface_kind: "rest".to_string(),
+                requested_by_principal_id: Some(auth.principal_id),
+                status: ASYNC_OP_STATUS_PROCESSING.to_string(),
+                subject_kind: "library".to_string(),
+                subject_id: Some(library.id),
+                parent_async_operation_id: None,
+                completed_at: None,
+                failure_code: None,
+            },
+        )
+        .await?;
 
-    let report = restore_library_archive(&state, library_id, reader, overwrite)
-        .await
-        .map_err(ApiError::from)?;
+    spawn_library_snapshot_import_worker(state, operation.id, library.id, spooled, overwrite);
 
-    Ok(Json(report.into()))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SnapshotImportAcceptedResponse {
+            operation_id: operation.id,
+            workspace_id: library.workspace_id,
+            library_id: library.id,
+            overwrite_mode: overwrite,
+            archive_bytes,
+        }),
+    ))
 }
 
 /// Streams a workspace snapshot as a plain `application/x-tar` archive that
@@ -406,14 +587,19 @@ pub async fn import_workspace_snapshot(
     let overwrite = OverwriteMode::parse(query.overwrite.as_deref().unwrap_or(""))
         .map_err(|error| ApiError::BadRequest(format!("invalid overwrite: {error}")))?;
 
-    let body_stream = body
-        .into_data_stream()
-        .map_err(|error| std::io::Error::other(format!("body stream error: {error}")));
-    let reader = StreamReader::new(body_stream);
+    let spooled = spool_snapshot_body(body, "workspace").await?;
+    let reader = spooled.open().await?;
 
     let report = restore_workspace_archive(&state, workspace_id, reader, overwrite)
         .await
         .map_err(ApiError::from)?;
+
+    tracing::info!(
+        workspace_id = %report.workspace_id,
+        archive_bytes = spooled.bytes_written,
+        libraries_restored = report.libraries_restored,
+        "workspace snapshot import restored from spooled request body",
+    );
 
     Ok(Json(report.into()))
 }

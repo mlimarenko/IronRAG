@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
 import { useApp } from "@/shared/contexts/app-context";
+import { useCan } from "@/shared/auth/useCan";
 
 import { DocumentsPageHeader } from "@/features/documents/components/DocumentsPageHeader";
 
@@ -20,10 +21,23 @@ import {
 import { useDocumentsQueries } from "./useDocumentsQueries";
 import { useWebIngestController } from "./useWebIngestController";
 
+const TERMINAL_RUN_STATES = new Set([
+  "completed",
+  "completed_partial",
+  "failed",
+  "canceled",
+]);
+
 export function DocumentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { activeLibrary, activeWorkspace, locale, user } = useApp();
+  const { activeLibrary, activeWorkspace, locale } = useApp();
+  const { can } = useCan();
+  const canUpload = can("content.upload");
+  const canEdit = can("content.edit");
+  const canDelete = can("library.delete");
+  const documentHintEditable = can("content.edit");
+
   const [tableState, setTableState] = useDocumentsTableState();
   const urlState = useDocumentsPageUrlState({ tableState, setTableState });
   const [activeTab, setActiveTab] = useState<DocumentsPageTab>("documents");
@@ -61,26 +75,37 @@ export function DocumentsPage() {
     webRuns: documents.webRuns,
     webRunsRefreshing: documents.webRunsRefreshing,
   });
-  const documentHintEditable = user?.role === "admin" || user?.role === "operator";
 
+  const hasActiveWebRun = webIngest.webRuns.some(
+    (r) => !TERMINAL_RUN_STATES.has(r.runState?.toLowerCase() ?? ""),
+  );
   if (!activeLibrary) return <NoLibraryState t={t} />;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <DocumentsPageHeader
         activeLibraryName={activeLibrary.name}
-        activeTab={activeTab} documentsCount={documents.totalCount ?? documents.items.length}
-        fileInputRef={uploadQueue.fileInputRef} folderInputRef={uploadQueue.folderInputRef}
+        activeTab={activeTab}
+        canUpload={canUpload}
+        documentsCount={documents.totalCount ?? documents.items.length}
+        fileInputRef={uploadQueue.fileInputRef}
+        folderInputRef={uploadQueue.folderInputRef}
         handleFileSelect={uploadQueue.handleFileSelect}
         handleFolderSelect={uploadQueue.handleFolderSelect}
+        hasActiveWebRun={hasActiveWebRun}
         onRefreshWebRuns={() => void webIngest.refreshWebRuns()}
-        setActiveTab={setActiveTab} setAddLinkOpen={webIngest.setAddLinkOpen}
-        setBoundaryPolicy={webIngest.setBoundaryPolicy} setCrawlMode={webIngest.setCrawlMode}
-        setMaxDepth={webIngest.setMaxDepth} setMaxPages={webIngest.setMaxPages}
-        setSeedUrl={webIngest.setSeedUrl} t={t}
-        webRunsCount={webIngest.webRuns.length} webRunsRefreshing={webIngest.webRunsRefreshing}
+        setActiveTab={setActiveTab}
+        setAddLinkOpen={webIngest.setAddLinkOpen}
+        setBoundaryPolicy={webIngest.setBoundaryPolicy}
+        setCrawlMode={webIngest.setCrawlMode}
+        setMaxDepth={webIngest.setMaxDepth}
+        setMaxPages={webIngest.setMaxPages}
+        setSeedUrl={webIngest.setSeedUrl}
+        t={t}
+        webRunsCount={webIngest.webRuns.length}
+        webRunsRefreshing={webIngest.webRunsRefreshing}
         ingestionReady={activeLibrary.ingestionReady}
-        onOpenAiSettings={() => navigate('/admin?tab=ai')}
+        onOpenAiSettings={() => navigate("/admin/ai")}
       />
       <div className="flex-1 flex overflow-hidden">
         {activeTab === "documents" ? (
@@ -88,21 +113,36 @@ export function DocumentsPage() {
             <DocumentsListSection
               activeLibrary={activeLibrary}
               activateListPollGrace={documents.activateListPollGrace}
-              debouncedSearch={documents.debouncedSearch} errorMessage={documents.errorMessage}
-              filteredTotal={documents.filteredTotal} isLoading={documents.isLoading}
-              items={documents.items} libraryCost={documents.libraryCost}
-              loadError={documents.loadError} loadFirstPage={documents.loadFirstPage} locale={locale}
+              canUpload={canUpload}
+              debouncedSearch={documents.debouncedSearch}
+              errorMessage={documents.errorMessage}
+              filteredTotal={documents.filteredTotal}
+              isLoading={documents.isLoading}
+              items={documents.items}
+              libraryCost={documents.libraryCost}
+              loadError={documents.loadError}
+              loadFirstPage={documents.loadFirstPage}
+              locale={locale}
               localSort={tableState.localSort}
               onSelectionModeChange={setSelectionMode}
-              pageSize={urlState.pageSize} pagination={documents.pagination}
-              pendingUploads={uploadQueue.pendingUploads} searchQuery={urlState.searchQuery}
-              selectedDoc={documents.selectedDoc} selectDoc={documents.selectDoc}
-              sortBy={documents.sortBy} sortOrder={documents.sortOrder} sortValue={urlState.sortValue}
-              statusBackendFilter={urlState.statusBackendFilter} statusBucket={urlState.statusBucket}
-              statusCounts={documents.statusCounts} t={t}
+              pageSize={urlState.pageSize}
+              pagination={documents.pagination}
+              pendingUploads={uploadQueue.pendingUploads}
+              searchQuery={urlState.searchQuery}
+              selectedDoc={documents.selectedDoc}
+              selectDoc={documents.selectDoc}
+              showDetailColumns={tableState.showDetailColumns}
+              sortBy={documents.sortBy}
+              sortOrder={documents.sortOrder}
+              sortValue={urlState.sortValue}
+              statusBackendFilter={urlState.statusBackendFilter}
+              statusBucket={urlState.statusBucket}
+              statusCounts={documents.statusCounts}
+              t={t}
               setTableState={setTableState}
               updateSearchParamState={urlState.updateSearchParamState}
-              uploadController={uploadQueue} workspaceCost={documents.workspaceCost}
+              uploadController={uploadQueue}
+              workspaceCost={documents.workspaceCost}
             />
           </div>
         ) : (
@@ -112,12 +152,19 @@ export function DocumentsPage() {
         )}
         <InspectorSection
           activateListPollGrace={documents.activateListPollGrace}
-          clearSelectedDoc={documents.clearSelectedDoc} errorMessage={documents.errorMessage}
+          canEdit={canEdit}
+          canDelete={canDelete}
+          clearSelectedDoc={documents.clearSelectedDoc}
+          errorMessage={documents.errorMessage}
           documentHintEditable={documentHintEditable}
           fetchSelectedDetail={documents.fetchSelectedDetail}
-          inspectorLifecycle={documents.inspectorLifecycle} loadFirstPage={documents.loadFirstPage}
-          locale={locale} selectedDoc={documents.selectedDoc}
-          selectionMode={selectionMode} selectDoc={documents.selectDoc} t={t}
+          inspectorLifecycle={documents.inspectorLifecycle}
+          loadFirstPage={documents.loadFirstPage}
+          locale={locale}
+          selectedDoc={documents.selectedDoc}
+          selectionMode={selectionMode}
+          selectDoc={documents.selectDoc}
+          t={t}
           updateDocumentHintLocally={documents.updateDocumentHintLocally}
           updateSearchParamState={urlState.updateSearchParamState}
         />

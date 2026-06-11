@@ -653,6 +653,22 @@ impl UnifiedGateway {
         serde_json::Value::Object(filtered)
     }
 
+    fn tool_use_extra_parameters(
+        provider_kind: &str,
+        has_tools: bool,
+        extra_parameters_json: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut upstream_extra = Self::upstream_extra_parameters(extra_parameters_json);
+        if !has_tools || !provider_kind.eq_ignore_ascii_case("qwen") {
+            return upstream_extra;
+        }
+        let serde_json::Value::Object(ref mut object) = upstream_extra else {
+            return upstream_extra;
+        };
+        object.entry("enable_thinking".to_string()).or_insert(serde_json::Value::Bool(false));
+        upstream_extra
+    }
+
     fn resolve_provider(
         provider_kind: &str,
         api_key_override: Option<&str>,
@@ -1040,7 +1056,11 @@ impl LlmGateway for UnifiedGateway {
             resolved.runtime.token_limit_parameter,
             request.max_output_tokens_override,
         );
-        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let upstream_extra = Self::tool_use_extra_parameters(
+            &request.provider_kind,
+            !tools.is_empty(),
+            &request.extra_parameters_json,
+        );
         // Some reasoning models (DeepSeek `*-pro` / `*-reasoner` family,
         // OpenAI `o*` series) reject `tool_choice` overrides. They only
         // accept the implicit "auto", so coercing them into "required"
@@ -1166,7 +1186,11 @@ impl LlmGateway for UnifiedGateway {
             resolved.runtime.token_limit_parameter,
             request.max_output_tokens_override,
         );
-        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let upstream_extra = Self::tool_use_extra_parameters(
+            &request.provider_kind,
+            !tools.is_empty(),
+            &request.extra_parameters_json,
+        );
         // Some reasoning models (DeepSeek `*-pro` / `*-reasoner` family,
         // OpenAI `o*` series) reject `tool_choice` overrides. They only
         // accept the implicit "auto", so coercing them into "required"
@@ -1688,6 +1712,32 @@ mod tests {
 
         assert_eq!(value.get("tools").and_then(serde_json::Value::as_array).map(Vec::len), Some(1));
         assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn qwen_tool_use_disables_thinking_by_default() {
+        let extra = UnifiedGateway::tool_use_extra_parameters("qwen", true, &serde_json::json!({}));
+
+        assert_eq!(extra.get("enable_thinking").and_then(serde_json::Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn qwen_tool_use_preserves_explicit_thinking_override() {
+        let extra = UnifiedGateway::tool_use_extra_parameters(
+            "qwen",
+            true,
+            &serde_json::json!({ "enable_thinking": true }),
+        );
+
+        assert_eq!(extra.get("enable_thinking").and_then(serde_json::Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn non_qwen_tool_use_does_not_add_thinking_flag() {
+        let extra =
+            UnifiedGateway::tool_use_extra_parameters("openai", true, &serde_json::json!({}));
+
+        assert!(extra.get("enable_thinking").is_none());
     }
 
     #[test]

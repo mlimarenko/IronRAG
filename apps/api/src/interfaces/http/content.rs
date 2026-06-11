@@ -171,6 +171,16 @@ pub async fn list_documents(
         Some(raw) => parse_document_status_filter(raw)?,
     };
 
+    // Optional document-id filter: lets a deep link (e.g. the Graph view's
+    // "open document" action carrying `documentId`) resolve a specific
+    // document through the same canonical list derivation that powers the
+    // table, so the inspector opens even when the target is off the loaded
+    // page. Empty / absent = no filter.
+    let id_filter: Vec<Uuid> = match query.ids.as_deref() {
+        None => Vec::new(),
+        Some(raw) => parse_document_id_filter(raw)?,
+    };
+
     let result = state
         .canonical_services
         .content
@@ -185,6 +195,7 @@ pub async fn list_documents(
                 sort,
                 sort_desc,
                 status_filter,
+                id_filter,
             },
         )
         .await?;
@@ -280,6 +291,17 @@ fn parse_document_status_filter(raw: &str) -> Result<Vec<DocumentStatus>, ApiErr
             }
         };
         out.push(status);
+    }
+    Ok(out)
+}
+
+fn parse_document_id_filter(raw: &str) -> Result<Vec<Uuid>, ApiError> {
+    let mut out = Vec::new();
+    for token in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let id = Uuid::parse_str(token).map_err(|_| {
+            ApiError::BadRequest(format!("invalid document id `{token}` in ids filter"))
+        })?;
+        out.push(id);
     }
     Ok(out)
 }
@@ -386,6 +408,7 @@ pub async fn create_document(
                 request_surface: "rest".to_string(),
                 source_identity: None,
                 revision: build_revision_metadata(&payload)?,
+                parent_external_key: payload.parent_external_key.clone(),
             },
         )
         .await?;
@@ -439,6 +462,7 @@ pub async fn upload_document(
                 file_name: payload.file_name,
                 mime_type: payload.mime_type,
                 file_bytes: payload.file_bytes,
+                parent_external_key: payload.parent_external_key,
             },
         )
         .await?;
@@ -971,6 +995,7 @@ pub async fn create_mutation(
                     workspace_id: payload.workspace_id,
                     library_id: payload.library_id,
                     external_key: None,
+                    parent_external_key: None,
                     idempotency_key: payload.idempotency_key.clone(),
                     content_source_kind: payload.content_source_kind.clone(),
                     checksum: payload.checksum.clone(),

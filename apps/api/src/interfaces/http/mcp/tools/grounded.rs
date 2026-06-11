@@ -42,7 +42,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     }
     Some(McpToolDescriptor {
         name: "grounded_answer",
-        description: "Ask a natural-language question against one library and get a grounded answer from IronRAG's canonical answer pipeline (query planning, hybrid retrieval, graph-aware context, answer generation, verifier). This is the best first candidate for ordinary content questions where the user expects an answer rather than a hit list, including setup/how-to questions, troubleshooting, versioned change summaries, and inventories of identifiers, values, parameters, modules, packages, graph nodes, or other items mentioned inside document content. Catalog tools list records and titles; they do not prove content facts. For composite questions, use this as an early focused probe or as one of several probes alongside document, graph, or runtime tools, then follow up if the result is incomplete. When the user asks for setup/configuration, a strong answer should include any sourced package/module, configuration path, parameter names/defaults, and example fragments present in the evidence. The tool text is a candidate human-readable reply only when structured output has `finalAnswerReady: true`; still inspect citations, warnings, and requested coverage before finalizing. For inventories, ordered lists, release/change summaries, table extracts, or multi-item comparisons, preserve the tool result's visible item coverage and order unless another tool gives better evidence. Otherwise treat it as a partial evidence summary, continue with a narrower tool call when useful, or answer only from the supported parts and mark unsupported or missing parts plainly. Structured output includes `executionDetail` with chunk, prepared-segment, technical-fact, entity, relation, verifier, runtime, request, and response fields, plus top-level `finalAnswerReady`, `runtimeExecutionId`, `executionId`, and `conversationId` shortcuts for trace lookups.",
+        description: "Ask a natural-language question against one library and get a grounded answer from IronRAG's canonical answer pipeline (query planning, hybrid retrieval, graph-aware context, answer generation, verifier). This is the best first candidate for ordinary content questions where the user expects an answer rather than a hit list, including setup/how-to questions, troubleshooting, versioned change summaries, and inventories of identifiers, values, parameters, modules, packages, graph nodes, or other items mentioned inside document content. Catalog tools list records and titles; they do not prove content facts. For composite questions, use this as an early focused probe or as one of several probes alongside document, graph, or runtime tools, then follow up if the result is incomplete. Build a coverage checklist from the user's requested deliverables, scopes, roles, items, constraints, and requested output shape; if one result covers only part of that checklist, continue with focused follow-up probes for the missing checklist items, using parallel calls when the missing items are independent. If a combined probe was narrowed by one checklist item and reports another checklist item unavailable, issue a standalone probe for the missing item with the narrowing removed before declaring it unavailable. Keep an evidence ledger across tool calls in the same turn: a later focused repair probe narrows or extends coverage; it does not erase earlier grounded facts, source labels, warnings, or action paths unless the later evidence directly contradicts them. If a result is not `finalAnswerReady`, not `finalizable`, or non-verified, treat it as a repair signal for requested examples, configuration/code snippets, table extracts, value inventories, operational outcomes, status handling, cancellation/rollback behavior, or exception paths: run a focused `grounded_answer` probe for the missing output shape and exact source snippets/literals before relying on generic document search, reading a loosely related source title, or absence wording. For short follow-up queries, preserve the prior requested action, output shape, and coverage requirements from `conversationTurns`; treat the latest query as the narrowing constraint. When the user asks for setup/configuration, a strong answer should include any sourced package/module, configuration path, parameter names/defaults, and example fragments present in the evidence; do not construct a synthetic file, command, request body, or code block by assembling separate sourced parameters unless the evidence explicitly returns that assembled snippet as an example. The tool text is a candidate human-readable reply only when structured output has `finalAnswerReady: true`; still inspect citations, warnings, requested coverage before finalizing, and merge useful supported facts from earlier partial and non-finalizable results instead of replacing them with the last probe. Treat `mustPreserveSpans` as exact same-turn evidence anchors for both finalizable and non-finalizable results: preserve every applicable value verbatim unless a later tool result directly contradicts it or that exact value is explicitly flagged as unsupported. When a ready verified result fully covers the request, copy or minimally reformat the visible tool text instead of summarizing away supported items or exact code-formatted literals. For inventories, ordered lists, release/change summaries, table extracts, or multi-item comparisons, preserve the tool result's visible item coverage and order unless another tool gives better evidence. Otherwise treat it as a partial evidence summary, continue with a narrower tool call when useful, or answer only from the supported parts and mark unsupported or missing parts plainly. Structured output includes `answerBody`, `finalizable`, `mustPreserveSpans`, `executionDetail` with chunk, prepared-segment, technical-fact, entity, relation, verifier, runtime, request, and response fields, plus top-level `finalAnswerReady`, `runtimeExecutionId`, `executionId`, and `conversationId` shortcuts for trace lookups.",
         input_schema: json!({
             "type": "object",
             "required": ["library", "query"],
@@ -325,6 +325,25 @@ mod tests {
     }
 
     #[test]
+    fn grounded_answer_descriptor_preserves_composite_coverage_contract() {
+        let descriptor = descriptor("grounded_answer").expect("descriptor");
+        assert!(descriptor.description.contains("coverage checklist"));
+        assert!(descriptor.description.contains("covers only part of that checklist"));
+        assert!(descriptor.description.contains("focused follow-up probes"));
+        assert!(descriptor.description.contains("parallel calls"));
+        assert!(descriptor.description.contains("combined probe was narrowed"));
+        assert!(descriptor.description.contains("standalone probe for the missing item"));
+        assert!(descriptor.description.contains("repair signal"));
+        assert!(descriptor.description.contains("exact source snippets/literals"));
+        assert!(descriptor.description.contains("reading a loosely related source title"));
+        assert!(descriptor.description.contains("Keep an evidence ledger"));
+        assert!(descriptor.description.contains("does not erase earlier grounded facts"));
+        assert!(descriptor.description.contains("merge useful supported facts"));
+        assert!(descriptor.description.contains("partial and non-finalizable results"));
+        assert!(descriptor.description.contains("exact same-turn evidence anchors"));
+    }
+
+    #[test]
     fn conversation_title_preserves_actual_surface() {
         assert_eq!(conversation_title("mcp", "  Lookup adapters  "), "[MCP] Lookup adapters");
         assert_eq!(conversation_title("ui", ""), "[UI] grounded_answer");
@@ -349,16 +368,28 @@ mod tests {
             edge_id,
         );
 
-        let structured = crate::interfaces::http::mcp::grounded_answer_contract_payload(
-            "Synthetic answer",
-            &detail,
-        );
+        let answer = "Use `/etc/alpha.ini` with `alphaKey = true`.";
+        let structured =
+            crate::interfaces::http::mcp::grounded_answer_contract_payload(answer, &detail);
         let structured_content = &structured["structuredContent"];
         let execution_detail = &structured_content["executionDetail"];
 
         assert_eq!(structured["isError"], json!(false));
         assert_eq!(structured_content.get("citations"), None);
+        assert_eq!(structured_content["answerBody"], json!(answer));
         assert_eq!(structured_content["finalAnswerReady"], json!(true));
+        assert_eq!(structured_content["finalizable"], json!(true));
+        assert_eq!(
+            structured_content["mustPreserveSpans"],
+            json!([
+                "/etc/alpha.ini",
+                "alphaKey = true",
+                "Synthetic API calls endpoint",
+                "Synthetic API",
+                "Synthetic API node",
+                "Synthetic contract"
+            ])
+        );
         assert_eq!(execution_detail["chunkReferences"][0]["executionId"], json!(execution_id));
         assert_eq!(execution_detail["chunkReferences"][0]["chunkId"], json!(chunk_id));
         assert_eq!(
@@ -382,6 +413,32 @@ mod tests {
         assert_eq!(execution_detail["entityReferences"][0]["nodeId"], json!(node_id));
         assert_eq!(execution_detail["relationReferences"][0]["executionId"], json!(execution_id));
         assert_eq!(execution_detail["relationReferences"][0]["edgeId"], json!(edge_id));
+    }
+
+    #[test]
+    fn non_finalizable_structured_content_does_not_promote_source_titles_to_preserve_spans() {
+        let mut detail = sample_execution_detail(
+            Uuid::from_u128(21),
+            Uuid::from_u128(22),
+            Uuid::from_u128(23),
+            Uuid::from_u128(24),
+            Uuid::from_u128(25),
+            Uuid::from_u128(26),
+            Uuid::from_u128(27),
+        );
+        detail.verification_state = AssistantVerificationState::Conflicting;
+
+        let answer = "Use `/etc/alpha.ini` with `alphaKey = true`.";
+        let structured =
+            crate::interfaces::http::mcp::grounded_answer_contract_payload(answer, &detail);
+        let structured_content = &structured["structuredContent"];
+
+        assert_eq!(structured_content["finalAnswerReady"], json!(false));
+        assert_eq!(structured_content["finalizable"], json!(false));
+        assert_eq!(
+            structured_content["mustPreserveSpans"],
+            json!(["/etc/alpha.ini", "alphaKey = true"])
+        );
     }
 
     fn sample_execution_detail(

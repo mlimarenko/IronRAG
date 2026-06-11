@@ -88,13 +88,22 @@ impl VectorShardKind {
     }
 }
 
+// LEGACY-SHIM(arango-era, remove>=0.7.0): drains the non-suffixed single-dim
+// Arango vector collections into per-dim shards — safe to delete once all
+// deployments have completed migration and those collections are dropped.
 /// Move every row from the legacy `knowledge_chunk_vector` /
 /// `knowledge_entity_vector` collections into the per-dim shards
 /// (`knowledge_*_vector_d<dim>`). Idempotent: a second run after the
 /// legacy collections are empty is a no-op.
 pub async fn vector_per_dim(state: &AppState) -> Result<VectorPerDimReport> {
-    let params = state.arango_search_store.vector_index_params();
-    let arango = state.arango_search_store.client();
+    ensure_arango_migration_backend(state)?;
+
+    let params = crate::infra::arangodb::search_store::VectorIndexParams {
+        n_lists: state.settings.arangodb_vector_index_n_lists,
+        default_n_probe: state.settings.arangodb_vector_index_default_n_probe,
+        training_iterations: state.settings.arangodb_vector_index_training_iterations,
+    };
+    let arango = &state.arango_client;
 
     let chunk_rows_moved = migrate_legacy_collection(
         arango,
@@ -298,7 +307,9 @@ pub struct ChunkVectorPerLibraryReport {
 /// the shared shard. It heals the split-brain window where a per-library shard
 /// was created by a new write before the library's older rows migrated.
 pub async fn chunk_vector_per_library(state: &AppState) -> Result<ChunkVectorPerLibraryReport> {
-    let arango = state.arango_search_store.client();
+    ensure_arango_migration_backend(state)?;
+
+    let arango = &state.arango_client;
 
     // Discover the shared per-dim chunk shards. `list_per_dim_chunk_vector_collections`
     // matches the `knowledge_chunk_vector_d` prefix, which also covers the
@@ -480,6 +491,8 @@ pub async fn chunk_temporal_bounds(
     library_filter: Option<Uuid>,
     dry_run: bool,
 ) -> Result<ChunkTemporalBackfillReport> {
+    ensure_arango_migration_backend(state)?;
+
     let mut libraries =
         catalog_repository::list_libraries(&state.persistence.postgres, None).await?;
     if let Some(target) = library_filter {
@@ -610,6 +623,16 @@ async fn backfill_library(
     Ok(counts)
 }
 
+fn ensure_arango_migration_backend(state: &AppState) -> Result<()> {
+    match state.settings.knowledge_plane_backend.as_str() {
+        "arango" => Ok(()),
+        "postgres" => anyhow::bail!(
+            "automatic migration is not supported on the postgres knowledge plane; use snapshot restore"
+        ),
+        backend => anyhow::bail!("unsupported knowledge_plane_backend `{backend}`"),
+    }
+}
+
 async fn update_arango_chunk_temporal(
     state: &AppState,
     chunk_id: Uuid,
@@ -621,8 +644,7 @@ async fn update_arango_chunk_temporal(
     // `FOR chunk IN @@collection FILTER chunk.chunk_id == @id` would
     // compile to.
     state
-        .arango_document_store
-        .client()
+        .arango_client
         .query_json(
             "UPDATE @key WITH { occurred_at: @occurred_at, occurred_until: @occurred_until } \
              IN @@collection RETURN NEW",

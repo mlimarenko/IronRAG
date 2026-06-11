@@ -58,7 +58,7 @@ use provider_validation::{
     runtime_provider_base_url, validate_provider_access,
 };
 use shared::{
-    binding_purpose_key, canonical_runtime_preset_name, map_ai_write_error,
+    binding_purpose_key, canonical_runtime_preset_name, map_ai_delete_error, map_ai_write_error,
     map_binding_assignment_row, map_binding_validation_row, normalize_non_empty,
     normalize_optional, normalize_scope_ref, parse_binding_purpose, parse_scope_kind,
     scope_can_use_resource, scope_kind_key, scope_ref_from_binding_row,
@@ -91,6 +91,54 @@ pub struct UpdateProviderCredentialCommand {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub credential_state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateProviderCatalogCommand {
+    pub provider_kind: String,
+    pub display_name: String,
+    pub api_style: String,
+    pub lifecycle_state: String,
+    pub default_base_url: Option<String>,
+    pub capability_flags_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateProviderCatalogCommand {
+    pub provider_id: Uuid,
+    pub provider_kind: String,
+    pub display_name: String,
+    pub api_style: String,
+    pub lifecycle_state: String,
+    pub default_base_url: Option<String>,
+    pub capability_flags_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateModelCatalogCommand {
+    pub provider_catalog_id: Uuid,
+    pub model_name: String,
+    pub capability_kind: String,
+    pub modality_kind: String,
+    pub lifecycle_state: String,
+    pub allowed_binding_purposes: Vec<AiBindingPurpose>,
+    pub context_window: Option<i32>,
+    pub max_output_tokens: Option<i32>,
+    pub metadata_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateModelCatalogCommand {
+    pub model_id: Uuid,
+    pub provider_catalog_id: Uuid,
+    pub model_name: String,
+    pub capability_kind: String,
+    pub modality_kind: String,
+    pub lifecycle_state: String,
+    pub allowed_binding_purposes: Vec<AiBindingPurpose>,
+    pub context_window: Option<i32>,
+    pub max_output_tokens: Option<i32>,
+    pub metadata_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]

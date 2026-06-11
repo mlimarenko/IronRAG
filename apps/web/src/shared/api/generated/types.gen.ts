@@ -293,6 +293,16 @@ export type AsyncOperationDetailResponse = OpsAsyncOperation & {
     progress: OpsAsyncOperationProgress;
 };
 
+export type AuditActorPrincipalResponse = {
+    displayLabel: string;
+    displayName?: string | null;
+    id: string;
+    login?: string | null;
+    principalKind: string;
+    role?: string | null;
+    status: string;
+};
+
 export type AuditAssistantCallResponse = {
     conversationId?: string | null;
     currencyCode?: string | null;
@@ -317,6 +327,7 @@ export type AuditEventPageResponse = {
 
 export type AuditEventResponse = {
     actionKind: string;
+    actorPrincipal?: null | AuditActorPrincipalResponse;
     actorPrincipalId?: string | null;
     assistantCall?: null | AuditAssistantCallResponse;
     createdAt: string;
@@ -812,6 +823,18 @@ export type CreateGrantRequest = {
     resourceKind: IamGrantResourceKind;
 };
 
+export type CreateModelCatalogRequest = {
+    allowedBindingPurposes?: Array<AiBindingPurpose>;
+    capabilityKind: string;
+    contextWindow?: number | null;
+    lifecycleState: string;
+    maxOutputTokens?: number | null;
+    metadataJson?: unknown;
+    modalityKind: string;
+    modelName: string;
+    providerCatalogId: string;
+};
+
 export type CreateModelPresetRequest = {
     extraParametersJson?: unknown;
     libraryId?: string | null;
@@ -840,6 +863,15 @@ export type CreateMutationRequest = {
     storageKey?: string | null;
     title?: string | null;
     workspaceId: string;
+};
+
+export type CreateProviderCatalogRequest = {
+    apiStyle: string;
+    capabilityFlagsJson: unknown;
+    defaultBaseUrl?: string | null;
+    displayName: string;
+    lifecycleState: string;
+    providerKind: string;
 };
 
 export type CreateProviderCredentialRequest = {
@@ -875,6 +907,14 @@ export type CreateSubscriptionRequest = {
     secret: string;
     targetUrl: string;
     workspaceId: string;
+};
+
+export type CreateUserRequest = {
+    displayName: string;
+    email: string;
+    login: string;
+    password: string;
+    role: SystemRole;
 };
 
 export type CreateWebIngestRunRequest = {
@@ -955,7 +995,7 @@ export type DependencyStatus = {
 };
 
 export type DependencyStatusSet = {
-    arangodb: DependencyStatus;
+    knowledgePlane: DependencyStatus;
     postgres: DependencyStatus;
     redis: DependencyStatus;
 };
@@ -1199,23 +1239,6 @@ export type IamMe = {
 export type IamPermissionKind = 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read' | 'iam_admin';
 
 export type IamPrincipalKind = 'user' | 'api_token' | 'worker' | 'bootstrap';
-
-/**
- * Scope of a library snapshot.
- *
- * A library is an atomic unit from the operator's point of view: its
- * documents, revisions, chunks, graph facts, knowledge entities and
- * relations all describe the same thing and are worthless without each
- * other. The canonical scope keeps that domain model whole instead of
- * exposing persistence-tier fragments to operators.
- *
- * The canonical scope `LibraryData` therefore always includes every
- * non-blob row required to rebuild the library 1:1. `Blobs` is the
- * separate opt-in toggle for original source files (PDFs, images,
- * etc.); it is optional because a large library's source tree can
- * easily dwarf the rest of the snapshot.
- */
-export type IncludeKind = 'workspace' | 'library_data' | 'blobs';
 
 export type IngestAttempt = {
     attempt_number: number;
@@ -1496,6 +1519,7 @@ export type KnowledgeDocumentRow = {
     active_revision_id?: string | null;
     created_at: string;
     deleted_at?: string | null;
+    document_hint?: string | null;
     document_id: string;
     document_state: string;
     external_key: string;
@@ -1503,6 +1527,7 @@ export type KnowledgeDocumentRow = {
     latest_revision_no?: number | null;
     library_id: string;
     readable_revision_id?: string | null;
+    source_uri?: string | null;
     title?: string | null;
     updated_at: string;
     workspace_id: string;
@@ -1760,6 +1785,14 @@ export type KnowledgeTechnicalFactProvenanceSummary = {
     typedFactCount: number;
 };
 
+/**
+ * Desired library access entry in a `PUT /iam/users/{id}/access` request.
+ */
+export type LibraryAccessEntryRequest = {
+    libraryId: string;
+    permissionKind: IamPermissionKind;
+};
+
 export type LibraryCostSummary = {
     currencyCode: string;
     documentCount: number;
@@ -1938,6 +1971,7 @@ export type ModelCatalogEntryResponse = {
     capabilityKind: string;
     contextWindow?: number | null;
     id: string;
+    lifecycleState: string;
     maxOutputTokens?: number | null;
     modalityKind: string;
     modelName: string;
@@ -2432,6 +2466,23 @@ export type SessionUserResponse = {
     principalId: string;
 };
 
+/**
+ * Declarative target state for a user's workspace + library access.
+ *
+ * The handler reconciles the user's existing workspace/library grants against
+ * this set: grants not present here are revoked, missing ones are created, and
+ * matching ones are left untouched. Other grant kinds (system, document, etc.)
+ * are not touched by this endpoint.
+ */
+export type SetUserAccessRequest = {
+    libraries?: Array<LibraryAccessEntryRequest>;
+    workspaces?: Array<WorkspaceAccessEntryRequest>;
+};
+
+export type SetUserRoleRequest = {
+    role: SystemRole;
+};
+
 export type ShellBootstrap = {
     activeLibraryId?: string | null;
     activeWorkspaceId?: string | null;
@@ -2461,23 +2512,12 @@ export type ShellViewer = {
     role: ShellRole;
 };
 
-export type SnapshotImportReportResponse = {
-    arangoDocsByStore: {
-        [key: string]: number;
-    };
-    arangoEdgesByStore: {
-        [key: string]: number;
-    };
-    blobsRestored: number;
-    includeKinds: Array<IncludeKind>;
+export type SnapshotImportAcceptedResponse = {
+    archiveBytes: number;
     libraryId: string;
+    operationId: string;
     overwriteMode: OverwriteMode;
-    postgresRowsByTable: {
-        [key: string]: number;
-    };
-    skippedArangoEdgesByStore: {
-        [key: string]: number;
-    };
+    workspaceId: string;
 };
 
 export type StartupAuthorityState = 'succeeded' | 'pending' | 'not_required' | 'running';
@@ -2525,6 +2565,14 @@ export type SubscriptionResponse = {
     updatedAt: string;
     workspaceId: string;
 };
+
+/**
+ * System role assigned to a user principal (viewer < operator < admin).
+ *
+ * Canonical source for the UI shell's capability gating. Mirrors the
+ * `public.iam_system_role` PG enum and the `ShellRole` shell-bootstrap field.
+ */
+export type SystemRole = 'viewer' | 'operator' | 'admin';
 
 export type TechnicalFactKind = 'url' | 'endpoint_path' | 'http_method' | 'port' | 'parameter_name' | 'status_code' | 'protocol' | 'auth_rule' | 'identifier' | 'environment_variable' | 'version_number' | 'database_name' | 'configuration_key' | 'error_code' | 'rate_limit' | 'dependency_declaration' | 'code_identifier';
 
@@ -2677,6 +2725,18 @@ export type UpdateLibraryWebIngestPolicyRequest = {
     materializationFilter: WebIngestUrlFilter;
 };
 
+export type UpdateModelCatalogRequest = {
+    allowedBindingPurposes?: Array<AiBindingPurpose>;
+    capabilityKind: string;
+    contextWindow?: number | null;
+    lifecycleState: string;
+    maxOutputTokens?: number | null;
+    metadataJson?: unknown;
+    modalityKind: string;
+    modelName: string;
+    providerCatalogId: string;
+};
+
 export type UpdateModelPresetRequest = {
     extraParametersJson?: unknown;
     maxOutputTokensOverride?: number | null;
@@ -2684,6 +2744,15 @@ export type UpdateModelPresetRequest = {
     systemPrompt?: string | null;
     temperature?: number | null;
     topP?: number | null;
+};
+
+export type UpdateProviderCatalogRequest = {
+    apiStyle: string;
+    capabilityFlagsJson?: unknown;
+    defaultBaseUrl?: string | null;
+    displayName: string;
+    lifecycleState: string;
+    providerKind: string;
 };
 
 export type UpdateProviderCredentialRequest = {
@@ -2711,11 +2780,34 @@ export type UpdateWorkspacePriceOverrideRequest = {
     unitPrice: string;
 };
 
+/**
+ * The full per-user access picture: every workspace- and library-scoped grant
+ * the admin can manage from the Users access editor.
+ */
+export type UserAccessResponse = {
+    libraries: Array<UserLibraryAccessResponse>;
+    principalId: string;
+    workspaces: Array<UserWorkspaceAccessResponse>;
+};
+
+/**
+ * One library the user has been granted access to, with its workspace and the
+ * permission tier. Returned by `GET /iam/users/{id}/access`.
+ */
+export type UserLibraryAccessResponse = {
+    displayName: string;
+    grantId: string;
+    libraryId: string;
+    permissionKind: IamPermissionKind;
+    workspaceId: string;
+};
+
 export type UserProfile = {
     displayName?: string | null;
     email?: string | null;
     login?: string | null;
     principalId: string;
+    role: SystemRole;
 };
 
 export type UserResponse = {
@@ -2725,6 +2817,18 @@ export type UserResponse = {
     externalSubject?: string | null;
     login: string;
     principalId: string;
+    role: SystemRole;
+};
+
+/**
+ * One workspace the user has been granted access to, with the permission
+ * tier that access was granted at. Returned by `GET /iam/users/{id}/access`.
+ */
+export type UserWorkspaceAccessResponse = {
+    displayName: string;
+    grantId: string;
+    permissionKind: IamPermissionKind;
+    workspaceId: string;
 };
 
 export type VersionResponse = {
@@ -2852,12 +2956,41 @@ export type WebRunCounts = {
 
 export type WebRunFailureCode = 'inaccessible' | 'invalid_url' | 'unsupported_content' | 'web_discovery_failed' | 'web_snapshot_persist_failed' | 'web_snapshot_missing' | 'web_snapshot_missing_final_url' | 'web_snapshot_unavailable' | 'web_capture_materialization_failed' | 'recursive_crawl_failed';
 
+/**
+ * Desired workspace access entry in a `PUT /iam/users/{id}/access` request.
+ */
+export type WorkspaceAccessEntryRequest = {
+    permissionKind: IamPermissionKind;
+    workspaceId: string;
+};
+
 export type WorkspaceCostSummary = {
     currencyCode: string;
     documentCount: number;
     libraryCount: number;
     providerCallCount: number;
     totalCost: string;
+};
+
+/**
+ * One library's restore counts inside a [`WorkspaceSnapshotImportReportResponse`].
+ */
+export type WorkspaceLibraryImportReportResponse = {
+    arangoDocsByStore: {
+        [key: string]: number;
+    };
+    arangoEdgesByStore: {
+        [key: string]: number;
+    };
+    blobsRestored: number;
+    libraryId: string;
+    postgresRowsByTable: {
+        [key: string]: number;
+    };
+    skippedArangoEdgesByStore: {
+        [key: string]: number;
+    };
+    slug: string;
 };
 
 export type WorkspaceMembership = {
@@ -2873,6 +3006,16 @@ export type WorkspaceMembershipResponse = {
     joinedAt: string;
     membershipState: string;
     principalId: string;
+    workspaceId: string;
+};
+
+/**
+ * Report returned by `POST /v1/catalog/workspaces/{workspaceId}/snapshot`.
+ */
+export type WorkspaceSnapshotImportReportResponse = {
+    libraries: Array<WorkspaceLibraryImportReportResponse>;
+    librariesRestored: number;
+    overwriteMode: OverwriteMode;
     workspaceId: string;
 };
 
@@ -3132,6 +3275,44 @@ export type CreateAiCredentialResponses = {
 
 export type CreateAiCredentialResponse = CreateAiCredentialResponses[keyof CreateAiCredentialResponses];
 
+export type DeleteAiCredentialData = {
+    body?: never;
+    path: {
+        /**
+         * Provider credential identifier
+         */
+        credentialId: string;
+    };
+    query?: never;
+    url: '/v1/ai/credentials/{credentialId}';
+};
+
+export type DeleteAiCredentialErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot administer credentials in the credential's scope
+     */
+    403: unknown;
+    /**
+     * Credential not found
+     */
+    404: unknown;
+    /**
+     * Credential is still referenced
+     */
+    409: unknown;
+};
+
+export type DeleteAiCredentialResponses = {
+    /**
+     * Empty acknowledgement payload
+     */
+    200: unknown;
+};
+
 export type UpdateAiCredentialData = {
     body: UpdateProviderCredentialRequest;
     path: {
@@ -3226,6 +3407,44 @@ export type CreateAiModelPresetResponses = {
 
 export type CreateAiModelPresetResponse = CreateAiModelPresetResponses[keyof CreateAiModelPresetResponses];
 
+export type DeleteAiModelPresetData = {
+    body?: never;
+    path: {
+        /**
+         * Model preset identifier
+         */
+        presetId: string;
+    };
+    query?: never;
+    url: '/v1/ai/model-presets/{presetId}';
+};
+
+export type DeleteAiModelPresetErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot administer presets in the preset's scope
+     */
+    403: unknown;
+    /**
+     * Preset not found
+     */
+    404: unknown;
+    /**
+     * Preset is still referenced
+     */
+    409: unknown;
+};
+
+export type DeleteAiModelPresetResponses = {
+    /**
+     * Empty acknowledgement payload
+     */
+    200: unknown;
+};
+
 export type UpdateAiModelPresetData = {
     body: UpdateModelPresetRequest;
     path: {
@@ -3294,6 +3513,103 @@ export type ListAiModelsResponses = {
 
 export type ListAiModelsResponse = ListAiModelsResponses[keyof ListAiModelsResponses];
 
+export type CreateAiModelData = {
+    body: CreateModelCatalogRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/ai/models';
+};
+
+export type CreateAiModelErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+};
+
+export type CreateAiModelResponses = {
+    /**
+     * Newly created AI model catalog entry
+     */
+    200: ModelCatalogEntryResponse;
+};
+
+export type CreateAiModelResponse = CreateAiModelResponses[keyof CreateAiModelResponses];
+
+export type DeleteAiModelData = {
+    body?: never;
+    path: {
+        /**
+         * AI model catalog identifier
+         */
+        modelId: string;
+    };
+    query?: never;
+    url: '/v1/ai/models/{modelId}';
+};
+
+export type DeleteAiModelErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * Model not found
+     */
+    404: unknown;
+};
+
+export type DeleteAiModelResponses = {
+    /**
+     * Model catalog entry was disabled
+     */
+    200: unknown;
+};
+
+export type UpdateAiModelData = {
+    body: UpdateModelCatalogRequest;
+    path: {
+        /**
+         * AI model catalog identifier
+         */
+        modelId: string;
+    };
+    query?: never;
+    url: '/v1/ai/models/{modelId}';
+};
+
+export type UpdateAiModelErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * Model not found
+     */
+    404: unknown;
+};
+
+export type UpdateAiModelResponses = {
+    /**
+     * Updated AI model catalog entry
+     */
+    200: ModelCatalogEntryResponse;
+};
+
+export type UpdateAiModelResponse = UpdateAiModelResponses[keyof UpdateAiModelResponses];
+
 export type ListAiPricesData = {
     body?: never;
     path?: never;
@@ -3346,6 +3662,48 @@ export type CreateAiPriceOverrideResponses = {
 };
 
 export type CreateAiPriceOverrideResponse = CreateAiPriceOverrideResponses[keyof CreateAiPriceOverrideResponses];
+
+export type DeleteAiPriceOverrideData = {
+    body?: never;
+    path: {
+        /**
+         * Price catalog entry identifier
+         */
+        priceId: string;
+    };
+    query?: never;
+    url: '/v1/ai/prices/{priceId}';
+};
+
+export type DeleteAiPriceOverrideErrors = {
+    /**
+     * System catalog prices are read-only
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot administer pricing for the workspace
+     */
+    403: unknown;
+    /**
+     * Price override not found
+     */
+    404: unknown;
+    /**
+     * Price override is still referenced
+     */
+    409: unknown;
+};
+
+export type DeleteAiPriceOverrideResponses = {
+    /**
+     * Empty acknowledgement payload
+     */
+    200: unknown;
+};
 
 export type UpdateAiPriceOverrideData = {
     body: UpdateWorkspacePriceOverrideRequest;
@@ -3405,6 +3763,103 @@ export type ListAiProvidersResponses = {
 };
 
 export type ListAiProvidersResponse = ListAiProvidersResponses[keyof ListAiProvidersResponses];
+
+export type CreateAiProviderData = {
+    body: CreateProviderCatalogRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/ai/providers';
+};
+
+export type CreateAiProviderErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+};
+
+export type CreateAiProviderResponses = {
+    /**
+     * Newly created AI provider catalog entry
+     */
+    200: ProviderCatalogEntryResponse;
+};
+
+export type CreateAiProviderResponse = CreateAiProviderResponses[keyof CreateAiProviderResponses];
+
+export type DeleteAiProviderData = {
+    body?: never;
+    path: {
+        /**
+         * AI provider catalog identifier
+         */
+        providerId: string;
+    };
+    query?: never;
+    url: '/v1/ai/providers/{providerId}';
+};
+
+export type DeleteAiProviderErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * Provider not found
+     */
+    404: unknown;
+};
+
+export type DeleteAiProviderResponses = {
+    /**
+     * Provider catalog entry was disabled
+     */
+    200: unknown;
+};
+
+export type UpdateAiProviderData = {
+    body: UpdateProviderCatalogRequest;
+    path: {
+        /**
+         * AI provider catalog identifier
+         */
+        providerId: string;
+    };
+    query?: never;
+    url: '/v1/ai/providers/{providerId}';
+};
+
+export type UpdateAiProviderErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * Provider not found
+     */
+    404: unknown;
+};
+
+export type UpdateAiProviderResponses = {
+    /**
+     * Updated AI provider catalog entry
+     */
+    200: ProviderCatalogEntryResponse;
+};
+
+export type UpdateAiProviderResponse = UpdateAiProviderResponses[keyof UpdateAiProviderResponses];
 
 export type ListAuditEventsData = {
     body?: never;
@@ -4012,6 +4467,91 @@ export type DeleteCatalogLibraryResponses = {
 
 export type DeleteCatalogLibraryResponse = DeleteCatalogLibraryResponses[keyof DeleteCatalogLibraryResponses];
 
+export type ExportWorkspaceSnapshotData = {
+    body?: never;
+    path: {
+        /**
+         * Workspace identifier
+         */
+        workspaceId: string;
+    };
+    query?: {
+        /**
+         * Comma-separated include kinds applied to every library archive (default `library_data,blobs`)
+         */
+        include?: string;
+    };
+    url: '/v1/catalog/workspaces/{workspaceId}/snapshot';
+};
+
+export type ExportWorkspaceSnapshotErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the workspace
+     */
+    403: unknown;
+    /**
+     * Workspace not found
+     */
+    404: unknown;
+};
+
+export type ExportWorkspaceSnapshotResponses = {
+    /**
+     * Streaming plain tar bundling every library archive
+     */
+    200: Blob | File;
+};
+
+export type ExportWorkspaceSnapshotResponse = ExportWorkspaceSnapshotResponses[keyof ExportWorkspaceSnapshotResponses];
+
+export type ImportWorkspaceSnapshotData = {
+    /**
+     * Plain tar archive previously emitted by GET /v1/catalog/workspaces/{workspaceId}/snapshot
+     */
+    body?: unknown;
+    path: {
+        /**
+         * Workspace identifier
+         */
+        workspaceId: string;
+    };
+    query?: {
+        /**
+         * Overwrite mode recorded in the report: 'reject' (default) or 'replace'. Each newly minted library is always restored in replace mode.
+         */
+        overwrite?: string;
+    };
+    url: '/v1/catalog/workspaces/{workspaceId}/snapshot';
+};
+
+export type ImportWorkspaceSnapshotErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the workspace
+     */
+    403: unknown;
+    /**
+     * Workspace not found
+     */
+    404: unknown;
+};
+
+export type ImportWorkspaceSnapshotResponses = {
+    /**
+     * Workspace snapshot import report (per-library row counts)
+     */
+    200: WorkspaceSnapshotImportReportResponse;
+};
+
+export type ImportWorkspaceSnapshotResponse = ImportWorkspaceSnapshotResponses[keyof ImportWorkspaceSnapshotResponses];
+
 export type ListChunksData = {
     body?: never;
     path?: never;
@@ -4060,6 +4600,13 @@ export type ListContentDocumentsData = {
          * in the list CTE and the 5 status pills on the documents page.
          */
         status?: string;
+        /**
+         * Comma-separated list of document ids to keep. Empty or absent = no
+         * filter. Lets a caller resolve specific documents (e.g. a deep link
+         * carrying `documentId`) through the same canonical list derivation
+         * that powers the table, instead of a divergent per-id detail mapper.
+         */
+        ids?: string;
     };
     url: '/v1/content/documents';
 };
@@ -4744,9 +5291,9 @@ export type ImportLibrarySnapshotErrors = {
 
 export type ImportLibrarySnapshotResponses = {
     /**
-     * Snapshot import report (per-table row counts, blob count, applied overwrite mode)
+     * Snapshot import accepted; poll /v1/ops/operations/{operationId}
      */
-    200: SnapshotImportReportResponse;
+    202: SnapshotImportAcceptedResponse;
 };
 
 export type ImportLibrarySnapshotResponse = ImportLibrarySnapshotResponses[keyof ImportLibrarySnapshotResponses];
@@ -5411,6 +5958,184 @@ export type RevokeIamTokenResponses = {
 };
 
 export type RevokeIamTokenResponse = RevokeIamTokenResponses[keyof RevokeIamTokenResponses];
+
+export type ListIamUsersData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/users';
+};
+
+export type ListIamUsersErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+};
+
+export type ListIamUsersResponses = {
+    /**
+     * All user principals with their system roles
+     */
+    200: Array<UserResponse>;
+};
+
+export type ListIamUsersResponse = ListIamUsersResponses[keyof ListIamUsersResponses];
+
+export type CreateIamUserData = {
+    body: CreateUserRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/users';
+};
+
+export type CreateIamUserErrors = {
+    /**
+     * Invalid request payload
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * Login or email already exists
+     */
+    409: unknown;
+};
+
+export type CreateIamUserResponses = {
+    /**
+     * Newly created user
+     */
+    200: UserResponse;
+};
+
+export type CreateIamUserResponse = CreateIamUserResponses[keyof CreateIamUserResponses];
+
+export type GetIamUserAccessData = {
+    body?: never;
+    path: {
+        /**
+         * User principal id whose access is read
+         */
+        principalId: string;
+    };
+    query?: never;
+    url: '/v1/iam/users/{principalId}/access';
+};
+
+export type GetIamUserAccessErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * User not found
+     */
+    404: unknown;
+};
+
+export type GetIamUserAccessResponses = {
+    /**
+     * The user's workspace and library access grants
+     */
+    200: UserAccessResponse;
+};
+
+export type GetIamUserAccessResponse = GetIamUserAccessResponses[keyof GetIamUserAccessResponses];
+
+export type SetIamUserAccessData = {
+    body: SetUserAccessRequest;
+    path: {
+        /**
+         * User principal id whose access is set
+         */
+        principalId: string;
+    };
+    query?: never;
+    url: '/v1/iam/users/{principalId}/access';
+};
+
+export type SetIamUserAccessErrors = {
+    /**
+     * Invalid permission kind for a resource
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * User, workspace or library not found
+     */
+    404: unknown;
+};
+
+export type SetIamUserAccessResponses = {
+    /**
+     * The user's access after reconciliation
+     */
+    200: UserAccessResponse;
+};
+
+export type SetIamUserAccessResponse = SetIamUserAccessResponses[keyof SetIamUserAccessResponses];
+
+export type SetIamUserRoleData = {
+    body: SetUserRoleRequest;
+    path: {
+        /**
+         * User principal id whose role changes
+         */
+        principalId: string;
+    };
+    query?: never;
+    url: '/v1/iam/users/{principalId}/role';
+};
+
+export type SetIamUserRoleErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * User not found
+     */
+    404: unknown;
+    /**
+     * Would demote the last remaining administrator
+     */
+    409: unknown;
+};
+
+export type SetIamUserRoleResponses = {
+    /**
+     * Updated user
+     */
+    200: UserResponse;
+};
+
+export type SetIamUserRoleResponse = SetIamUserRoleResponses[keyof SetIamUserRoleResponses];
 
 export type GetIngestAttemptData = {
     body?: never;

@@ -459,7 +459,12 @@ fn order_bounded_context_chunks<'a>(
     }
     let mut identity_chunks = chunks
         .iter()
-        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::DocumentIdentity)
+        .filter(|chunk| {
+            matches!(
+                chunk.score_kind,
+                RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion
+            )
+        })
         .collect::<Vec<_>>();
     identity_chunks.sort_by(|left, right| {
         score_value(right.score)
@@ -529,11 +534,20 @@ fn bounded_context_document_block(
             excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
         );
     }
-    if chunk.score_kind == RuntimeChunkScoreKind::DocumentIdentity {
+    if matches!(
+        chunk.score_kind,
+        RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion
+    ) {
         let source_text = chunk.source_text.trim();
         let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
+        let block_kind = if chunk.score_kind == RuntimeChunkScoreKind::LatestVersion {
+            "latest_version"
+        } else {
+            "document_identity"
+        };
         return format!(
-            "[document document_identity ordinal={} document=\"{}\"]\n{}",
+            "[document {} ordinal={} document=\"{}\"]\n{}",
+            block_kind,
             chunk.chunk_index,
             context_label(&chunk.document_label),
             excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
@@ -591,7 +605,12 @@ fn assemble_ordered_source_slice_context(
         let identity_chunks = content_chunks
             .iter()
             .copied()
-            .filter(|chunk| matches!(chunk.score_kind, RuntimeChunkScoreKind::DocumentIdentity))
+            .filter(|chunk| {
+                matches!(
+                    chunk.score_kind,
+                    RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion
+                )
+            })
             .collect::<Vec<_>>();
         if !identity_chunks.is_empty() {
             content_chunks = identity_chunks;
@@ -766,11 +785,18 @@ pub(crate) fn build_grouped_reference_candidates(
     relationships: &[RuntimeMatchedRelationship],
     chunks: &[RuntimeMatchedChunk],
     top_k: usize,
+    demoted_document_ids: &HashSet<Uuid>,
 ) -> Vec<GroupedReferenceCandidate> {
     let mut candidates = Vec::new();
     let mut rank = 1usize;
 
     for chunk in chunks.iter().take(top_k) {
+        // Attached-context documents are subordinate context, never a standalone
+        // subject to clarify between, so they do not produce a grouped reference
+        // (and therefore never surface as a clarify variant).
+        if demoted_document_ids.contains(&chunk.document_id) {
+            continue;
+        }
         candidates.push(GroupedReferenceCandidate {
             dedupe_key: format!("document:{}", chunk.document_id),
             kind: GroupedReferenceKind::Document,
@@ -905,6 +931,7 @@ pub(crate) async fn load_query_execution_library_context(
         None,
         crate::infra::repositories::content_repository::DocumentListSortColumn::CreatedAt,
         true,
+        &[],
         &[],
     )
     .await
@@ -1102,6 +1129,19 @@ pub(crate) async fn load_retrieved_document_briefs(
     let mut focused_chunks: Vec<&RuntimeMatchedChunk> = Vec::new();
 
     for chunk in chunks {
+        // Attached-context documents (image attachments collapsed onto a parent
+        // page) are subordinate context, not standalone retrieved documents the
+        // user should be asked to clarify between. Exclude them from the brief
+        // set (which feeds the clarify-vs-answer disposition) unless the query
+        // explicitly focuses on that document. Role is the only signal — no
+        // MIME/extension/filename inspection here.
+        if Some(chunk.document_id) != focused_document_id
+            && document_index.get(&chunk.document_id).is_some_and(|document| {
+                crate::domains::content::role_is_attached_context(&document.document_role)
+            })
+        {
+            continue;
+        }
         if Some(chunk.document_id) == focused_document_id {
             focused_chunks.push(chunk);
         }

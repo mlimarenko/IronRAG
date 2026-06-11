@@ -1,10 +1,11 @@
 import { act } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createRoot, type Root } from 'react-dom/client';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DocumentsPage from '@/features/documents/DocumentsPage';
+import { TooltipProvider } from '@/shared/components/ui/tooltip';
 import { getTableStateStorageKey } from '@/shared/hooks/useTableState';
 
 const {
@@ -51,7 +52,7 @@ vi.mock('@/shared/api', () => ({
   // assertions keep working without rebuilding tests around the SDK classes.
   queries: {
     listContentDocumentsOptions: (
-      input?: { query?: { libraryId?: string; limit?: number; cursor?: string; search?: string; sortBy?: string; sortOrder?: string; includeTotal?: boolean; status?: string[] } },
+      input?: { query?: { libraryId?: string; limit?: number; cursor?: string; search?: string; sortBy?: string; sortOrder?: string; includeTotal?: boolean; status?: string[]; ids?: string } },
     ) => ({
       queryKey: ['mockedListContentDocuments', input?.query ?? null],
       queryFn: async () => {
@@ -65,6 +66,7 @@ vi.mock('@/shared/api', () => ({
           sortOrder: q.sortOrder,
           includeTotal: q.includeTotal,
           status: q.status,
+          ids: q.ids,
         });
       },
     }),
@@ -123,11 +125,17 @@ vi.mock('@/features/documents/components/DocumentsInspectorPanel', () => ({
     editorActionReadOnly?: boolean;
     selectedDoc?: { fileName?: string } | null;
     onOpenEditor: () => void;
+    onViewInGraph?: () => void;
   }) =>
     props.selectedDoc ? (
-      <button onClick={() => props.onOpenEditor()}>
-        {props.editorActionReadOnly ? 'View' : 'Edit'} {props.selectedDoc.fileName}
-      </button>
+      <div>
+        <button onClick={() => props.onOpenEditor()}>
+          {props.editorActionReadOnly ? 'View' : 'Edit'} {props.selectedDoc.fileName}
+        </button>
+        {props.onViewInGraph && (
+          <button onClick={() => props.onViewInGraph()}>View in Graph</button>
+        )}
+      </div>
     ) : null,
 }));
 
@@ -198,6 +206,12 @@ function listPage(
     nextCursor: null,
     totalCount: items.length,
   };
+}
+
+function LocationProbe() {
+  const location = useLocation();
+
+  return <div data-testid="current-location">{`${location.pathname}${location.search}`}</div>;
 }
 
 describe('DocumentsPage', () => {
@@ -279,9 +293,12 @@ describe('DocumentsPage', () => {
       root = createRoot(container);
       root.render(
         <QueryClientProvider client={queryClient}>
-          <MemoryRouter initialEntries={[initialEntry]}>
-            <DocumentsPage />
-          </MemoryRouter>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={[initialEntry]}>
+              <DocumentsPage />
+              <LocationProbe />
+            </MemoryRouter>
+          </TooltipProvider>
         </QueryClientProvider>,
       );
     });
@@ -332,6 +349,21 @@ describe('DocumentsPage', () => {
     );
   });
 
+  it('applies a status URL filter when opened from dashboard attention', async () => {
+    await renderPage('/documents?status=failed');
+
+    expect(documentsApiMock.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'failed',
+      }),
+    );
+
+    const failedFilter = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Failed'),
+    );
+    expect(failedFilter?.className).toContain('text-foreground');
+  });
+
   it('opens the editor from the table action', async () => {
     await renderPage();
 
@@ -359,6 +391,59 @@ describe('DocumentsPage', () => {
 
     expect(documentsApiMock.getEditorSourceText).toHaveBeenCalledWith('doc-1');
     expect(container.querySelector('[data-testid="document-editor-shell"]')).toBeTruthy();
+  });
+
+  it('opens the graph with the selected document node id from the inspector action', async () => {
+    await renderPage('/documents?documentId=doc-1');
+    await flushUi();
+
+    const viewInGraphButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('View in Graph'),
+    );
+    expect(viewInGraphButton).toBeTruthy();
+
+    await act(async () => {
+      viewInGraphButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+
+    expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe(
+      '/graph?nodeId=doc-1',
+    );
+  });
+
+  it('opens the inspector for a deep-linked documentId that is off the loaded page', async () => {
+    // Default list page contains only `doc-1`; the deep-linked target lives
+    // off-page (e.g. arrived from the Graph view's "open document" action on
+    // a document buried thousands of rows deep). The page must resolve it
+    // through the id-filtered list endpoint so the inspector still opens.
+    documentsApiMock.list.mockImplementation(
+      async (params: { ids?: string }) => {
+        if (params.ids === 'doc-off-page') {
+          return listPage([
+            { id: 'doc-off-page', fileName: 'buried.xlsx', sourceKind: 'upload' },
+          ]);
+        }
+        return listPage([
+          { id: 'doc-1', fileName: 'inventory.xlsx', sourceKind: 'upload' },
+        ]);
+      },
+    );
+
+    await renderPage('/documents?documentId=doc-off-page');
+    await flushUi();
+
+    // The id-filtered list call resolved the off-page document.
+    expect(documentsApiMock.list).toHaveBeenCalledWith(
+      expect.objectContaining({ ids: 'doc-off-page' }),
+    );
+
+    // The inspector rendered for the deep-linked document (its action
+    // buttons only mount inside the inspector panel).
+    const inspectorButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('buried.xlsx'),
+    );
+    expect(inspectorButton).toBeTruthy();
   });
 
   it('saves edited markdown through the edit mutation and refreshes the document', async () => {
@@ -418,6 +503,9 @@ describe('DocumentsPage', () => {
     // normal page rendering. A row with a literal "0" renders as
     // "$0.000" (a billable execution landed with zero cost), a row
     // with no cost at all renders as "—".
+    //
+    // Post-redesign (DOC-04): the Cost column is an opt-in detail column
+    // hidden by default. The per-row cost is not visible in the default view.
     documentsApiMock.list.mockResolvedValue(
       listPage([
         { id: 'doc-1', fileName: 'inventory.xlsx', sourceKind: 'upload', cost: '0' },
@@ -426,9 +514,12 @@ describe('DocumentsPage', () => {
 
     await renderPage();
 
-    expect(container.textContent).toContain('$0.000');
+    // The document row is present.
+    expect(container.textContent).toContain('inventory.xlsx');
     // The library-wide total cost banner stays hidden when totalCost is 0.
     expect(container.textContent).not.toContain('Library cost');
+    // Per-row cost is in the opt-in detail columns — not shown by default.
+    expect(container.textContent).not.toContain('$0.000');
   });
 
   it('shows the library-wide total cost banner alongside the per-row cost from the list payload', async () => {
@@ -447,11 +538,13 @@ describe('DocumentsPage', () => {
 
     await renderPage();
 
-    // Per-row cost from the list payload.
-    expect(container.textContent).toContain('$1.000');
-    // Library-wide cost banner (shown when totalCost > 0).
+    // The document row is present.
+    expect(container.textContent).toContain('inventory.xlsx');
+    // Library-wide cost banner (shown when totalCost > 0) appears in the filters bar.
     expect(container.textContent).toContain('Library cost');
     expect(container.textContent).toContain('$3.500');
+    // Per-row cost ($1.000) is in opt-in detail columns — not shown by default.
+    expect(container.textContent).not.toContain('$1.000');
   });
 
   it('renders processing progress inside the blue status badge', async () => {

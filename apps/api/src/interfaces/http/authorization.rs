@@ -109,6 +109,50 @@ pub const POLICY_MCP_AUDIT_REVIEW: &[&str] =
     &[PERMISSION_AUDIT_READ, PERMISSION_WORKSPACE_ADMIN, PERMISSION_IAM_ADMIN];
 pub const POLICY_IAM_ADMIN: &[&str] = &[PERMISSION_IAM_ADMIN];
 
+/// Permission kinds that represent a write/mutation capability.
+///
+/// Any authorization request whose accepted-permission set is a subset of write
+/// kinds (i.e. read kinds are not also accepted) is treated as a write request
+/// and gated on the caller's system-role write capability. This is what keeps a
+/// `viewer` user read-only even when a resource grant would otherwise match.
+const WRITE_PERMISSION_KINDS: &[&str] = &[
+    PERMISSION_WORKSPACE_ADMIN,
+    PERMISSION_LIBRARY_WRITE,
+    PERMISSION_DOCUMENT_WRITE,
+    PERMISSION_CONNECTOR_ADMIN,
+    PERMISSION_CREDENTIAL_ADMIN,
+    PERMISSION_BINDING_ADMIN,
+    PERMISSION_IAM_ADMIN,
+];
+
+/// Whether an accepted-permission set denotes a write/mutation request.
+///
+/// True only when *every* accepted permission is a write kind. Mixed sets that
+/// also accept a read permission (e.g. a policy that lets either `library_read`
+/// or `library_write` through) are treated as read requests so the role gate
+/// never blocks a legitimate read for a `viewer`. Write-only policies such as
+/// [`POLICY_LIBRARY_WRITE`] / [`POLICY_DOCUMENTS_WRITE`] are write requests.
+#[must_use]
+fn accepted_permissions_require_write(accepted_permissions: &[&str]) -> bool {
+    !accepted_permissions.is_empty()
+        && accepted_permissions.iter().all(|permission| WRITE_PERMISSION_KINDS.contains(permission))
+}
+
+/// Enforces the caller's system-role write capability when the accepted
+/// permissions denote a write request. Reads pass through untouched.
+///
+/// # Errors
+/// Returns [`ApiError::Unauthorized`] when a `viewer` attempts a write.
+fn enforce_write_capability(
+    auth: &AuthContext,
+    accepted_permissions: &[&str],
+) -> Result<(), ApiError> {
+    if accepted_permissions_require_write(accepted_permissions) {
+        auth.require_write_capability()?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SanitizedMcpAuditScope {
     pub workspace_id: Option<Uuid>,
@@ -136,6 +180,7 @@ pub fn authorize_workspace_permission(
     workspace_id: Uuid,
     accepted_permissions: &[&str],
 ) -> Result<(), ApiError> {
+    enforce_write_capability(auth, accepted_permissions)?;
     if auth.has_workspace_permission(workspace_id, accepted_permissions) {
         return Ok(());
     }
@@ -155,12 +200,52 @@ pub fn authorize_workspace_discovery(
     Err(ApiError::Unauthorized)
 }
 
+/// Authorizes a library-authoring (create/edit/delete) action in a workspace.
+///
+/// Passes for a system administrator unconditionally, or for an `operator`+
+/// user (write capability) who has workspace-level access (a `workspace`-scoped
+/// grant or active membership). A `viewer` is always rejected, even with a
+/// stray workspace grant. Library *content* mutations continue to flow through
+/// [`authorize_library_permission`] / [`authorize_document_permission`] with the
+/// write policies; this helper is the workspace-level gate that previously hard-
+/// required `workspace_admin`, which excluded plain operators.
+pub fn authorize_library_write(auth: &AuthContext, workspace_id: Uuid) -> Result<(), ApiError> {
+    auth.require_write_capability()?;
+    if auth.is_system_admin || auth.can_access_workspace(workspace_id) {
+        return Ok(());
+    }
+    Err(ApiError::Unauthorized)
+}
+
+/// Loads a workspace and authorizes a library-authoring action against it.
+///
+/// Convenience wrapper mirroring [`load_workspace_and_authorize`] but using the
+/// role-aware [`authorize_library_write`] gate instead of a fixed policy.
+///
+/// # Errors
+/// Returns [`ApiError::NotFound`] when the workspace does not exist and
+/// [`ApiError::Unauthorized`] when the caller may not author libraries there.
+pub async fn load_workspace_and_authorize_library_write(
+    auth: &AuthContext,
+    state: &AppState,
+    workspace_id: Uuid,
+) -> Result<CatalogWorkspaceRow, ApiError> {
+    let workspace =
+        catalog_repository::get_workspace_by_id(&state.persistence.postgres, workspace_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("workspace", workspace_id))?;
+    authorize_library_write(auth, workspace.id)?;
+    Ok(workspace)
+}
+
 pub fn authorize_library_permission(
     auth: &AuthContext,
     workspace_id: Uuid,
     library_id: Uuid,
     accepted_permissions: &[&str],
 ) -> Result<(), ApiError> {
+    enforce_write_capability(auth, accepted_permissions)?;
     if auth.has_library_permission(workspace_id, library_id, accepted_permissions) {
         return Ok(());
     }
@@ -188,6 +273,7 @@ pub fn authorize_document_permission(
     document_id: Uuid,
     accepted_permissions: &[&str],
 ) -> Result<(), ApiError> {
+    enforce_write_capability(auth, accepted_permissions)?;
     if auth.has_document_permission(workspace_id, library_id, document_id, accepted_permissions) {
         return Ok(());
     }
@@ -229,6 +315,7 @@ pub fn authorize_connector_permission(
     connector_id: Uuid,
     accepted_permissions: &[&str],
 ) -> Result<(), ApiError> {
+    enforce_write_capability(auth, accepted_permissions)?;
     if auth.is_system_admin
         || auth.grants.iter().any(|grant| {
             accepted_permissions.iter().any(|permission| grant.permission_kind == *permission)
@@ -249,6 +336,7 @@ pub fn authorize_provider_credential_permission(
     credential_id: Uuid,
     accepted_permissions: &[&str],
 ) -> Result<(), ApiError> {
+    enforce_write_capability(auth, accepted_permissions)?;
     if auth.is_system_admin
         || auth.grants.iter().any(|grant| {
             accepted_permissions.iter().any(|permission| grant.permission_kind == *permission)
@@ -270,6 +358,7 @@ pub fn authorize_library_binding_permission(
     binding_id: Uuid,
     accepted_permissions: &[&str],
 ) -> Result<(), ApiError> {
+    enforce_write_capability(auth, accepted_permissions)?;
     if auth.is_system_admin
         || auth.grants.iter().any(|grant| {
             accepted_permissions.iter().any(|permission| grant.permission_kind == *permission)
@@ -587,4 +676,212 @@ pub fn sanitize_mcp_audit_scope(
     }
 
     SanitizedMcpAuditScope { workspace_id, library_id, document_id }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::{
+        domains::iam::PrincipalKind,
+        infra::repositories::iam_repository::SystemRole,
+        interfaces::http::auth::{AuthGrant, AuthTokenKind},
+    };
+
+    /// Builds a session-backed user [`AuthContext`] with a system role and an
+    /// optional workspace grant. `library_write` is used for the workspace
+    /// grant so the matrix exercises a real write permission.
+    fn user_auth(
+        role: SystemRole,
+        workspace_id: Uuid,
+        with_workspace_grant: bool,
+        grant_permission: &str,
+    ) -> AuthContext {
+        let mut grants = Vec::new();
+        let mut visible_workspace_ids = BTreeSet::new();
+        if with_workspace_grant {
+            grants.push(AuthGrant {
+                id: Uuid::now_v7(),
+                resource_kind: "workspace".into(),
+                resource_id: workspace_id,
+                permission_kind: grant_permission.to_string(),
+                workspace_id: Some(workspace_id),
+                library_id: None,
+                document_id: None,
+            });
+            visible_workspace_ids.insert(workspace_id);
+        }
+        AuthContext {
+            token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            workspace_id: None,
+            token_kind: AuthTokenKind::Session,
+            scopes: if with_workspace_grant {
+                vec![grant_permission.to_string()]
+            } else {
+                Vec::new()
+            },
+            grants,
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids,
+            is_system_admin: role == SystemRole::Admin,
+            system_role: Some(role),
+        }
+    }
+
+    #[test]
+    fn write_classifier_only_trips_for_write_only_policies() {
+        assert!(accepted_permissions_require_write(POLICY_LIBRARY_WRITE));
+        assert!(accepted_permissions_require_write(POLICY_DOCUMENTS_WRITE));
+        assert!(accepted_permissions_require_write(POLICY_WORKSPACE_ADMIN));
+        // Mixed read/write policies are read requests so viewers keep reading.
+        assert!(!accepted_permissions_require_write(POLICY_LIBRARY_READ));
+        assert!(!accepted_permissions_require_write(POLICY_DOCUMENTS_READ));
+        assert!(!accepted_permissions_require_write(&[]));
+    }
+
+    #[test]
+    fn admin_can_create_libraries_in_any_workspace() {
+        let workspace_id = Uuid::now_v7();
+        let admin = user_auth(SystemRole::Admin, workspace_id, false, PERMISSION_WORKSPACE_READ);
+        // No grant at all, but admin short-circuits.
+        assert!(authorize_library_write(&admin, Uuid::now_v7()).is_ok());
+    }
+
+    #[test]
+    fn operator_without_grant_cannot_create_library() {
+        let workspace_id = Uuid::now_v7();
+        let operator =
+            user_auth(SystemRole::Operator, workspace_id, false, PERMISSION_WORKSPACE_READ);
+        assert!(matches!(
+            authorize_library_write(&operator, workspace_id),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn operator_with_workspace_grant_can_create_library() {
+        let workspace_id = Uuid::now_v7();
+        let operator =
+            user_auth(SystemRole::Operator, workspace_id, true, PERMISSION_WORKSPACE_READ);
+        assert!(authorize_library_write(&operator, workspace_id).is_ok());
+        // But not in a workspace they were never granted.
+        assert!(matches!(
+            authorize_library_write(&operator, Uuid::now_v7()),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn viewer_with_grant_cannot_create_library() {
+        let workspace_id = Uuid::now_v7();
+        // Even with a (stray) workspace grant, a viewer is never write-capable.
+        let viewer = user_auth(SystemRole::Viewer, workspace_id, true, PERMISSION_WORKSPACE_ADMIN);
+        assert!(matches!(
+            authorize_library_write(&viewer, workspace_id),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn viewer_with_write_grant_is_blocked_at_permission_gate() {
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        // Viewer with a library_write grant must still be blocked from writes.
+        let mut viewer =
+            user_auth(SystemRole::Viewer, workspace_id, false, PERMISSION_LIBRARY_READ);
+        viewer.grants.push(AuthGrant {
+            id: Uuid::now_v7(),
+            resource_kind: "library".into(),
+            resource_id: library_id,
+            permission_kind: PERMISSION_LIBRARY_WRITE.into(),
+            workspace_id: Some(workspace_id),
+            library_id: Some(library_id),
+            document_id: None,
+        });
+        assert!(matches!(
+            authorize_library_permission(&viewer, workspace_id, library_id, POLICY_LIBRARY_WRITE),
+            Err(ApiError::Unauthorized)
+        ));
+        // The same viewer CAN read that library via its read grant + role.
+        let mut reader =
+            user_auth(SystemRole::Viewer, workspace_id, false, PERMISSION_LIBRARY_READ);
+        reader.grants.push(AuthGrant {
+            id: Uuid::now_v7(),
+            resource_kind: "library".into(),
+            resource_id: library_id,
+            permission_kind: PERMISSION_LIBRARY_READ.into(),
+            workspace_id: Some(workspace_id),
+            library_id: Some(library_id),
+            document_id: None,
+        });
+        assert!(
+            authorize_library_permission(&reader, workspace_id, library_id, POLICY_LIBRARY_READ)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn operator_with_library_write_grant_can_write_library() {
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        let mut operator =
+            user_auth(SystemRole::Operator, workspace_id, false, PERMISSION_LIBRARY_WRITE);
+        operator.grants.push(AuthGrant {
+            id: Uuid::now_v7(),
+            resource_kind: "library".into(),
+            resource_id: library_id,
+            permission_kind: PERMISSION_LIBRARY_WRITE.into(),
+            workspace_id: Some(workspace_id),
+            library_id: Some(library_id),
+            document_id: None,
+        });
+        assert!(
+            authorize_library_permission(&operator, workspace_id, library_id, POLICY_LIBRARY_WRITE)
+                .is_ok()
+        );
+        // No grant for a different library → denied.
+        assert!(matches!(
+            authorize_library_permission(
+                &operator,
+                workspace_id,
+                Uuid::now_v7(),
+                POLICY_LIBRARY_WRITE
+            ),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn api_token_principals_keep_grant_only_behavior() {
+        // No system_role → role gate is a no-op; the resource grant decides.
+        let workspace_id = Uuid::now_v7();
+        let auth = AuthContext {
+            token_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+            parent_principal_id: None,
+            workspace_id: Some(workspace_id),
+            token_kind: AuthTokenKind::Principal(PrincipalKind::ApiToken),
+            scopes: vec![PERMISSION_LIBRARY_WRITE.into()],
+            grants: vec![AuthGrant {
+                id: Uuid::now_v7(),
+                resource_kind: "workspace".into(),
+                resource_id: workspace_id,
+                permission_kind: PERMISSION_LIBRARY_WRITE.into(),
+                workspace_id: Some(workspace_id),
+                library_id: None,
+                document_id: None,
+            }],
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: [workspace_id].into_iter().collect(),
+            is_system_admin: false,
+            system_role: None,
+        };
+        assert!(
+            authorize_library_permission(&auth, workspace_id, Uuid::now_v7(), POLICY_LIBRARY_WRITE)
+                .is_ok()
+        );
+    }
 }

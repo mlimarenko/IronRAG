@@ -5,18 +5,24 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::query_ir::{QueryAct, QueryIR, literal_text_is_identifier_shaped},
+    domains::query_ir::{QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped},
     infra::arangodb::document_store::{KnowledgeDocumentRow, KnowledgeStructuredBlockRow},
-    services::query::{effective_query::current_question_segment, planner::QueryIntentProfile},
+    services::query::{
+        effective_query::{current_question_segment, structured_current_question_segment},
+        planner::QueryIntentProfile,
+    },
 };
 
 use super::{
-    CanonicalAnswerEvidence, PreparedAnswerQueryResult, RuntimeMatchedChunk,
+    CanonicalAnswerEvidence, PreparedAnswerQueryResult, RuntimeChunkScoreKind, RuntimeMatchedChunk,
     build_canonical_answer_context, build_deterministic_grounded_answer,
     build_missing_explicit_document_answer, load_canonical_answer_chunks,
     load_canonical_answer_evidence, load_direct_targeted_table_answer, load_document_index,
     question_intent::{QuestionIntent, classify_query_ir_intents, has_question_intent},
-    question_intent::{canonical_target_type_tag, query_ir_has_focused_document_answer_intent},
+    question_intent::{
+        canonical_target_type_tag, query_ir_has_focused_document_answer_intent,
+        query_ir_targets_graph_entities_or_relationships,
+    },
     question_requests_multi_document_scope,
     retrieve::{canonical_document_revision_id, merge_chunks, score_value},
     technical_literals::{
@@ -82,6 +88,16 @@ pub(super) async fn prepare_canonical_answer_preflight(
             &prepared.structured.context_chunks,
             scoped_document_ids.as_ref(),
         );
+    } else if query_ir_requests_low_confidence_setup_preflight(
+        question,
+        &prepared.query_ir,
+        &prepared.structured.context_chunks,
+    ) {
+        extend_setup_preflight_chunks_from_structured_context(
+            &mut preflight_answer_chunks,
+            &prepared.structured.context_chunks,
+            None,
+        );
     }
     let mut preflight_evidence = build_preflight_canonical_evidence_for_scope(
         &canonical_evidence,
@@ -109,6 +125,12 @@ pub(super) async fn prepare_canonical_answer_preflight(
         &preflight_answer_chunks,
         &graph_evidence_context_lines,
     );
+    let prompt_context = prepend_preflight_source_title_inventory(
+        &document_index,
+        &preflight_evidence,
+        &preflight_answer_chunks,
+        prompt_context,
+    );
     let answer_override = build_canonical_preflight_answer(
         question,
         &prepared.query_ir,
@@ -126,6 +148,71 @@ pub(super) async fn prepare_canonical_answer_preflight(
     })
 }
 
+fn prepend_preflight_source_title_inventory(
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    evidence: &CanonicalAnswerEvidence,
+    chunks: &[RuntimeMatchedChunk],
+    prompt_context: String,
+) -> String {
+    let mut seen = HashSet::<String>::new();
+    let mut titles = Vec::<String>::new();
+    for chunk in chunks {
+        push_preflight_source_title(&mut titles, &mut seen, chunk.document_label.trim());
+    }
+    for block in &evidence.structured_blocks {
+        if let Some(document) = document_index.get(&block.document_id) {
+            push_preflight_source_title(
+                &mut titles,
+                &mut seen,
+                preflight_document_title(document).as_deref().unwrap_or_default(),
+            );
+        }
+    }
+    for fact in &evidence.technical_facts {
+        if let Some(document) = document_index.get(&fact.document_id) {
+            push_preflight_source_title(
+                &mut titles,
+                &mut seen,
+                preflight_document_title(document).as_deref().unwrap_or_default(),
+            );
+        }
+    }
+    if titles.len() < 2 {
+        return prompt_context;
+    }
+    titles.truncate(24);
+    let inventory = format!("Source title inventory\n- {}", titles.join("\n- "));
+    if prompt_context.trim().is_empty() {
+        inventory
+    } else {
+        format!("{inventory}\n\n{prompt_context}")
+    }
+}
+
+fn preflight_document_title(document: &KnowledgeDocumentRow) -> Option<String> {
+    document
+        .title
+        .as_deref()
+        .or(document.file_name.as_deref())
+        .or(document.document_hint.as_deref())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(ToString::to_string)
+}
+
+fn push_preflight_source_title(titles: &mut Vec<String>, seen: &mut HashSet<String>, title: &str) {
+    let title = title.trim();
+    if title.is_empty()
+        || title.chars().count() > 240
+        || !title.chars().any(|ch| ch.is_alphanumeric())
+    {
+        return;
+    }
+    if seen.insert(title.to_lowercase()) {
+        titles.push(title.to_string());
+    }
+}
+
 pub(super) fn build_canonical_preflight_answer(
     question: &str,
     query_ir: &crate::domains::query_ir::QueryIR,
@@ -137,7 +224,7 @@ pub(super) fn build_canonical_preflight_answer(
 ) -> Option<String> {
     let missing_explicit_document_answer =
         build_missing_explicit_document_answer(question, document_index);
-    let requires_synthesis = query_ir.is_follow_up();
+    let requires_synthesis = canonical_preflight_requires_synthesis(question, query_ir);
     let deterministic_grounded_answer = if requires_synthesis {
         None
     } else {
@@ -150,24 +237,13 @@ pub(super) fn build_canonical_preflight_answer(
     };
 
     if intent_profile.exact_literal_technical {
-        let top_documents = canonical_answer_chunks
-            .iter()
-            .map(|chunk| chunk.document_label.as_str())
-            .collect::<Vec<_>>();
-        let top_chunk_previews = canonical_answer_chunks
-            .iter()
-            .take(3)
-            .map(|chunk| {
-                let text = if chunk.excerpt.trim().is_empty() {
-                    chunk.source_text.trim()
-                } else {
-                    chunk.excerpt.trim()
-                };
-                text.chars().take(120).collect::<String>()
-            })
-            .collect::<Vec<_>>();
+        // Telemetry stays content-free: emit shapes and counts only, never the
+        // verbatim question text or document/chunk previews. Diagnostics export
+        // (traces especially, which are on by default) must not carry user
+        // content; the persisted query turn in Postgres holds it for operator
+        // debugging.
         tracing::info!(
-            question = question,
+            question_len = question.chars().count(),
             chunk_count = canonical_answer_chunks.len(),
             chunk_document_count = canonical_answer_chunks
                 .iter()
@@ -180,8 +256,6 @@ pub(super) fn build_canonical_preflight_answer(
             has_direct_targeted_table_answer = direct_targeted_table_answer.is_some(),
             has_deterministic_grounded_answer = deterministic_grounded_answer.is_some(),
             requires_synthesis,
-            top_documents = ?top_documents,
-            top_chunk_previews = ?top_chunk_previews,
             "exact technical preflight decision"
         );
     }
@@ -189,6 +263,16 @@ pub(super) fn build_canonical_preflight_answer(
     missing_explicit_document_answer
         .or(direct_targeted_table_answer)
         .or(deterministic_grounded_answer)
+}
+
+fn canonical_preflight_requires_synthesis(question: &str, query_ir: &QueryIR) -> bool {
+    query_ir.is_follow_up() || scoped_setup_literal_inventory_requires_synthesis(question, query_ir)
+}
+
+fn scoped_setup_literal_inventory_requires_synthesis(question: &str, query_ir: &QueryIR) -> bool {
+    structured_current_question_segment(question).is_some()
+        && query_ir_requests_setup_literal_context(query_ir)
+        && !current_question_has_exact_technical_surface(question)
 }
 
 pub(super) fn build_preflight_graph_evidence_context_lines(
@@ -296,13 +380,17 @@ pub(super) fn select_technical_literal_chunks(
     selected
 }
 
-fn query_ir_requests_setup_literal_context(query_ir: &QueryIR) -> bool {
+pub(super) fn query_ir_requests_setup_literal_context(query_ir: &QueryIR) -> bool {
     if !matches!(
         query_ir.act,
         QueryAct::ConfigureHow | QueryAct::Describe | QueryAct::RetrieveValue
     ) {
         return false;
     }
+    let has_focus_signal = query_ir.document_focus.is_some()
+        || !query_ir.target_entities.is_empty()
+        || !query_ir.literal_constraints.is_empty()
+        || !query_ir.conversation_refs.is_empty();
     let requests_configuration = query_ir.target_types.iter().any(|target_type| {
         matches!(
             canonical_target_type_tag(target_type).as_str(),
@@ -315,12 +403,68 @@ fn query_ir_requests_setup_literal_context(query_ir: &QueryIR) -> bool {
     if requests_configuration && requests_module_or_parameter {
         return true;
     }
+    if requests_configuration && has_focus_signal {
+        return true;
+    }
     matches!(query_ir.act, QueryAct::ConfigureHow)
         && (requests_configuration || requests_module_or_parameter)
-        && (query_ir.document_focus.is_some()
-            || !query_ir.target_entities.is_empty()
-            || !query_ir.literal_constraints.is_empty()
-            || !query_ir.conversation_refs.is_empty())
+        && has_focus_signal
+}
+
+pub(super) fn query_ir_requests_low_confidence_setup_preflight(
+    question: &str,
+    query_ir: &QueryIR,
+    context_chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    (query_ir_low_confidence_unfocused_descriptive_setup(query_ir)
+        || query_ir_low_confidence_structural_descriptive_setup(query_ir))
+        && context_chunks.iter().any(|chunk| {
+            low_confidence_context_chunk_requests_setup_bridge(question, query_ir, chunk)
+        })
+}
+
+fn query_ir_low_confidence_unfocused_descriptive_setup(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.3
+        && matches!(query_ir.scope, QueryScope::SingleDocument)
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.target_entities.is_empty()
+        && query_ir.literal_constraints.is_empty()
+}
+
+fn query_ir_low_confidence_structural_descriptive_setup(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.35
+        && matches!(query_ir.scope, QueryScope::SingleDocument | QueryScope::MultiDocument)
+        && matches!(
+            query_ir.act,
+            QueryAct::Describe | QueryAct::ConfigureHow | QueryAct::RetrieveValue
+        )
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.comparison.is_none()
+        && query_ir.temporal_constraints.is_empty()
+        && query_ir.conversation_refs.is_empty()
+        && (!query_ir.target_entities.is_empty() || !query_ir.literal_constraints.is_empty())
+}
+
+fn low_confidence_context_chunk_requests_setup_bridge(
+    question: &str,
+    query_ir: &QueryIR,
+    chunk: &RuntimeMatchedChunk,
+) -> bool {
+    let text = format!("{}\n{}", chunk.excerpt, chunk.source_text);
+    let setup_score = setup_literal_chunk_score(&text);
+    setup_score.anchor_score > 0
+        || (setup_score.total_score >= 3
+            && chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+        || (chunk.score_kind == RuntimeChunkScoreKind::SourceContext
+            && technical_literal_focus_keywords(question, Some(query_ir))
+                .iter()
+                .any(|keyword| keyword.chars().count() < 4)
+            && !extract_parameter_literals(&text, 2).is_empty())
 }
 
 fn select_setup_literal_document_id(
@@ -607,7 +751,15 @@ pub(super) fn preflight_exact_literal_document_scope(
     if has_question_intent(&classify_query_ir_intents(query_ir), QuestionIntent::ErrorCode) {
         return None;
     }
+    if query_ir_requests_open_descriptive_context(query_ir) {
+        return None;
+    }
     if query_ir_requests_transport_inventory_scope(query_ir) {
+        return None;
+    }
+    if query_ir_low_confidence_unfocused_descriptive_setup(query_ir)
+        && !current_question_has_exact_preflight_scope_surface(question)
+    {
         return None;
     }
     if !intent_profile.exact_literal_technical || technical_literal_chunks.is_empty() {
@@ -645,6 +797,25 @@ fn query_ir_requests_transport_inventory_scope(query_ir: &QueryIR) -> bool {
             .any(|target_type| target_type.trim().eq_ignore_ascii_case("connection"))
 }
 
+fn query_ir_requests_open_descriptive_context(query_ir: &QueryIR) -> bool {
+    if !query_ir.literal_constraints.is_empty()
+        || query_ir.source_slice.is_some()
+        || query_ir.is_follow_up()
+        || query_ir_has_focused_document_answer_intent(query_ir)
+        || query_ir_requests_setup_literal_context(query_ir)
+    {
+        return false;
+    }
+    if !matches!(query_ir.act, QueryAct::Compare | QueryAct::Describe | QueryAct::RetrieveValue) {
+        return false;
+    }
+    let intents = classify_query_ir_intents(query_ir);
+    if !intents.is_empty() {
+        return false;
+    }
+    !query_ir.target_types.is_empty() && query_ir_targets_graph_entities_or_relationships(query_ir)
+}
+
 pub(super) fn question_prefers_single_exact_literal_scope(
     question: &str,
     query_ir: &QueryIR,
@@ -675,6 +846,49 @@ fn current_question_has_exact_technical_surface(question: &str) -> bool {
                 token.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.')
             })
             .any(literal_text_is_identifier_shaped)
+}
+
+fn current_question_has_exact_preflight_scope_surface(question: &str) -> bool {
+    let current = current_question_segment(question);
+    current.contains("http://")
+        || current.contains("https://")
+        || current.contains('/')
+        || current
+            .split_whitespace()
+            .map(|token| {
+                token.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.')
+            })
+            .any(token_has_exact_preflight_scope_surface)
+}
+
+fn token_has_exact_preflight_scope_surface(token: &str) -> bool {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut has_numeric = false;
+    let mut has_separator = false;
+    let mut seen_lowercase_before = false;
+    let mut has_uppercase_after_lowercase = false;
+
+    for ch in trimmed.chars() {
+        if ch.is_alphabetic() {
+            if ch.is_uppercase() {
+                has_uppercase_after_lowercase |= seen_lowercase_before;
+            }
+            if ch.is_lowercase() {
+                seen_lowercase_before = true;
+            }
+        } else if ch.is_numeric() {
+            has_numeric = true;
+        } else if matches!(ch, '_' | '-' | '.') {
+            has_separator = true;
+        } else {
+            return false;
+        }
+    }
+
+    has_separator || has_numeric || has_uppercase_after_lowercase
 }
 
 fn query_ir_targets_multiple_technical_literal_families(query_ir: &QueryIR) -> bool {
@@ -944,7 +1158,13 @@ async fn augment_setup_preflight_structured_blocks(
     scoped_document_ids: Option<&HashSet<Uuid>>,
     preflight_evidence: &mut CanonicalAnswerEvidence,
 ) -> anyhow::Result<()> {
-    if !query_ir_requests_setup_literal_context(query_ir) {
+    if !query_ir_requests_setup_literal_context(query_ir)
+        && !query_ir_requests_low_confidence_setup_preflight(
+            question,
+            query_ir,
+            preflight_answer_chunks,
+        )
+    {
         return Ok(());
     }
     let Some(document_id) = setup_preflight_focused_document_id(

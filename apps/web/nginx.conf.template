@@ -11,6 +11,19 @@ server {
 
     client_max_body_size 100M;
 
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_vary on;
+    gzip_types
+        application/javascript
+        application/json
+        application/manifest+json
+        application/wasm
+        image/svg+xml
+        text/css
+        text/plain;
+
     include /etc/nginx/snippets/ironrag-security-headers.conf;
 
     location ~ /\.(?!well-known(?:/|$)) {
@@ -23,6 +36,7 @@ server {
 
     location ~ ^/v1/content/libraries/[^/]+/snapshot$ {
         client_max_body_size 0;
+        gzip off;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -40,6 +54,7 @@ server {
     }
 
     location /v1/ {
+        gzip off;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

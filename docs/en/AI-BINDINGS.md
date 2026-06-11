@@ -15,7 +15,7 @@ A binding row in `ai_binding_assignment` joins six pieces:
 
 | Field | Source | Notes |
 |---|---|---|
-| `binding_purpose` | `ai_binding_purpose` enum | one of the 10 purposes below |
+| `binding_purpose` | `ai_binding_purpose` enum | one of the 8 purposes below |
 | `scope_kind` | `ai_scope_kind` enum | `instance` / `workspace` / `library` |
 | `workspace_id`, `library_id` | nullable | populated according to `scope_kind` |
 | `provider_credential_id` | `ai_provider_credential` | api key + base URL + provider catalog |
@@ -31,7 +31,7 @@ The runtime resolves the **effective** binding by walking the scope ladder:
 The first match wins. If nothing is configured, the stage fails loudly
 (no silent fallback to a default provider).
 
-## 2. The ten purposes
+## 2. The eight purposes
 
 | Purpose | Stage that consumes it | What the model must do |
 |---|---|---|
@@ -39,11 +39,9 @@ The first match wins. If nothing is configured, the stage fails loudly
 | `extract_graph` | ingest: graph builder | strict JSON tagging of entities/relationships per chunk |
 | `embed_chunk` | ingest: vector indexer | embeddings (not chat); dimension must match the per-library shard |
 | `query_compile` | query: turn NL question into `QueryIR` | strict JSON output against a fixed schema; low temperature |
-| `query_retrieve` | query: optional rewriter / HyDE companion | short text generation; only used by HyDE/CRAG paths |
+| `query_retrieve` | query: embed the question for vector search | embeddings (not chat); must share the same model and dimension as `embed_chunk` for the library |
 | `query_answer` | query: grounded answer over retrieved bundle | citation-aware long-form generation; instruction following |
 | `vision` | ingest: image-to-text on visual chunks | multi-modal model with image input |
-| `utility` | misc background helpers | any chat-capable model |
-| `rerank` | retrieval: optional cross-encoder rerank | dedicated rerank model (e.g. Cohere, Jina), not a chat model |
 | `agent` | UI in-product agent + MCP `grounded_answer` host | tool-calling chat model with good instruction following |
 
 ## 3. Wire-level prompt structure (matters for caching)
@@ -115,24 +113,24 @@ What matters from IronRAG's side is the *shape* of the work:
 - A higher-quality model usually pays for itself here because the
   user-visible answer is the product.
 
-### `embed_chunk`
+### `embed_chunk` / `query_retrieve`
 
-- Not a chat model. Dimension is part of the per-library contract — the
-  vector collection is sharded per dim (`knowledge_chunk_vector_d<dim>`).
-- Switching models that change the embedding dimension requires a
-  vector-migrate pass (`ironrag-maintenance migrate vector-per-dim`).
-- Latency matters at ingest scale, not per query.
+- Neither is a chat model. Both are embedding models; `embed_chunk` indexes
+  chunks at ingest time, `query_retrieve` embeds the question at query time.
+  They must share the same model and dimension for a given library — the
+  runtime enforces this and fails loudly if they disagree.
+- Dimension is part of the per-library contract; vector material is stored
+  in per-`(library, dim)` pgvector relations.
+- Switching to a model with a different embedding dimension requires a vector
+  rebuild pass (`ironrag-maintenance rebuild vector-plane --source-library`).
+- Latency matters at ingest scale for `embed_chunk`; for `query_retrieve` it
+  is on the critical query path.
 
 ### `extract_graph`
 
 - Strict JSON output per chunk; runs many times per document. Cost and
   throughput dominate over single-call latency.
 - A smaller, fast structured-output model is usually fine.
-
-### `rerank`
-
-- A cross-encoder reranker, **not** a chat model. Pick a dedicated
-  reranker (Cohere, Jina, BGE) — chat models will not work here.
 
 ### `vision` / `extract_text`
 
@@ -210,16 +208,17 @@ LIMIT 1;
 - **Embedding dimension drift.** Changing the `embed_chunk` model
   between two models with different dimensions (e.g. `1024` →
   `3072`) requires a vector-migrate pass and re-indexing. The per-dim
-  Arango shard does the routing; the old shard stays around until
-  migrated.
+  pgvector relations do the routing; old vector material stays around
+  until migrated.
 - **Per-call dynamic `extra_parameters_json`.** Anything that varies
   per request (user ids, timestamps, request ids) goes into the
   request body and busts every provider-side prompt cache.
 - **System prompt edits.** Editing the built-in `QUERY_COMPILER_SYSTEM_PROMPT`
-  or `EXTRACT_GRAPH_SYSTEM_PROMPT` invalidates the prompt cache for
-  every binding that uses the built-in prompt. Treat these constants
-  as part of the schema and version them through `QUERY_IR_SCHEMA_VERSION`
-  in the IR cache key.
+  invalidates the prompt cache for every binding that uses the built-in
+  prompt. Treat this constant as part of the schema and version changes
+  through `QUERY_IR_SCHEMA_VERSION` in the IR cache key. Graph-extraction
+  prompts live in the graph service source and do not have a separate
+  named compile-time constant.
 - **Mixing `instance`, `workspace`, and `library` scopes.** A library
   override hides the workspace fallback completely. If you set a
   `library`-scoped `query_compile` binding, the workspace and instance

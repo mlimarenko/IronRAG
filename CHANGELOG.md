@@ -1,22 +1,281 @@
 # Changelog
 
-## 0.4.23 — 2026-06-02
+## 0.5.0 — 2026-06-11
+
+ArangoDB is removed as the knowledge-plane database. The knowledge plane —
+documents, revisions, structured blocks, chunks, technical facts, entities,
+relations, evidence, context bundles, the chunk and entity vectors, and the
+runtime graph — now lives entirely in PostgreSQL 18 with pgvector and
+PostgreSQL full-text search. A 0.5.0 deployment runs no ArangoDB.
+
+> ⚠️ **Clean install only — there is no in-place 0.4.x → 0.5.0 upgrade.**
+> 0.5.0 replaces ArangoDB with PostgreSQL + pgvector and starts from a single
+> baseline migration. Provision a **fresh** 0.5.0 stack; never point a 0.5.0
+> backend at a 0.4.x database. Carry your data across **manually** by exporting
+> each library's snapshot from the old stack and restoring it into the new one
+> (see the upgrade procedure below).
+
+### Breaking changes
+
+- **Single baseline migration.** `apps/api/migrations/0001_init.sql`
+  replaces the entire previous migration chain. A 0.5.0 stack starts from this
+  one baseline and does not apply the historical `0001`–`0017` migrations.
+- **Knowledge-plane backend.** `IRONRAG_KNOWLEDGE_PLANE_BACKEND=postgres` is the
+  default and the only backend provisioned for new deployments. Chunk and entity
+  vectors are stored in per-`(library, dim)` pgvector relations tracked by a
+  manifest table.
+- **PostgreSQL-only deployment.** The Compose files and the Helm chart no longer
+  provision ArangoDB; the PostgreSQL service uses the `pgvector/pgvector` image.
+  The readiness/diagnostics payload reports a `knowledgePlane` dependency where
+  it previously reported `arangodb`.
+- **Default agent AI binding.** A new `agent` binding purpose is seeded by
+  default, reusing the configured `query_answer` provider and model, so a clean
+  stack resolves an active agent binding without extra operator configuration.
+- **Snapshot archive format v6.** Library snapshots are exported from PostgreSQL
+  (schema version 6). Restore accepts both v6 (PostgreSQL) archives and v5
+  (ArangoDB) archives, so a snapshot taken on a 0.4.x stack can be restored into
+  a 0.5.0 stack.
+
+### Deprecations
+
+- **ArangoDB is deprecated.** The ArangoDB knowledge-plane backend
+  (`IRONRAG_KNOWLEDGE_PLANE_BACKEND=arango`) is no longer provisioned by the
+  Compose files or the Helm chart and is retained in 0.5.0 only as a
+  compatibility path for reading older v5 snapshot archives during the upgrade.
+  It is expected to be removed entirely in a future release: ArangoDB's
+  free/community tier caps a deployment at 100 GiB of data, which the PostgreSQL
+  knowledge plane removes. New deployments must use PostgreSQL. If you still run
+  the `arango` backend, export your libraries and restore them onto a PostgreSQL
+  0.5.0 stack now (see the upgrade procedure below); do not expect the `arango`
+  backend to remain available.
+
+### Upgrade procedure (manual, data-preserving)
+
+The 0.4.x → 0.5.0 upgrade is manual; there is no automatic ArangoDB-to-PostgreSQL
+migration. To carry your data across:
+
+1. **Upgrade your existing 0.4.x stack to 0.4.23 first.** 0.4.23 contains a
+   snapshot-export fix required to export libraries whose vectors were promoted
+   to per-`(library, dim)` shards; without it the export of such a library
+   fails and writes an `EXPORT_FAILED.json` sentinel instead of data.
+2. **Export each library you want to keep** with
+   `GET /v1/content/libraries/{libraryId}/snapshot` and save the `.tar.zst`
+   archive.
+3. **Deploy a fresh 0.5.0 stack** (new PostgreSQL baseline, no ArangoDB).
+4. **Restore each library** with
+   `POST /v1/content/libraries/{libraryId}/snapshot`. Restore is idempotent and
+   safe to re-run; it rebuilds the per-`(library, dim)` vector relations and the
+   vector manifest, and accepts both v5 and v6 archives.
+
+To start fresh without preserving data, deploy 0.5.0 directly — no export or
+restore is required.
 
 ### Added
 
-- feat(snapshot): workspace-level export/import
-  (`GET`/`POST /v1/catalog/workspaces/{id}/snapshot`) bundles every library in
-  a workspace into one archive, so an operator can back up a whole stack in one
-  call before the 0.5.0 manual upgrade instead of exporting each library
-  separately. The archive is a plain tar holding a `workspace-manifest.json`
-  plus one per-library `.tar.zst`; import provisions a fresh library per entry
-  and reuses the per-library restore.
+- **Structural document parentage and attached-context retrieval.** A document
+  admitted as a dependent of another source document (e.g. a page attachment or
+  inline image) now records its canonical `parent_document_id` and a typed
+  `document_role` (`primary`, `attachment`, or `attached_context`), derived once
+  at admission/backfill from structural inputs (declared parentage + the
+  revision's media class). Connectors declare the link with an optional
+  `parentExternalKey` on document admission; a per-library `ironrag-cli`
+  backfill recovers parentage for already-ingested corpora and is idempotent.
+  In retrieval, raster-image attachments (`attached_context`) are demoted below
+  peer and primary content during final context selection, excluded from the
+  clarify-vs-answer disposition, and never offered as a clarify variant — so a
+  page's one-chunk image attachments can no longer flood an answer's context or
+  a clarification menu and displace the parent page's own evidence. A document
+  the query explicitly focuses on is never demoted, so an exact attachment ask
+  still resolves it. The signal is the typed role only; no MIME, extension, or
+  filename inspection at the retrieval layer. Non-image attachments (e.g. a PDF
+  manual) keep peer-document recall. See
+  [docs/en/PIPELINE.md](docs/en/PIPELINE.md).
+- **Corpus-gloss acronym aliases.** When a document spells a short form next
+  to its full form as a parenthetical gloss (`Full Form (FF)`), graph
+  extraction now captures the short form as an alias of the full-form entity
+  node. The signal is purely structural (Unicode tokenization plus the
+  existing identifier-shape gate) and evidence-local: a different sense
+  glossed in a different chunk attaches to its own node, so polysemous
+  acronyms keep their senses separate. A new `ironrag-cli` per-library
+  backfill recomputes these structural aliases over already-ingested data
+  idempotently — re-running it is a no-op, and it removes initials-shaped
+  aliases no gloss justifies.
+- **Graph anchoring for short identifier mentions.** A compiled target entity
+  whose label is a short identifier-shaped token (for example a two-letter
+  acronym) previously built no graph anchor profile at all, so retrieval fell
+  back to the vague vector neighbourhood. Such mentions now anchor through an
+  exact label-or-alias match, guarded by a sense-dominance filter: when the
+  short token matches several homograph nodes, only nodes whose evidence
+  support is within a fixed ratio of the strongest match seed neighbourhood
+  expansion, keeping incidental low-evidence senses out of the frontier.
+- **Release-inventory clarify-with-fallback.** A "what's new in the latest
+  releases?"-class query that names no explicit subject now checks, on the
+  deterministic latest-version inventory path, whether the listed release
+  notes mention several distinct subjects in the knowledge graph (entity
+  evidence spanning at least two of the listed release documents). If so, the
+  answer leads with a grounded excerpt for one subject and asks which subject
+  to focus on, listing the graph-derived choices; a query that already scopes
+  the inventory — by a named entity, a document focus, or a literal — keeps
+  the flat latest-versions list. The choices come entirely from the library's
+  own graph; no subject names or language-specific lists exist in code.
+- **Horizontal ingest-worker scale-out.** The number of ingest workers is a
+  single variable: `IRONRAG_WORKER_REPLICAS` for Docker Compose (default `1`,
+  keeping the baseline stack light for weak hosts) and `worker.replicaCount` for
+  the Helm chart. Scale-out is safe at any time — workers claim queued jobs with
+  `SELECT … FOR UPDATE SKIP LOCKED` under per-library, per-workspace and global
+  concurrency caps, so replicas never double-process a job. See
+  [docs/en/CAPACITY-PLANNING.md](docs/en/CAPACITY-PLANNING.md).
+- **Universal structured-record ingest.** JSON (object or array), YAML (single
+  document, `---` stream, or sequence of mappings), JSONL/NDJSON, and TOML now
+  ingest through one key-agnostic record extractor. Every field at any nesting
+  depth is flattened to searchable text, heterogeneous schemas are profiled, and
+  any value shaped like a timestamp (RFC3339 or epoch, under any key name)
+  time-stamps its record for temporal retrieval — with no per-format or per-field
+  special-casing, so an arbitrary export, event log, config dump, or session
+  transcript all flow through the same generic path. Spreadsheets (`csv`/`tsv`/
+  `xls*`) stay on the native tabular extractor. The knowledge graph built from
+  these records captures the real value-entities (named things, identifiers,
+  paths, places) and their relations — not the structural scaffolding (field-path
+  keys, format counters, raw timestamps), which stay as record metadata. See
+  [docs/en/PIPELINE.md](docs/en/PIPELINE.md).
+- **Workspace-level snapshots.** `GET`/`POST /v1/catalog/workspaces/{id}/snapshot`
+  export and restore an entire workspace — every library at once — as a single
+  archive, instead of one library at a time. The archive is a plain tar holding
+  a `workspace-manifest.json` plus one per-library `.tar.zst`; restore
+  provisions a fresh library per entry and reuses the per-library restore. This
+  is the operator path for moving a whole stack between deployments.
+- **Selectable AI-configuration snapshots.** Library export accepts an
+  `include=ai_config` kind alongside `library_data`, `blobs` and `workspace`.
+  It bundles the portable AI configuration needed to resolve the library on
+  another stack — provider and model catalogs, prices, model presets, provider
+  credentials and binding assignments — covering both instance-scoped
+  (deployment-global) and workspace/library-scoped rows. Provider `api_key`
+  values are never exported, and import is non-destructive: a row that
+  collides with the target's existing AI configuration is skipped, so an
+  import only populates an empty target.
+- **System-role RBAC.** Each user now carries a system role
+  (`viewer` | `operator` | `admin`). A viewer reads documents and the graph and
+  asks the assistant; an operator additionally creates and edits libraries and
+  their content; an admin additionally manages workspaces, system settings, AI
+  configuration and users. The role is surfaced on the session bootstrap and
+  gates the UI shell's capability matrix. The `0001_init.sql` baseline carries
+  the system-role column and promotes the bootstrap administrator to `admin`.
+- **User-management endpoints and admin surface.** New admin-only endpoints
+  `GET`/`POST /v1/iam/users` and `PATCH /v1/iam/users/{principalId}/role` list
+  users, create a user (login, email, display name, password, role) and change
+  a user's role. Admin access is enforced from the caller's own system role, and
+  the role-change path refuses to demote the last remaining administrator. The
+  admin Users surface lists users, creates them and changes their roles against
+  these endpoints.
+- **Role-aware authorization and per-user access management.** The system role
+  is now enforced end-to-end: it decides the capability (read, write or admin)
+  while resource grants decide which workspaces and libraries a user can reach.
+  An admin passes every authorization check; an operator can create and edit
+  libraries and content in the workspaces they have been granted access to; a
+  viewer stays read-only even where a resource grant would otherwise match.
+  Library creation no longer requires a workspace-admin grant — operator access
+  to the workspace is sufficient. New admin-only endpoints
+  `GET`/`PUT /v1/iam/users/{principalId}/access` read and set a user's workspace
+  and library access, and the admin Users surface gains a per-user access editor
+  built on them.
+
+### Observability
+
+- **Anonymous performance telemetry on by default.** The backend ships
+  OpenTelemetry traces and metrics to the project's default collector to help
+  improve performance. These signals carry request timings, stage durations,
+  counters and identifiers (library/document/chunk UUIDs) — not your documents,
+  queries, answers or credentials. Disable with `IRONRAG_OTEL_ENABLED=false`, or
+  redirect to your own collector with `OTEL_EXPORTER_OTLP_ENDPOINT`; the shipped
+  default lives in `apps/api/observability.toml`.
+- **Logs off by default.** Logs are the only content-bearing signal, so the
+  Compose and Helm defaults set `OTEL_LOGS_EXPORTER=none`; set it to `otlp` to
+  ship logs to a collector you control.
+- **Per-deployment attribution.** Every signal carries a stable
+  `ironrag.deployment.id`, derived from the PostgreSQL cluster identity and
+  overridable with `IRONRAG_DEPLOYMENT_ID`, so deployments are distinguishable
+  and never mixed into one bucket.
+- **No verbatim content in diagnostics.** The exact-technical preflight stage no
+  longer records the question text or document/chunk previews; it emits only
+  shapes and counts.
+
+### Performance
+
+- **Large-graph view stays at frame rate during every interaction.** On a
+  ~90k-node / ~430k-edge library the graph previously stalled for seconds on
+  pan, zoom and node drag. The bottleneck was rasterising the full edge set
+  every frame, so the view now draws a uniform stride-sampled subset of edges
+  above a render cap (the full topology is a few hundred-thousand-edge
+  hairball anyway), with a toolbar toggle to render all edges on demand. Node
+  highlighting still uses the complete adjacency, so hover/select neighbours
+  are unaffected by sampling. Measured on the reference library, pan / zoom /
+  drag / hover / select / layout-switch all hold the display refresh rate with
+  no long tasks, down from multi-second main-thread blocks.
+- **Large-graph interaction is reindex-free.** Every graph interaction —
+  hover, node drag, legend/search filtering, layout/mode switching and node
+  selection — repaints through Sigma's reducer pipeline with
+  `refresh({ partialGraph, skipIndexation: true })` instead of rebuilding the
+  Graphology instance or forcing a whole-graph reprocess. Hover, drag and
+  filter touch only the affected neighbourhood; the layout/mode switch runs
+  its force-directed math off the main thread in the existing graphology Web
+  Worker; and node selection emphasises the focus neighbourhood (O(degree))
+  rather than dimming all nodes and edges, so a click no longer restyles the
+  whole graph. A partial-refresh guard also prevents a "can't be repaint"
+  error from losing the WebGL context when a fresh instance is mid-build.
+- **Smaller initial web bundle.** The document editor (Tiptap) is lazily
+  loaded and Radix/form vendors are split into their own chunks, cutting the
+  initial `index` chunk roughly in half (~70 kB gzip) and reducing
+  re-renders via memoised context and row components.
 
 ### Fixed
 
-- fix(snapshot): export now includes per-(library,dim) promoted vector shards
-  instead of failing with `EXPORT_FAILED`; required so operators on large
-  libraries can back up before the 0.5.0 manual upgrade.
+- Release-inventory clarifications keep the full flat inventory in the tool
+  answer: the clarification is appended after the complete top-N list instead
+  of replacing it, so an agent relaying the tool result (the in-product UI
+  agent or an external MCP client) delivers the data in one round trip instead
+  of re-querying with a guessed subject.
+- A compiled follow-up retrieval query that drops the recovered history
+  subject is no longer trusted: a structural guard detects a resolved query
+  sharing zero tokens with the follow-up's scope segment and searches the full
+  scoped question instead, so bare refinements ("give more detail") stay on
+  the prior subject.
+- Procedural how-to answers open with the grounded command lines as ordered
+  steps when the retrieved context contains them; a note that the
+  documentation lacks one end-to-end procedure document may only follow the
+  steps as a coverage remark.
+- The corpus-gloss acronym capture is bidirectional: a node labeled with the
+  short form gains the glossed full-form phrase as an alias (add-only, from
+  its own evidence chunks), so full-form queries anchor short-labeled graph
+  nodes too.
+- Restoring a library snapshot exported before document parentage existed no
+  longer fails on the `document_role` not-null constraint: the import injects
+  the default role for legacy archives.
+- Snapshot export and restore handle per-`(library, dim)` promoted vector
+  shards instead of failing the export.
+- Grounded-answer context bundles persist correctly on PostgreSQL: the bundle
+  entity, relation, and evidence foreign keys reference the canonical runtime
+  graph, so a grounded answer records its chunk and segment references instead
+  of returning an unreferenced answer.
+- Restoring a library snapshot no longer fails when the archive's library slug
+  is already taken by another library in the target workspace. The restore
+  rewrites the incoming row to the target library's own slug, so an import is
+  collision-free regardless of the source slug.
+- Service-unavailable (HTTP 503) responses now report an accurate `error.kind`.
+  Content-storage read failures surface as `content_storage_unavailable` and
+  cache failures as `cache_unavailable`, instead of the misleading
+  `arangodb_bootstrap_failed` left over from the removed ArangoDB backend — a
+  missing content blob no longer looks like a database bootstrap error.
+
+### Deploy
+
+- The four Compose files (base, local-build, large-host, s4) are unified into a
+  single `docker-compose.yml`. Variants are now driven by env and one profile:
+  the `s4` profile adds the bundled s4core object store (with
+  `IRONRAG_CONTENT_STORAGE_PROVIDER=s3`), the `IRONRAG_*_MEMORY_LIMIT` vars
+  raise the per-role caps for larger hosts, and `IRONRAG_BACKEND_IMAGE` /
+  `IRONRAG_FRONTEND_IMAGE` select a local source build. The default
+  `docker compose up -d` is unchanged: filesystem storage on a 16 GiB-safe
+  memory budget.
 
 ## 0.4.22 — 2026-06-02
 

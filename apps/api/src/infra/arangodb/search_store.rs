@@ -20,7 +20,7 @@ use crate::infra::arangodb::{
         KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
         KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_NGRAM_ANALYZER, KNOWLEDGE_SEARCH_VIEW,
         chunk_vector_collection_for_dim, chunk_vector_collection_for_library,
-        entity_vector_collection_for_dim,
+        entity_vector_collection_for_dim, parse_library_vector_shard,
     },
 };
 
@@ -594,6 +594,46 @@ impl ArangoSearchStore {
         Ok(total)
     }
 
+    pub async fn delete_library_vectors_except_dim(
+        &self,
+        library_id: Uuid,
+        keep_dim: u64,
+    ) -> anyhow::Result<u64> {
+        let keep_chunk_collection = chunk_vector_collection_for_dim(keep_dim);
+        let keep_entity_collection = entity_vector_collection_for_dim(keep_dim);
+        let mut total = 0_u64;
+
+        let mut chunk_targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        chunk_targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        for collection in chunk_targets {
+            if vector_collection_has_dim(&collection, &keep_chunk_collection, keep_dim) {
+                continue;
+            }
+            total = total
+                .checked_add(
+                    self.delete_library_rows_from_vector_collection(&collection, library_id)
+                        .await?,
+                )
+                .context("deleted vector count overflowed u64")?;
+        }
+
+        let mut entity_targets = vec![KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string()];
+        entity_targets.extend(self.client.list_per_dim_entity_vector_collections().await?);
+        for collection in entity_targets {
+            if vector_collection_has_dim(&collection, &keep_entity_collection, keep_dim) {
+                continue;
+            }
+            total = total
+                .checked_add(
+                    self.delete_library_rows_from_vector_collection(&collection, library_id)
+                        .await?,
+                )
+                .context("deleted vector count overflowed u64")?;
+        }
+
+        Ok(total)
+    }
+
     pub async fn delete_all_chunk_vectors(&self) -> anyhow::Result<u64> {
         let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
         targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
@@ -617,6 +657,31 @@ impl ArangoSearchStore {
                 .context("deleted chunk vector count overflowed u64")?;
         }
         Ok(total)
+    }
+
+    async fn delete_library_rows_from_vector_collection(
+        &self,
+        collection: &str,
+        library_id: Uuid,
+    ) -> anyhow::Result<u64> {
+        let cursor = self
+            .client
+            .query_json(
+                "FOR vector IN @@collection
+                 FILTER vector.library_id == @library_id
+                 REMOVE vector IN @@collection
+                 RETURN OLD._key",
+                serde_json::json!({
+                    "@collection": collection,
+                    "library_id": library_id,
+                }),
+            )
+            .await
+            .with_context(|| {
+                format!("failed to delete knowledge vectors by library from {collection}")
+            })?;
+        let deleted: Vec<String> = decode_many_results(cursor)?;
+        u64::try_from(deleted.len()).context("deleted vector count overflowed u64")
     }
 
     pub async fn list_chunk_vectors_by_chunk(
@@ -1794,6 +1859,11 @@ fn choose_chunk_vector_write_target(
     }
 }
 
+fn vector_collection_has_dim(collection: &str, shared_collection: &str, dim: u64) -> bool {
+    collection == shared_collection
+        || parse_library_vector_shard(collection).is_some_and(|shard| shard.dim == dim)
+}
+
 /// Size IVF `nLists` for a per-library chunk shard from its live row count.
 /// IVF training needs at least as many sample points as lists, and a
 /// per-library shard is small, so we target ~`PER_LIBRARY_CHUNK_SHARD_ROWS_PER_LIST`
@@ -1925,6 +1995,203 @@ where
         .cloned()
         .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
     serde_json::from_value(result).context("failed to decode ArangoDB result rows")
+}
+
+// --- Knowledge-plane SearchStore port (forwards to inherent methods) ---
+// The trait is the swappable boundary for the 0.5.0 PG migration; bodies stay
+// on the concrete struct. Leaky contracts (vector write-routing hidden behind
+// upsert_chunk_vectors_*, write-count returns) documented on the trait:
+// crate::infra::knowledge_plane::SearchStore.
+#[async_trait::async_trait]
+impl crate::infra::knowledge_plane::SearchStore for ArangoSearchStore {
+    async fn ensure_chunk_vector_shard(&self, dim: u64) -> anyhow::Result<()> {
+        self.ensure_chunk_vector_shard(dim).await
+    }
+    async fn ensure_chunk_vector_shard_for_library(
+        &self,
+        dim: u64,
+        library_id: Uuid,
+    ) -> anyhow::Result<()> {
+        self.ensure_chunk_vector_shard_for_library(dim, library_id).await
+    }
+    async fn ensure_entity_vector_shard(&self, dim: u64) -> anyhow::Result<()> {
+        self.ensure_entity_vector_shard(dim).await
+    }
+    async fn upsert_chunk_vector(
+        &self,
+        row: &KnowledgeChunkVectorRow,
+    ) -> anyhow::Result<KnowledgeChunkVectorRow> {
+        self.upsert_chunk_vector(row).await
+    }
+    async fn upsert_chunk_vectors_bulk(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+    ) -> anyhow::Result<()> {
+        self.upsert_chunk_vectors_bulk(rows).await
+    }
+    async fn delete_chunk_vector(
+        &self,
+        chunk_id: Uuid,
+        embedding_model_key: &str,
+        freshness_generation: i64,
+    ) -> anyhow::Result<Option<KnowledgeChunkVectorRow>> {
+        self.delete_chunk_vector(chunk_id, embedding_model_key, freshness_generation).await
+    }
+    async fn delete_chunk_vectors_by_revision(&self, revision_id: Uuid) -> anyhow::Result<u64> {
+        self.delete_chunk_vectors_by_revision(revision_id).await
+    }
+    async fn delete_chunk_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<u64> {
+        self.delete_chunk_vectors_by_library(library_id).await
+    }
+    async fn delete_library_vectors_except_dim(
+        &self,
+        library_id: Uuid,
+        keep_dim: u64,
+    ) -> anyhow::Result<u64> {
+        self.delete_library_vectors_except_dim(library_id, keep_dim).await
+    }
+    async fn delete_all_chunk_vectors(&self) -> anyhow::Result<u64> {
+        self.delete_all_chunk_vectors().await
+    }
+    async fn list_chunk_vectors_by_chunk(
+        &self,
+        chunk_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeChunkVectorRow>> {
+        self.list_chunk_vectors_by_chunk(chunk_id).await
+    }
+    async fn list_chunk_vectors_by_chunks(
+        &self,
+        chunk_ids: &[Uuid],
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<Vec<KnowledgeChunkVectorRow>> {
+        self.list_chunk_vectors_by_chunks(chunk_ids, embedding_model_key, vector_kind).await
+    }
+    async fn count_chunk_vectors_by_revision(
+        &self,
+        revision_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+        freshness_generation: i64,
+    ) -> anyhow::Result<usize> {
+        self.count_chunk_vectors_by_revision(
+            revision_id,
+            embedding_model_key,
+            vector_kind,
+            freshness_generation,
+        )
+        .await
+    }
+    async fn upsert_entity_vector(
+        &self,
+        row: &KnowledgeEntityVectorRow,
+    ) -> anyhow::Result<KnowledgeEntityVectorRow> {
+        self.upsert_entity_vector(row).await
+    }
+    async fn delete_entity_vector(
+        &self,
+        entity_id: Uuid,
+        embedding_model_key: &str,
+        freshness_generation: i64,
+    ) -> anyhow::Result<Option<KnowledgeEntityVectorRow>> {
+        self.delete_entity_vector(entity_id, embedding_model_key, freshness_generation).await
+    }
+    async fn delete_entity_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<()> {
+        self.delete_entity_vectors_by_library(library_id).await
+    }
+    async fn delete_all_entity_vectors(&self) -> anyhow::Result<u64> {
+        self.delete_all_entity_vectors().await
+    }
+    async fn list_entity_vectors_by_entity(
+        &self,
+        entity_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeEntityVectorRow>> {
+        self.list_entity_vectors_by_entity(entity_id).await
+    }
+    async fn search_chunks(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+        temporal_start: Option<chrono::DateTime<chrono::Utc>>,
+        temporal_end: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>> {
+        self.search_chunks(library_id, query, limit, temporal_start, temporal_end).await
+    }
+    async fn search_structured_blocks(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeStructuredBlockSearchRow>> {
+        self.search_structured_blocks(library_id, query, limit).await
+    }
+    async fn search_technical_facts(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeTechnicalFactSearchRow>> {
+        self.search_technical_facts(library_id, query, limit).await
+    }
+    async fn search_entities(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeEntitySearchRow>> {
+        self.search_entities(library_id, query, limit).await
+    }
+    async fn search_relations(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeRelationSearchRow>> {
+        self.search_relations(library_id, query, limit).await
+    }
+    async fn search_chunk_vectors_by_similarity(
+        &self,
+        dim: u64,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        query_vector: &[f32],
+        limit: usize,
+        n_probe: Option<u64>,
+        temporal_start: Option<chrono::DateTime<chrono::Utc>>,
+        temporal_end: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<Vec<KnowledgeChunkVectorSearchRow>> {
+        self.search_chunk_vectors_by_similarity(
+            dim,
+            library_id,
+            embedding_model_key,
+            query_vector,
+            limit,
+            n_probe,
+            temporal_start,
+            temporal_end,
+        )
+        .await
+    }
+    async fn search_entity_vectors_by_similarity(
+        &self,
+        dim: u64,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        query_vector: &[f32],
+        limit: usize,
+        n_probe: Option<u64>,
+    ) -> anyhow::Result<Vec<KnowledgeEntityVectorSearchRow>> {
+        self.search_entity_vectors_by_similarity(
+            dim,
+            library_id,
+            embedding_model_key,
+            query_vector,
+            limit,
+            n_probe,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

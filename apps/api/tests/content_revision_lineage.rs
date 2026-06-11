@@ -28,6 +28,7 @@ async fn canonical_content_lifecycle_preserves_logical_document_identity_and_rev
                     external_key: Some(external_key.clone()),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await

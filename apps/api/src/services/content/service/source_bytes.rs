@@ -219,9 +219,9 @@ mod tests {
         let extracted = extract_record_jsonl(&after_second).expect("merged JSONL must parse");
         assert_eq!(extracted.source_metadata.line_count, 4); // header + 3 records
         assert!(extracted.content_text.contains("unit_count=3"));
-        assert!(extracted.content_text.contains("unit_id=msg-1"));
-        assert!(extracted.content_text.contains("unit_id=msg-2"));
-        assert!(extracted.content_text.contains("unit_id=msg-3"));
+        assert!(extracted.content_text.contains("id=msg-1"));
+        assert!(extracted.content_text.contains("id=msg-2"));
+        assert!(extracted.content_text.contains("id=msg-3"));
     }
 
     #[test]

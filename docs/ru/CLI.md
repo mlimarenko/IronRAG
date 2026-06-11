@@ -83,7 +83,6 @@ ironrag-cli create-token <LOGIN> [--label "my-token"] [--workspace "my-workspace
 - `query_run` -- выполнение запросов (ask)
 - `ops_read`, `audit_read` -- операционные и аудит данные
 - `credential_admin`, `binding_admin` -- управление интеграциями
-- `connector_admin` -- управление коннекторами
 
 Разрешение скоупа (когда `--scope` не указан):
 - Системные права (`iam_admin`, `ops_read`, `audit_read`) → скоуп `system`
@@ -209,15 +208,14 @@ worker'а.
 | «Диск кончается, что его съело?» | [`audit storage-summary`](#audit-storage-summary) |
 | «Retrieval медленный, подозреваю плохие индексы» | [`audit index-bloat`](#audit-index-bloat) |
 | «Документ загрузился, но в ответах не появляется» | [`audit null-head-docs`](#audit-null-head-docs), потом [`repair null-heads`](#repair-null-heads) |
-| «Удалили библиотеки на той неделе, Arango освободил место?» | [`audit orphan-libraries`](#audit-orphan-libraries) |
+| «Удалили библиотеки на той неделе, knowledge-plane rows вычищены?» | [`audit orphan-libraries`](#audit-orphan-libraries) |
 | «Старые чанки копятся после замены ревизий» | [`gc stale-chunks`](#gc-stale-chunks) |
 | «`runtime_graph_evidence` больше остальной БД вместе взятой» | [`gc stale-evidence`](#gc-stale-evidence) |
-| «Подтверждённый orphan-след в Arango, нужно вычистить» | [`gc orphan-libraries --yes`](#gc-orphan-libraries) |
+| «Подтверждённый orphan-след в knowledge plane, нужно вычистить» | [`gc orphan-libraries --yes`](#gc-orphan-libraries) |
 | «Failed ingest наплодил кучу null-head документов» | [`repair null-heads-auto`](#repair-null-heads-auto) |
 | «ingest_stage_event в архивах, запросы тормозят» | [`retention stage-events`](#retention-stage-events) |
-| «Сменили embedding-модель, вектора нужно перенести в новый шард» | [`migrate vector-per-dim`](#migrate-vector-per-dim) |
+| «Сменили embedding-модель библиотеки, вектора нужно перестроить» | [`rebuild vector-plane`](#rebuild-vector-plane) |
 | «JSONL-чанки без temporal bounds» | [`migrate chunk-temporal-bounds`](#migrate-chunk-temporal-bounds) |
-| «Векторы чанков лежат в общем per-dim шарде; хочу перенести в per-library шарды» | [`migrate chunk-vector-per-library`](#migrate-chunk-vector-per-library) |
 | «Хочу пере-embed всю библиотеку» | [`rebuild vector-plane`](#rebuild-vector-plane) |
 | «Graph разъехался с документами» | [`rebuild runtime-graph`](#rebuild-runtime-graph) |
 | «Что сейчас делает фоновый scheduler?» | [`lease summary`](#lease-summary) |
@@ -233,8 +231,8 @@ cargo build --release -p ironrag-backend --bin ironrag-maintenance
 
 ## Конфигурация
 
-Использует те же переменные окружения, что и backend (главное —
-`DATABASE_URL` и ArangoDB-кредентиалы).
+Использует те же переменные окружения, что и backend. Обязательная
+database-настройка — `DATABASE_URL`.
 
 ## Замена устаревших maintenance-бинарей
 
@@ -247,7 +245,6 @@ cargo build --release -p ironrag-backend --bin ironrag-maintenance
 | `ironrag-gc-stale-chunks` | `ironrag-maintenance gc stale-chunks` |
 | `ironrag-audit-orphan-data` | `ironrag-maintenance audit orphan-libraries` (read-only) + `ironrag-maintenance gc orphan-libraries --yes` (destructive) |
 | `ironrag-promote-null-heads` | `ironrag-maintenance repair null-heads` |
-| `ironrag-vector-migrate-to-per-dim` | `ironrag-maintenance migrate vector-per-dim` |
 | `ironrag-vector-rebuild` | `ironrag-maintenance rebuild vector-plane --source-library <uuid>` |
 | `ironrag-backfill-chunk-temporal-bounds` | `ironrag-maintenance migrate chunk-temporal-bounds` |
 | `rebuild_runtime_graph` | `ironrag-maintenance rebuild runtime-graph` |
@@ -323,11 +320,11 @@ ironrag-maintenance audit null-head-docs --library <uuid> --limit 100 --json
 
 ### `audit orphan-libraries`
 
-**Что показывает.** Строки в ArangoDB, чей `library_id` не
-соответствует живой строке `catalog_library` в Postgres. Такие
-строки оставляли старые delete-пути и pre-cascade-fix код; в отчёте
-для каждой orphan-библиотеки расписано, сколько строк осело в каких
-knowledge-коллекциях.
+**Что показывает.** PostgreSQL knowledge-plane rows, чей `library_id`
+не соответствует живой строке `catalog_library`. Такие строки
+оставляли старые delete-пути и pre-cascade-fix код; в отчёте для
+каждой orphan-библиотеки расписано, сколько строк осело в каких
+knowledge tables.
 
 **Когда запускать.** Регулярная гигиена, особенно после удалений
 библиотек на старых деплоях. Всегда read-only — destructive чистка
@@ -354,20 +351,19 @@ ingest job в состоянии `queued` / `leased` / `paused` — так
 
 ### `gc stale-chunks`
 
-**Что делает.** Удаляет чанки из ArangoDB (и их вектора во всех
-per-dim шардах плюс legacy single-dim коллекции), у которых
-revision больше не readable/active head документа. По умолчанию —
-консервативно: документы, у которых head null на обоих pointer'ах
-(failed ingest), пропускаются, чтобы recoverable doc не был стёрт
-насовсем.
+**Что делает.** Удаляет чанки из PostgreSQL knowledge-plane tables,
+включая vector material, у которых revision больше не readable/active
+head документа. По умолчанию — консервативно: документы, у которых
+head null на обоих pointer'ах (failed ingest), пропускаются, чтобы
+recoverable doc не был стёрт насовсем.
 
-**Когда запускать.** Давление на Arango-volume, особенно после
+**Когда запускать.** Давление на PostgreSQL storage, особенно после
 многих замен ревизий. Подозрение, что «остались старые чанки».
 
 **Пример.**
 
 ```bash
-# Безопасный preview: посчитать, не запуская destructive AQL.
+# Безопасный preview: посчитать, не выполняя destructive-удаления.
 ironrag-maintenance gc stale-chunks --dry-run --json
 
 # Реальный запуск, одна библиотека.
@@ -406,8 +402,9 @@ ironrag-maintenance gc stale-evidence --library <uuid> --json
 ### `gc orphan-libraries`
 
 **Что делает.** Destructive-спутник `audit orphan-libraries`.
-Вычищает все строки в ArangoDB, чей `library_id` не соответствует
-живой строке PG. Отказывается работать без `--yes`.
+Вычищает все PostgreSQL knowledge-plane rows, чей `library_id` не
+соответствует живой строке `catalog_library`. Отказывается работать
+без `--yes`.
 
 **Когда запускать.** Только после того, как `audit orphan-libraries`
 проверен и оператор принял его список.
@@ -537,23 +534,6 @@ no-op. Это НЕ recurring — они существуют для канони
 «конвертировать старую форму в новую» и удаляются из операторского
 catalog'а, как только деплой полностью мигрирован.
 
-### `migrate vector-per-dim`
-
-**Что делает.** Переносит строки из legacy single-dim коллекций
-`knowledge_chunk_vector` / `knowledge_entity_vector` в per-dim
-шарды (`knowledge_*_vector_d<dim>`). Обходит каждую отдельную
-vector-размерность в legacy-коллекции и создаёт соответствующий
-шард on demand.
-
-**Когда запускать.** Один раз на кластер, после апгрейда на
-per-dim схему. Повторные запуски безопасны после прерывания.
-
-**Пример.**
-
-```bash
-ironrag-maintenance migrate vector-per-dim --json
-```
-
 ### `migrate chunk-temporal-bounds`
 
 **Что делает.** Backfill `occurred_at` / `occurred_until` для
@@ -575,50 +555,23 @@ ironrag-maintenance migrate chunk-temporal-bounds --dry-run --json
 ironrag-maintenance migrate chunk-temporal-bounds --library <uuid> --json
 ```
 
-### `migrate chunk-vector-per-library`
-
-**Что делает.** Переносит векторы чанков из общего per-dim шарда
-(`knowledge_chunk_vector_d<dim>`) в per-`(library, dim)` шарды
-(`knowledge_chunk_vector_d<dim>_l<library>`). Обходит каждую
-уникальную пару `(library_id, dim)` в общем шарде и записывает строки
-в соответствующий per-library шард, создавая его on demand при
-необходимости. Идемпотентно: повторный запуск после завершения
-миграции — no-op. Векторы сущностей этой командой не переносятся —
-они остаются в общем per-dim шарде.
-
-**Когда запускать.** Один раз на кластер, после апгрейда на схему с
-per-library шардами. Повторные запуски после прерывания безопасны.
-
-**Пример.**
-
-```bash
-# Перенести векторы из общего per-dim шарда в per-library шарды
-ironrag-maintenance migrate chunk-vector-per-library
-
-# То же самое, но с JSON-сводкой
-ironrag-maintenance migrate chunk-vector-per-library --json
-```
-
----
-
 ## `rebuild` — тяжёлые operator-only passes
 
 Семейство rebuild специально *никогда* не подключается к
 recurring scheduler. Эти проходы тратят значительный provider-
-бюджет или удерживают долго-живущие ArangoDB-ресурсы; оператор
+бюджет или удерживают долго-живущие database resources; оператор
 обязан запускать их явно с полным контекстом.
 
 ### `rebuild vector-plane`
 
-**Что делает.** Согласует instance-wide ArangoDB vector index
-dimensions с активным vector binding исходной библиотеки и
-пересобирает всё library vector-материал, который должен делить
-эти индексы.
+**Что делает.** Согласует PostgreSQL pgvector material с активным
+vector binding исходной библиотеки и пересобирает library
+vector-материал, который должен перейти в соответствующую
+`(library, dim)` relation.
 
-**Когда запускать.** При смене embedding-размерности глобально
-(например, миграция с 1536-dim на 3072-dim по всему кластеру).
-Исходная библиотека говорит rebuilder'у, какая размерность теперь
-канон.
+**Когда запускать.** При смене embedding-размерности для библиотеки
+или scope, где уже есть vector material. Исходная библиотека говорит
+rebuilder'у, какой active binding и dimension использовать.
 
 **Пример.**
 

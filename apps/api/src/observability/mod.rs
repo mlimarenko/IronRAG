@@ -26,6 +26,7 @@ use tracing_subscriber::Layer as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use url::Url;
+use uuid::Uuid;
 
 const DEFAULT_LOG_FILTER: &str = "info";
 const DEFAULT_SERVICE_NAME: &str = "ironrag-backend";
@@ -49,6 +50,7 @@ const IRONRAG_OTEL_ENABLED: &str = "IRONRAG_OTEL_ENABLED";
 const IRONRAG_SERVICE_NAME: &str = "IRONRAG_SERVICE_NAME";
 const IRONRAG_SERVICE_ROLE: &str = "IRONRAG_SERVICE_ROLE";
 const IRONRAG_ENVIRONMENT: &str = "IRONRAG_ENVIRONMENT";
+const IRONRAG_DEPLOYMENT_ID: &str = "IRONRAG_DEPLOYMENT_ID";
 const HOSTNAME_ENV: &str = "HOSTNAME";
 const IRONRAG_LOG_FILTER: &str = "IRONRAG_LOG_FILTER";
 
@@ -57,6 +59,11 @@ const IRONRAG_LOG_FILTER: &str = "IRONRAG_LOG_FILTER";
 /// configuration, not logic, and operators can override it via the standard
 /// OTLP env vars or disable it with `IRONRAG_OTEL_ENABLED=false`.
 const OWNER_TELEMETRY_DEFAULTS_TOML: &str = include_str!("../../observability.toml");
+
+/// Resolved per-deployment telemetry identity, set once during `init_tracing`.
+static DEPLOYMENT_ID: OnceLock<Option<String>> = OnceLock::new();
+/// Namespace UUID for IronRAG deployment identities (fixed, telemetry-only).
+const DEPLOYMENT_ID_NAMESPACE: Uuid = Uuid::from_u128(0xa3f1_c2b4_5d6e_4f80_9a1b_2c3d_4e5f_6071);
 
 static TRACER_PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
 static METER_PROVIDER: OnceLock<Mutex<Option<SdkMeterProvider>>> = OnceLock::new();
@@ -109,8 +116,11 @@ impl OtlpSignal {
 ///
 /// # Errors
 /// Returns an error when the subscriber or OTLP exporter cannot be installed.
-pub fn init_tracing() -> anyhow::Result<()> {
+pub fn init_tracing(deployment_id: Option<String>) -> anyhow::Result<()> {
     global::set_text_map_propagator(TraceContextPropagator::new());
+    // The env override always wins; otherwise use the database-derived id passed
+    // in by the caller. Stored once so every signal's Resource carries it.
+    let _ = DEPLOYMENT_ID.set(env_string(IRONRAG_DEPLOYMENT_ID).or(deployment_id));
 
     let filter = env_string(IRONRAG_LOG_FILTER).unwrap_or_else(|| DEFAULT_LOG_FILTER.to_string());
     let env_filter = crate::shared::telemetry::compose_env_filter(&filter);
@@ -386,6 +396,9 @@ fn observability_resource() -> Resource {
         env_string(OTEL_SERVICE_VERSION).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
     );
     attributes.insert(DEPLOYMENT_ENVIRONMENT_NAME.to_string(), resolved_deployment_environment());
+    if let Some(Some(deployment_id)) = DEPLOYMENT_ID.get() {
+        attributes.insert("ironrag.deployment.id".to_string(), deployment_id.clone());
+    }
     for (key, value) in inferred_runtime_resource_attributes() {
         attributes.entry(key).or_insert(value);
     }
@@ -564,6 +577,57 @@ fn resolved_deployment_environment() -> String {
         .unwrap_or_else(|| DEFAULT_DEPLOYMENT_ENVIRONMENT.to_string())
 }
 
+/// Resolves the stable per-deployment telemetry identity before `init_tracing`.
+///
+/// Resolution order: the `IRONRAG_DEPLOYMENT_ID` operator override, else a
+/// UUIDv5 derived from the Postgres cluster `system_identifier` — unique per
+/// database data directory, stable across container recreation, and identical
+/// for every service role (api/worker/startup) that points at the same
+/// database. Two deployments only collide if they deliberately share one
+/// database; operators split those with the override. Fails soft to `None` so a
+/// slow or restricted database never blocks or fails process startup.
+pub async fn resolve_deployment_id(database_url: &str) -> Option<String> {
+    if let Some(override_id) = env_string(IRONRAG_DEPLOYMENT_ID) {
+        return Some(override_id);
+    }
+    match tokio::time::timeout(Duration::from_secs(8), read_pg_system_identifier(database_url))
+        .await
+    {
+        Ok(Ok(system_identifier)) => Some(derive_deployment_id(&system_identifier)),
+        Ok(Err(error)) => {
+            warn!(
+                error = %error,
+                "observability: deployment id unresolved from database; attribution will omit it",
+            );
+            None
+        }
+        Err(_) => {
+            warn!("observability: deployment id resolution timed out; attribution will omit it");
+            None
+        }
+    }
+}
+
+async fn read_pg_system_identifier(database_url: &str) -> anyhow::Result<String> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(database_url)
+        .await
+        .context("connect to database for deployment id")?;
+    let system_identifier =
+        sqlx::query_scalar::<_, String>("SELECT system_identifier::text FROM pg_control_system()")
+            .fetch_one(&pool)
+            .await
+            .context("read pg_control_system().system_identifier");
+    pool.close().await;
+    system_identifier
+}
+
+fn derive_deployment_id(seed: &str) -> String {
+    Uuid::new_v5(&DEPLOYMENT_ID_NAMESPACE, seed.as_bytes()).to_string()
+}
+
 fn resolved_instance_id() -> Option<String> {
     let service_name = resolved_service_name();
     let service_role = env_string(IRONRAG_SERVICE_ROLE).unwrap_or_else(|| "unknown".to_string());
@@ -706,6 +770,16 @@ mod tests {
     fn sanitizes_resource_components_for_instance_id() {
         assert_eq!(sanitize_resource_component("api:worker/1"), "api_worker_1");
         assert_eq!(sanitize_resource_component(""), "unknown");
+    }
+
+    #[test]
+    fn derives_stable_deployment_id_from_seed() {
+        let first = derive_deployment_id("7401234567890123456");
+        let second = derive_deployment_id("7401234567890123456");
+        let other = derive_deployment_id("7409999999999999999");
+        assert_eq!(first, second, "same system_identifier must map to the same id");
+        assert_ne!(first, other, "different system_identifier must map to a different id");
+        assert!(Uuid::parse_str(&first).is_ok(), "derived id must be a valid UUID");
     }
 
     #[test]

@@ -9,7 +9,16 @@ import type {
   ModelPreset,
 } from '@/shared/types';
 
-export type AiConfigSection = 'bindings' | 'credentials' | 'presets' | 'providers' | 'models';
+export type AiConfigSection =
+  | 'bindings'
+  | 'credentials'
+  | 'presets'
+  | 'providers'
+  | 'models'
+  // Pricing folded into the AI → Catalog group (ADM-08/RM-07): it prices the
+  // very models listed beside it, so it belongs here rather than as an
+  // isolated top-level admin tab.
+  | 'pricing';
 
 export type AiConfigDataState<T> = {
   isLoading: boolean;
@@ -70,6 +79,7 @@ export type AiReadinessSummary = {
   availableModelCount: number;
   providerCatalogCount: number;
   configuredProviderCount: number;
+  priceRuleCount: number;
 };
 
 export type AiBindingSuggestion = {
@@ -297,6 +307,7 @@ export function summarizeAiReadiness({
   workspaceBindings,
   models,
   providers,
+  priceRuleCount,
 }: {
   selectedScope: AIScopeKind;
   availableCredentials: AICredential[];
@@ -308,6 +319,7 @@ export function summarizeAiReadiness({
   workspaceBindings: AIBindingAssignment[];
   models: AIModelOption[];
   providers: AIProvider[];
+  priceRuleCount?: number;
 }): AiReadinessSummary {
   const credentialById = new Map(availableCredentials.map(entry => [entry.id, entry]));
   const presetById = new Map(availablePresets.map(entry => [entry.id, entry]));
@@ -396,6 +408,7 @@ export function summarizeAiReadiness({
     availableModelCount: models.filter(entry => entry.availabilityState !== 'unavailable').length,
     providerCatalogCount: providers.length,
     configuredProviderCount: configuredProviderIds.size,
+    priceRuleCount: priceRuleCount ?? 0,
   };
 }
 

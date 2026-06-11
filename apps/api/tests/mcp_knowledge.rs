@@ -326,6 +326,9 @@ impl McpKnowledgeFixture {
                 external_key,
                 document_state: "active",
                 created_by_principal_id: None,
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
             },
         )
         .await
@@ -343,6 +346,8 @@ impl McpKnowledgeFixture {
                 external_key: external_key.to_string(),
                 file_name: Some(format!("{external_key}.md")),
                 title: Some(title.to_string()),
+                source_uri: None,
+                document_hint: None,
                 document_state: "active".to_string(),
                 active_revision_id: None,
                 readable_revision_id: None,
@@ -350,6 +355,8 @@ impl McpKnowledgeFixture {
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
+                parent_document_id: None,
+                document_role: "primary".to_string(),
             })
             .await
             .with_context(|| format!("failed to upsert arango document {external_key}"))

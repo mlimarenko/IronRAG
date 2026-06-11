@@ -6,25 +6,29 @@ This document describes the current web frontend structure and the QA contract f
 
 ```text
 apps/web/src/
-├── adapters/      Raw API envelopes -> domain models
-├── api/           Thin HTTP clients for `/v1/*`
-├── components/    Reusable view components and feature widgets
-├── contexts/      Global app state such as active workspace and library
-├── hooks/         Cross-page React hooks
-├── lib/           Non-React utilities
-├── pages/         Route shells and page-owned feature packages
-├── test/          Cross-cutting UI audits
-└── types/         Shared frontend domain types
+├── app/             App shell, root routing, and shell-level components
+├── features/        Page-owned feature packages (one dir per surface)
+│   └── {feature}/   page shell, components/, model/ (adapters), hooks/, workers/
+└── shared/          Cross-feature building blocks
+    ├── api/         Thin HTTP clients for `/v1/*`
+    ├── components/  Reusable view components (incl. ui/ presentation primitives)
+    ├── contexts/    Global app state such as active workspace and library
+    ├── forms/       Shared form helpers
+    ├── hooks/       Cross-page React hooks
+    ├── i18n/        Locale resources
+    ├── lib/         Non-React utilities
+    ├── test/        Cross-cutting UI audits
+    └── types/       Shared frontend domain types
 ```
 
 ## Frontend contracts
 
-- `api/*` talks to the backend and returns wire payloads or already-normalized DTOs.
-- `adapters/*` are the only place where Raw API envelopes become domain models.
-- `pages/*` orchestrate data loading, routing state, and page-owned derived state.
-- `components/*` render; they do not own transport logic.
-- Page-specific helpers stay next to the page under `pages/{feature}/`.
-- Shared primitives in `components/ui/*` remain presentation-only.
+- `shared/api/*` talks to the backend and returns wire payloads or already-normalized DTOs.
+- `features/*/model/*Adapter.*` are the only place where Raw API envelopes become domain models.
+- `features/*` orchestrate data loading, routing state, and page-owned derived state.
+- `shared/components/*` render; they do not own transport logic.
+- Page-specific helpers stay next to the page under `features/{feature}/`.
+- Shared primitives in `shared/components/ui/*` remain presentation-only.
 
 ## Page ownership
 

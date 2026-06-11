@@ -1,7 +1,6 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
 import { FileText } from 'lucide-react';
-import { Button } from '@/shared/components/ui/button';
 import { humanizeDocumentFailure, humanizeDocumentStage } from '@/shared/lib/document-processing';
 import type { RecentDocument } from "../model/types";
 import { buildDocumentsPath } from "../model/types";
@@ -22,7 +21,6 @@ function buildDetailBits(doc: RecentDocument, t: TFunction): string[] {
     bits.push(
       humanizeDocumentFailure(
         {
-          failureCode: doc.failureMessage,
           stalledReason: doc.failureMessage,
           stage: doc.stageLabel,
         },
@@ -54,20 +52,14 @@ function RecentDocumentsListImpl({
 }: RecentDocumentsListProps) {
   return (
     <div className="workbench-surface p-5 sm:p-6">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h2 className="text-sm font-bold tracking-tight">{t('dashboard.recentDocs')}</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {t('dashboard.recentDocsSummary', {
-              count: recentDocuments.length,
-              total: totalDocuments,
-            })}
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={() => onNavigate('/documents')}>
-          <FileText className="h-3.5 w-3.5 mr-1.5" />
-          {t('dashboard.openDocuments')}
-        </Button>
+      <div>
+        <h2 className="text-sm font-bold tracking-tight">{t('dashboard.recentDocs')}</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t('dashboard.recentDocsSummary', {
+            count: recentDocuments.length,
+            total: totalDocuments,
+          })}
+        </p>
       </div>
 
       {recentDocuments.length > 0 ? (

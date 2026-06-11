@@ -122,6 +122,15 @@ describe('mapAudit', () => {
       createdAt: '2026-04-17T10:00:00Z',
       redactedMessage: 'assistant call completed',
       actorPrincipalId: 'principal-1',
+      actorPrincipal: {
+        id: 'principal-1',
+        principalKind: 'user',
+        status: 'active',
+        displayLabel: 'Operator One',
+        login: 'operator.one',
+        displayName: 'Operator One',
+        role: 'operator',
+      },
       subjects: [{ auditEventId: 'evt-1', subjectKind: 'query_execution', subjectId: 'exec-1' }],
       assistantCall: {
         queryExecutionId: 'exec-1',
@@ -143,6 +152,7 @@ describe('mapAudit', () => {
       currencyCode: 'USD',
       providerCallCount: 2,
     });
+    expect(audit.actor).toBe('Operator One (operator.one)');
   });
 
   it('maps generated audit pages canonically', () => {

@@ -54,14 +54,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
-{{- define "ironrag.arangodbHost" -}}
-{{- if eq .Values.dependencies.arangodb.mode "bundled" -}}
-{{ include "ironrag.fullname" . }}-arangodb
-{{- else -}}
-{{ required "dependencies.arangodb.host is required when dependencies.arangodb.mode=external and url is not provided" .Values.dependencies.arangodb.host }}
-{{- end -}}
-{{- end -}}
-
 {{- define "ironrag.databaseUrl" -}}
 {{- if .Values.dependencies.postgres.url -}}
 {{ .Values.dependencies.postgres.url }}
@@ -75,14 +67,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ .Values.dependencies.redis.url }}
 {{- else -}}
 {{- printf "redis://%s:%v" (include "ironrag.redisHost" .) .Values.dependencies.redis.port -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "ironrag.arangodbUrl" -}}
-{{- if .Values.dependencies.arangodb.url -}}
-{{ .Values.dependencies.arangodb.url }}
-{{- else -}}
-{{- printf "http://%s:%v" (include "ironrag.arangodbHost" .) .Values.dependencies.arangodb.port -}}
 {{- end -}}
 {{- end -}}
 
@@ -154,19 +138,6 @@ disabled
     - --timeout={{ .Values.startup.wait.timeoutSeconds }}s
     - deployment/{{ include "ironrag.fullname" . }}-redis
 {{- end }}
-{{- if eq .Values.dependencies.arangodb.mode "bundled" }}
-- name: wait-for-bundled-arangodb
-  image: "{{ .Values.startup.wait.image.repository }}:{{ .Values.startup.wait.image.tag }}"
-  imagePullPolicy: {{ .Values.startup.wait.image.pullPolicy }}
-  command:
-    - kubectl
-  args:
-    - wait
-    - --namespace={{ .Release.Namespace }}
-    - --for=condition=available
-    - --timeout={{ .Values.startup.wait.timeoutSeconds }}s
-    - deployment/{{ include "ironrag.fullname" . }}-arangodb
-{{- end }}
 {{- if and (eq .Values.storage.provider "s3") (eq .Values.storage.s3.mode "bundled") }}
 - name: wait-for-bundled-s4core
   image: "{{ .Values.startup.wait.image.repository }}:{{ .Values.startup.wait.image.tag }}"
@@ -216,9 +187,6 @@ disabled
 {{- end -}}
 {{- if and (eq .Values.dependencies.redis.mode "external") (empty .Values.runtimeSecret.existingSecret) (and (empty .Values.dependencies.redis.url) (empty .Values.dependencies.redis.host)) -}}
 {{- fail "dependencies.redis.url or dependencies.redis.host is required when dependencies.redis.mode=external and runtimeSecret.existingSecret is empty" -}}
-{{- end -}}
-{{- if and (eq .Values.dependencies.arangodb.mode "external") (empty .Values.runtimeSecret.existingSecret) (and (empty .Values.dependencies.arangodb.url) (empty .Values.dependencies.arangodb.host)) -}}
-{{- fail "dependencies.arangodb.url or dependencies.arangodb.host is required when dependencies.arangodb.mode=external and runtimeSecret.existingSecret is empty" -}}
 {{- end -}}
 {{- if and (eq .Values.storage.provider "s3") (eq .Values.storage.s3.mode "external") (empty .Values.storage.s3.bucket) -}}
 {{- fail "storage.s3.bucket is required when storage.provider=s3" -}}

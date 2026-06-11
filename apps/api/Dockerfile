@@ -67,9 +67,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg,sha
 # application-code changes without re-downloading model weights.
 FROM python:3.14.4-slim-trixie AS docling-base
 WORKDIR /app
-ARG DOCLING_VERSION=2.93.0
-ARG TORCH_VERSION=2.11.0+cpu
-ARG TORCHVISION_VERSION=0.26.0+cpu
+ARG DOCLING_VERSION=2.101.0
+# rapidocr is a transitive docling dependency and must stay pinned: its 3.8.2
+# wheel ships without the pytorch inference-engine data files
+# (networks/arch_config.yaml), and with torch present in the venv rapidocr
+# auto-selects that engine, so an unpinned fresh build fails the OCR warmup
+# below. 3.8.1 is the latest correctly packaged release.
+ARG RAPIDOCR_VERSION=3.8.1
+ARG TORCH_VERSION=2.12.0+cpu
+ARG TORCHVISION_VERSION=0.27.0+cpu
 ENV VIRTUAL_ENV=/opt/ironrag-docling
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV PYTHONUNBUFFERED=1
@@ -89,7 +95,9 @@ RUN python -m venv "${VIRTUAL_ENV}" \
     --index-url https://download.pytorch.org/whl/cpu \
     "torch==${TORCH_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
-  && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir "docling==${DOCLING_VERSION}"
+  && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
+    "docling==${DOCLING_VERSION}" \
+    "rapidocr==${RAPIDOCR_VERSION}"
 
 COPY apps/api/docker/docling-extract.py /usr/local/bin/ironrag-docling-extract
 

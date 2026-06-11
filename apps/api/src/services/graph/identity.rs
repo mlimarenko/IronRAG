@@ -269,35 +269,12 @@ pub fn normalize_graph_identity_component(value: &str) -> String {
         .to_string();
 
     if !normalized.is_empty() {
-        return normalize_compound_identity_segments(&normalized);
+        return normalized;
     }
 
     let fallback_seed = trimmed.nfkc().flat_map(char::to_lowercase).collect::<String>();
     let digest = Sha256::digest(fallback_seed.as_bytes());
     format!("u{}", hex::encode(&digest[..8]))
-}
-
-#[must_use]
-fn normalize_compound_identity_segments(normalized: &str) -> String {
-    normalized
-        .split('_')
-        .filter(|segment| !segment.is_empty())
-        .flat_map(expand_compound_identity_segment)
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-fn expand_compound_identity_segment(segment: &str) -> Vec<String> {
-    match segment {
-        "consultantapp" => vec!["consultant".to_string(), "app".to_string()],
-        "digitalsignage" => vec!["digital".to_string(), "signage".to_string()],
-        "hybridpos" => vec!["hybrid".to_string(), "pos".to_string()],
-        "loyaltymanagement" => vec!["loyalty".to_string(), "management".to_string()],
-        "pricechecker" => vec!["price".to_string(), "checker".to_string()],
-        "tgbot" => vec!["telegram".to_string(), "bot".to_string()],
-        "virtualpos" => vec!["virtual".to_string(), "pos".to_string()],
-        _ => vec![segment.to_string()],
-    }
 }
 
 #[must_use]
@@ -384,11 +361,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_graph_identity_component_splits_known_compound_segments() {
-        assert_eq!(normalize_graph_identity_component("Acme Hybridpos"), "acme_hybrid_pos");
-        assert_eq!(normalize_graph_identity_component("Acme Tgbot"), "acme_telegram_bot");
-        assert_eq!(normalize_graph_identity_component("Acme VirtualPos"), "acme_virtual_pos");
-        assert_eq!(normalize_graph_identity_component("Acme ConsultantApp"), "acme_consultant_app");
+    fn normalize_graph_identity_component_keeps_segments_verbatim() {
+        assert_eq!(normalize_graph_identity_component("Alpha SuitePos"), "alpha_suitepos");
+        assert_eq!(normalize_graph_identity_component("Beta AppBot"), "beta_appbot");
     }
 
     #[test]

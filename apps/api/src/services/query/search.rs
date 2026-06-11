@@ -6,7 +6,6 @@ use std::{
 use anyhow::{Context, Result as AnyhowResult, anyhow, bail};
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
-use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Transaction};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
@@ -18,11 +17,6 @@ use crate::{
     domains::ai::AiBindingPurpose,
     domains::query_ir::QueryIR,
     infra::arangodb::{
-        collections::{
-            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-            KNOWLEDGE_ENTITY_VECTOR_COLLECTION, chunk_vector_collection_for_dim,
-            entity_vector_collection_for_dim,
-        },
         document_store::KnowledgeChunkRow,
         graph_store::KnowledgeEntityRow,
         search_store::{
@@ -499,61 +493,14 @@ impl SearchService {
             .await
             .context("failed to ensure entity vector shard for library rebuild")?;
 
-        // Drop this library's rows from every per-dim shard whose dim
-        // does not match the new target. Includes the legacy single-dim
-        // collection — its rows are pre-migration material that must
-        // not survive a binding change. The target-dim shard itself is
-        // also cleared so the subsequent re-embed writes a clean set.
-        let target_chunk_collection = chunk_vector_collection_for_dim(target_dimensions);
-        let target_entity_collection = entity_vector_collection_for_dim(target_dimensions);
-
-        let mut chunk_targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
-        chunk_targets.extend(state.arango_client.list_per_dim_chunk_vector_collections().await?);
-        for collection in &chunk_targets {
-            if collection == &target_chunk_collection {
-                continue;
-            }
-            let _ = state
-                .arango_client
-                .query_json(
-                    "FOR row IN @@collection
-                     FILTER row.library_id == @library_id
-                     REMOVE row IN @@collection
-                     RETURN OLD._key",
-                    serde_json::json!({
-                        "@collection": collection,
-                        "library_id": library_id,
-                    }),
-                )
-                .await
-                .with_context(|| {
-                    format!("failed to drop library {library_id} chunk vectors from {collection}")
-                })?;
-        }
-
-        let mut entity_targets = vec![KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string()];
-        entity_targets.extend(state.arango_client.list_per_dim_entity_vector_collections().await?);
-        for collection in &entity_targets {
-            if collection == &target_entity_collection {
-                continue;
-            }
-            let _ = state
-                .arango_client
-                .query_json(
-                    "FOR row IN @@collection
-                     FILTER row.library_id == @library_id
-                     REMOVE row IN @@collection
-                     RETURN OLD._key",
-                    serde_json::json!({
-                        "@collection": collection,
-                        "library_id": library_id,
-                    }),
-                )
-                .await
-                .with_context(|| {
-                    format!("failed to drop library {library_id} entity vectors from {collection}")
-                })?;
-        }
+        // Drop this library's rows from every vector shard/relation whose
+        // dimension does not match the new target. Target-dim rows are cleared
+        // by the rebuild steps below so the fresh writes land in a clean lane.
+        state
+            .arango_search_store
+            .delete_library_vectors_except_dim(library_id, target_dimensions)
+            .await
+            .context("failed to drop non-target vector dimensions before library rebuild")?;
 
         let mut outcome = VectorPlaneRebuildOutcome {
             previous_dimensions,
@@ -1676,22 +1623,13 @@ fn chunk_text_reuse_key(chunk: &KnowledgeChunkRow) -> Option<String> {
 }
 
 async fn load_knowledge_chunk(state: &AppState, chunk_id: Uuid) -> AnyhowResult<KnowledgeChunkRow> {
-    let cursor = state
+    state
         .arango_document_store
-        .client()
-        .query_json(
-            "FOR chunk IN @@collection
-             FILTER chunk.chunk_id == @chunk_id
-             LIMIT 1
-             RETURN chunk",
-            serde_json::json!({
-                "@collection": KNOWLEDGE_CHUNK_COLLECTION,
-                "chunk_id": chunk_id,
-            }),
-        )
+        .list_chunks_by_ids(&[chunk_id])
         .await
-        .with_context(|| format!("failed to load knowledge chunk {}", chunk_id))?;
-    decode_optional_single_result(cursor)?
+        .with_context(|| format!("failed to load knowledge chunk {}", chunk_id))?
+        .into_iter()
+        .next()
         .ok_or_else(|| anyhow!("knowledge chunk {} not found", chunk_id))
 }
 
@@ -1699,56 +1637,17 @@ async fn list_knowledge_chunks_by_library(
     state: &AppState,
     library_id: Uuid,
 ) -> AnyhowResult<Vec<KnowledgeChunkRow>> {
-    let cursor = state
-        .arango_document_store
-        .client()
-        .query_json(
-            "FOR chunk IN @@collection
-             FILTER chunk.library_id == @library_id
-             SORT chunk.revision_id ASC, chunk.chunk_index ASC, chunk.chunk_id ASC
-             RETURN chunk",
-            serde_json::json!({
-                "@collection": KNOWLEDGE_CHUNK_COLLECTION,
-                "library_id": library_id,
-            }),
-        )
-        .await
-        .with_context(|| format!("failed to list knowledge chunks for library {}", library_id))?;
-    decode_many_results(cursor)
-}
-
-#[allow(dead_code)]
-async fn library_has_vector_material(state: &AppState, library_id: Uuid) -> AnyhowResult<bool> {
-    Ok(collection_has_library_row(state, KNOWLEDGE_CHUNK_VECTOR_COLLECTION, library_id).await?
-        || collection_has_library_row(state, KNOWLEDGE_ENTITY_VECTOR_COLLECTION, library_id)
-            .await?)
-}
-
-#[allow(dead_code)]
-async fn collection_has_library_row(
-    state: &AppState,
-    collection: &str,
-    library_id: Uuid,
-) -> AnyhowResult<bool> {
-    let cursor = state
-        .arango_document_store
-        .client()
-        .query_json(
-            "FOR row IN @@collection
-             FILTER row.library_id == @library_id
-             LIMIT 1
-             RETURN 1",
-            serde_json::json!({
-                "@collection": collection,
-                "library_id": library_id,
-            }),
-        )
-        .await
-        .with_context(|| {
-            format!("failed to inspect whether {collection} has rows for library {library_id}")
-        })?;
-    let rows: Vec<i32> = decode_many_results(cursor)?;
-    Ok(!rows.is_empty())
+    let mut chunks =
+        state.arango_document_store.list_chunks_by_library(library_id).await.with_context(
+            || format!("failed to list knowledge chunks for library {}", library_id),
+        )?;
+    chunks.sort_by(|left, right| {
+        left.revision_id
+            .cmp(&right.revision_id)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    Ok(chunks)
 }
 
 async fn resolve_chunk_vector_generation(
@@ -1806,30 +1705,6 @@ async fn mark_revisions_vector_ready(
         }
     }
     Ok(())
-}
-
-fn decode_optional_single_result<T>(cursor: serde_json::Value) -> AnyhowResult<Option<T>>
-where
-    T: DeserializeOwned,
-{
-    let result = cursor
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
-    let mut rows: Vec<T> =
-        serde_json::from_value(result).context("failed to decode ArangoDB result rows")?;
-    Ok((!rows.is_empty()).then(|| rows.remove(0)))
-}
-
-fn decode_many_results<T>(cursor: serde_json::Value) -> AnyhowResult<Vec<T>>
-where
-    T: DeserializeOwned,
-{
-    let result = cursor
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?;
-    serde_json::from_value(result).context("failed to decode ArangoDB result rows")
 }
 
 #[cfg(test)]

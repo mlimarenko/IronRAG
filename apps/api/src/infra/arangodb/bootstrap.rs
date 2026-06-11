@@ -198,6 +198,10 @@ pub async fn bootstrap_knowledge_plane(
     }
 
     if options.vector_indexes {
+        // LEGACY-SHIM(arango-era, remove>=0.7.0): inspect and conditionally
+        // rebuild ANN indexes on the non-suffixed single-dim collections;
+        // safe to delete once KNOWLEDGE_CHUNK_VECTOR_COLLECTION /
+        // KNOWLEDGE_ENTITY_VECTOR_COLLECTION are dropped.
         let chunk_dimensions = client
             .vector_index_dimensions(
                 KNOWLEDGE_CHUNK_VECTOR_COLLECTION,

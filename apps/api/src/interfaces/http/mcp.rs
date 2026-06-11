@@ -1,5 +1,4 @@
-use std::error::Error as _;
-use std::time::Duration;
+use std::{collections::BTreeSet, error::Error as _, time::Duration};
 
 use axum::{
     Json, Router, body,
@@ -26,9 +25,14 @@ use uuid::Uuid;
 /// meaningful traffic. mcp-remote only stops its reconnect loop when
 /// the stream stays alive past the handshake.
 const MCP_GET_STREAM_KEEPALIVE: Duration = Duration::from_secs(25);
+const GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT: usize = 128;
+const GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS: usize = 240;
+const GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT: usize = 24;
+const GROUNDED_ANSWER_GRAPH_PRESERVE_MAX_RANK: i32 = 32;
 
 use crate::{
     app::state::AppState,
+    domains::query_ir::literal_text_is_identifier_shaped,
     interfaces::http::{
         auth::AuthContext,
         router_support::{ApiError, attach_request_id_header, ensure_or_generate_request_id},
@@ -767,7 +771,7 @@ pub(crate) fn grounded_answer_tool_result(
 ) -> McpToolResult {
     ok_tool_result(
         &grounded_answer_human_text(answer_text),
-        grounded_answer_structured_content(execution_detail),
+        grounded_answer_structured_content(answer_text, execution_detail),
     )
 }
 
@@ -780,6 +784,7 @@ fn grounded_answer_human_text(answer_text: &str) -> String {
 }
 
 fn grounded_answer_structured_content(
+    answer_text: &str,
     execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
 ) -> Value {
     let mut sanitized_execution_detail = json!(execution_detail);
@@ -794,9 +799,18 @@ fn grounded_answer_structured_content(
             }
         }
     }
+    let final_answer_ready = grounded_answer_final_answer_ready(execution_detail);
+    let finalizable = final_answer_ready && !answer_text.trim().is_empty();
     json!({
+        "answerBody": answer_text,
         "executionDetail": sanitized_execution_detail,
-        "finalAnswerReady": grounded_answer_final_answer_ready(execution_detail),
+        "finalAnswerReady": final_answer_ready,
+        "finalizable": finalizable,
+        "mustPreserveSpans": grounded_answer_must_preserve_spans(
+            answer_text,
+            execution_detail,
+            finalizable,
+        ),
         "runtimeExecutionId": execution_detail.execution.runtime_execution_id,
         "executionId": execution_detail.execution.id,
         "conversationId": execution_detail.execution.conversation_id,
@@ -804,6 +818,340 @@ fn grounded_answer_structured_content(
         "workspaceId": execution_detail.execution.workspace_id,
         "lifecycleState": execution_detail.execution.lifecycle_state,
     })
+}
+
+fn grounded_answer_must_preserve_spans(
+    answer_text: &str,
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+    include_source_titles: bool,
+) -> Vec<String> {
+    let graph_spans = include_source_titles
+        .then(|| grounded_answer_graph_preserve_span_candidates(execution_detail))
+        .unwrap_or_default();
+    let source_titles = include_source_titles.then_some(()).into_iter().flat_map(|_| {
+        execution_detail
+            .prepared_segment_references
+            .iter()
+            .filter_map(|reference| reference.document_title.as_deref())
+    });
+    grounded_answer_must_preserve_spans_for_evidence(answer_text, graph_spans, source_titles)
+}
+
+#[cfg(test)]
+fn grounded_answer_must_preserve_spans_for_source_titles<'a>(
+    answer_text: &str,
+    source_titles: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    grounded_answer_must_preserve_spans_for_evidence(answer_text, std::iter::empty(), source_titles)
+}
+
+fn grounded_answer_must_preserve_spans_for_evidence<'a>(
+    answer_text: &str,
+    graph_spans: impl IntoIterator<Item = &'a str>,
+    source_titles: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut spans = Vec::new();
+    let mut seen = BTreeSet::new();
+    for span in backtick_literal_spans(answer_text) {
+        push_grounded_answer_preserve_span(&mut spans, &mut seen, &span);
+        if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+            break;
+        }
+    }
+    for span in adjacent_code_span_assignments(answer_text) {
+        push_grounded_answer_preserve_candidate(&mut spans, &mut seen, &span);
+        if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+            break;
+        }
+    }
+    for graph_span in graph_spans {
+        push_grounded_answer_preserve_evidence_span(&mut spans, &mut seen, graph_span);
+        if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+            break;
+        }
+    }
+    for title in source_titles {
+        push_grounded_answer_preserve_source_title(&mut spans, &mut seen, title);
+        if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+            break;
+        }
+    }
+    spans
+}
+
+fn grounded_answer_graph_preserve_span_candidates(
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    for relation in execution_detail.relation_references.iter().filter(|reference| {
+        reference.rank > 0 && reference.rank <= GROUNDED_ANSWER_GRAPH_PRESERVE_MAX_RANK
+    }) {
+        if let Some(assertion) = relation.normalized_assertion.as_deref() {
+            candidates.push(assertion);
+        }
+        if candidates.len() >= GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT {
+            return candidates;
+        }
+    }
+    for entity in execution_detail.entity_references.iter().filter(|reference| {
+        reference.rank > 0 && reference.rank <= GROUNDED_ANSWER_GRAPH_PRESERVE_MAX_RANK
+    }) {
+        candidates.push(entity.label.as_str());
+        if let Some(summary) = entity.summary.as_deref() {
+            candidates.push(summary);
+        }
+        if candidates.len() >= GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT {
+            candidates.truncate(GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT);
+            return candidates;
+        }
+    }
+    candidates
+}
+
+fn push_grounded_answer_preserve_evidence_span(
+    spans: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    evidence: &str,
+) {
+    if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+        return;
+    }
+    let evidence = evidence.trim();
+    if evidence.is_empty()
+        || evidence.chars().count() > GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS
+        || !evidence.chars().any(|ch| ch.is_alphanumeric())
+    {
+        return;
+    }
+    if seen.insert(evidence.to_string()) {
+        spans.push(evidence.to_string());
+    }
+}
+
+fn push_grounded_answer_preserve_source_title(
+    spans: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    title: &str,
+) {
+    if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+        return;
+    }
+    let title = title.trim();
+    if title.is_empty()
+        || title.chars().count() > GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS
+        || !title.chars().any(|ch| ch.is_alphanumeric())
+    {
+        return;
+    }
+    if seen.insert(title.to_string()) {
+        spans.push(title.to_string());
+    }
+}
+
+fn push_grounded_answer_preserve_span(
+    spans: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    span: &str,
+) {
+    let span = span.trim();
+    if span.is_empty() {
+        return;
+    }
+    if span.contains('\n') {
+        let mut lines = span.lines();
+        if let Some(first_line) = lines.next()
+            && !is_probable_code_fence_info(first_line)
+        {
+            push_grounded_answer_preserve_line(spans, seen, first_line);
+        }
+        for line in lines {
+            push_grounded_answer_preserve_line(spans, seen, line);
+            if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+                break;
+            }
+        }
+        return;
+    }
+    push_grounded_answer_preserve_candidate(spans, seen, span);
+}
+
+fn push_grounded_answer_preserve_line(
+    spans: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    line: &str,
+) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    push_grounded_answer_preserve_candidate(spans, seen, line);
+    if let Some((left, right)) = line.split_once('=') {
+        push_grounded_answer_preserve_candidate(spans, seen, left.trim());
+        push_grounded_answer_preserve_candidate(spans, seen, right.trim());
+    }
+}
+
+fn push_grounded_answer_preserve_candidate(
+    spans: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    candidate: &str,
+) {
+    if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
+        return;
+    }
+    let candidate = candidate.trim();
+    if !is_grounded_answer_preserve_candidate(candidate) {
+        return;
+    }
+    if seen.insert(candidate.to_string()) {
+        spans.push(candidate.to_string());
+    }
+}
+
+fn is_grounded_answer_preserve_candidate(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty()
+        || candidate.chars().count() > GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS
+        || !candidate.chars().any(|ch| ch.is_alphanumeric())
+    {
+        return false;
+    }
+    if candidate.starts_with('/') || candidate.starts_with('\\') {
+        return true;
+    }
+    if candidate.contains('/') || candidate.contains('\\') || candidate.contains("://") {
+        return true;
+    }
+    if candidate.contains('=') {
+        return candidate.split_once('=').is_some_and(|(left, right)| {
+            !left.trim().is_empty()
+                && !right.trim().is_empty()
+                && left.trim().chars().any(|ch| ch.is_alphanumeric())
+        });
+    }
+    let unwrapped =
+        candidate.trim_matches('[').trim_matches(']').trim_matches('`').trim_matches('"');
+    literal_text_is_identifier_shaped(unwrapped) || is_plain_code_span(unwrapped)
+}
+
+fn is_plain_code_span(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let alnum_count = candidate.chars().filter(|ch| ch.is_alphanumeric()).count();
+    alnum_count >= 2
+        && candidate.chars().all(|ch| {
+            ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '\\' | ':' | '=')
+        })
+}
+
+fn adjacent_code_span_assignments(text: &str) -> Vec<String> {
+    let mut assignments = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut pending_key: Option<(String, usize)> = None;
+    for (line_index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            pending_key = None;
+            continue;
+        }
+        let spans = backtick_literal_spans(line);
+        if spans.is_empty() {
+            continue;
+        }
+        let keys = spans
+            .iter()
+            .map(String::as_str)
+            .filter(|span| is_assignment_key_span(span))
+            .collect::<Vec<_>>();
+        let values = spans
+            .iter()
+            .map(String::as_str)
+            .filter(|span| is_assignment_value_span(span))
+            .collect::<Vec<_>>();
+        if keys.is_empty()
+            && let Some((key, key_line)) = pending_key.as_ref()
+            && line_index.saturating_sub(*key_line) <= 6
+            && values.len() == 1
+        {
+            let assignment = format!("{} = {}", key.trim(), values[0].trim());
+            if seen.insert(assignment.clone()) {
+                assignments.push(assignment);
+            }
+        }
+        if keys.len() == 1 {
+            if values.len() == 1 {
+                let assignment = format!("{} = {}", keys[0].trim(), values[0].trim());
+                if seen.insert(assignment.clone()) {
+                    assignments.push(assignment);
+                }
+            }
+            pending_key = Some((keys[0].trim().to_string(), line_index));
+        }
+    }
+    assignments
+}
+
+fn is_assignment_key_span(span: &str) -> bool {
+    let span = span.trim();
+    if span.is_empty()
+        || is_assignment_value_span(span)
+        || span.starts_with('[')
+        || span.starts_with('/')
+        || span.starts_with('\\')
+        || span.contains('/')
+        || span.contains('\\')
+        || span.contains("://")
+        || span.contains('=')
+    {
+        return false;
+    }
+    let Some(first) = span.chars().next() else {
+        return false;
+    };
+    first.is_alphabetic()
+        && span.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        && literal_text_is_identifier_shaped(span)
+}
+
+fn is_assignment_value_span(span: &str) -> bool {
+    let span = span.trim();
+    if span.is_empty() || span.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let lowered = span.to_ascii_lowercase();
+    matches!(lowered.as_str(), "true" | "false")
+        || span.contains("://")
+        || span.starts_with('/')
+        || span.starts_with('\\')
+        || span.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+'))
+}
+
+fn is_probable_code_fence_info(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty()
+        && line.chars().count() <= 32
+        && line
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '.' | '#'))
+}
+
+fn backtick_literal_spans(text: &str) -> Vec<String> {
+    let mut spans = Vec::new();
+    let mut span_start: Option<usize> = None;
+    for (index, ch) in text.char_indices() {
+        if ch != '`' {
+            continue;
+        }
+        if let Some(start) = span_start.take() {
+            if start < index {
+                spans.push(text[start..index].to_string());
+            }
+        } else {
+            span_start = Some(index + ch.len_utf8());
+        }
+    }
+    spans
 }
 
 fn grounded_answer_final_answer_ready(
@@ -925,5 +1273,89 @@ async fn handle_initialize(
             .await;
             mcp_api_error_response(id, error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        grounded_answer_must_preserve_spans_for_evidence,
+        grounded_answer_must_preserve_spans_for_source_titles,
+    };
+
+    #[test]
+    fn grounded_answer_preserve_spans_include_adjacent_scalar_assignments() {
+        let spans = grounded_answer_must_preserve_spans_for_source_titles(
+            "`Synthetic source`
+
+- slot: `alphaFlag`
+- values: `true` / `false`
+- selected: `false`
+
+- file: `/opt/acme/ui.ini`
+- section: `[UI.Panel]`
+- slot: `betaVisible`
+- selected: `true`",
+            [],
+        );
+
+        assert!(spans.iter().any(|span| span == "alphaFlag = false"), "{spans:?}");
+        assert!(spans.iter().any(|span| span == "betaVisible = true"), "{spans:?}");
+        assert!(!spans.iter().any(|span| span == "/opt/acme/ui.ini = [UI.Panel]"), "{spans:?}");
+        assert!(!spans.iter().any(|span| span == "alphaFlag = true"), "{spans:?}");
+    }
+
+    #[test]
+    fn grounded_answer_preserve_spans_include_source_titles() {
+        let spans = grounded_answer_must_preserve_spans_for_source_titles(
+            "The answer found provider alpha and the setup appendix.",
+            [
+                "Provider Alpha - Setup Guide",
+                "Provider Alpha - Setup Guide",
+                "Setup Appendix / Parameters",
+            ],
+        );
+
+        assert!(spans.iter().any(|span| span == "Provider Alpha - Setup Guide"), "{spans:?}");
+        assert!(spans.iter().any(|span| span == "Setup Appendix / Parameters"), "{spans:?}");
+        assert_eq!(
+            spans.iter().filter(|span| span.as_str() == "Provider Alpha - Setup Guide").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn grounded_answer_preserve_spans_include_graph_evidence_before_source_titles() {
+        let spans = grounded_answer_must_preserve_spans_for_evidence(
+            "Use `/opt/acme.ini`.",
+            [
+                "Alpha flow includes completed action",
+                "Beta flow includes rollback action",
+                "Alpha flow includes completed action",
+            ],
+            ["Alpha setup guide"],
+        );
+
+        assert_eq!(spans[0], "/opt/acme.ini");
+        assert!(spans.iter().any(|span| span == "Alpha flow includes completed action"));
+        assert!(spans.iter().any(|span| span == "Beta flow includes rollback action"));
+        assert!(spans.iter().any(|span| span == "Alpha setup guide"));
+
+        let graph_index = spans
+            .iter()
+            .position(|span| span == "Alpha flow includes completed action")
+            .expect("graph span should be present");
+        let source_index = spans
+            .iter()
+            .position(|span| span == "Alpha setup guide")
+            .expect("source title should be present");
+        assert!(graph_index < source_index, "{spans:?}");
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|span| span.as_str() == "Alpha flow includes completed action")
+                .count(),
+            1
+        );
     }
 }

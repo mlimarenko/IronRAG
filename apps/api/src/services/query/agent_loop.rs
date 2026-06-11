@@ -22,6 +22,7 @@ use crate::{
     app::state::AppState,
     domains::provider_profiles::ProviderModelSelection,
     domains::query::{QueryTurnKind, resolve_contextual_grounded_answer_top_k},
+    domains::query_ir::literal_text_is_identifier_shaped,
     domains::{agent_runtime::RuntimeSurfaceKind, ai::AiBindingPurpose},
     integrations::llm::{ChatMessage, ChatToolCall, ChatToolDef, ToolUseRequest},
     interfaces::http::{
@@ -29,7 +30,7 @@ use crate::{
         mcp::{
             McpToolSurface,
             tools::{
-                self, ToolCallContext,
+                self, ToolCallContext, ToolVisibilityCapabilities,
                 documents::{READ_DOCUMENT_TOOL_NAME, SEARCH_DOCUMENTS_TOOL_NAME},
             },
         },
@@ -47,7 +48,6 @@ use crate::{
 
 const RUNTIME_RETRIEVED_CONTEXT_TOOL: &str = "ironrag_retrieved_context";
 const RUNTIME_LITERAL_REVISION_CONTEXT_TOOL: &str = "ironrag_literal_revision_context";
-const RUNTIME_CLARIFY_VARIANTS_TOOL: &str = "ironrag_clarify_variants";
 const GROUNDED_ANSWER_TOOL_NAME: &str = "grounded_answer";
 const GROUNDED_ANSWER_LIFECYCLE_COMPLETED: &str = "completed";
 const GROUNDED_ANSWER_VERIFICATION_NOT_RUN: &str = "not_run";
@@ -59,14 +59,31 @@ const TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT: usize = 8_000;
 const TOOL_VERIFICATION_CONTENT_CHAR_LIMIT: usize = 8_000;
 const TOOL_VERIFICATION_STRUCTURED_JSON_CHAR_LIMIT: usize = 16_000;
 const TOOL_MODEL_GROUNDED_REFERENCE_LIMIT: usize = 8;
+const TOOL_MODEL_FINALIZABLE_GROUNDED_REFERENCE_LIMIT: usize = 0;
+const TOOL_VERIFICATION_GROUNDED_REFERENCE_LIMIT: usize = 8;
 const TOOL_DEBUG_RESULT_JSON_CHAR_LIMIT: usize = 96_000;
 const TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT: usize = 20_000;
 const TOOL_GROUNDING_TOTAL_CHAR_LIMIT: usize = 80_000;
+const GROUNDED_EVIDENCE_LEDGER_ENTRY_LIMIT: usize = 6;
+const GROUNDED_EVIDENCE_LEDGER_ANSWER_CHARS: usize = 1_600;
+const GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT: usize = 32;
+const GROUNDED_EVIDENCE_LEDGER_SOURCE_LABEL_LIMIT: usize = 24;
+const GROUNDED_EVIDENCE_LEDGER_TEXT_CHARS: usize = 10_000;
+const GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_ANCHORS: usize = 3;
+const GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS: usize = 2;
 const SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS: usize = 4;
 const VERBATIM_USER_FRAGMENT_LIMIT: usize = 6;
 const VERBATIM_USER_FRAGMENT_MIN_CHARS: usize = 4;
 const VERBATIM_USER_FRAGMENT_MAX_CHARS: usize = 400;
 const VERBATIM_USER_FRAGMENT_TOTAL_CHARS: usize = 1_200;
+const HISTORY_PADDED_QUERY_ANCHOR_LIMIT: usize = 24;
+const HISTORY_PADDED_QUERY_MAX_CHARS: usize = 900;
+const HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS: usize = 180;
+const CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT: usize = 10;
+const CONTEXTUAL_SEARCH_QUERY_MIN_ANCHORS: usize = 2;
+const CONTEXTUAL_SEARCH_QUERY_HISTORY_OVERLAP_SELF_SUFFICIENT: usize = 2;
+const VERIFIED_GROUNDED_LITERAL_GUARD_MIN_LITERALS: usize = 4;
+const PRIOR_ASSISTANT_ANSWER_FALLBACK_MIN_ANCHORS: usize = 3;
 const USER_FRAGMENT_QUOTE_PAIRS: [(char, char); 8] = [
     ('«', '»'),
     ('“', '”'),
@@ -139,6 +156,7 @@ pub struct McpToolAgentTurnInput<'a> {
     pub library_id: Uuid,
     pub library_ref: &'a str,
     pub user_question: &'a str,
+    pub contextual_follow_up: bool,
     pub conversation_history: &'a [ChatMessage],
     pub follow_up_context_messages: &'a [ChatMessage],
     pub grounded_answer_tool_history: &'a [ExternalConversationTurn],
@@ -188,6 +206,7 @@ struct ToolExecutionOutcome {
     result_json: Option<Value>,
     grounding_text: Option<String>,
     grounded_answer_ready: bool,
+    grounded_answer_completed: bool,
     grounded_answer_needs_follow_up: bool,
     is_error: bool,
     /// Wall-clock the tool ran. Set centrally in `execute_tool_calls`;
@@ -197,11 +216,310 @@ struct ToolExecutionOutcome {
     child_runtime_execution_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct GroundedAnswerEvidenceLedger {
+    entries: Vec<GroundedAnswerEvidenceEntry>,
+    seen_keys: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GroundedAnswerEvidenceEntry {
+    index: usize,
+    execution_id: Option<String>,
+    final_answer_ready: bool,
+    finalizable: bool,
+    verification_state: Option<String>,
+    warning_codes: Vec<String>,
+    unsupported_literal_spans: BTreeSet<String>,
+    answer_body: Option<String>,
+    answer_excerpt: Option<String>,
+    must_preserve_spans: Vec<String>,
+    source_labels: Vec<String>,
+}
+
+impl GroundedAnswerEvidenceLedger {
+    fn remember(&mut self, tool_name: &str, outcome: &ToolExecutionOutcome) {
+        if tool_name != GROUNDED_ANSWER_TOOL_NAME || outcome.is_error {
+            return;
+        }
+        if self.entries.len() >= GROUNDED_EVIDENCE_LEDGER_ENTRY_LIMIT {
+            return;
+        }
+        let Some(result_json) = outcome.result_json.as_ref() else {
+            return;
+        };
+        let Some(entry) = GroundedAnswerEvidenceEntry::from_result(
+            self.entries.len() + 1,
+            result_json,
+            outcome.result_text.as_deref(),
+        ) else {
+            return;
+        };
+        let key = entry
+            .execution_id
+            .clone()
+            .unwrap_or_else(|| format!("entry:{}", self.entries.len() + 1));
+        if self.seen_keys.insert(key) {
+            self.entries.push(entry);
+        }
+    }
+
+    fn system_message(&self) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let mut message = String::from(
+            "Same-turn grounded_answer evidence ledger. Treat these entries as accumulated tool evidence, not as a replacement final answer. Later focused repair entries add or clarify coverage; they do not erase earlier grounded facts, source labels, warnings, or action paths unless directly contradicted. Before finalizing, cover the relevant preserved spans and source labels from all entries, or mark unsupported/conflicting branches plainly.",
+        );
+        for entry in &self.entries {
+            entry.push_to_message(&mut message);
+            if message.chars().count() >= GROUNDED_EVIDENCE_LEDGER_TEXT_CHARS {
+                message = message.chars().take(GROUNDED_EVIDENCE_LEDGER_TEXT_CHARS).collect();
+                break;
+            }
+        }
+        Some(message)
+    }
+
+    fn guard_candidate_for_answer(&self, answer: &str) -> Option<String> {
+        let high_signal_missing_count = self
+            .guard_high_signal_anchor_set()
+            .iter()
+            .filter(|anchor| !answer_contains_guard_anchor(answer, anchor))
+            .count();
+        if high_signal_missing_count
+            >= GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS
+        {
+            return self.answer_guard_text();
+        }
+
+        let anchors = self.guard_anchor_set();
+        if anchors.len() < GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_ANCHORS {
+            return None;
+        }
+        let missing_count =
+            anchors.iter().filter(|anchor| !answer_contains_guard_anchor(answer, anchor)).count();
+        let missing_threshold = anchors.len().div_ceil(2).max(2);
+        if missing_count < missing_threshold {
+            return None;
+        }
+        self.answer_guard_text()
+    }
+
+    fn guard_high_signal_anchor_set(&self) -> BTreeSet<String> {
+        let mut anchors = BTreeSet::new();
+        for entry in self.guardable_entries() {
+            push_grounded_evidence_ledger_high_signal_anchors(
+                &mut anchors,
+                &entry.must_preserve_spans,
+                &entry.unsupported_literal_spans,
+            );
+            if anchors.len() >= GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT {
+                break;
+            }
+        }
+        anchors
+    }
+
+    fn guard_anchor_set(&self) -> BTreeSet<String> {
+        let mut anchors = BTreeSet::new();
+        for entry in self.guardable_entries() {
+            push_grounded_evidence_ledger_anchors(&mut anchors, &entry.must_preserve_spans);
+            if anchors.len() >= GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT {
+                return anchors;
+            }
+        }
+        if anchors.len() < GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_ANCHORS {
+            for entry in self.guardable_entries() {
+                push_grounded_evidence_ledger_anchors(&mut anchors, &entry.source_labels);
+                if anchors.len() >= GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT {
+                    return anchors;
+                }
+            }
+        }
+        anchors
+    }
+
+    fn guardable_entries(&self) -> impl Iterator<Item = &GroundedAnswerEvidenceEntry> {
+        self.entries.iter().filter(|entry| entry.can_guard_final_answer())
+    }
+
+    fn answer_guard_text(&self) -> Option<String> {
+        let mut lines = Vec::new();
+        let mut seen = BTreeSet::new();
+        for entry in self.guardable_entries() {
+            if let Some(answer) = &entry.answer_body {
+                push_guard_answer_line(&mut lines, &mut seen, answer);
+            }
+            if lines.len() >= GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT {
+                break;
+            }
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        let text = lines.join("\n");
+        Some(text.chars().take(GROUNDED_EVIDENCE_LEDGER_TEXT_CHARS).collect())
+    }
+}
+
+impl GroundedAnswerEvidenceEntry {
+    fn from_result(index: usize, result_json: &Value, fallback_text: Option<&str>) -> Option<Self> {
+        let structured = result_json.get("structuredContent")?;
+        let answer_body = structured
+            .get("answerBody")
+            .and_then(Value::as_str)
+            .or(fallback_text)
+            .map(str::trim)
+            .map(|text| text.chars().take(GROUNDED_EVIDENCE_LEDGER_TEXT_CHARS).collect::<String>())
+            .filter(|text| !text.trim().is_empty());
+        let answer_excerpt =
+            answer_body.as_deref().map(compact_ledger_text).filter(|text| !text.trim().is_empty());
+        let mut must_preserve_spans = Vec::new();
+        let mut seen_spans = BTreeSet::new();
+        push_json_string_array(
+            &mut must_preserve_spans,
+            &mut seen_spans,
+            structured.get("mustPreserveSpans"),
+            GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT,
+        );
+
+        let execution_detail = structured.get("executionDetail");
+        let mut source_labels = Vec::new();
+        let mut seen_labels = BTreeSet::new();
+        push_reference_field_values(
+            &mut source_labels,
+            &mut seen_labels,
+            execution_detail,
+            "/relationReferences",
+            "normalizedAssertion",
+            GROUNDED_EVIDENCE_LEDGER_SOURCE_LABEL_LIMIT,
+        );
+        push_reference_field_values(
+            &mut source_labels,
+            &mut seen_labels,
+            execution_detail,
+            "/entityReferences",
+            "label",
+            GROUNDED_EVIDENCE_LEDGER_SOURCE_LABEL_LIMIT,
+        );
+        push_reference_field_values(
+            &mut source_labels,
+            &mut seen_labels,
+            execution_detail,
+            "/entityReferences",
+            "summary",
+            GROUNDED_EVIDENCE_LEDGER_SOURCE_LABEL_LIMIT,
+        );
+        push_reference_field_values(
+            &mut source_labels,
+            &mut seen_labels,
+            execution_detail,
+            "/preparedSegmentReferences",
+            "documentTitle",
+            GROUNDED_EVIDENCE_LEDGER_SOURCE_LABEL_LIMIT,
+        );
+
+        if answer_excerpt.is_none() && must_preserve_spans.is_empty() && source_labels.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            index,
+            execution_id: structured
+                .get("executionId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            final_answer_ready: structured
+                .get("finalAnswerReady")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            finalizable: structured.get("finalizable").and_then(Value::as_bool).unwrap_or(false),
+            verification_state: execution_detail
+                .and_then(|detail| detail.get("verificationState"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            warning_codes: collect_verification_warning_codes(execution_detail),
+            unsupported_literal_spans: collect_unsupported_literal_spans(execution_detail),
+            answer_body,
+            answer_excerpt,
+            must_preserve_spans,
+            source_labels,
+        })
+    }
+
+    fn push_to_message(&self, message: &mut String) {
+        message.push_str("\n\n[grounded_answer ");
+        message.push_str(&self.index.to_string());
+        message.push_str("] finalAnswerReady=");
+        message.push_str(if self.final_answer_ready { "true" } else { "false" });
+        message.push_str(" finalizable=");
+        message.push_str(if self.finalizable { "true" } else { "false" });
+        if let Some(state) = &self.verification_state {
+            message.push_str(" verificationState=");
+            message.push_str(state);
+        }
+        if !self.warning_codes.is_empty() {
+            message.push_str(" warnings=");
+            message.push_str(&self.warning_codes.join(", "));
+        }
+        if let Some(excerpt) = &self.answer_excerpt {
+            message.push_str("\nanswerExcerpt: ");
+            message.push_str(excerpt);
+        }
+        if !self.must_preserve_spans.is_empty() {
+            message.push_str("\nmustPreserveSpans: ");
+            message.push_str(&self.must_preserve_spans.join(" | "));
+        }
+        if !self.source_labels.is_empty() {
+            message.push_str("\nsourceLabelsAndEvidenceSummaries: ");
+            message.push_str(&self.source_labels.join(" | "));
+        }
+    }
+
+    fn can_guard_final_answer(&self) -> bool {
+        self.final_answer_ready
+            || self.finalizable
+            || self.verification_state.as_deref() == Some(GROUNDED_ANSWER_VERIFICATION_VERIFIED)
+            || self.has_guardable_partial_inventory()
+    }
+
+    fn has_guardable_partial_inventory(&self) -> bool {
+        if self.answer_body.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            return false;
+        }
+        if self.verification_state.as_deref() == Some("conflicting") {
+            return false;
+        }
+        if self.warning_codes.iter().any(|code| code != "unsupported_literal") {
+            return false;
+        }
+        self.must_preserve_spans
+            .iter()
+            .filter(|span| {
+                let anchor = single_line_text(span);
+                let anchor = anchor.trim();
+                !self.unsupported_literal_spans.contains(anchor)
+                    && is_high_signal_grounded_answer_anchor(anchor)
+            })
+            .take(GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS + 1)
+            .count()
+            > GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS
+    }
+}
+
 /// Build the LLM-facing tool definitions from the MCP
 /// descriptors. MCP JSON-RPC and in-process UI agent calls therefore
-/// share one schema source of truth.
-pub(crate) fn answer_surface_tool_defs(auth: &AuthContext) -> Vec<ChatToolDef> {
-    tools::visible_tool_names(auth, McpToolSurface::Answer)
+/// share one schema source of truth, and — given the same
+/// [`ToolVisibilityCapabilities`] — the same visible tool set. This is
+/// what keeps the UI agent at 1:1 tool parity with external MCP clients,
+/// including `view_document_image` when the running agent model is
+/// vision-capable.
+pub(crate) fn answer_surface_tool_defs(
+    auth: &AuthContext,
+    capabilities: ToolVisibilityCapabilities,
+) -> Vec<ChatToolDef> {
+    tools::visible_tool_names_with_capabilities(auth, McpToolSurface::Answer, capabilities)
         .into_iter()
         .filter_map(|name| tools::descriptor_for(&name))
         .map(|descriptor| ChatToolDef {
@@ -239,7 +557,22 @@ pub async fn run_mcp_tool_agent_turn(
         provider_kind: binding.provider_kind.clone(),
         model_name: binding.model_name.clone(),
     };
-    let tool_defs = answer_surface_tool_defs(input.auth);
+    // Tool-surface parity with external MCP clients: expose
+    // `view_document_image` exactly when the agent model that runs this
+    // turn is vision-capable, mirroring the MCP `tools/list` capability
+    // gate. Gate on the turn's resolved binding (not "any visible library
+    // has vision") so we never offer the tool to a model that cannot
+    // consume image content.
+    let agent_vision_available = input
+        .state
+        .canonical_services
+        .ai_catalog
+        .get_model_catalog(input.state, binding.model_catalog_id)
+        .await
+        .map(|model| model.modality_kind == "multimodal")
+        .unwrap_or(false);
+    let tool_defs =
+        answer_surface_tool_defs(input.auth, ToolVisibilityCapabilities { agent_vision_available });
     if tool_defs.is_empty() {
         return Err(AgentTurnFailure::empty(anyhow::anyhow!(
             "no MCP answer tools are visible for the current caller"
@@ -275,13 +608,16 @@ pub async fn run_mcp_tool_agent_turn(
     let mut stopped_reason = AgentStopReason::IterationCap;
     let mut last_required_tool_refusal_answer: Option<String> = None;
     let mut verified_grounded_answer_count = 0usize;
+    let mut last_verified_grounded_answer: Option<String> = None;
+    let mut verified_grounded_answer_guard_text: Option<String> = None;
+    let mut last_completed_grounded_answer: Option<String> = None;
+    let mut grounded_answer_evidence_ledger = GroundedAnswerEvidenceLedger::default();
     let mut incomplete_grounded_answer_needs_follow_up = false;
-
     // There is no hidden post-loop synthesis pass: the model must spend
     // one of these iterations on a final answer after seeing tool results.
     // The caller budgets one extra iteration beyond the tool-round cap.
     for iteration in 1..=iteration_cap {
-        let Some(deadline_remaining) = deadline_remaining(deadline_started, input.deadline) else {
+        let Some(deadline_budget) = deadline_remaining(deadline_started, input.deadline) else {
             stopped_reason = AgentStopReason::Deadline;
             break;
         };
@@ -293,6 +629,7 @@ pub async fn run_mcp_tool_agent_turn(
             successful_tool_call_count,
             verified_grounded_answer_count,
             &successful_tool_names,
+            incomplete_grounded_answer_needs_follow_up,
             deadline_started,
             input.soft_final_answer_deadline,
         );
@@ -304,7 +641,7 @@ pub async fn run_mcp_tool_agent_turn(
         );
         let tools_for_iteration =
             tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, force_final_answer);
-        let request_messages = messages.clone();
+        let mut request_messages = final_answer_request_messages(&messages, force_final_answer);
         emit_activity(
             &input.activity_tx,
             AgentLoopActivityEvent::ModelRequest {
@@ -314,8 +651,8 @@ pub async fn run_mcp_tool_agent_turn(
             },
         );
         let model_call_started = std::time::Instant::now();
-        let response = match tokio::time::timeout(
-            deadline_remaining,
+        let mut response = match tokio::time::timeout(
+            deadline_budget,
             input.state.llm_gateway.generate_with_tools(ToolUseRequest {
                 provider_kind: binding.provider_kind.clone(),
                 model_name: binding.model_name.clone(),
@@ -369,8 +706,112 @@ pub async fn run_mcp_tool_agent_turn(
             }
         };
         merge_usage_into(&mut usage_json, &response.usage_json);
-        let model_call_duration_ms =
+        let mut model_call_duration_ms =
             model_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        if force_final_answer && !response.tool_calls.is_empty() {
+            tracing::warn!(
+                request_id = input.request_id,
+                library_id = %input.library_id,
+                iteration,
+                tool_call_count = response.tool_calls.len(),
+                has_output_text = !response.output_text.trim().is_empty(),
+                "assistant agent provider returned tool calls during forced-final iteration"
+            );
+            if response.output_text.trim().is_empty() {
+                let Some(retry_deadline_remaining) =
+                    deadline_remaining(deadline_started, input.deadline)
+                else {
+                    stopped_reason = AgentStopReason::Deadline;
+                    break;
+                };
+                let retry_messages = final_answer_retry_messages(
+                    &request_messages,
+                    response.reasoning_content.clone(),
+                    &response.tool_calls,
+                );
+                emit_activity(
+                    &input.activity_tx,
+                    AgentLoopActivityEvent::ModelRequest {
+                        iteration,
+                        provider_kind: binding.provider_kind.clone(),
+                        model_name: binding.model_name.clone(),
+                    },
+                );
+                let retry_started = std::time::Instant::now();
+                let retry_response = match tokio::time::timeout(
+                    retry_deadline_remaining,
+                    input.state.llm_gateway.generate_with_tools(ToolUseRequest {
+                        provider_kind: binding.provider_kind.clone(),
+                        model_name: binding.model_name.clone(),
+                        api_key_override: binding.api_key.clone(),
+                        base_url_override: binding.provider_base_url.clone(),
+                        temperature: binding.temperature,
+                        top_p: binding.top_p,
+                        max_output_tokens_override: binding.max_output_tokens_override,
+                        messages: retry_messages.clone(),
+                        tools: Vec::new(),
+                        extra_parameters_json: binding.extra_parameters_json.clone(),
+                        require_tool_call: false,
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            provider = %binding.provider_kind,
+                            model = %binding.model_name,
+                            iteration,
+                            max_output_tokens_override = ?binding.max_output_tokens_override,
+                            error = %error,
+                            "MCP-backed assistant agent forced-final retry failed"
+                        );
+                        return Err(AgentTurnFailure::with_loop(
+                            error.context("MCP-backed assistant agent forced-final retry failed"),
+                            debug_iterations.clone(),
+                            agent_loop_metadata(
+                                iteration_cap,
+                                input.deadline,
+                                AgentStopReason::ProviderError,
+                                total_tool_call_count,
+                            ),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(AgentTurnFailure::with_loop(
+                            anyhow::anyhow!(
+                                "assistant agent exceeded its turn deadline while waiting for the forced-final retry"
+                            ),
+                            debug_iterations.clone(),
+                            agent_loop_metadata(
+                                iteration_cap,
+                                input.deadline,
+                                AgentStopReason::Deadline,
+                                total_tool_call_count,
+                            ),
+                        ));
+                    }
+                };
+                merge_usage_into(&mut usage_json, &retry_response.usage_json);
+                model_call_duration_ms = model_call_duration_ms.saturating_add(
+                    retry_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                );
+                request_messages = retry_messages;
+                response = retry_response;
+                if !response.tool_calls.is_empty() {
+                    tracing::warn!(
+                        request_id = input.request_id,
+                        library_id = %input.library_id,
+                        iteration,
+                        tool_call_count = response.tool_calls.len(),
+                        "assistant agent forced-final retry still returned tool calls; discarding them"
+                    );
+                    response.tool_calls.clear();
+                }
+            } else {
+                response.tool_calls.clear();
+            }
+        }
 
         if response.tool_calls.is_empty() {
             let answer = response.output_text.trim().to_string();
@@ -411,7 +852,35 @@ pub async fn run_mcp_tool_agent_turn(
             if require_tool_call {
                 if last_required_tool_refusal_answer.is_some() || iteration == iteration_cap {
                     stopped_reason = AgentStopReason::FinalAnswer;
-                    let answer = ensure_user_fragments_visible(answer, input.user_question);
+                    let prior_answer_guard = prior_assistant_answer_fallback_candidate(
+                        input.grounded_answer_tool_history,
+                        input.conversation_history,
+                    );
+                    let ledger_guard =
+                        grounded_answer_evidence_ledger.guard_candidate_for_answer(&answer);
+                    let grounded_guard = ledger_guard
+                        .as_deref()
+                        .or_else(|| {
+                            verified_grounded_answer_guard_candidate(
+                                last_verified_grounded_answer.as_deref(),
+                                verified_grounded_answer_guard_text.as_deref(),
+                                verified_grounded_answer_count,
+                                successful_tool_call_count,
+                            )
+                        })
+                        .or_else(|| {
+                            prior_assistant_answer_guard_for_final_answer(
+                                &answer,
+                                prior_answer_guard.as_deref(),
+                            )
+                        });
+                    let answer = finalize_agent_loop_answer(
+                        answer,
+                        input.user_question,
+                        grounded_guard,
+                        input.request_id,
+                        input.library_id,
+                    );
                     return Ok(AgentTurnResult {
                         answer,
                         provider,
@@ -434,7 +903,34 @@ pub async fn run_mcp_tool_agent_turn(
                 continue;
             }
             stopped_reason = AgentStopReason::FinalAnswer;
-            let answer = ensure_user_fragments_visible(answer, input.user_question);
+            let prior_answer_guard = prior_assistant_answer_fallback_candidate(
+                input.grounded_answer_tool_history,
+                input.conversation_history,
+            );
+            let ledger_guard = grounded_answer_evidence_ledger.guard_candidate_for_answer(&answer);
+            let grounded_guard = ledger_guard
+                .as_deref()
+                .or_else(|| {
+                    verified_grounded_answer_guard_candidate(
+                        last_verified_grounded_answer.as_deref(),
+                        verified_grounded_answer_guard_text.as_deref(),
+                        verified_grounded_answer_count,
+                        successful_tool_call_count,
+                    )
+                })
+                .or_else(|| {
+                    prior_assistant_answer_guard_for_final_answer(
+                        &answer,
+                        prior_answer_guard.as_deref(),
+                    )
+                });
+            let answer = finalize_agent_loop_answer(
+                answer,
+                input.user_question,
+                grounded_guard,
+                input.request_id,
+                input.library_id,
+            );
             return Ok(AgentTurnResult {
                 answer,
                 provider,
@@ -505,10 +1001,29 @@ pub async fn run_mcp_tool_agent_turn(
                 if outcome.grounded_answer_ready {
                     verified_grounded_answer_count =
                         verified_grounded_answer_count.saturating_add(1);
+                    last_verified_grounded_answer = remember_verified_grounded_answer(
+                        last_verified_grounded_answer,
+                        &call.name,
+                        &outcome,
+                    );
+                    verified_grounded_answer_guard_text =
+                        remember_verified_grounded_answer_guard_text(
+                            verified_grounded_answer_guard_text,
+                            &call.name,
+                            &outcome,
+                        );
+                }
+                if outcome.grounded_answer_completed {
+                    last_completed_grounded_answer = remember_completed_grounded_answer(
+                        last_completed_grounded_answer,
+                        &call.name,
+                        &outcome,
+                    );
                 }
                 if outcome.grounded_answer_needs_follow_up {
                     iteration_had_incomplete_grounded_answer = true;
                 }
+                grounded_answer_evidence_ledger.remember(&call.name, outcome);
                 if let Some(grounding_text) = &outcome.grounding_text {
                     push_tool_grounding_fragment(
                         &mut assistant_grounding,
@@ -536,6 +1051,9 @@ pub async fn run_mcp_tool_agent_turn(
                 outcome.message_content.clone(),
             ));
         }
+        if let Some(ledger_message) = grounded_answer_evidence_ledger.system_message() {
+            messages.push(ChatMessage::system(ledger_message));
+        }
         if let Some(reminder) = latest_user_verbatim_fragment_reminder(input.user_question) {
             messages.push(ChatMessage::system(reminder));
         }
@@ -553,6 +1071,7 @@ pub async fn run_mcp_tool_agent_turn(
             child_runtime_execution_ids,
             child_query_execution_ids: iteration_child_query_execution_ids,
         });
+
         let next_incomplete_grounded_answer_needs_follow_up =
             next_incomplete_grounded_answer_follow_up_required(
                 incomplete_grounded_answer_needs_follow_up,
@@ -582,6 +1101,81 @@ pub async fn run_mcp_tool_agent_turn(
         && total_tool_call_count > 0
     {
         stopped_reason = AgentStopReason::ToolError;
+    }
+
+    if matches!(stopped_reason, AgentStopReason::IterationCap)
+        && let Some(answer) = verified_grounded_answer_fallback_candidate(
+            last_verified_grounded_answer.as_deref(),
+            verified_grounded_answer_count,
+            successful_tool_call_count,
+        )
+    {
+        let answer = ensure_user_fragments_visible(answer.to_string(), input.user_question);
+        return Ok(AgentTurnResult {
+            answer,
+            provider,
+            usage_json,
+            iterations: debug_iterations.len(),
+            assistant_grounding,
+            child_query_execution_ids,
+            debug_iterations,
+            agent_loop: Some(agent_loop_metadata(
+                iteration_cap,
+                input.deadline,
+                AgentStopReason::IterationCap,
+                total_tool_call_count,
+            )),
+        });
+    }
+
+    if should_return_completed_grounded_answer_on_iteration_cap(
+        stopped_reason,
+        successful_tool_call_count,
+        last_completed_grounded_answer.as_deref(),
+    ) {
+        let answer = last_completed_grounded_answer.unwrap_or_default();
+        let answer = ensure_user_fragments_visible(answer, input.user_question);
+        return Ok(AgentTurnResult {
+            answer,
+            provider,
+            usage_json,
+            iterations: debug_iterations.len(),
+            assistant_grounding,
+            child_query_execution_ids,
+            debug_iterations,
+            agent_loop: Some(agent_loop_metadata(
+                iteration_cap,
+                input.deadline,
+                AgentStopReason::IterationCap,
+                total_tool_call_count,
+            )),
+        });
+    }
+
+    if matches!(stopped_reason, AgentStopReason::IterationCap)
+        && successful_tool_call_count > 0
+        && successful_tool_names.iter().any(|name| tool_result_can_ground_final_answer(name))
+        && let Some(answer) = prior_assistant_answer_fallback_candidate(
+            input.grounded_answer_tool_history,
+            input.conversation_history,
+        )
+    {
+        let answer = ensure_user_fragments_visible(answer, input.user_question);
+        return Ok(AgentTurnResult {
+            answer,
+            provider,
+            usage_json,
+            iterations: debug_iterations.len(),
+            assistant_grounding,
+            child_query_execution_ids,
+            debug_iterations,
+            agent_loop: Some(agent_loop_metadata(
+                iteration_cap,
+                input.deadline,
+                AgentStopReason::IterationCap,
+                total_tool_call_count,
+            )),
+        });
     }
 
     let mut message = match stopped_reason {
@@ -627,13 +1221,18 @@ fn force_final_answer_iteration(
     successful_tool_call_count: usize,
     verified_grounded_answer_count: usize,
     successful_tool_names: &BTreeSet<String>,
+    incomplete_grounded_answer_needs_follow_up: bool,
     started: Instant,
     soft_final_answer_deadline: Option<Duration>,
 ) -> bool {
     if iteration == iteration_cap && total_tool_call_count > 0 {
         return true;
     }
-    if successful_tool_call_count >= SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS
+    if incomplete_grounded_answer_needs_follow_up {
+        return false;
+    }
+    if verified_grounded_answer_count > 0
+        && successful_tool_call_count >= SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS
         && successful_tool_names.contains(READ_DOCUMENT_TOOL_NAME)
         && has_composite_tool_signal(successful_tool_names)
     {
@@ -647,8 +1246,8 @@ fn force_final_answer_iteration(
     }
 
     verified_grounded_answer_count > 0
-        || (successful_tool_call_count >= SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS
-            && has_composite_tool_signal(successful_tool_names))
+        && (successful_tool_call_count >= SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS
+            || has_composite_tool_signal(successful_tool_names))
 }
 
 fn should_require_tool_call_before_final(
@@ -745,6 +1344,50 @@ fn tool_requirement_reminder() -> String {
     "Before writing the final answer, call at least one MCP tool and inspect the result. Use any relevant visible tool, and do not repeat an identical argument payload.".to_string()
 }
 
+fn final_answer_request_messages(
+    messages: &[ChatMessage],
+    force_final_answer: bool,
+) -> Vec<ChatMessage> {
+    let mut request_messages = messages.to_vec();
+    if force_final_answer {
+        request_messages.push(ChatMessage::system(final_answer_required_reminder()));
+    }
+    request_messages
+}
+
+fn final_answer_required_reminder() -> String {
+    "No more MCP tool calls are available in this turn. Write the final answer now from the tool results already in the transcript. If the evidence is partial, answer only the supported parts and mark missing parts plainly.".to_string()
+}
+
+fn final_answer_retry_messages(
+    request_messages: &[ChatMessage],
+    reasoning_content: Option<String>,
+    tool_calls: &[ChatToolCall],
+) -> Vec<ChatMessage> {
+    let mut retry_messages = request_messages.to_vec();
+    retry_messages.push(ChatMessage::assistant_with_reasoning_and_tool_calls(
+        reasoning_content,
+        tool_calls.to_vec(),
+    ));
+    for call in tool_calls {
+        retry_messages.push(ChatMessage::tool_result(
+            call.id.clone(),
+            call.name.clone(),
+            final_answer_tool_unavailable_result(),
+        ));
+    }
+    retry_messages.push(ChatMessage::system(final_answer_retry_reminder()));
+    retry_messages
+}
+
+fn final_answer_tool_unavailable_result() -> String {
+    "This tool request was not executed because no more MCP tool calls are available in this turn. Produce the final answer from the prior tool results already in the transcript.".to_string()
+}
+
+fn final_answer_retry_reminder() -> String {
+    "The previous response requested another tool, but this is the final answer step and tools are unavailable. Do not request tools. Produce the answer from the existing tool results now.".to_string()
+}
+
 fn latest_user_verbatim_fragment_reminder(user_question: &str) -> Option<String> {
     let fragments = extract_verbatim_user_fragments(user_question);
     if fragments.is_empty() {
@@ -798,6 +1441,339 @@ fn ensure_user_fragments_visible(answer: String, user_question: &str) -> String 
     prefixed
 }
 
+fn finalize_agent_loop_answer(
+    answer: String,
+    user_question: &str,
+    verified_grounded_answer: Option<&str>,
+    request_id: &str,
+    library_id: Uuid,
+) -> String {
+    let answer = prefer_verified_grounded_answer_on_ordered_source_loss(
+        answer,
+        verified_grounded_answer,
+        request_id,
+        library_id,
+    );
+    let answer = prefer_verified_grounded_answer_on_literal_drift(
+        answer,
+        user_question,
+        verified_grounded_answer,
+        request_id,
+        library_id,
+    );
+    ensure_user_fragments_visible(answer, user_question)
+}
+
+fn verified_grounded_answer_fallback_candidate<'a>(
+    last_verified_grounded_answer: Option<&'a str>,
+    verified_grounded_answer_count: usize,
+    successful_tool_call_count: usize,
+) -> Option<&'a str> {
+    if verified_grounded_answer_count == 1 && successful_tool_call_count == 1 {
+        return last_verified_grounded_answer;
+    }
+    None
+}
+
+fn verified_grounded_answer_guard_candidate<'a>(
+    last_verified_grounded_answer: Option<&'a str>,
+    verified_grounded_answer_guard_text: Option<&'a str>,
+    verified_grounded_answer_count: usize,
+    successful_tool_call_count: usize,
+) -> Option<&'a str> {
+    verified_grounded_answer_fallback_candidate(
+        last_verified_grounded_answer,
+        verified_grounded_answer_count,
+        successful_tool_call_count,
+    )
+    .or_else(|| {
+        if verified_grounded_answer_count > 1 { verified_grounded_answer_guard_text } else { None }
+    })
+}
+
+fn prior_assistant_answer_fallback_candidate(
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+    conversation_history: &[ChatMessage],
+) -> Option<String> {
+    let grounded_candidates = grounded_answer_tool_history
+        .iter()
+        .rev()
+        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+        .filter_map(|turn| normalize_prior_assistant_answer_fallback(&turn.content_text));
+    let chat_candidates = conversation_history
+        .iter()
+        .rev()
+        .filter(|message| message.role == "assistant" || message.role == "system")
+        .filter_map(|message| message.content.as_deref())
+        .filter_map(normalize_prior_assistant_answer_fallback);
+
+    grounded_candidates
+        .chain(chat_candidates)
+        .max_by(|left, right| {
+            left.anchor_count
+                .cmp(&right.anchor_count)
+                .then_with(|| left.answer.chars().count().cmp(&right.answer.chars().count()))
+        })
+        .map(|candidate| candidate.answer)
+}
+
+#[derive(Debug, Clone)]
+struct PriorAssistantAnswerFallbackCandidate {
+    answer: String,
+    anchor_count: usize,
+}
+
+fn normalize_prior_assistant_answer_fallback(
+    value: &str,
+) -> Option<PriorAssistantAnswerFallbackCandidate> {
+    let answer = strip_compact_literal_memory_line(value);
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let anchors = verified_grounded_answer_surface_anchor_set(trimmed);
+    (anchors.len() >= PRIOR_ASSISTANT_ANSWER_FALLBACK_MIN_ANCHORS).then(|| {
+        PriorAssistantAnswerFallbackCandidate {
+            answer: trimmed.to_string(),
+            anchor_count: anchors.len(),
+        }
+    })
+}
+
+fn strip_compact_literal_memory_line(value: &str) -> String {
+    let mut trimmed = value.trim_start();
+    loop {
+        let Some((first, rest)) = trimmed.split_once('\n') else {
+            return trimmed.to_string();
+        };
+        let first = first.trim_start();
+        if first.starts_with("literals:") && first.contains('`') {
+            trimmed = rest.trim_start();
+            continue;
+        }
+        return trimmed.to_string();
+    }
+}
+
+fn prior_assistant_answer_guard_for_final_answer<'a>(
+    answer: &str,
+    prior_answer: Option<&'a str>,
+) -> Option<&'a str> {
+    let prior_answer = prior_answer?;
+    let answer_anchor_count = verified_grounded_answer_surface_anchor_set(answer).len();
+    if answer_anchor_count >= PRIOR_ASSISTANT_ANSWER_FALLBACK_MIN_ANCHORS {
+        return None;
+    }
+    Some(prior_answer)
+}
+
+fn prefer_verified_grounded_answer_on_ordered_source_loss(
+    answer: String,
+    verified_grounded_answer: Option<&str>,
+    request_id: &str,
+    library_id: Uuid,
+) -> String {
+    let Some(verified_grounded_answer) =
+        verified_grounded_answer.map(str::trim).filter(|value| !value.is_empty())
+    else {
+        return answer;
+    };
+    if !answer_has_ordered_source_markers(verified_grounded_answer) {
+        return answer;
+    }
+    if answer_has_ordered_source_markers(&answer) {
+        return answer;
+    }
+    tracing::debug!(
+        request_id,
+        library_id = %library_id,
+        "query.agent_loop.verified_grounded_ordered_source_guard"
+    );
+    verified_grounded_answer.to_string()
+}
+
+fn answer_has_ordered_source_markers(answer: &str) -> bool {
+    let mut marker_count = 0usize;
+    for line in answer.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("source=`") || trimmed.contains(" source=`") {
+            marker_count = marker_count.saturating_add(1);
+            if marker_count >= 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn prefer_verified_grounded_answer_on_literal_drift(
+    answer: String,
+    user_question: &str,
+    verified_grounded_answer: Option<&str>,
+    request_id: &str,
+    library_id: Uuid,
+) -> String {
+    let Some(verified_grounded_answer) =
+        verified_grounded_answer.map(str::trim).filter(|value| !value.is_empty())
+    else {
+        return answer;
+    };
+
+    let grounded_literals = verified_grounded_answer_literal_set(verified_grounded_answer);
+    if grounded_literals.len() < VERIFIED_GROUNDED_LITERAL_GUARD_MIN_LITERALS {
+        return prefer_verified_grounded_answer_on_surface_anchor_loss(
+            answer,
+            verified_grounded_answer,
+            request_id,
+            library_id,
+        );
+    }
+    let answer_literals = verified_grounded_answer_literal_set(&answer);
+    let user_literals = verified_grounded_answer_literal_set(user_question);
+    let missing_count = grounded_literals.difference(&answer_literals).count();
+    let unsupported_count = answer_literals
+        .difference(&grounded_literals)
+        .filter(|literal| !user_literals.contains(*literal))
+        .count();
+    if missing_count == 0 && unsupported_count == 0 {
+        return prefer_verified_grounded_answer_on_surface_anchor_loss(
+            answer,
+            verified_grounded_answer,
+            request_id,
+            library_id,
+        );
+    }
+
+    tracing::debug!(
+        request_id,
+        library_id = %library_id,
+        grounded_literal_count = grounded_literals.len(),
+        answer_literal_count = answer_literals.len(),
+        missing_count,
+        unsupported_count,
+        "query.agent_loop.verified_grounded_literal_guard"
+    );
+    verified_grounded_answer.to_string()
+}
+
+fn prefer_verified_grounded_answer_on_surface_anchor_loss(
+    answer: String,
+    verified_grounded_answer: &str,
+    request_id: &str,
+    library_id: Uuid,
+) -> String {
+    let grounded_anchors = verified_grounded_answer_surface_anchor_set(verified_grounded_answer);
+    if grounded_anchors.len() < VERIFIED_GROUNDED_LITERAL_GUARD_MIN_LITERALS {
+        return answer;
+    }
+    let answer_anchors = verified_grounded_answer_surface_anchor_set(&answer);
+    let high_signal_missing_count = grounded_anchors
+        .iter()
+        .filter(|anchor| is_high_signal_grounded_answer_anchor(anchor))
+        .filter(|anchor| !answer_anchors.contains(*anchor))
+        .count();
+    if high_signal_missing_count >= GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS {
+        tracing::debug!(
+            request_id,
+            library_id = %library_id,
+            grounded_anchor_count = grounded_anchors.len(),
+            answer_anchor_count = answer_anchors.len(),
+            high_signal_missing_count,
+            "query.agent_loop.verified_grounded_high_signal_anchor_guard"
+        );
+        return verified_grounded_answer.to_string();
+    }
+    let missing_count = grounded_anchors.difference(&answer_anchors).count();
+    let missing_threshold = grounded_anchors.len().div_ceil(3).max(2);
+    if missing_count < missing_threshold {
+        return answer;
+    }
+
+    tracing::debug!(
+        request_id,
+        library_id = %library_id,
+        grounded_anchor_count = grounded_anchors.len(),
+        answer_anchor_count = answer_anchors.len(),
+        missing_count,
+        missing_threshold,
+        "query.agent_loop.verified_grounded_surface_anchor_guard"
+    );
+    verified_grounded_answer.to_string()
+}
+
+fn verified_grounded_answer_literal_set(text: &str) -> BTreeSet<String> {
+    let mut literals = BTreeSet::new();
+    for span in backtick_literal_spans(text) {
+        push_verified_grounded_answer_literal_span(&mut literals, &span);
+    }
+    literals
+}
+
+fn verified_grounded_answer_surface_anchor_set(text: &str) -> BTreeSet<String> {
+    let mut anchors = verified_grounded_answer_literal_set(text);
+    for candidate in split_literal_anchor_candidates(text) {
+        let candidate = trim_literal_anchor_candidate(&candidate);
+        if is_structural_literal_anchor(candidate) {
+            anchors.insert(candidate.to_string());
+        }
+    }
+    anchors
+}
+
+fn push_verified_grounded_answer_literal_span(literals: &mut BTreeSet<String>, span: &str) {
+    let span = span.trim();
+    if span.is_empty() {
+        return;
+    }
+    if span.contains('\n') {
+        let mut lines = span.lines();
+        if let Some(first_line) = lines.next()
+            && !is_probable_code_fence_info(first_line)
+        {
+            push_verified_grounded_answer_literal_line(literals, first_line);
+        }
+        for line in lines {
+            push_verified_grounded_answer_literal_line(literals, line);
+        }
+        return;
+    }
+    push_verified_grounded_answer_literal_candidate(literals, span);
+}
+
+fn is_probable_code_fence_info(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty()
+        && line.chars().count() <= 32
+        && line
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '.' | '#'))
+}
+
+fn push_verified_grounded_answer_literal_line(literals: &mut BTreeSet<String>, line: &str) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    push_verified_grounded_answer_literal_candidate(literals, line);
+    if let Some((left, right)) = line.split_once('=') {
+        push_verified_grounded_answer_literal_candidate(literals, left.trim());
+        push_verified_grounded_answer_literal_candidate(literals, right.trim());
+    }
+}
+
+fn push_verified_grounded_answer_literal_candidate(
+    literals: &mut BTreeSet<String>,
+    candidate: &str,
+) {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return;
+    }
+    if is_structural_literal_anchor(candidate) || is_plain_history_code_literal(candidate) {
+        literals.insert(candidate.to_string());
+    }
+}
+
 fn contains_casefolded(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
@@ -834,14 +1810,7 @@ enum RequiredVisibleMatchKind {
 fn extract_required_visible_user_fragments(
     user_question: &str,
 ) -> Vec<RequiredVisibleUserFragment> {
-    let mut raw_fragments = extract_quoted_verbatim_user_fragments(user_question);
-    for fragment in extract_delimited_verbatim_user_fragments(user_question) {
-        let ends_with_terminal =
-            fragment.chars().last().is_some_and(|ch| matches!(ch, '?' | '.' | '!'));
-        if fragment.chars().count() >= 16 && !ends_with_terminal {
-            push_verbatim_fragment(&fragment, &mut raw_fragments);
-        }
-    }
+    let raw_fragments = extract_quoted_verbatim_user_fragments(user_question);
     let mut required =
         raw_fragments.into_iter().map(RequiredVisibleUserFragment::casefolded).collect::<Vec<_>>();
     let mut identifier_fragments = Vec::new();
@@ -856,12 +1825,6 @@ fn extract_required_visible_user_fragments(
         }
     }
     required
-}
-
-fn extract_delimited_verbatim_user_fragments(user_question: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    extend_delimited_user_fragments(user_question, &mut fragments);
-    fragments
 }
 
 fn extract_quoted_user_fragments(
@@ -1073,9 +2036,12 @@ async fn execute_tool_calls(
     seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
 ) -> Vec<ToolExecutionOutcome> {
     let mut outcomes: Vec<Option<ToolExecutionOutcome>> = vec![None; tool_calls.len()];
-    let pending_calls = prepare_agent_tool_calls(
+    let single_tool_iteration = tool_calls.len() == 1;
+    let pending_calls = prepare_agent_tool_calls_with_context(
         tool_calls,
         input.user_question,
+        input.contextual_follow_up,
+        single_tool_iteration,
         input.grounded_answer_top_k,
         input.library_ref,
         input.grounded_answer_tool_history,
@@ -1096,7 +2062,9 @@ async fn execute_tool_calls(
                     },
                 );
                 let mut outcome = match deadline_remaining(deadline_started, input.deadline) {
-                    Some(_) => execute_one_tool_call(&input, &pending.call).await,
+                    Some(_) => {
+                        execute_one_tool_call(&input, &pending.call, single_tool_iteration).await
+                    }
                     None => tool_execution_error(format!(
                         "tool '{}' was not started because the assistant turn deadline expired",
                         pending.call.name
@@ -1152,9 +2120,34 @@ struct PendingAgentToolCall {
     fingerprint: Option<String>,
 }
 
+#[cfg(test)]
 fn prepare_agent_tool_calls(
     tool_calls: &[ChatToolCall],
     user_question: &str,
+    grounded_top_k: usize,
+    library_ref: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
+    outcomes: &mut [Option<ToolExecutionOutcome>],
+) -> Vec<PendingAgentToolCall> {
+    prepare_agent_tool_calls_with_context(
+        tool_calls,
+        user_question,
+        false,
+        false,
+        grounded_top_k,
+        library_ref,
+        grounded_answer_tool_history,
+        seen_effective_payloads,
+        outcomes,
+    )
+}
+
+fn prepare_agent_tool_calls_with_context(
+    tool_calls: &[ChatToolCall],
+    user_question: &str,
+    contextual_follow_up: bool,
+    single_tool_iteration: bool,
     grounded_top_k: usize,
     library_ref: &str,
     grounded_answer_tool_history: &[ExternalConversationTurn],
@@ -1166,10 +2159,12 @@ fn prepare_agent_tool_calls(
         .cloned()
         .enumerate()
         .filter_map(|(pending_index, call)| {
-            let fingerprint = effective_tool_call_fingerprint(
+            let fingerprint = effective_tool_call_fingerprint_with_context(
                 &call.name,
                 &call.arguments_json,
                 user_question,
+                contextual_follow_up,
+                single_tool_iteration,
                 grounded_top_k,
                 library_ref,
                 grounded_answer_tool_history,
@@ -1217,6 +2212,7 @@ fn emit_activity(sender: &Option<Sender<AgentLoopActivityEvent>>, event: AgentLo
 async fn execute_one_tool_call(
     input: &McpToolAgentTurnInput<'_>,
     call: &ChatToolCall,
+    single_tool_iteration: bool,
 ) -> ToolExecutionOutcome {
     let mut arguments = match serde_json::from_str::<Value>(&call.arguments_json) {
         Ok(arguments) => arguments,
@@ -1224,16 +2220,19 @@ async fn execute_one_tool_call(
             return tool_execution_error(format!("invalid tool arguments JSON: {error}"));
         }
     };
+    let requested_arguments = arguments.clone();
+    normalize_agent_tool_argument_types(&call.name, &mut arguments);
     if let Err(message) =
         validate_agent_tool_library_scope(&call.name, &arguments, input.library_ref)
     {
         return tool_execution_error(message);
     }
-    let requested_arguments = arguments.clone();
-    apply_agent_tool_argument_defaults(
+    apply_agent_tool_argument_defaults_with_context(
         &call.name,
         &mut arguments,
         input.user_question,
+        input.contextual_follow_up,
+        single_tool_iteration,
         input.grounded_answer_top_k,
         input.library_ref,
         input.grounded_answer_tool_history,
@@ -1249,7 +2248,7 @@ async fn execute_one_tool_call(
         return tool_execution_error(format!("unsupported MCP answer tool '{}'", call.name));
     };
 
-    let result_text = tool_result_preview(&result.content);
+    let result_text = tool_result_answer_text(&call.name, &result.content);
     let child_query_execution_ids =
         extract_child_query_execution_ids(&call.name, &result.structured_content);
     let child_runtime_execution_ids =
@@ -1258,6 +2257,7 @@ async fn execute_one_tool_call(
     let message_content = tool_result_model_message(&call.name, &result);
     let grounding_text = tool_result_verification_text(&call.name, &result);
     let grounded_answer_ready = grounded_answer_ready(&call.name, &result);
+    let grounded_answer_completed = grounded_answer_completed(&call.name, &result);
     let grounded_answer_needs_follow_up = grounded_answer_needs_follow_up(&call.name, &result);
     let result_json = Some(debug_tool_result_json(&result));
     let arguments_json = Some(arguments.to_string());
@@ -1272,6 +2272,7 @@ async fn execute_one_tool_call(
         result_json,
         grounding_text,
         grounded_answer_ready,
+        grounded_answer_completed,
         grounded_answer_needs_follow_up,
         is_error,
         duration_ms: 0,
@@ -1320,10 +2321,76 @@ fn validate_agent_tool_library_scope(
     Ok(())
 }
 
+fn normalize_agent_tool_argument_types(tool_name: &str, arguments: &mut Value) {
+    let Value::Object(object) = arguments else {
+        return;
+    };
+    if tool_name == SEARCH_DOCUMENTS_TOOL_NAME {
+        normalize_stringified_json_array_field(object, "libraries");
+    }
+    for field in ["limit", "topK", "startOffset", "length", "maxBytes"] {
+        normalize_unsigned_integer_string_field(object, field);
+    }
+}
+
+fn normalize_stringified_json_array_field(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+) {
+    let Some(raw) = object.get(field).and_then(Value::as_str).map(str::trim) else {
+        return;
+    };
+    if !raw.starts_with('[') {
+        return;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return;
+    };
+    if parsed.is_array() {
+        object.insert(field.to_string(), parsed);
+    }
+}
+
+fn normalize_unsigned_integer_string_field(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+) {
+    let Some(raw) = object.get(field).and_then(Value::as_str).map(str::trim) else {
+        return;
+    };
+    let Ok(value) = raw.parse::<u64>() else {
+        return;
+    };
+    object.insert(field.to_string(), serde_json::json!(value));
+}
+
+#[cfg(test)]
 fn apply_agent_tool_argument_defaults(
     tool_name: &str,
     arguments: &mut Value,
     user_question: &str,
+    grounded_top_k: usize,
+    library_ref: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) {
+    apply_agent_tool_argument_defaults_with_context(
+        tool_name,
+        arguments,
+        user_question,
+        false,
+        false,
+        grounded_top_k,
+        library_ref,
+        grounded_answer_tool_history,
+    );
+}
+
+fn apply_agent_tool_argument_defaults_with_context(
+    tool_name: &str,
+    arguments: &mut Value,
+    user_question: &str,
+    contextual_follow_up: bool,
+    single_tool_iteration: bool,
     grounded_top_k: usize,
     library_ref: &str,
     grounded_answer_tool_history: &[ExternalConversationTurn],
@@ -1336,26 +2403,62 @@ fn apply_agent_tool_argument_defaults(
     }
     if tool_name == SEARCH_DOCUMENTS_TOOL_NAME {
         object.insert("libraries".to_string(), serde_json::json!([library_ref]));
-    }
-    let bounded_top_k = grounded_top_k.max(1);
-    if tool_name == GROUNDED_ANSWER_TOOL_NAME {
-        if let Some(query) = object.get("query").and_then(Value::as_str)
-            && should_replace_history_padded_grounded_answer_query(
+        if contextual_follow_up
+            && let Some(query) = object.get("query").and_then(Value::as_str)
+            && let Some(compact_query) = contextual_search_documents_query(
                 query,
                 user_question,
                 grounded_answer_tool_history,
             )
         {
-            object.insert("query".to_string(), serde_json::json!(user_question.trim()));
+            object.insert("query".to_string(), serde_json::json!(compact_query));
+        }
+    }
+    let bounded_top_k = grounded_top_k.max(1);
+    if tool_name == GROUNDED_ANSWER_TOOL_NAME {
+        let model_requested_history = object
+            .get("conversationTurns")
+            .and_then(Value::as_array)
+            .is_some_and(|turns| !turns.is_empty());
+        let use_contextual_history = contextual_follow_up || model_requested_history;
+        let contextual_history = use_contextual_history.then_some(grounded_answer_tool_history);
+        if let Some(query) = object.get("query").and_then(Value::as_str) {
+            let compact_query = if use_contextual_history {
+                compact_history_padded_grounded_answer_query(
+                    query,
+                    user_question,
+                    grounded_answer_tool_history,
+                )
+            } else if single_tool_iteration {
+                compact_standalone_single_grounded_answer_query(query, user_question).or_else(
+                    || {
+                        compact_non_contextual_history_scoped_grounded_answer_query(
+                            query,
+                            user_question,
+                            grounded_answer_tool_history,
+                        )
+                    },
+                )
+            } else {
+                compact_non_contextual_history_scoped_grounded_answer_query(
+                    query,
+                    user_question,
+                    grounded_answer_tool_history,
+                )
+            };
+            if let Some(compact_query) = compact_query {
+                object.insert("query".to_string(), serde_json::json!(compact_query));
+            }
         }
         let requested_top_k = object
             .get("topK")
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok());
-        let turns = grounded_answer_conversation_turn_defaults(grounded_answer_tool_history);
+        let turns =
+            grounded_answer_conversation_turn_defaults(contextual_history.unwrap_or_default());
         object.insert("conversationTurns".to_string(), Value::Array(turns));
-        let has_contextual_turns = !grounded_answer_tool_history.is_empty();
-        let effective_top_k = resolve_contextual_grounded_answer_top_k(
+        let has_contextual_turns = contextual_history.is_some_and(|history| !history.is_empty());
+        let effective_top_k = resolve_agent_grounded_answer_top_k(
             requested_top_k,
             has_contextual_turns,
             bounded_top_k,
@@ -1384,6 +2487,16 @@ fn apply_agent_tool_argument_defaults(
     }
 }
 
+fn resolve_agent_grounded_answer_top_k(
+    requested_top_k: Option<usize>,
+    has_contextual_turns: bool,
+    max_top_k: usize,
+) -> usize {
+    resolve_contextual_grounded_answer_top_k(requested_top_k, has_contextual_turns, max_top_k)
+        .max(crate::domains::query::DEFAULT_TOP_K.min(max_top_k.max(1)))
+}
+
+#[cfg(test)]
 fn effective_tool_call_fingerprint(
     tool_name: &str,
     arguments_json: &str,
@@ -1392,12 +2505,37 @@ fn effective_tool_call_fingerprint(
     library_ref: &str,
     grounded_answer_tool_history: &[ExternalConversationTurn],
 ) -> Option<String> {
+    effective_tool_call_fingerprint_with_context(
+        tool_name,
+        arguments_json,
+        user_question,
+        false,
+        false,
+        grounded_top_k,
+        library_ref,
+        grounded_answer_tool_history,
+    )
+}
+
+fn effective_tool_call_fingerprint_with_context(
+    tool_name: &str,
+    arguments_json: &str,
+    user_question: &str,
+    contextual_follow_up: bool,
+    single_tool_iteration: bool,
+    grounded_top_k: usize,
+    library_ref: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) -> Option<String> {
     let mut arguments = serde_json::from_str::<Value>(arguments_json).ok()?;
+    normalize_agent_tool_argument_types(tool_name, &mut arguments);
     validate_agent_tool_library_scope(tool_name, &arguments, library_ref).ok()?;
-    apply_agent_tool_argument_defaults(
+    apply_agent_tool_argument_defaults_with_context(
         tool_name,
         &mut arguments,
         user_question,
+        contextual_follow_up,
+        single_tool_iteration,
         grounded_top_k,
         library_ref,
         grounded_answer_tool_history,
@@ -1423,6 +2561,200 @@ fn canonical_json_value(value: &Value) -> Value {
         }
         _ => value.clone(),
     }
+}
+
+fn compact_history_padded_grounded_answer_query(
+    query: &str,
+    user_question: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) -> Option<String> {
+    if !should_replace_history_padded_grounded_answer_query(
+        query,
+        user_question,
+        grounded_answer_tool_history,
+    ) {
+        return None;
+    }
+
+    let user_question = user_question.trim();
+    let mut anchors = ordered_query_literal_anchors(query, user_question);
+    extend_history_code_literals_present_in_query(
+        &mut anchors,
+        query,
+        user_question,
+        grounded_answer_tool_history,
+    );
+
+    if anchors.is_empty() {
+        return Some(user_question.to_string());
+    }
+
+    let mut compact = user_question.to_string();
+    let mut appended_anchor = false;
+    for anchor in anchors {
+        let prefix = if appended_anchor { " " } else { "\n@: " };
+        let candidate = format!("{compact}{prefix}{anchor};");
+        if candidate.chars().count() > HISTORY_PADDED_QUERY_MAX_CHARS {
+            continue;
+        }
+        compact = candidate;
+        appended_anchor = true;
+    }
+    if !appended_anchor {
+        return Some(user_question.to_string());
+    }
+    Some(compact)
+}
+
+fn compact_non_contextual_history_scoped_grounded_answer_query(
+    query: &str,
+    user_question: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) -> Option<String> {
+    if grounded_answer_tool_history.is_empty() {
+        return None;
+    }
+    let query = query.trim();
+    let user_question = user_question.trim();
+    if query.is_empty() || user_question.is_empty() || query == user_question {
+        return None;
+    }
+    if !query_mentions_user_question(query, user_question) {
+        return None;
+    }
+    if query.chars().count() <= user_question.chars().count().saturating_add(24) {
+        return None;
+    }
+    if history_added_query_token_overlap(query, user_question, grounded_answer_tool_history) < 2 {
+        return None;
+    }
+    Some(user_question.to_string())
+}
+
+fn compact_standalone_single_grounded_answer_query(
+    query: &str,
+    user_question: &str,
+) -> Option<String> {
+    let query = query.trim();
+    let user_question = user_question.trim();
+    if query.is_empty() || user_question.is_empty() || query == user_question {
+        return None;
+    }
+    let query_chars = query.chars().count();
+    let user_chars = user_question.chars().count();
+    if !query_mentions_user_question(query, user_question) {
+        return None;
+    }
+    let query_tokens =
+        normalized_alnum_token_sequence(query, 3).into_iter().collect::<BTreeSet<_>>();
+    let user_tokens =
+        normalized_alnum_token_sequence(user_question, 3).into_iter().collect::<BTreeSet<_>>();
+    if query_tokens.is_empty() {
+        return None;
+    }
+    let shared_count = query_tokens.iter().filter(|token| user_tokens.contains(*token)).count();
+    let query_only_count = query_tokens.len().saturating_sub(shared_count);
+    let user_only_count = user_tokens.iter().filter(|token| !query_tokens.contains(*token)).count();
+    if user_only_count == 0 {
+        return None;
+    }
+    if query_chars.saturating_mul(100) > user_chars.saturating_mul(115) {
+        return None;
+    }
+    if query_chars.saturating_mul(100) > user_chars.saturating_mul(85) && user_only_count < 2 {
+        return None;
+    }
+    if query_only_count > user_only_count.max(2) {
+        return None;
+    }
+    Some(user_question.to_string())
+}
+
+fn contextual_search_documents_query(
+    query: &str,
+    user_question: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() || grounded_answer_tool_history.is_empty() {
+        return None;
+    }
+    if history_added_query_token_overlap(query, user_question, grounded_answer_tool_history)
+        >= CONTEXTUAL_SEARCH_QUERY_HISTORY_OVERLAP_SELF_SUFFICIENT
+    {
+        return None;
+    }
+    let anchors =
+        contextual_search_history_anchors(query, user_question, grounded_answer_tool_history);
+    if anchors.len() < CONTEXTUAL_SEARCH_QUERY_MIN_ANCHORS {
+        return None;
+    }
+
+    let mut compact = query.to_string();
+    let mut appended_anchor = false;
+    for anchor in anchors {
+        let prefix = if appended_anchor { " " } else { "\n@: " };
+        let candidate = format!("{compact}{prefix}{anchor};");
+        if candidate.chars().count() > HISTORY_PADDED_QUERY_MAX_CHARS {
+            continue;
+        }
+        compact = candidate;
+        appended_anchor = true;
+    }
+    appended_anchor.then_some(compact)
+}
+
+fn contextual_search_history_anchors(
+    query: &str,
+    user_question: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) -> Vec<String> {
+    let mut structural = Vec::new();
+    let mut identifier = Vec::new();
+    let mut seen = BTreeSet::new();
+    for turn in grounded_answer_tool_history.iter().rev() {
+        for span in backtick_literal_spans(&turn.content_text) {
+            for candidate in split_literal_anchor_candidates(&span) {
+                let candidate = candidate.trim();
+                if candidate.is_empty()
+                    || query_contains_literal(query, candidate)
+                    || query_contains_literal(user_question, candidate)
+                {
+                    continue;
+                }
+                let key = candidate.to_lowercase();
+                if !seen.insert(key) {
+                    continue;
+                }
+                if is_structural_literal_anchor(candidate) {
+                    structural.push(candidate.to_string());
+                } else if contextual_search_plain_anchor(candidate) {
+                    identifier.push(candidate.to_string());
+                }
+                if structural.len().saturating_add(identifier.len())
+                    >= CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT
+                {
+                    break;
+                }
+            }
+            if structural.len().saturating_add(identifier.len())
+                >= CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT
+            {
+                break;
+            }
+        }
+        if structural.len().saturating_add(identifier.len()) >= CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT
+        {
+            break;
+        }
+    }
+    structural.extend(identifier);
+    structural.truncate(CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT);
+    structural
+}
+
+fn contextual_search_plain_anchor(candidate: &str) -> bool {
+    is_plain_history_code_literal(candidate) && literal_text_is_identifier_shaped(candidate)
 }
 
 fn should_replace_history_padded_grounded_answer_query(
@@ -1485,6 +2817,244 @@ fn history_added_query_token_overlap(
         .into_iter()
         .filter(|token| !user_tokens.contains(token) && history_tokens.contains(token))
         .count()
+}
+
+fn ordered_query_literal_anchors(query: &str, user_question: &str) -> Vec<String> {
+    let mut anchors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for candidate in split_literal_anchor_candidates(query) {
+        push_literal_anchor_candidate(&mut anchors, &mut seen, candidate, user_question);
+        if anchors.len() >= HISTORY_PADDED_QUERY_ANCHOR_LIMIT {
+            break;
+        }
+    }
+    anchors
+}
+
+fn extend_history_code_literals_present_in_query(
+    anchors: &mut Vec<String>,
+    query: &str,
+    user_question: &str,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+) {
+    if anchors.len() >= HISTORY_PADDED_QUERY_ANCHOR_LIMIT {
+        return;
+    }
+    let mut seen = anchors.iter().map(|anchor| anchor.to_lowercase()).collect::<BTreeSet<_>>();
+    let query_lower = query.to_lowercase();
+    for turn in grounded_answer_tool_history {
+        for span in backtick_literal_spans(&turn.content_text) {
+            for candidate in split_literal_anchor_candidates(&span) {
+                if !query_lower.contains(&candidate.to_lowercase()) {
+                    continue;
+                }
+                push_history_code_literal_candidate(anchors, &mut seen, candidate, user_question);
+                if anchors.len() >= HISTORY_PADDED_QUERY_ANCHOR_LIMIT {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn split_literal_anchor_candidates(text: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut token_start: Option<usize> = None;
+    for (index, ch) in text.char_indices() {
+        if is_literal_anchor_boundary(ch) {
+            if let Some(start) = token_start.take() {
+                push_split_literal_anchor_candidate(&mut candidates, &text[start..index]);
+            }
+            continue;
+        }
+        token_start.get_or_insert(index);
+    }
+    if let Some(start) = token_start {
+        push_split_literal_anchor_candidate(&mut candidates, &text[start..]);
+    }
+    candidates
+}
+
+fn is_literal_anchor_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | ';'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '«'
+                | '»'
+                | '“'
+                | '”'
+                | '„'
+                | '‹'
+                | '›'
+                | '"'
+                | '\''
+                | '`'
+        )
+}
+
+fn push_split_literal_anchor_candidate(candidates: &mut Vec<String>, raw: &str) {
+    let candidate = trim_literal_anchor_candidate(raw);
+    if !candidate.is_empty() {
+        candidates.push(candidate.to_string());
+    }
+}
+
+fn trim_literal_anchor_candidate(raw: &str) -> &str {
+    raw.trim_matches(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                ',' | ';'
+                    | '.'
+                    | ')'
+                    | '('
+                    | '{'
+                    | '}'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '«'
+                    | '»'
+                    | '“'
+                    | '”'
+                    | '„'
+                    | '‹'
+                    | '›'
+            )
+    })
+}
+
+fn push_literal_anchor_candidate(
+    anchors: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    candidate: String,
+    user_question: &str,
+) {
+    if !is_structural_literal_anchor(&candidate) {
+        return;
+    }
+    push_literal_anchor(anchors, seen, candidate, user_question);
+}
+
+fn push_history_code_literal_candidate(
+    anchors: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    candidate: String,
+    user_question: &str,
+) {
+    if !is_structural_literal_anchor(&candidate) && !is_plain_history_code_literal(&candidate) {
+        return;
+    }
+    push_literal_anchor(anchors, seen, candidate, user_question);
+}
+
+fn push_literal_anchor(
+    anchors: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    candidate: String,
+    user_question: &str,
+) {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return;
+    }
+    let char_count = candidate.chars().count();
+    if !(2..=HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS).contains(&char_count) {
+        return;
+    }
+    if query_contains_literal(user_question, candidate) {
+        return;
+    }
+    let key = candidate.to_lowercase();
+    if seen.insert(key) {
+        anchors.push(candidate.to_string());
+    }
+}
+
+fn is_structural_literal_anchor(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    let char_count = candidate.chars().count();
+    if !(2..=HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS).contains(&char_count) {
+        return false;
+    }
+    let bracket_inner =
+        candidate.strip_prefix('[').and_then(|value| value.strip_suffix(']')).map(str::trim);
+    if let Some(inner) = bracket_inner
+        && !inner.is_empty()
+        && inner.chars().any(|ch| ch.is_alphanumeric())
+    {
+        return true;
+    }
+    let lower = candidate.to_ascii_lowercase();
+    if (lower.starts_with("http://") || lower.starts_with("https://"))
+        && candidate.chars().any(|ch| ch.is_alphanumeric())
+    {
+        return true;
+    }
+    if (candidate.starts_with('/') || candidate.starts_with('\\'))
+        && candidate.chars().any(|ch| ch.is_alphanumeric())
+    {
+        return true;
+    }
+    if candidate.contains('/') || candidate.contains('\\') {
+        return candidate.chars().any(|ch| ch.is_alphanumeric());
+    }
+    if candidate.contains('=') {
+        return candidate.split_once('=').is_some_and(|(left, right)| {
+            !left.trim().is_empty()
+                && !right.trim().is_empty()
+                && left.trim().chars().any(|ch| ch.is_alphanumeric())
+        });
+    }
+    let unwrapped =
+        candidate.trim_matches('[').trim_matches(']').trim_matches('`').trim_matches('"');
+    literal_text_is_identifier_shaped(unwrapped) || is_identifier_shaped_fragment(unwrapped)
+}
+
+fn is_plain_history_code_literal(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let char_count = candidate.chars().count();
+    if !(2..=HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS).contains(&char_count) {
+        return false;
+    }
+    let alnum_count = candidate.chars().filter(|ch| ch.is_alphanumeric()).count();
+    alnum_count >= 2
+        && candidate.chars().all(|ch| {
+            ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '\\' | ':' | '=')
+        })
+}
+
+fn query_contains_literal(query: &str, literal: &str) -> bool {
+    query.to_lowercase().contains(&literal.to_lowercase())
+}
+
+fn backtick_literal_spans(text: &str) -> Vec<String> {
+    let mut spans = Vec::new();
+    let mut span_start: Option<usize> = None;
+    for (index, ch) in text.char_indices() {
+        if ch != '`' {
+            continue;
+        }
+        if let Some(start) = span_start.take() {
+            if start < index {
+                spans.push(text[start..index].to_string());
+            }
+        } else {
+            span_start = Some(index + ch.len_utf8());
+        }
+    }
+    spans
 }
 
 fn technical_surface_marker_count(value: &str) -> usize {
@@ -1567,6 +3137,187 @@ fn push_tool_grounding_fragment(
     grounding.verification_corpus.push(format!("[MCP tool result: {tool_name}]\n{fragment}"));
 }
 
+fn compact_ledger_text(value: &str) -> String {
+    single_line_text(value).chars().take(GROUNDED_EVIDENCE_LEDGER_ANSWER_CHARS).collect()
+}
+
+fn push_guard_answer_line(lines: &mut Vec<String>, seen: &mut BTreeSet<String>, value: &str) {
+    if lines.len() >= GROUNDED_EVIDENCE_LEDGER_ENTRY_LIMIT {
+        return;
+    }
+    let text = value.trim();
+    if text.is_empty() || !text.chars().any(char::is_alphanumeric) {
+        return;
+    }
+    if seen.insert(text.to_string()) {
+        lines.push(text.to_string());
+    }
+}
+
+fn push_grounded_evidence_ledger_anchors(anchors: &mut BTreeSet<String>, values: &[String]) {
+    for value in values {
+        let anchor = single_line_text(value);
+        let anchor = anchor.trim();
+        if anchor.chars().count() >= 4 && anchor.chars().count() <= 240 {
+            anchors.insert(anchor.to_string());
+        }
+        if anchors.len() >= GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT {
+            break;
+        }
+    }
+}
+
+fn push_grounded_evidence_ledger_high_signal_anchors(
+    anchors: &mut BTreeSet<String>,
+    values: &[String],
+    unsupported_literals: &BTreeSet<String>,
+) {
+    for value in values {
+        let anchor = single_line_text(value);
+        let anchor = anchor.trim();
+        if unsupported_literals.contains(anchor) {
+            continue;
+        }
+        if is_high_signal_grounded_answer_anchor(anchor) {
+            anchors.insert(anchor.to_string());
+        }
+        if anchors.len() >= GROUNDED_EVIDENCE_LEDGER_SPAN_LIMIT {
+            break;
+        }
+    }
+}
+
+fn is_high_signal_grounded_answer_anchor(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.chars().count() < 4 || trimmed.chars().count() > 240 {
+        return false;
+    }
+    trimmed.contains('=')
+        || trimmed.contains('/')
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || literal_text_is_identifier_shaped(trimmed)
+}
+
+fn answer_contains_guard_anchor(answer: &str, anchor: &str) -> bool {
+    answer.to_lowercase().contains(&anchor.to_lowercase())
+}
+
+fn collect_unsupported_literal_spans(execution_detail: Option<&Value>) -> BTreeSet<String> {
+    let mut literals = BTreeSet::new();
+    let Some(warnings) = execution_detail
+        .and_then(|detail| detail.get("verificationWarnings"))
+        .and_then(Value::as_array)
+    else {
+        return literals;
+    };
+    for warning in warnings {
+        if warning.get("code").and_then(Value::as_str) != Some("unsupported_literal") {
+            continue;
+        }
+        let Some(message) = warning.get("message").and_then(Value::as_str) else {
+            continue;
+        };
+        for span in backtick_literal_spans(message) {
+            let literal = single_line_text(&span);
+            if !literal.trim().is_empty() {
+                literals.insert(literal);
+            }
+        }
+    }
+    literals
+}
+
+fn single_line_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn push_json_string_array(
+    values: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    value: Option<&Value>,
+    limit: usize,
+) {
+    let Some(Value::Array(items)) = value else {
+        return;
+    };
+    for item in items {
+        let Some(text) = item.as_str() else {
+            continue;
+        };
+        push_ledger_string(values, seen, text, limit);
+        if values.len() >= limit {
+            break;
+        }
+    }
+}
+
+fn push_reference_field_values(
+    values: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    execution_detail: Option<&Value>,
+    array_pointer: &str,
+    field_name: &str,
+    limit: usize,
+) {
+    let Some(Value::Array(items)) =
+        execution_detail.and_then(|detail| detail.pointer(array_pointer))
+    else {
+        return;
+    };
+    for item in items {
+        let Some(text) = item.get(field_name).and_then(Value::as_str) else {
+            continue;
+        };
+        push_ledger_string(values, seen, text, limit);
+        if values.len() >= limit {
+            break;
+        }
+    }
+}
+
+fn push_ledger_string(
+    values: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    value: &str,
+    limit: usize,
+) {
+    if values.len() >= limit {
+        return;
+    }
+    let text = single_line_text(value);
+    let text = text.trim();
+    if text.is_empty() || !text.chars().any(|ch| ch.is_alphanumeric()) {
+        return;
+    }
+    let text = text.chars().take(GROUNDED_EVIDENCE_LEDGER_ANSWER_CHARS).collect::<String>();
+    if seen.insert(text.clone()) {
+        values.push(text);
+    }
+}
+
+fn collect_verification_warning_codes(execution_detail: Option<&Value>) -> Vec<String> {
+    let mut codes = Vec::new();
+    let mut seen = BTreeSet::new();
+    let Some(Value::Array(warnings)) =
+        execution_detail.and_then(|detail| detail.get("verificationWarnings"))
+    else {
+        return codes;
+    };
+    for warning in warnings {
+        let Some(code) = warning.get("code").and_then(Value::as_str) else {
+            continue;
+        };
+        push_ledger_string(&mut codes, &mut seen, code, 12);
+    }
+    codes
+}
+
 fn tool_execution_error(message: impl Into<String>) -> ToolExecutionOutcome {
     let message = message.into();
     let result_json = serde_json::json!({
@@ -1606,6 +3357,7 @@ fn tool_execution_error(message: impl Into<String>) -> ToolExecutionOutcome {
         result_json: Some(result_json),
         grounding_text: None,
         grounded_answer_ready: false,
+        grounded_answer_completed: false,
         grounded_answer_needs_follow_up: false,
         is_error: true,
         duration_ms: 0,
@@ -1685,7 +3437,7 @@ fn tool_result_model_message(
         tool_result_preview_with_limit(&result.content, tool_model_content_char_limit(tool_name))
             .unwrap_or_default();
     let structured_content = if tool_name == GROUNDED_ANSWER_TOOL_NAME {
-        compact_grounded_answer_structured_content(
+        compact_grounded_answer_structured_content_for_model(
             &result.structured_content,
             TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT,
         )
@@ -1727,7 +3479,7 @@ fn tool_result_verification_text(
         tool_result_preview_with_limit(&result.content, TOOL_VERIFICATION_CONTENT_CHAR_LIMIT)
             .unwrap_or_default();
     let structured_content = if tool_name == GROUNDED_ANSWER_TOOL_NAME {
-        compact_grounded_answer_structured_content(
+        compact_grounded_answer_structured_content_for_verification(
             &result.structured_content,
             TOOL_VERIFICATION_STRUCTURED_JSON_CHAR_LIMIT,
         )
@@ -1786,6 +3538,9 @@ fn grounded_answer_needs_follow_up(
     if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
         return false;
     }
+    if grounded_answer_warning_requires_follow_up(result) {
+        return true;
+    }
     if grounded_answer_ready(tool_name, result) {
         return false;
     }
@@ -1798,7 +3553,37 @@ fn grounded_answer_needs_follow_up(
     }
 }
 
-#[cfg(test)]
+fn grounded_answer_warning_requires_follow_up(
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> bool {
+    result
+        .structured_content
+        .pointer("/executionDetail/verificationWarnings")
+        .and_then(Value::as_array)
+        .is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(verification_warning_code_requires_follow_up)
+            })
+        })
+}
+
+fn verification_warning_code_requires_follow_up(code: &str) -> bool {
+    matches!(
+        code,
+        "unsupported_literal"
+            | "unsupported_canonical_claim"
+            | "no_canonical_evidence"
+            | "no_verifiable_tool_evidence"
+            | "no_agent_tool_evidence"
+            | "conflicting_evidence"
+            | "partial_coverage"
+            | "empty_answer"
+    )
+}
+
 fn grounded_answer_completed(
     tool_name: &str,
     result: &crate::interfaces::http::mcp::McpToolResult,
@@ -1825,7 +3610,6 @@ fn grounded_answer_verification_state(
     result.structured_content.pointer("/executionDetail/verificationState").and_then(Value::as_str)
 }
 
-#[cfg(test)]
 fn tool_result_full_text(
     content: &[crate::interfaces::http::mcp::McpContentBlock],
 ) -> Option<String> {
@@ -1838,7 +3622,110 @@ fn tool_result_full_text(
     (!joined.is_empty()).then_some(joined)
 }
 
-fn compact_grounded_answer_structured_content(value: &Value, fallback_limit: usize) -> Value {
+fn tool_result_answer_text(
+    tool_name: &str,
+    content: &[crate::interfaces::http::mcp::McpContentBlock],
+) -> Option<String> {
+    if tool_name == GROUNDED_ANSWER_TOOL_NAME {
+        tool_result_full_text(content)
+    } else {
+        tool_result_preview(content)
+    }
+}
+
+fn grounded_answer_body_text(outcome: &ToolExecutionOutcome) -> Option<&str> {
+    outcome
+        .result_json
+        .as_ref()
+        .and_then(|json| json.pointer("/structuredContent/answerBody"))
+        .and_then(Value::as_str)
+        .or(outcome.result_text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn remember_verified_grounded_answer(
+    current: Option<String>,
+    tool_name: &str,
+    outcome: &ToolExecutionOutcome,
+) -> Option<String> {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || !outcome.grounded_answer_ready {
+        return current;
+    }
+    grounded_answer_body_text(outcome).map(ToOwned::to_owned).or(current)
+}
+
+fn remember_verified_grounded_answer_guard_text(
+    current: Option<String>,
+    tool_name: &str,
+    outcome: &ToolExecutionOutcome,
+) -> Option<String> {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || !outcome.grounded_answer_ready {
+        return current;
+    }
+    let Some(answer) = grounded_answer_body_text(outcome) else {
+        return current;
+    };
+    match current {
+        Some(existing) if existing.contains(answer) => Some(existing),
+        Some(mut existing) => {
+            existing.push_str("\n\n");
+            existing.push_str(answer);
+            Some(existing)
+        }
+        None => Some(answer.to_string()),
+    }
+}
+
+fn remember_completed_grounded_answer(
+    current: Option<String>,
+    tool_name: &str,
+    outcome: &ToolExecutionOutcome,
+) -> Option<String> {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || !outcome.grounded_answer_completed {
+        return current;
+    }
+    grounded_answer_body_text(outcome).map(ToOwned::to_owned).or(current)
+}
+
+fn should_return_completed_grounded_answer_on_iteration_cap(
+    stopped_reason: AgentStopReason,
+    successful_tool_call_count: usize,
+    last_completed_grounded_answer: Option<&str>,
+) -> bool {
+    matches!(stopped_reason, AgentStopReason::IterationCap)
+        && successful_tool_call_count == 1
+        && last_completed_grounded_answer.is_some_and(|answer| !answer.trim().is_empty())
+}
+
+fn compact_grounded_answer_structured_content_for_model(
+    value: &Value,
+    fallback_limit: usize,
+) -> Value {
+    let reference_limit = if value.get("finalizable").and_then(Value::as_bool) == Some(true) {
+        TOOL_MODEL_FINALIZABLE_GROUNDED_REFERENCE_LIMIT
+    } else {
+        TOOL_MODEL_GROUNDED_REFERENCE_LIMIT
+    };
+    compact_grounded_answer_structured_content(value, fallback_limit, reference_limit)
+}
+
+fn compact_grounded_answer_structured_content_for_verification(
+    value: &Value,
+    fallback_limit: usize,
+) -> Value {
+    compact_grounded_answer_structured_content(
+        value,
+        fallback_limit,
+        TOOL_VERIFICATION_GROUNDED_REFERENCE_LIMIT,
+    )
+}
+
+fn compact_grounded_answer_structured_content(
+    value: &Value,
+    fallback_limit: usize,
+    reference_limit: usize,
+) -> Value {
     let Some(execution_detail) = value.get("executionDetail") else {
         return compact_structured_content(value, fallback_limit);
     };
@@ -1850,28 +3737,43 @@ fn compact_grounded_answer_structured_content(value: &Value, fallback_limit: usi
         "workspaceId": value.get("workspaceId").cloned().unwrap_or(Value::Null),
         "lifecycleState": value.get("lifecycleState").cloned().unwrap_or(Value::Null),
         "finalAnswerReady": value.get("finalAnswerReady").cloned().unwrap_or(Value::Bool(false)),
+        "finalizable": value.get("finalizable").cloned().unwrap_or(Value::Bool(false)),
+        "mustPreserveSpans": value.get("mustPreserveSpans").cloned().unwrap_or_else(|| serde_json::json!([])),
         "verificationState": execution_detail.get("verificationState").cloned().unwrap_or(Value::Null),
         "verificationWarnings": execution_detail.get("verificationWarnings").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "referenceCounts": {
+            "chunkReferences": reference_array_len(execution_detail.get("chunkReferences")),
+            "preparedSegmentReferences": reference_array_len(execution_detail.get("preparedSegmentReferences")),
+            "technicalFactReferences": reference_array_len(execution_detail.get("technicalFactReferences")),
+            "entityReferences": reference_array_len(execution_detail.get("entityReferences")),
+            "relationReferences": reference_array_len(execution_detail.get("relationReferences"))
+        },
         "references": {
-            "chunkReferences": compact_reference_array(execution_detail.get("chunkReferences")),
-            "preparedSegmentReferences": compact_reference_array(execution_detail.get("preparedSegmentReferences")),
-            "technicalFactReferences": compact_reference_array(execution_detail.get("technicalFactReferences")),
-            "entityReferences": compact_reference_array(execution_detail.get("entityReferences")),
-            "relationReferences": compact_reference_array(execution_detail.get("relationReferences"))
+            "chunkReferences": compact_reference_array(execution_detail.get("chunkReferences"), reference_limit),
+            "preparedSegmentReferences": compact_reference_array(execution_detail.get("preparedSegmentReferences"), reference_limit),
+            "technicalFactReferences": compact_reference_array(execution_detail.get("technicalFactReferences"), reference_limit),
+            "entityReferences": compact_reference_array(execution_detail.get("entityReferences"), reference_limit),
+            "relationReferences": compact_reference_array(execution_detail.get("relationReferences"), reference_limit)
         }
     })
 }
 
-fn compact_reference_array(value: Option<&Value>) -> Value {
+fn reference_array_len(value: Option<&Value>) -> usize {
+    match value {
+        Some(Value::Array(items)) => items.len(),
+        _ => 0,
+    }
+}
+
+fn compact_reference_array(value: Option<&Value>, limit: usize) -> Value {
     let Some(Value::Array(items)) = value else {
         return serde_json::json!([]);
     };
-    let mut truncated =
-        items.iter().take(TOOL_MODEL_GROUNDED_REFERENCE_LIMIT).cloned().collect::<Vec<_>>();
-    if items.len() > TOOL_MODEL_GROUNDED_REFERENCE_LIMIT {
+    let mut truncated = items.iter().take(limit).cloned().collect::<Vec<_>>();
+    if items.len() > limit {
         truncated.push(serde_json::json!({
             "truncated": true,
-            "omittedCount": items.len() - TOOL_MODEL_GROUNDED_REFERENCE_LIMIT
+            "omittedCount": items.len() - limit
         }));
     }
     Value::Array(truncated)
@@ -2226,27 +4128,28 @@ pub async fn run_literal_inventory_coverage_revision_turn(
     })
 }
 
-/// Run one grounded-answer turn as a short clarification call.
+/// Run one clarify-with-fallback turn.
 ///
 /// The post-retrieval router decided (see
-/// `answer_pipeline::classify_answer_disposition`) that the topic
-/// the user asked about spans several distinct variants in the
-/// library and no single-shot answer will usefully cover them all.
-/// The caller passes those variant labels — pulled from retrieved
-/// document titles, graph node labels, or grouped-reference titles
-/// on the current `answer_context` — and this function asks the
-/// answer model to write one short clarifying question enumerating
-/// them.
+/// `answer_pipeline::classify_answer_disposition`) that the topic the
+/// user asked about spans several distinct variants in the library with
+/// no dominant one, so a single-shot answer would not cleanly cover them.
+/// The caller passes the variant labels PLUS the same retrieved
+/// `answer_context` the single-shot would answer from; this function asks
+/// the answer model to lead with a grounded best-effort answer only when
+/// the evidence itself settles which content to give, then enumerate the
+/// variants and ask the user to pick one or add a narrowing constraint.
 ///
 /// Uses the same `QueryAnswer` binding as `run_single_shot_turn`
-/// so the clarify reply shares model identity, temperature caps
-/// and per-turn billing plumbing.
+/// so the reply shares model identity, temperature caps and per-turn
+/// billing plumbing.
 pub async fn run_clarify_turn(
     state: &AppState,
     library_id: Uuid,
     user_question: &str,
     conversation_history: &[ChatMessage],
     variants: &[String],
+    answer_context: &str,
 ) -> Result<AgentTurnResult, QueryServiceError> {
     let binding = state
         .canonical_services
@@ -2263,19 +4166,18 @@ pub async fn run_clarify_turn(
         model_name: binding.model_name.clone(),
     };
 
+    // Clarify-with-fallback: the model receives the SAME retrieved evidence the
+    // single-shot answer would (as the `ironrag_retrieved_context` tool result) so
+    // it can ground a best-effort answer for the dominant variant, while the
+    // candidate variants live in the system prompt for the clarifying menu.
     let system_prompt = super::assistant_prompt::render_clarify(variants, None);
-    let variants_result = if variants.is_empty() {
-        "- (none)".to_string()
-    } else {
-        variants.iter().map(|variant| format!("- {variant}")).collect::<Vec<_>>().join("\n")
-    };
     let messages = build_runtime_tool_answer_messages(
         system_prompt,
         conversation_history,
         user_question,
-        RUNTIME_CLARIFY_VARIANTS_TOOL,
+        RUNTIME_RETRIEVED_CONTEXT_TOOL,
         serde_json::json!({ "question": user_question }),
-        &variants_result,
+        answer_context,
     );
 
     let tool_use_request = ToolUseRequest {
@@ -2486,26 +4388,44 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: false,
+            system_role: None,
         }
     }
 
     #[test]
     fn ui_agent_tool_defs_match_mcp_answer_surface_descriptors() {
         let auth = auth_with_answer_tool_access();
-        let expected_names = tools::visible_tool_names(&auth, McpToolSurface::Answer);
-        let tool_defs = answer_surface_tool_defs(&auth);
+        // 1:1 tool parity: for the SAME capabilities, the UI agent's visible
+        // tool set must equal the external MCP answer surface's set — and the
+        // single vision-gated tool (`view_document_image`) must appear on both
+        // surfaces under the same condition, never on one alone.
+        for agent_vision_available in [false, true] {
+            let capabilities = ToolVisibilityCapabilities { agent_vision_available };
+            let expected_names = tools::visible_tool_names_with_capabilities(
+                &auth,
+                McpToolSurface::Answer,
+                capabilities,
+            );
+            let tool_defs = answer_surface_tool_defs(&auth, capabilities);
 
-        assert_eq!(
-            tool_defs.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
-            expected_names.iter().map(String::as_str).collect::<Vec<_>>()
-        );
-        assert!(tool_defs.iter().any(|tool| tool.name == "grounded_answer"));
-        assert!(!tool_defs.iter().any(|tool| tool.name == "upload_documents"));
+            assert_eq!(
+                tool_defs.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+                expected_names.iter().map(String::as_str).collect::<Vec<_>>(),
+                "UI agent tool set diverged from MCP answer surface (vision={agent_vision_available})"
+            );
+            assert!(tool_defs.iter().any(|tool| tool.name == "grounded_answer"));
+            assert!(!tool_defs.iter().any(|tool| tool.name == "upload_documents"));
+            assert_eq!(
+                tool_defs.iter().any(|tool| tool.name == "view_document_image"),
+                agent_vision_available,
+                "view_document_image must track the vision capability for UI<->MCP parity"
+            );
 
-        for tool in tool_defs {
-            let descriptor = tools::descriptor_for(&tool.name).expect("descriptor");
-            assert_eq!(tool.description, descriptor.description);
-            assert_eq!(tool.parameters, descriptor.input_schema);
+            for tool in tool_defs {
+                let descriptor = tools::descriptor_for(&tool.name).expect("descriptor");
+                assert_eq!(tool.description, descriptor.description);
+                assert_eq!(tool.parameters, descriptor.input_schema);
+            }
         }
     }
 
@@ -2576,25 +4496,75 @@ mod tests {
         let started = Instant::now();
         let names = BTreeSet::new();
 
-        assert!(force_final_answer_iteration(5, 5, 1, 1, 0, &names, started, None));
-        assert!(force_final_answer_iteration(1, 1, 1, 1, 0, &names, started, None));
-        assert!(!force_final_answer_iteration(4, 5, 1, 1, 0, &names, started, None));
-        assert!(!force_final_answer_iteration(5, 5, 0, 0, 0, &names, started, None));
+        assert!(force_final_answer_iteration(5, 5, 1, 1, 0, &names, false, started, None));
+        assert!(force_final_answer_iteration(1, 1, 1, 1, 0, &names, false, started, None));
+        assert!(!force_final_answer_iteration(4, 5, 1, 1, 0, &names, false, started, None));
+        assert!(!force_final_answer_iteration(5, 5, 0, 0, 0, &names, false, started, None));
     }
 
     #[test]
-    fn soft_deadline_disables_tools_after_sufficient_tool_evidence() {
+    fn forced_final_request_messages_add_answer_only_reminder() {
+        let messages = vec![ChatMessage::system("policy"), ChatMessage::user("Q?")];
+
+        let normal_request = final_answer_request_messages(&messages, false);
+        let forced_request = final_answer_request_messages(&messages, true);
+
+        assert_eq!(normal_request.len(), messages.len());
+        assert_eq!(forced_request.len(), messages.len() + 1);
+        assert_eq!(forced_request.last().expect("reminder").role, "system");
+        assert!(
+            forced_request
+                .last()
+                .and_then(|message| message.content.as_deref())
+                .expect("reminder content")
+                .contains("No more MCP tool calls")
+        );
+    }
+
+    #[test]
+    fn forced_final_retry_messages_close_illegal_tool_call() {
+        let request_messages = vec![ChatMessage::system("policy"), ChatMessage::user("Q?")];
+        let tool_calls = vec![ChatToolCall {
+            id: "call-1".to_string(),
+            name: READ_DOCUMENT_TOOL_NAME.to_string(),
+            arguments_json: "{}".to_string(),
+        }];
+
+        let retry_messages = final_answer_retry_messages(
+            &request_messages,
+            Some("reasoning".to_string()),
+            &tool_calls,
+        );
+
+        assert_eq!(retry_messages.len(), request_messages.len() + 3);
+        let assistant = &retry_messages[request_messages.len()];
+        assert_eq!(assistant.role, "assistant");
+        assert_eq!(assistant.reasoning_content.as_deref(), Some("reasoning"));
+        assert_eq!(assistant.tool_calls.len(), 1);
+        let tool_result = &retry_messages[request_messages.len() + 1];
+        assert_eq!(tool_result.role, "tool");
+        assert_eq!(tool_result.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(tool_result.name.as_deref(), Some(READ_DOCUMENT_TOOL_NAME));
+        assert!(
+            tool_result.content.as_deref().expect("tool result content").contains("not executed")
+        );
+        assert_eq!(retry_messages.last().expect("reminder").role, "system");
+    }
+
+    #[test]
+    fn soft_deadline_keeps_tools_without_verified_grounded_answer() {
         let started = Instant::now() - Duration::from_secs(40);
         let names =
             BTreeSet::from([SEARCH_DOCUMENTS_TOOL_NAME.to_string(), "search_entities".to_string()]);
 
-        assert!(force_final_answer_iteration(
+        assert!(!force_final_answer_iteration(
             3,
             5,
             4,
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
             0,
             &names,
+            false,
             started,
             Some(Duration::from_secs(35)),
         ));
@@ -2612,6 +4582,7 @@ mod tests {
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
             0,
             &names,
+            false,
             started,
             Some(Duration::from_secs(35)),
         ));
@@ -2629,6 +4600,7 @@ mod tests {
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS - 1,
             0,
             &names,
+            false,
             started,
             Some(Duration::from_secs(35)),
         ));
@@ -2647,6 +4619,7 @@ mod tests {
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
             1,
             &names,
+            false,
             before_deadline,
             Some(Duration::from_secs(35)),
         ));
@@ -2657,17 +4630,99 @@ mod tests {
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
             1,
             &names,
+            false,
             after_deadline,
             Some(Duration::from_secs(35)),
         ));
     }
 
     #[test]
-    fn composite_doc_graph_evidence_disables_tools_before_soft_deadline() {
+    fn soft_deadline_does_not_force_final_when_grounded_follow_up_is_required() {
+        let after_deadline = Instant::now() - Duration::from_secs(40);
+        let names = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
+
+        assert!(!force_final_answer_iteration(
+            3,
+            5,
+            5,
+            SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
+            1,
+            &names,
+            true,
+            after_deadline,
+            Some(Duration::from_secs(35)),
+        ));
+        assert!(force_final_answer_iteration(
+            5,
+            5,
+            5,
+            SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
+            1,
+            &names,
+            true,
+            after_deadline,
+            Some(Duration::from_secs(35)),
+        ));
+    }
+
+    #[test]
+    fn grounded_answer_success_keeps_tool_surface_available_for_agent_judgment() {
+        let tool_defs = [
+            GROUNDED_ANSWER_TOOL_NAME,
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            READ_DOCUMENT_TOOL_NAME,
+            "search_entities",
+        ]
+        .into_iter()
+        .map(|name| ChatToolDef {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        })
+        .collect::<Vec<_>>();
+        let successful = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
+
+        let next_tools = tool_defs_for_agent_iteration(&tool_defs, &successful, false);
+
+        assert_eq!(
+            next_tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            vec![
+                GROUNDED_ANSWER_TOOL_NAME,
+                SEARCH_DOCUMENTS_TOOL_NAME,
+                READ_DOCUMENT_TOOL_NAME,
+                "search_entities"
+            ]
+        );
+    }
+
+    #[test]
+    fn composite_doc_graph_evidence_keeps_tools_without_verified_grounded_answer() {
         let started = Instant::now();
         let names = BTreeSet::from([
             SEARCH_DOCUMENTS_TOOL_NAME.to_string(),
             "search_entities".to_string(),
+            READ_DOCUMENT_TOOL_NAME.to_string(),
+        ]);
+
+        assert!(!force_final_answer_iteration(
+            3,
+            5,
+            4,
+            SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
+            0,
+            &names,
+            false,
+            started,
+            Some(Duration::from_secs(35)),
+        ));
+    }
+
+    #[test]
+    fn verified_grounded_composite_evidence_can_disable_tools_before_soft_deadline() {
+        let started = Instant::now();
+        let names = BTreeSet::from([
+            GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            SEARCH_DOCUMENTS_TOOL_NAME.to_string(),
             READ_DOCUMENT_TOOL_NAME.to_string(),
         ]);
 
@@ -2676,8 +4731,9 @@ mod tests {
             5,
             4,
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
-            0,
+            1,
             &names,
+            false,
             started,
             Some(Duration::from_secs(35)),
         ));
@@ -2695,6 +4751,7 @@ mod tests {
             SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS,
             0,
             &names,
+            false,
             started,
             Some(Duration::from_secs(35)),
         ));
@@ -2796,6 +4853,390 @@ mod tests {
         let grounded = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
 
         assert!(!should_require_tool_call_before_final(false, &tool_defs, &grounded, false));
+    }
+
+    #[test]
+    fn grounded_answer_evidence_ledger_retains_partial_and_repair_entries() {
+        let mut ledger = GroundedAnswerEvidenceLedger::default();
+        let partial = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000001",
+                "answerBody": "Alpha path is supported. Beta recovery path still needs repair. Beta recovery summary is grounded.",
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "mustPreserveSpans": ["Alpha path", "Beta recovery path", "Beta recovery summary"],
+                "executionDetail": {
+                    "verificationState": "conflicting",
+                    "verificationWarnings": [{"code": "partial_coverage"}],
+                    "preparedSegmentReferences": [{"documentTitle": "Alpha operator guide"}],
+                    "entityReferences": [{"label": "Beta recovery path", "summary": "Beta recovery summary"}],
+                    "relationReferences": [{"normalizedAssertion": "Alpha supports beta recovery"}]
+                }
+            },
+                "content": [{"type": "text", "text": "Alpha path is supported. Beta recovery path still needs repair. Beta recovery summary is grounded."}],
+            "isError": false
+        }));
+        let repair = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000002",
+                "answerBody": "Gamma repair path is supported.",
+                "finalAnswerReady": true,
+                "finalizable": true,
+                "mustPreserveSpans": ["Gamma repair path"],
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": [],
+                    "preparedSegmentReferences": [{"documentTitle": "Gamma repair guide"}],
+                    "entityReferences": [],
+                    "relationReferences": []
+                }
+            },
+            "content": [{"type": "text", "text": "Gamma repair path is supported."}],
+            "isError": false
+        }));
+
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &partial);
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &repair);
+
+        let message = ledger.system_message().expect("ledger message");
+        assert!(message.contains("Same-turn grounded_answer evidence ledger"));
+        assert!(message.contains("finalizable=false"));
+        assert!(message.contains("finalizable=true"));
+        assert!(message.contains("Alpha path"));
+        assert!(message.contains("Beta recovery path"));
+        assert!(message.contains("Beta recovery summary"));
+        assert!(message.contains("Gamma repair path"));
+        assert!(message.contains("partial_coverage"));
+    }
+
+    #[test]
+    fn grounded_answer_evidence_ledger_guards_answer_that_drops_anchors() {
+        let mut ledger = GroundedAnswerEvidenceLedger::default();
+        let partial = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000011",
+                "answerBody": "Alpha path is supported. Beta recovery path still needs repair. Beta recovery summary is grounded.",
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "mustPreserveSpans": ["Alpha path", "Beta recovery path", "Beta recovery summary"],
+                "executionDetail": {
+                    "verificationState": "conflicting",
+                    "verificationWarnings": [{"code": "partial_coverage"}],
+                    "preparedSegmentReferences": [{"documentTitle": "Alpha operator guide"}],
+                    "entityReferences": [{"label": "Beta recovery path", "summary": "Beta recovery summary"}],
+                    "relationReferences": [{"normalizedAssertion": "Alpha supports beta recovery"}]
+                }
+            },
+                "content": [{"type": "text", "text": "Alpha path is supported. Beta recovery path still needs repair. Beta recovery summary is grounded."}],
+            "isError": false
+        }));
+        let repair = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000012",
+                "answerBody": "Gamma repair path is supported. Gamma repair guide names Gamma repair action.",
+                "finalAnswerReady": true,
+                "finalizable": true,
+                "mustPreserveSpans": [
+                    "Gamma repair path",
+                    "Gamma repair guide",
+                    "Gamma repair action"
+                ],
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": [],
+                    "preparedSegmentReferences": [{"documentTitle": "Gamma repair guide"}],
+                    "entityReferences": [],
+                    "relationReferences": []
+                }
+            },
+            "content": [{"type": "text", "text": "Gamma repair path is supported."}],
+            "isError": false
+        }));
+
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &partial);
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &repair);
+
+        let dropped_answer = "No matching operational branch is described.";
+        let guard = ledger.guard_candidate_for_answer(dropped_answer).expect("guard candidate");
+
+        assert!(!guard.contains("Alpha path"));
+        assert!(!guard.contains("Beta recovery path"));
+        assert!(!guard.contains("Beta recovery summary"));
+        assert!(guard.contains("Gamma repair path"));
+        assert!(guard.contains("Gamma repair guide"));
+        assert!(guard.contains("Gamma repair action"));
+
+        assert!(ledger.guard_candidate_for_answer(&guard).is_none());
+    }
+
+    #[test]
+    fn grounded_answer_evidence_ledger_guards_insufficient_high_signal_inventory() {
+        let mut ledger = GroundedAnswerEvidenceLedger::default();
+        let answer_body = "`Provider Alpha Guide`\n\
+- `/opt/alpha/alpha.conf`\n\
+- `[Main]`\n\
+- `url = http://localhost`\n\
+- `timeout = 10`\n\
+- `merchantId`\n\
+- `secretKey`\n\
+- `currency = USD`\n\
+- `retryWindow = 60`\n\
+- `pollInterval = 1`\n\
+- `fillDetails = true`\n\
+- `printSlip = false`\n\
+- `visible = true`";
+        let partial = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000021",
+                "answerBody": answer_body,
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "mustPreserveSpans": [
+                    "Provider Alpha Guide",
+                    "/opt/alpha/alpha.conf",
+                    "[Main]",
+                    "url = http://localhost",
+                    "timeout = 10",
+                    "merchantId",
+                    "secretKey",
+                    "currency = USD",
+                    "retryWindow = 60",
+                    "pollInterval = 1",
+                    "fillDetails = true",
+                    "printSlip = false",
+                    "visible = true"
+                ],
+                "executionDetail": {
+                    "verificationState": "insufficient_evidence",
+                    "verificationWarnings": [{
+                        "code": "unsupported_literal",
+                        "message": "Literal `currency = USD` is not grounded in selected evidence."
+                    }],
+                    "preparedSegmentReferences": [{"documentTitle": "Provider Alpha Guide"}],
+                    "entityReferences": [],
+                    "relationReferences": []
+                }
+            },
+            "content": [{"type": "text", "text": answer_body}],
+            "isError": false
+        }));
+
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &partial);
+
+        let dropped_answer = "`Provider Alpha Guide`\n\
+- `/opt/alpha/alpha.conf`\n\
+- `[Main]`\n\
+- `url = http://localhost`\n\
+- `timeout = 10`\n\
+- `merchantId`\n\
+- `secretKey`\n\
+- `retryWindow = 60`\n\
+- `pollInterval = 1`";
+        let guard = ledger.guard_candidate_for_answer(dropped_answer).expect("guard candidate");
+
+        assert!(guard.contains("fillDetails = true"));
+        assert!(guard.contains("printSlip = false"));
+        assert!(guard.contains("visible = true"));
+    }
+
+    #[test]
+    fn grounded_answer_evidence_ledger_does_not_guard_from_conflicting_partial_inventory() {
+        let mut ledger = GroundedAnswerEvidenceLedger::default();
+        let answer_body = "`Provider Alpha Guide`\n\
+- `/opt/alpha/alpha.conf`\n\
+- `[Main]`\n\
+- `url = http://localhost`\n\
+- `timeout = 10`\n\
+- `merchantId`\n\
+- `secretKey`\n\
+- `fillDetails = true`\n\
+- `printSlip = false`\n\
+- `visible = true`";
+        let partial = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000024",
+                "answerBody": answer_body,
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "mustPreserveSpans": [
+                    "Provider Alpha Guide",
+                    "/opt/alpha/alpha.conf",
+                    "[Main]",
+                    "url = http://localhost",
+                    "timeout = 10",
+                    "merchantId",
+                    "secretKey",
+                    "fillDetails = true",
+                    "printSlip = false",
+                    "visible = true"
+                ],
+                "executionDetail": {
+                    "verificationState": "conflicting",
+                    "verificationWarnings": [{"code": "partial_coverage"}],
+                    "preparedSegmentReferences": [{"documentTitle": "Provider Alpha Guide"}],
+                    "entityReferences": [],
+                    "relationReferences": []
+                }
+            },
+            "content": [{"type": "text", "text": answer_body}],
+            "isError": false
+        }));
+
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &partial);
+
+        let dropped_answer = "`Provider Alpha Guide`\n\
+- `/opt/alpha/alpha.conf`\n\
+- `[Main]`\n\
+- `url = http://localhost`\n\
+- `timeout = 10`\n\
+- `merchantId`\n\
+- `secretKey`";
+        assert!(ledger.guard_candidate_for_answer(dropped_answer).is_none());
+    }
+
+    #[test]
+    fn grounded_answer_evidence_ledger_guards_missing_verified_high_signal_spans() {
+        let mut ledger = GroundedAnswerEvidenceLedger::default();
+        let answer_body = "`Provider Alpha Guide`\n\
+- `/opt/alpha/alpha.conf`\n\
+- `[Main]`\n\
+- `url = http://localhost`\n\
+- `timeout = 10`\n\
+- `merchantId`\n\
+- `secretKey`\n\
+- `currency = USD`\n\
+- `retryWindow = 60`\n\
+- `pollInterval = 1`\n\
+- `fillDetails = true`\n\
+- `printSlip = false`\n\
+- `visible = true`";
+        let verified = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000022",
+                "answerBody": answer_body,
+                "finalAnswerReady": true,
+                "finalizable": true,
+                "mustPreserveSpans": [
+                    "Provider Alpha Guide",
+                    "/opt/alpha/alpha.conf",
+                    "[Main]",
+                    "url = http://localhost",
+                    "timeout = 10",
+                    "merchantId",
+                    "secretKey",
+                    "currency = USD",
+                    "retryWindow = 60",
+                    "pollInterval = 1",
+                    "fillDetails = true",
+                    "printSlip = false",
+                    "visible = true"
+                ],
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": [{
+                        "code": "unsupported_literal",
+                        "message": "Literal `currency = USD` is not grounded in selected evidence."
+                    }],
+                    "preparedSegmentReferences": [{"documentTitle": "Provider Alpha Guide"}],
+                    "entityReferences": [],
+                    "relationReferences": []
+                }
+            },
+            "content": [{"type": "text", "text": answer_body}],
+            "isError": false
+        }));
+
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &verified);
+
+        let dropped_answer = "`Provider Alpha Guide`\n\
+- `/opt/alpha/alpha.conf`\n\
+- `[Main]`\n\
+- `url = http://localhost`\n\
+- `timeout = 10`\n\
+- `merchantId`\n\
+- `secretKey`\n\
+- `retryWindow = 60`\n\
+- `pollInterval = 1`";
+        let guard = ledger.guard_candidate_for_answer(dropped_answer).expect("guard candidate");
+
+        assert!(guard.contains("fillDetails = true"));
+        assert!(guard.contains("printSlip = false"));
+        assert!(guard.contains("visible = true"));
+        assert!(guard.contains("\n- `fillDetails = true`"));
+        assert!(
+            !ledger.guard_high_signal_anchor_set().contains("currency = USD"),
+            "unsupported warning literals must not become high-signal guard anchors"
+        );
+    }
+
+    #[test]
+    fn grounded_answer_evidence_ledger_guard_preserves_body_beyond_excerpt_limit() {
+        let mut ledger = GroundedAnswerEvidenceLedger::default();
+        let mut answer_body = String::from("Provider Alpha Guide\n\n");
+        for index in 0..90 {
+            answer_body.push_str(&format!(
+                "- field{index:02} = value{index:02}; keep this operational detail intact.\n"
+            ));
+        }
+        answer_body.push_str("- finalSetting = enabled\n");
+        answer_body.push_str("- lateIdentifier = preserve_me\n");
+        assert!(answer_body.chars().count() > GROUNDED_EVIDENCE_LEDGER_ANSWER_CHARS);
+
+        let verified = grounded_answer_ledger_outcome(serde_json::json!({
+            "structuredContent": {
+                "executionId": "00000000-0000-0000-0000-000000000023",
+                "answerBody": answer_body,
+                "finalAnswerReady": true,
+                "finalizable": true,
+                "mustPreserveSpans": [
+                    "Provider Alpha Guide",
+                    "field00 = value00",
+                    "field01 = value01",
+                    "finalSetting = enabled",
+                    "lateIdentifier = preserve_me"
+                ],
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": [],
+                    "preparedSegmentReferences": [{"documentTitle": "Provider Alpha Guide"}],
+                    "entityReferences": [],
+                    "relationReferences": []
+                }
+            },
+            "content": [{"type": "text", "text": answer_body}],
+            "isError": false
+        }));
+
+        ledger.remember(GROUNDED_ANSWER_TOOL_NAME, &verified);
+
+        let dropped_answer = "Provider Alpha Guide\n- field00 = value00\n- field01 = value01";
+        let guard = ledger.guard_candidate_for_answer(dropped_answer).expect("guard candidate");
+
+        assert!(guard.chars().count() > GROUNDED_EVIDENCE_LEDGER_ANSWER_CHARS);
+        assert!(guard.contains("finalSetting = enabled"));
+        assert!(guard.contains("lateIdentifier = preserve_me"));
+        assert!(guard.contains("\n- lateIdentifier = preserve_me"));
+    }
+
+    fn grounded_answer_ledger_outcome(result_json: Value) -> ToolExecutionOutcome {
+        ToolExecutionOutcome {
+            arguments_json: None,
+            requested_arguments_json: None,
+            message_content: String::new(),
+            result_text: result_json
+                .pointer("/content/0/text")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            result_json: Some(result_json),
+            grounding_text: None,
+            grounded_answer_ready: false,
+            grounded_answer_completed: true,
+            grounded_answer_needs_follow_up: false,
+            is_error: false,
+            duration_ms: 0,
+            child_query_execution_ids: Vec::new(),
+            child_runtime_execution_ids: Vec::new(),
+        }
     }
 
     #[test]
@@ -2916,13 +5357,13 @@ mod tests {
     }
 
     #[test]
-    fn final_answer_keeps_missing_requested_slot_fragment_visible() {
+    fn final_answer_does_not_prefix_requested_slot_fragment() {
         let answer = ensure_user_fragments_visible(
             "Package: alpha-plugin.\nConfig path: /opt/app/config.ini.".to_string(),
             "Configure Alpha: name package, config path and parameters, then explain defaults.",
         );
 
-        assert!(answer.starts_with("config path and parameters\n\n"));
+        assert_eq!(answer, "Package: alpha-plugin.\nConfig path: /opt/app/config.ini.");
     }
 
     #[test]
@@ -2933,6 +5374,206 @@ mod tests {
         );
 
         assert!(answer.starts_with("SYNC-AGENT\n\n"));
+    }
+
+    #[test]
+    fn prior_assistant_answer_fallback_strips_compact_literal_memory() {
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text: "Choose a provider before setup can continue.".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text:
+                    "literals: `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`\nInstall `alpha-package`, edit `/etc/alpha.ini`, and set `alphaTimeout` from the source table."
+                        .to_string(),
+            },
+        ];
+
+        let answer = prior_assistant_answer_fallback_candidate(&history, &[])
+            .expect("anchored prior assistant answer");
+
+        assert!(answer.starts_with("Install `alpha-package`"));
+        assert!(!answer.starts_with("literals:"));
+    }
+
+    #[test]
+    fn prior_assistant_answer_fallback_ignores_unanchored_history() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Choose a provider before setup can continue.".to_string(),
+        }];
+
+        assert!(prior_assistant_answer_fallback_candidate(&history, &[]).is_none());
+    }
+
+    #[test]
+    fn prior_assistant_answer_fallback_uses_chat_history_when_tool_history_is_empty() {
+        let conversation_history = vec![ChatMessage::assistant_text(
+            "Use `alpha-package`, `/etc/alpha.ini`, and `alphaTimeout`.".to_string(),
+        )];
+
+        let answer = prior_assistant_answer_fallback_candidate(&[], &conversation_history)
+            .expect("anchored chat history answer");
+
+        assert!(answer.contains("`alpha-package`"));
+        assert!(answer.contains("`alphaTimeout`"));
+    }
+
+    #[test]
+    fn prior_assistant_answer_fallback_prefers_more_anchored_history_candidate() {
+        let compact_tool_history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text:
+                "literals: `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, `alphaUrl`, `alphaRetry`\nUse `alpha-package`, `/etc/alpha.ini`, and `alphaTimeout`."
+                    .to_string(),
+        }];
+        let conversation_history = vec![ChatMessage::assistant_text(
+            "Use `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, `alphaUrl`, and `alphaRetry`."
+                .to_string(),
+        )];
+
+        let answer =
+            prior_assistant_answer_fallback_candidate(&compact_tool_history, &conversation_history)
+                .expect("anchored prior assistant answer");
+
+        assert!(answer.contains("`alphaRetry`"));
+        assert!(answer.contains("`alphaMode`"));
+        assert!(!answer.starts_with("literals:"));
+    }
+
+    #[test]
+    fn final_answer_prefers_prior_assistant_fallback_when_parent_drops_anchors() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "Use `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, and `alphaUrl`."
+                .to_string(),
+        }];
+        let prior = prior_assistant_answer_fallback_candidate(&history, &[])
+            .expect("anchored prior assistant answer");
+        let answer = "Install the module and configure the connection settings.".to_string();
+        let guard = prior_assistant_answer_guard_for_final_answer(&answer, Some(&prior));
+
+        let finalized =
+            finalize_agent_loop_answer(answer, "Explain all settings.", guard, "req", Uuid::nil());
+
+        assert_eq!(finalized, prior);
+    }
+
+    #[test]
+    fn final_answer_keeps_fresh_anchored_answer_over_prior_fallback() {
+        let prior = "Choose one option: alphaProvider, betaProvider, gammaProvider, deltaProvider.";
+        let answer =
+            "Install `alpha-package`, edit `/etc/alpha.ini`, and set `alphaTimeout`.".to_string();
+        let guard = prior_assistant_answer_guard_for_final_answer(&answer, Some(prior));
+
+        let finalized = finalize_agent_loop_answer(
+            answer.clone(),
+            "Explain all settings.",
+            guard,
+            "req",
+            Uuid::nil(),
+        );
+
+        assert_eq!(finalized, answer);
+    }
+
+    #[test]
+    fn final_answer_keeps_parent_answer_when_verified_literals_match() {
+        let grounded = "Configure `alphaPackage`, `/etc/alpha.ini`, `partnerId`, and `secretKey`.";
+        let answer =
+            "Use `/etc/alpha.ini` for `alphaPackage`; set `partnerId` and `secretKey`.".to_string();
+
+        let finalized = finalize_agent_loop_answer(
+            answer.clone(),
+            "How do I configure it?",
+            Some(grounded),
+            "req",
+            Uuid::nil(),
+        );
+
+        assert_eq!(finalized, answer);
+    }
+
+    #[test]
+    fn final_answer_keeps_user_literal_that_is_not_in_verified_grounding() {
+        let grounded = "Configure `alphaPackage`, `/etc/alpha.ini`, `partnerId`, and `secretKey`.";
+        let answer =
+            "For `USER-42`, configure `alphaPackage`, `/etc/alpha.ini`, `partnerId`, and `secretKey`."
+                .to_string();
+
+        let finalized = finalize_agent_loop_answer(
+            answer.clone(),
+            "Apply this to `USER-42`.",
+            Some(grounded),
+            "req",
+            Uuid::nil(),
+        );
+
+        assert_eq!(finalized, answer);
+    }
+
+    #[test]
+    fn final_answer_prefers_verified_grounding_when_parent_drops_or_adds_literals() {
+        let grounded = "Configure `alphaPackage`, `/etc/alpha.ini`, `partnerId`, `secretKey`, and `sendDetails`.";
+        let answer = "Configure `alphaPackage`, `/etc/alpha.ini`, `partnerId`, and `madeUpFlag`."
+            .to_string();
+
+        let finalized = finalize_agent_loop_answer(
+            answer,
+            "How do I configure it?",
+            Some(grounded),
+            "req",
+            Uuid::nil(),
+        );
+
+        assert_eq!(finalized, grounded);
+    }
+
+    #[test]
+    fn final_answer_prefers_verified_grounding_when_parent_drops_plain_surface_anchors() {
+        let grounded = "Use alphaPackage with /etc/alpha.ini. Set partnerId, secretKey, sendDetails, callbackUrl, and retryCount from the sourced parameter table.";
+        let answer = "Use alphaPackage with /etc/alpha.ini, partnerId, and secretKey.".to_string();
+
+        let finalized = finalize_agent_loop_answer(
+            answer,
+            "How do I configure it?",
+            Some(grounded),
+            "req",
+            Uuid::nil(),
+        );
+
+        assert_eq!(finalized, grounded);
+    }
+
+    #[test]
+    fn final_answer_keeps_parent_answer_when_plain_surface_anchor_loss_is_small() {
+        let grounded = "Use alphaPackage with /etc/alpha.ini. Set partnerId, secretKey, sendDetails, callbackUrl, and retryCount from the sourced parameter table.";
+        let answer = "Use alphaPackage with /etc/alpha.ini. Set partnerId, secretKey, sendDetails, and callbackUrl."
+            .to_string();
+
+        let finalized = finalize_agent_loop_answer(
+            answer.clone(),
+            "How do I configure it?",
+            Some(grounded),
+            "req",
+            Uuid::nil(),
+        );
+
+        assert_eq!(finalized, answer);
+    }
+
+    #[test]
+    fn verified_grounded_literal_set_extracts_config_block_without_fence_language() {
+        let literals = verified_grounded_answer_literal_set(
+            "```ini\n[Main]\nalphaPackage = true\n/etc/alpha.ini\n```",
+        );
+
+        assert!(literals.contains("[Main]"));
+        assert!(literals.contains("alphaPackage"));
+        assert!(literals.contains("/etc/alpha.ini"));
+        assert!(!literals.contains("ini"));
     }
 
     #[test]
@@ -3089,12 +5730,15 @@ mod tests {
         let execution_id = Uuid::now_v7();
         let runtime_execution_id = Uuid::now_v7();
         let structured_content = serde_json::json!({
+            "answerBody": "Use `/etc/alpha.ini`.",
             "executionId": execution_id,
             "runtimeExecutionId": runtime_execution_id,
             "conversationId": Uuid::now_v7(),
             "libraryId": Uuid::now_v7(),
             "workspaceId": Uuid::now_v7(),
             "lifecycleState": "completed",
+            "finalizable": true,
+            "mustPreserveSpans": ["/etc/alpha.ini"],
             "executionDetail": {
                 "execution": {
                     "id": execution_id,
@@ -3127,10 +5771,21 @@ mod tests {
         let message = tool_result_model_message(GROUNDED_ANSWER_TOOL_NAME, &result);
 
         assert!(message.contains("grounded answer body"));
+        assert!(message.contains("mustPreserveSpans"));
+        assert!(message.contains("/etc/alpha.ini"));
+        assert!(!message.contains("answerBody"));
         assert!(message.contains(&execution_id.to_string()));
         assert!(message.contains(&runtime_execution_id.to_string()));
-        assert!(message.contains("\"omittedCount\":4"));
+        assert!(message.contains("\"referenceCounts\""));
+        assert!(message.contains("\"chunkReferences\":12"));
+        assert!(message.contains("\"omittedCount\":12"));
+        assert!(!message.contains("\"rank\":1"));
         assert!(!message.contains("\"executionDetail\""));
+
+        let verification_text =
+            tool_result_verification_text(GROUNDED_ANSWER_TOOL_NAME, &result).unwrap();
+        assert!(verification_text.contains("\"omittedCount\": 4"));
+        assert!(verification_text.contains("\"rank\": 1"));
     }
 
     #[test]
@@ -3179,7 +5834,7 @@ mod tests {
             "workspace-a/library-b",
             &[],
         );
-        assert_eq!(narrower["topK"], 4);
+        assert_eq!(narrower["topK"], 8);
     }
 
     #[test]
@@ -3187,6 +5842,26 @@ mod tests {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "focused subquestion"
+        });
+
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "focused subquestion",
+            32,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["topK"], 24);
+    }
+
+    #[test]
+    fn ui_agent_raises_non_contextual_grounded_answer_tool_top_k_floor() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "focused subquestion",
+            "topK": 5
         });
 
         apply_agent_tool_argument_defaults(
@@ -3468,10 +6143,12 @@ mod tests {
             ]
         });
 
-        apply_agent_tool_argument_defaults(
+        apply_agent_tool_argument_defaults_with_context(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
             "follow-up subquestion",
+            true,
+            false,
             32,
             "workspace-a/library-b",
             &[
@@ -3507,10 +6184,12 @@ mod tests {
             },
         ];
 
-        apply_agent_tool_argument_defaults(
+        apply_agent_tool_argument_defaults_with_context(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
             "follow-up subquestion",
+            true,
+            false,
             32,
             "workspace-a/library-b",
             &history,
@@ -3527,7 +6206,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_overrides_explicit_empty_context_with_typed_history_top_k_floor() {
+    fn ui_agent_omits_typed_history_for_non_contextual_grounded_answer() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "new standalone topic",
@@ -3549,12 +6228,113 @@ mod tests {
         );
 
         assert_eq!(arguments["topK"], 24);
-        assert_eq!(
-            arguments["conversationTurns"],
-            serde_json::json!([
-                {"role": "user", "content": "previous topic"}
-            ])
+        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn ui_agent_restores_short_single_grounded_answer_query_to_full_user_question() {
+        let user_question =
+            "AlphaZero BetaOne GammaTwo DeltaThree EpsilonFour ZetaFive EtaSix ThetaSeven";
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "AlphaZero GammaTwo DeltaThree",
+            "topK": 5
+        });
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            user_question,
+            false,
+            true,
+            8,
+            "workspace-a/library-b",
+            &[],
         );
+
+        assert_eq!(arguments["query"], user_question);
+    }
+
+    #[test]
+    fn ui_agent_keeps_short_multi_tool_grounded_answer_query_focused() {
+        let user_question =
+            "AlphaZero BetaOne GammaTwo DeltaThree EpsilonFour ZetaFive EtaSix ThetaSeven";
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "AlphaZero GammaTwo DeltaThree",
+            "topK": 5
+        });
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            user_question,
+            false,
+            false,
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["query"], "AlphaZero GammaTwo DeltaThree");
+    }
+
+    #[test]
+    fn ui_agent_restores_single_grounded_answer_query_with_missing_user_terms() {
+        let user_question = "AlphaOne BetaTwo GammaThree DeltaFour EpsilonFive ZetaSix";
+        let mut single_tool_arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "AlphaOne BetaTwo GammaThree DeltaFour",
+            "topK": 5
+        });
+        let mut multi_tool_arguments = single_tool_arguments.clone();
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut single_tool_arguments,
+            user_question,
+            false,
+            true,
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut multi_tool_arguments,
+            user_question,
+            false,
+            false,
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(single_tool_arguments["query"], user_question);
+        assert_eq!(multi_tool_arguments["query"], "AlphaOne BetaTwo GammaThree DeltaFour");
+    }
+
+    #[test]
+    fn ui_agent_restores_single_grounded_answer_query_with_similar_length_paraphrase() {
+        let user_question = "AlphaOne BetaTwo GammaThree DeltaFour EpsilonFive ZetaSix EtaSeven";
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "AlphaOne BetaTwo GammaThree DeltaFour EpsilonNine ZetaTen",
+            "topK": 5
+        });
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            user_question,
+            false,
+            true,
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["query"], user_question);
     }
 
     #[test]
@@ -3574,10 +6354,12 @@ mod tests {
             },
         ];
 
-        apply_agent_tool_argument_defaults(
+        apply_agent_tool_argument_defaults_with_context(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
             "follow-up question",
+            true,
+            false,
             8,
             "workspace-a/library-b",
             &history,
@@ -3637,10 +6419,12 @@ mod tests {
             },
         ];
 
-        apply_agent_tool_argument_defaults(
+        apply_agent_tool_argument_defaults_with_context(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
             "show full ready config",
+            true,
+            false,
             8,
             "workspace-a/library-b",
             &history,
@@ -3656,6 +6440,52 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn ui_agent_keeps_model_requested_grounded_answer_history_from_server_context() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "show full ready config",
+            "conversationTurns": [
+                {"role": "user", "content": "model supplied context"}
+            ]
+        });
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::User,
+                content_text: "configure Connector Alpha".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text:
+                    "Install `pkg-alpha`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
+                        .to_string(),
+            },
+        ];
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "show full ready config",
+            false,
+            false,
+            32,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        assert_eq!(
+            arguments["conversationTurns"],
+            serde_json::json!([
+                {"role": "user", "content": "configure Connector Alpha"},
+                {
+                    "role": "assistant",
+                    "content": "Install `pkg-alpha`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
+                }
+            ])
+        );
+        assert_eq!(arguments["topK"], 24);
     }
 
     #[test]
@@ -3681,12 +6511,12 @@ mod tests {
             &[],
         );
 
-        assert_eq!(arguments["topK"], 4);
+        assert_eq!(arguments["topK"], 24);
         assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
     }
 
     #[test]
-    fn ui_agent_overrides_explicit_empty_grounded_answer_conversation_turns() {
+    fn ui_agent_drops_explicit_empty_grounded_answer_conversation_turns_for_standalone() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "new standalone topic",
@@ -3706,12 +6536,34 @@ mod tests {
             &history,
         );
 
-        assert_eq!(
-            arguments["conversationTurns"],
-            serde_json::json!([
-                {"role": "user", "content": "previous topic"}
-            ])
+        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn ui_agent_strips_prior_subject_from_non_contextual_grounded_answer_query() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "inventory latest ten release entries for ConnectorAlpha and alphaSecret changes",
+            "conversationTurns": []
+        });
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text:
+                "ConnectorAlpha setup uses `alphaSecret` and `/opt/alpha/connector.conf`."
+                    .to_string(),
+        }];
+
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "inventory latest ten release entries",
+            24,
+            "workspace-a/library-b",
+            &history,
         );
+
+        assert_eq!(arguments["query"], "inventory latest ten release entries");
+        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
     }
 
     #[test]
@@ -3732,10 +6584,12 @@ mod tests {
             },
         ];
 
-        apply_agent_tool_argument_defaults(
+        apply_agent_tool_argument_defaults_with_context(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
             "follow-up question",
+            true,
+            false,
             8,
             "workspace-a/library-b",
             &history,
@@ -3751,42 +6605,51 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_replaces_history_padded_grounded_answer_query_with_current_turn() {
+    fn ui_agent_compacts_history_padded_grounded_answer_query_without_losing_anchors() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
-            "query": "explain all settings: [Main], url, https://localhost/api, [UI.AlphaForm.alphaCode], http://localhost, timeout, alphaMerchantId, alphaSecret, alpha-provider-module, staticAlphaId, staticAlphaPayload, alphaCodeLifetime, /opt/alpha/alpha.conf, /var/log/alpha.log",
+            "query": "Q: [S0], k0, https://localhost/api, [X.f0], http://localhost, k1, merchantId0, cred0, p0-module, staticId0, staticPayload0, codeTtl0, /opt/p0/p0.conf, /var/log/p0.log",
             "conversationTurns": []
         });
         let history = vec![
             ExternalConversationTurn {
                 turn_kind: QueryTurnKind::User,
-                content_text: "how do I configure Provider Alpha".to_string(),
+                content_text: "Q0".to_string(),
             },
             ExternalConversationTurn {
                 turn_kind: QueryTurnKind::Assistant,
-                content_text:
-                    "Install `alpha-provider-module`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
-                        .to_string(),
+                content_text: "`p0-module` `/opt/p0/p0.conf` `cred0`".to_string(),
             },
         ];
 
-        apply_agent_tool_argument_defaults(
+        apply_agent_tool_argument_defaults_with_context(
             GROUNDED_ANSWER_TOOL_NAME,
             &mut arguments,
-            "explain all settings",
+            "Q",
+            true,
+            false,
             24,
             "workspace-a/library-b",
             &history,
         );
 
-        assert_eq!(arguments["query"], "explain all settings");
+        let compact_query = arguments["query"].as_str().unwrap();
+        assert!(compact_query.starts_with("Q\n@:"));
+        assert!(compact_query.chars().count() < 900);
+        assert!(compact_query.contains("[S0]"));
+        assert!(compact_query.contains("https://localhost/api"));
+        assert!(compact_query.contains("[X.f0]"));
+        assert!(compact_query.contains("merchantId0"));
+        assert!(compact_query.contains("cred0"));
+        assert!(compact_query.contains("p0-module"));
+        assert!(compact_query.contains("/opt/p0/p0.conf"));
         assert_eq!(
             arguments["conversationTurns"],
             serde_json::json!([
-                {"role": "user", "content": "how do I configure Provider Alpha"},
+                {"role": "user", "content": "Q0"},
                 {
                     "role": "assistant",
-                    "content": "Install `alpha-provider-module`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
+                    "content": "`p0-module` `/opt/p0/p0.conf` `cred0`"
                 }
             ])
         );
@@ -3794,14 +6657,14 @@ mod tests {
 
     #[test]
     fn ui_agent_keeps_user_supplied_long_grounded_answer_query() {
-        let user_question = "explain all settings: [Main], url, https://localhost/api, [UI.AlphaForm.alphaCode], http://localhost, timeout, alphaMerchantId, alphaSecret, alpha-provider-module, staticAlphaId, staticAlphaPayload, alphaCodeLifetime, /opt/alpha/alpha.conf, /var/log/alpha.log";
+        let user_question = "Q: [S0], k0, https://localhost/api, [X.f0], http://localhost, k1, merchantId0, cred0, p0-module, staticId0, staticPayload0, codeTtl0, /opt/p0/p0.conf, /var/log/p0.log";
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": user_question
         });
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "Previous grounded answer.".to_string(),
+            content_text: "A0".to_string(),
         }];
 
         apply_agent_tool_argument_defaults(
@@ -3818,15 +6681,15 @@ mod tests {
 
     #[test]
     fn ui_agent_keeps_current_turn_rewrite_when_literals_are_not_from_history() {
-        let user_question = "show setup steps";
-        let rewritten_query = "show setup steps: configure `/opt/beta/beta.conf`, set `[Main]`, `betaSecret`, `betaToken`, `https://beta.local/api`, `timeout = 30`, `beta-module`";
+        let user_question = "Q";
+        let rewritten_query = "Q: `/opt/p1/p1.conf`, `[S0]`, `cred0`, `tok0`, `https://p1.local/api`, `k1 = 30`, `p1-module`";
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": rewritten_query
         });
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "Previous grounded answer about Provider Alpha.".to_string(),
+            content_text: "A0".to_string(),
         }];
 
         apply_agent_tool_argument_defaults(
@@ -3839,6 +6702,72 @@ mod tests {
         );
 
         assert_eq!(arguments["query"], rewritten_query);
+    }
+
+    #[test]
+    fn ui_agent_preserves_plain_code_literals_from_prior_grounded_answer_when_compacting_query() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "Q: [S0], [X.f0], https://p0.local/api, k0, k1, k2, fn0, cred0, codeTtl0, /opt/p0/p0.conf, staticId0, staticPayload0, qrId0, qrPayload0, qrTtl0, qrPoll0, qrStatusTtl0, /var/log/p0.log",
+            "conversationTurns": []
+        });
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "`k0` `k1` `k2` `fn0` `cred0` `codeTtl0` `/opt/p0/p0.conf`".to_string(),
+        }];
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "Q",
+            true,
+            false,
+            24,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        let compact_query = arguments["query"].as_str().unwrap();
+        assert!(compact_query.starts_with("Q\n@:"));
+        assert!(compact_query.contains("k0"));
+        assert!(compact_query.contains("k1"));
+        assert!(compact_query.contains("k2"));
+        assert!(compact_query.contains("fn0"));
+        assert!(compact_query.contains("cred0"));
+        assert!(compact_query.contains("codeTtl0"));
+        assert!(compact_query.contains("/opt/p0/p0.conf"));
+    }
+
+    #[test]
+    fn ui_agent_omits_empty_literal_anchor_tail_when_budget_is_exhausted() {
+        let user_question = format!("Q {}", "segment ".repeat(140));
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": format!(
+                "{} [S0] [X.f0] https://p0.local/api p0-module /opt/p0/p0.conf cred0 staticId0 staticPayload0",
+                user_question
+            ),
+            "conversationTurns": []
+        });
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "`p0-module` `/opt/p0/p0.conf` `cred0` `staticId0`".to_string(),
+        }];
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            &user_question,
+            true,
+            false,
+            24,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        let compact_query = arguments["query"].as_str().unwrap();
+        assert_eq!(compact_query, user_question.trim());
+        assert!(!compact_query.contains("\n@:"));
     }
 
     #[test]
@@ -3908,6 +6837,135 @@ mod tests {
     }
 
     #[test]
+    fn ui_agent_pads_search_documents_with_contextual_history_anchors() {
+        let mut arguments = serde_json::json!({
+            "query": "settings parameters",
+            "limit": 5
+        });
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "literals: `alpha-package`, `/etc/alpha.ini`, `[Main]`, `retryTimeout`, `plainword`\nUse `alpha-package` and `retryTimeout`."
+                .to_string(),
+        }];
+
+        apply_agent_tool_argument_defaults_with_context(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            &mut arguments,
+            "explain all parameters",
+            true,
+            false,
+            8,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        let query = arguments["query"].as_str().expect("query string");
+        assert!(query.starts_with("settings parameters"));
+        assert!(query.contains("alpha-package"));
+        assert!(query.contains("/etc/alpha.ini"));
+        assert!(query.contains("[Main]"));
+        assert!(query.contains("retryTimeout"));
+        assert!(!query.contains("plainword"));
+        assert_eq!(arguments["libraries"], serde_json::json!(["workspace-a/library-b"]));
+    }
+
+    #[test]
+    fn ui_agent_does_not_pad_self_sufficient_contextual_search_query() {
+        let mut arguments = serde_json::json!({
+            "query": "alphaPackage retryTimeout settings parameters",
+            "limit": 5
+        });
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text:
+                "Choose one: `alphaPackage`, `betaImage`, `/etc/alpha.ini`, `[Main]`, `retryTimeout`."
+                    .to_string(),
+        }];
+
+        apply_agent_tool_argument_defaults_with_context(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            &mut arguments,
+            "show settings parameters",
+            true,
+            false,
+            8,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        assert_eq!(arguments["query"], "alphaPackage retryTimeout settings parameters");
+        assert_eq!(arguments["libraries"], serde_json::json!(["workspace-a/library-b"]));
+    }
+
+    #[test]
+    fn ui_agent_keeps_search_documents_query_without_contextual_anchors() {
+        let mut arguments = serde_json::json!({
+            "query": "settings parameters",
+            "limit": 5
+        });
+
+        apply_agent_tool_argument_defaults(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            &mut arguments,
+            "settings parameters",
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["query"], "settings parameters");
+    }
+
+    #[test]
+    fn ui_agent_normalizes_stringified_search_document_scope_arguments() {
+        let mut arguments = serde_json::json!({
+            "query": "focused probe",
+            "libraries": "[\"workspace-a/library-b\"]",
+            "limit": "10"
+        });
+
+        normalize_agent_tool_argument_types(SEARCH_DOCUMENTS_TOOL_NAME, &mut arguments);
+
+        validate_agent_tool_library_scope(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            &arguments,
+            "workspace-a/library-b",
+        )
+        .expect("normalized scope");
+        apply_agent_tool_argument_defaults(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            &mut arguments,
+            "focused probe",
+            8,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["libraries"], serde_json::json!(["workspace-a/library-b"]));
+        assert_eq!(arguments["limit"], 8);
+    }
+
+    #[test]
+    fn ui_agent_rejects_cross_library_stringified_search_document_scope() {
+        let mut arguments = serde_json::json!({
+            "query": "focused probe",
+            "libraries": "[\"workspace-x/library-y\"]"
+        });
+
+        normalize_agent_tool_argument_types(SEARCH_DOCUMENTS_TOOL_NAME, &mut arguments);
+        let error = validate_agent_tool_library_scope(
+            SEARCH_DOCUMENTS_TOOL_NAME,
+            &arguments,
+            "workspace-a/library-b",
+        )
+        .expect_err("scope mismatch");
+
+        assert!(error.contains("library scope mismatch"));
+        assert!(error.contains("workspace-x/library-y"));
+        assert!(error.contains("workspace-a/library-b"));
+    }
+
+    #[test]
     fn ui_agent_rejects_cross_library_single_scope_arguments() {
         let arguments = serde_json::json!({
             "library": "workspace-x/library-y",
@@ -3970,6 +7028,135 @@ mod tests {
         let answer = tool_result_full_text(&result.content).expect("answer");
 
         assert_eq!(answer, "First supported paragraph.\n\nSecond supported paragraph.");
+    }
+
+    #[test]
+    fn verified_grounded_answer_fallback_keeps_full_text() {
+        let long_answer = "A".repeat(2_500);
+        let content = vec![crate::interfaces::http::mcp::McpContentBlock {
+            content_type: "text",
+            text: long_answer.clone(),
+        }];
+        let fallback_text =
+            tool_result_answer_text(GROUNDED_ANSWER_TOOL_NAME, &content).expect("fallback text");
+        let preview_text = tool_result_preview(&content).expect("preview text");
+        let outcome = ToolExecutionOutcome {
+            arguments_json: None,
+            requested_arguments_json: None,
+            message_content: String::new(),
+            result_text: Some(fallback_text),
+            result_json: None,
+            grounding_text: None,
+            grounded_answer_ready: true,
+            grounded_answer_completed: true,
+            grounded_answer_needs_follow_up: false,
+            is_error: false,
+            duration_ms: 0,
+            child_query_execution_ids: Vec::new(),
+            child_runtime_execution_ids: Vec::new(),
+        };
+
+        let remembered =
+            remember_verified_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome)
+                .expect("remembered answer");
+
+        assert_eq!(preview_text.chars().count(), 2_000);
+        assert_eq!(remembered, long_answer);
+        assert_eq!(remembered.chars().count(), 2_500);
+    }
+
+    #[test]
+    fn verified_grounded_answer_memory_prefers_structured_answer_body() {
+        let outcome = ToolExecutionOutcome {
+            arguments_json: None,
+            requested_arguments_json: None,
+            message_content: String::new(),
+            result_text: Some(
+                "Clean Alpha answer.\n\nSources:\nAlpha source title\nBeta source title"
+                    .to_string(),
+            ),
+            result_json: Some(serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Clean Alpha answer.\n\nSources:\nAlpha source title\nBeta source title"
+                }],
+                "structuredContent": {
+                    "answerBody": "Clean Alpha answer.",
+                    "finalAnswerReady": true,
+                    "lifecycleState": "completed",
+                    "executionDetail": {
+                        "verificationState": "verified"
+                    }
+                },
+                "isError": false
+            })),
+            grounding_text: None,
+            grounded_answer_ready: true,
+            grounded_answer_completed: true,
+            grounded_answer_needs_follow_up: false,
+            is_error: false,
+            duration_ms: 0,
+            child_query_execution_ids: Vec::new(),
+            child_runtime_execution_ids: Vec::new(),
+        };
+
+        let remembered =
+            remember_verified_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome)
+                .expect("remembered answer");
+        let guard =
+            remember_verified_grounded_answer_guard_text(None, GROUNDED_ANSWER_TOOL_NAME, &outcome)
+                .expect("guard text");
+        let completed =
+            remember_completed_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome)
+                .expect("completed answer");
+
+        assert_eq!(remembered, "Clean Alpha answer.");
+        assert_eq!(guard, "Clean Alpha answer.");
+        assert_eq!(completed, "Clean Alpha answer.");
+    }
+
+    #[test]
+    fn finalization_keeps_verified_ordered_source_inventory() {
+        let verified = "3/3\n\n\
+1. source=`Release 3.0.0`\n   Added Gamma support.\n\
+2. source=`Release 2.0.0`\n   Added Beta support.\n\
+3. source=`Release 1.0.0`\n   Added Alpha support.";
+        let model_rewrite = "Latest records:\n\n\
+1. Release 3.0.0 - Added Gamma support.\n\
+2. Release 2.0.0 - Added Beta support.\n\
+3. Release 1.0.0 - Added Alpha support.";
+
+        let answer = finalize_agent_loop_answer(
+            model_rewrite.to_string(),
+            "list latest release records",
+            Some(verified),
+            "request-1",
+            Uuid::now_v7(),
+        );
+
+        assert_eq!(answer, verified);
+    }
+
+    #[test]
+    fn finalization_keeps_verified_grounded_identifier_inventory() {
+        let verified = "\
+Use module `alpha-connector`.
+Config file: `/opt/alpha/modules/connector.conf`, section `[Main]`.
+Parameters: `url`, `staticQrPayload`, `fillPaymentDetails`, `paymentDetails`.";
+        let model_rewrite = "\
+Use module `alpha-connector`.
+Config file: `/opt/alpha/modules/connector.conf`, section `[Main]`.
+Parameters: `url`, `staticQrPayload`.";
+
+        let answer = finalize_agent_loop_answer(
+            model_rewrite.to_string(),
+            "configure Provider Alpha",
+            Some(verified),
+            "request-1",
+            Uuid::now_v7(),
+        );
+
+        assert_eq!(answer, verified);
     }
 
     #[test]
@@ -4132,6 +7319,110 @@ mod tests {
         };
 
         assert!(grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn final_grounded_answer_with_non_evidence_warning_does_not_force_follow_up() {
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Warning-bearing verified answer.".to_string(),
+            }],
+            structured_content: serde_json::json!({
+                "finalAnswerReady": true,
+                "lifecycleState": "completed",
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": [
+                        {
+                            "code": "operator_note",
+                            "warning": "Metadata-only note."
+                        }
+                    ]
+                }
+            }),
+            is_error: false,
+        };
+
+        assert!(grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(!grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn completed_grounded_answer_fallback_keeps_non_verified_text() {
+        let outcome = ToolExecutionOutcome {
+            arguments_json: None,
+            requested_arguments_json: None,
+            message_content: String::new(),
+            result_text: Some("  Completed tool answer.  ".to_string()),
+            result_json: None,
+            grounding_text: None,
+            grounded_answer_ready: false,
+            grounded_answer_completed: true,
+            grounded_answer_needs_follow_up: true,
+            is_error: false,
+            duration_ms: 0,
+            child_query_execution_ids: Vec::new(),
+            child_runtime_execution_ids: Vec::new(),
+        };
+
+        let remembered =
+            remember_completed_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome)
+                .expect("remembered answer");
+
+        assert_eq!(remembered, "Completed tool answer.");
+    }
+
+    #[test]
+    fn completed_grounded_answer_fallback_requires_iteration_cap() {
+        assert!(should_return_completed_grounded_answer_on_iteration_cap(
+            AgentStopReason::IterationCap,
+            1,
+            Some("Completed tool answer.")
+        ));
+        assert!(!should_return_completed_grounded_answer_on_iteration_cap(
+            AgentStopReason::Deadline,
+            1,
+            Some("Completed tool answer.")
+        ));
+        assert!(!should_return_completed_grounded_answer_on_iteration_cap(
+            AgentStopReason::IterationCap,
+            0,
+            Some("Completed tool answer.")
+        ));
+        assert!(!should_return_completed_grounded_answer_on_iteration_cap(
+            AgentStopReason::IterationCap,
+            2,
+            Some("Completed tool answer.")
+        ));
+        assert!(!should_return_completed_grounded_answer_on_iteration_cap(
+            AgentStopReason::IterationCap,
+            1,
+            Some("   ")
+        ));
+    }
+
+    #[test]
+    fn verified_grounded_answer_fallback_waits_after_multi_tool_synthesis() {
+        assert_eq!(verified_grounded_answer_fallback_candidate(Some("A0"), 1, 1), Some("A0"));
+        assert_eq!(verified_grounded_answer_fallback_candidate(Some("A0"), 2, 2), None);
+        assert_eq!(verified_grounded_answer_fallback_candidate(Some("A0"), 1, 2), None);
+    }
+
+    #[test]
+    fn final_answer_prefers_verified_union_when_parent_drops_multi_tool_anchors() {
+        let first = "A: `A1`, `A2`, `A3`, and `A4`.";
+        let second = "B: `B1`, `B2`, `B3`, and `B4`.";
+        let union = format!("{first}\n\n{second}");
+        let answer = "A: `A1` and `A2`. B: `B1`.".to_string();
+
+        let guard = verified_grounded_answer_guard_candidate(Some(second), Some(&union), 2, 2)
+            .expect("multi-tool verified guard");
+        let finalized = finalize_agent_loop_answer(answer, "Q?", Some(guard), "req", Uuid::nil());
+
+        assert_eq!(guard, union);
+        assert_eq!(finalized, union);
     }
 
     #[test]

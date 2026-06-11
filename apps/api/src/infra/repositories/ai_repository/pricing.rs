@@ -390,3 +390,18 @@ pub async fn update_workspace_price_override(
     .fetch_optional(postgres)
     .await
 }
+
+pub async fn delete_workspace_price_override(
+    postgres: &PgPool,
+    price_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "delete from ai_price_catalog
+         where id = $1
+           and catalog_scope = 'workspace_override'",
+    )
+    .bind(price_id)
+    .execute(postgres)
+    .await?;
+    Ok(result.rows_affected())
+}

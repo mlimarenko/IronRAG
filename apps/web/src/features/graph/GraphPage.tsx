@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -12,7 +13,7 @@ import { useTranslation } from 'react-i18next';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import i18n from '@/shared/i18n';
 import { useApp } from '@/shared/contexts/app-context';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   mapGraphDocumentDetail,
   mapGraphTopology,
@@ -23,13 +24,21 @@ import { knowledgeApi, queries } from '@/shared/api';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/shared/components/ui/tooltip';
+import {
   GRAPH_LAYOUT_OPTIONS,
-  isGraphLayoutType,
+  GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES,
+  GRAPH_EDGE_RENDER_CAP,
+  DEFAULT_GRAPH_LAYOUT,
+  normalizeRecommendedGraphLayout,
   type GraphLayoutType,
 } from '@/features/graph/model/config';
 import {
   Search,
-  X,
   Loader2,
   FileText,
   Share2,
@@ -39,6 +48,7 @@ import {
   Network,
   CircleDashed,
   Orbit,
+  Maximize2,
 } from 'lucide-react';
 import type { GraphEdge, GraphMetadata, GraphNode, GraphStatus } from '@/shared/types';
 import { GraphInspector } from '@/features/graph/components/GraphInspector';
@@ -54,6 +64,11 @@ const GRAPH_LAYOUT_ICONS = {
   components: Network,
   rings: CircleDashed,
   clusters: Orbit,
+  hubs: Network,
+  sources: FileText,
+  flow: Share2,
+  radial: CircleDashed,
+  circlepack: Orbit,
 } as const;
 
 type GraphInspectorDetailProps = {
@@ -63,6 +78,7 @@ type GraphInspectorDetailProps = {
   adjacency: GraphAdjacencyIndex;
   onClose: () => void;
   onSelectNode: (id: string) => void;
+  onFocusNeighborhood: (id: string) => void;
 };
 
 function GraphInspectorLoadingFallback({
@@ -71,6 +87,7 @@ function GraphInspectorLoadingFallback({
   adjacency,
   onClose,
   onSelectNode,
+  onFocusNeighborhood,
 }: Omit<GraphInspectorDetailProps, 'activeLibraryId'>) {
   return (
     <GraphInspector
@@ -80,6 +97,7 @@ function GraphInspectorLoadingFallback({
       adjacency={adjacency}
       onClose={onClose}
       onSelectNode={onSelectNode}
+      onFocusNeighborhood={onFocusNeighborhood}
     />
   );
 }
@@ -90,6 +108,7 @@ function GraphInspectorDetailErrorFallback({
   adjacency,
   onClose,
   onSelectNode,
+  onFocusNeighborhood,
 }: Omit<GraphInspectorDetailProps, 'activeLibraryId'>) {
   return (
     <GraphInspector
@@ -100,6 +119,7 @@ function GraphInspectorDetailErrorFallback({
       adjacency={adjacency}
       onClose={onClose}
       onSelectNode={onSelectNode}
+      onFocusNeighborhood={onFocusNeighborhood}
     />
   );
 }
@@ -110,6 +130,7 @@ function DocumentGraphInspector({
   adjacency,
   onClose,
   onSelectNode,
+  onFocusNeighborhood,
 }: Omit<GraphInspectorDetailProps, 'activeLibraryId'>) {
   const detailQuery = useSuspenseQuery({
     ...queries.getContentDocumentOptions({
@@ -127,6 +148,7 @@ function DocumentGraphInspector({
       adjacency={adjacency}
       onClose={onClose}
       onSelectNode={onSelectNode}
+      onFocusNeighborhood={onFocusNeighborhood}
     />
   );
 }
@@ -138,6 +160,7 @@ function EntityGraphInspector({
   adjacency,
   onClose,
   onSelectNode,
+  onFocusNeighborhood,
 }: GraphInspectorDetailProps) {
   const detailQuery = useSuspenseQuery({
     ...queries.getKnowledgeEntityOptions({
@@ -155,6 +178,7 @@ function EntityGraphInspector({
       adjacency={adjacency}
       onClose={onClose}
       onSelectNode={onSelectNode}
+      onFocusNeighborhood={onFocusNeighborhood}
     />
   );
 }
@@ -198,6 +222,8 @@ export default function GraphPage() {
   const { t } = useTranslation();
   const { activeLibrary } = useApp();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const requestedNodeId = searchParams.get('nodeId');
 
   // Graph data
   const [allNodes, setAllNodes] = useState<GraphNode[]>([]);
@@ -220,34 +246,68 @@ export default function GraphPage() {
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [hiddenSubTypes, setHiddenSubTypes] = useState<Set<string>>(new Set());
-  const [layout, setLayout] = useState<GraphLayoutType>('bands');
+  const [layout, setLayout] = useState<GraphLayoutType>(DEFAULT_GRAPH_LAYOUT);
+  // When the graph has more edges than the render cap, only a sampled subset
+  // is drawn for smoothness; this toggle raises the sample density without
+  // asking Firefox to paint the entire edge set every frame.
+  const [showDenseEdges, setShowDenseEdges] = useState(false);
   const [legendOpen, setLegendOpen] = useState(true);
   const [expandedSubtypeGroups, setExpandedSubtypeGroups] = useState<Set<string>>(new Set());
+  const [focusedNeighborhoodId, setFocusedNeighborhoodId] = useState<string | null>(null);
 
   useEffect(() => {
     const handle = setTimeout(() => setDebouncedSearchQuery(searchQuery), 250);
     return () => clearTimeout(handle);
   }, [searchQuery]);
 
-  const hasActiveGraphFilters =
-    searchQuery.trim().length > 0 || hiddenTypes.size > 0 || hiddenSubTypes.size > 0;
-  const hasActiveGraphState = hasActiveGraphFilters || selectedNode !== null;
-
   // Canonical adjacency index — computed once per (nodes, edges). The inspector,
   // search, and any future neighbor lookup read from this in O(k) per query
   // instead of scanning every edge on each render.
   const adjacency = useGraphAdjacency(allNodes, allEdges);
+  const activeSelectedNode =
+    selectedNode && adjacency.nodeById.has(selectedNode) ? selectedNode : null;
 
   const handleSelectNode = useCallback((nextId: string | null) => {
     setSelectedNode(nextId);
+    if (typeof window === 'undefined') return;
+
+    const nextParams = new URLSearchParams(window.location.search);
+    if (nextId) {
+      nextParams.set('nodeId', nextId);
+    } else {
+      nextParams.delete('nodeId');
+    }
+    const search = nextParams.toString();
+    const nextUrl = `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`;
+    window.history.replaceState(window.history.state, '', nextUrl);
   }, []);
 
-  const resetGraphView = useCallback(() => {
+  useEffect(() => {
+    if (!requestedNodeId || !adjacency.nodeById.has(requestedNodeId)) return;
+    const handle = window.setTimeout(() => {
+      setSelectedNode((current) => (current === requestedNodeId ? current : requestedNodeId));
+    }, 0);
+    return () => window.clearTimeout(handle);
+  }, [requestedNodeId, adjacency.nodeById]);
+
+  const fitViewRef = useRef<(() => void) | null>(null);
+  const handleFitViewReady = useCallback((fn: () => void) => {
+    fitViewRef.current = fn;
+  }, []);
+  const updateHiddenTypes = useCallback((updater: (prev: Set<string>) => Set<string>) => {
+    setHiddenTypes((prev) => updater(prev));
+  }, []);
+  const updateHiddenSubTypes = useCallback((updater: (prev: Set<string>) => Set<string>) => {
+    setHiddenSubTypes((prev) => updater(prev));
+  }, []);
+  const updateExpandedSubtypeGroups = useCallback(
+    (updater: (prev: Set<string>) => Set<string>) => {
+      setExpandedSubtypeGroups((prev) => updater(prev));
+    },
+    [],
+  );
+  const closeInspector = useCallback(() => {
     handleSelectNode(null);
-    setSearchQuery('');
-    setHiddenTypes(new Set());
-    setHiddenSubTypes(new Set());
-    setExpandedSubtypeGroups(new Set());
   }, [handleSelectNode]);
 
   // Fetch graph topology on library change. Uses cancellation guard so a
@@ -267,6 +327,7 @@ export default function GraphPage() {
       setSearchQuery('');
       setHiddenTypes(new Set());
       setHiddenSubTypes(new Set());
+      setFocusedNeighborhoodId(null);
 
       try {
         // Streaming topology with onProgress callback — TanStack Query's queryFn
@@ -290,9 +351,7 @@ export default function GraphPage() {
           meta: topologyMeta,
         } = mapGraphTopology(topologyRes);
         const recommendedLayout =
-          topologyMeta.recommendedLayout && isGraphLayoutType(topologyMeta.recommendedLayout)
-            ? topologyMeta.recommendedLayout
-            : 'bands';
+          normalizeRecommendedGraphLayout(topologyMeta.recommendedLayout) ?? DEFAULT_GRAPH_LAYOUT;
 
         setAllNodes(topologyNodes);
         setAllEdges(topologyEdges);
@@ -315,7 +374,20 @@ export default function GraphPage() {
 
   // Look up the basic node for the current selection from the adjacency index.
   // Used to gate the detail queries and as a fallback when detail is unavailable.
-  const selectedBasic = selectedNode ? (adjacency.nodeById.get(selectedNode) ?? null) : null;
+  const selectedBasic = activeSelectedNode
+    ? (adjacency.nodeById.get(activeSelectedNode) ?? null)
+    : null;
+  // Dense graphs use a local canvas overlay inside SigmaGraph for selected
+  // neighborhoods, so selection still reaches the graph without forcing the
+  // expensive whole-canvas reducer path.
+  const sigmaSelectedNode = activeSelectedNode;
+  const focusedNeighborhoodIds = useMemo(() => {
+    if (!focusedNeighborhoodId || !adjacency.nodeById.has(focusedNeighborhoodId)) return null;
+    const visible = new Set<string>([focusedNeighborhoodId]);
+    const neighbors = adjacency.neighborIds.get(focusedNeighborhoodId) ?? [];
+    for (const id of neighbors) visible.add(id);
+    return visible;
+  }, [adjacency.neighborIds, adjacency.nodeById, focusedNeighborhoodId]);
   // Canonical "hide this node" set, recomputed only when filter inputs
   // change. SigmaGraph reads this and applies the hide flag via its
   // reducer pipeline — the Graphology instance is never rebuilt, so
@@ -339,19 +411,20 @@ export default function GraphPage() {
       }
       if (hasQuery && !n.label.toLowerCase().includes(query)) {
         hidden.add(n.id);
+        continue;
+      }
+      if (focusedNeighborhoodIds && !focusedNeighborhoodIds.has(n.id)) {
+        hidden.add(n.id);
       }
     }
     return hidden;
-  }, [allNodes, hiddenTypes, hiddenSubTypes, debouncedSearchQuery]);
+  }, [allNodes, hiddenTypes, hiddenSubTypes, debouncedSearchQuery, focusedNeighborhoodIds]);
 
   const visibleNodeCount = allNodes.length - hiddenIds.size;
 
   const activeLayoutOption =
     GRAPH_LAYOUT_OPTIONS.find((option) => option.id === layout) ?? GRAPH_LAYOUT_OPTIONS[0];
-  const recommendedLayout =
-    graphMeta?.recommendedLayout && isGraphLayoutType(graphMeta.recommendedLayout)
-      ? graphMeta.recommendedLayout
-      : null;
+  const recommendedLayout = normalizeRecommendedGraphLayout(graphMeta?.recommendedLayout);
 
   const typeLegend = useMemo(() => buildTypeLegend(allNodes), [allNodes]);
 
@@ -376,12 +449,14 @@ export default function GraphPage() {
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
       {/* Toolbar */}
       <div
-        className="px-4 py-2.5 border-b flex items-center gap-2 flex-wrap"
+        role="toolbar"
+        aria-label={t('graph.toolbar')}
+        className="min-h-[3rem] overflow-x-auto overflow-y-hidden border-b px-4 py-1.5 flex items-center gap-2 whitespace-nowrap"
         style={{
           background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--background)))',
         }}
       >
-        <div className="relative min-w-[180px]">
+        <div className="relative w-[13rem] shrink-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
             className="h-8 pl-8 text-xs"
@@ -391,32 +466,53 @@ export default function GraphPage() {
           />
         </div>
 
-        <div className="flex items-center gap-1 rounded-xl border border-border/60 bg-card/80 p-1 shadow-soft">
-          {GRAPH_LAYOUT_OPTIONS.map((option) => {
-            const isActive = layout === option.id;
-            const Icon = GRAPH_LAYOUT_ICONS[option.iconKey];
-            return (
-              <button
-                key={option.id}
-                onClick={() => setLayout(option.id)}
-                className={`flex h-8 w-8 items-center justify-center rounded-lg transition-all ${
-                  isActive
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-                }`}
-                title={t(option.labelKey)}
-                aria-label={t(option.labelKey)}
-              >
-                <Icon className="h-4 w-4" />
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="hidden xl:flex xl:min-w-[240px] xl:flex-col">
-          <span className="text-xs font-semibold text-foreground">{t(activeLayoutOption.labelKey)}</span>
-          <span className="text-xs text-muted-foreground">{t(activeLayoutOption.descriptionKey)}</span>
-        </div>
+        <TooltipProvider delayDuration={180}>
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="flex items-center gap-1 rounded-xl border border-border/60 bg-card/80 p-0.5 shadow-soft">
+              {GRAPH_LAYOUT_OPTIONS.map((option) => {
+                const isActive = layout === option.id;
+                const Icon = GRAPH_LAYOUT_ICONS[option.iconKey];
+                return (
+                  <Tooltip key={option.id}>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => setLayout(option.id)}
+                        className={`flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
+                          isActive
+                            ? 'bg-primary text-primary-foreground shadow-sm'
+                            : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                        }`}
+                        aria-label={t(option.labelKey)}
+                        aria-pressed={isActive}
+                      >
+                        <Icon className="h-4 w-4" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" align="center" className="max-w-64">
+                      <div className="text-xs font-semibold">{t(option.labelKey)}</div>
+                      <div className="mt-1 text-xs leading-snug text-muted-foreground">
+                        {t(option.descriptionKey)}
+                      </div>
+                    </TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex min-w-0 max-w-[120px] cursor-help items-center xl:max-w-[180px]">
+                  <span className="truncate text-xs font-semibold text-foreground">
+                    {t(activeLayoutOption.labelKey)}
+                  </span>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="start" className="max-w-64">
+                <div className="text-xs leading-snug">{t(activeLayoutOption.descriptionKey)}</div>
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        </TooltipProvider>
 
         {recommendedLayout && layout !== recommendedLayout && (
           <button
@@ -432,12 +528,36 @@ export default function GraphPage() {
           </button>
         )}
 
-        {hasActiveGraphState && (
+        {/* Fit-to-view button — always visible when graph has nodes */}
+        {allNodes.length > 0 && (
           <button
-            className="h-7 px-2.5 text-xs flex items-center gap-1.5 rounded-lg hover:bg-muted transition-all duration-200 font-semibold"
-            onClick={resetGraphView}
+            type="button"
+            aria-label={t('graph.zoomToFit')}
+            title={t('graph.zoomToFit')}
+            className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-200"
+            onClick={() => fitViewRef.current?.()}
           >
-            <X className="h-3.5 w-3.5" /> {t('graph.clear')}
+            <Maximize2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+
+        {/* Show-all-edges toggle — only when the edge count is capped */}
+        {(graphMeta?.edgeCount ?? 0) > GRAPH_EDGE_RENDER_CAP &&
+          (graphMeta?.edgeCount ?? 0) <= GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES && (
+          <button
+            type="button"
+            data-perf-id="edge-density-toggle"
+            aria-label={showDenseEdges ? t('graph.showSampledEdges') : t('graph.showDenseEdges')}
+            aria-pressed={showDenseEdges}
+            title={showDenseEdges ? t('graph.showSampledEdgesHint') : t('graph.showDenseEdgesHint')}
+            className={`h-7 w-7 flex items-center justify-center rounded-lg transition-all duration-200 ${
+              showDenseEdges
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+            }`}
+            onClick={() => setShowDenseEdges((v) => !v)}
+          >
+            <Share2 className="h-3.5 w-3.5" />
           </button>
         )}
 
@@ -522,10 +642,12 @@ export default function GraphPage() {
               <SigmaGraph
                 nodes={allNodes}
                 edges={allEdges}
-                selectedId={selectedNode}
+                selectedId={sigmaSelectedNode}
                 onSelect={handleSelectNode}
                 layout={layout}
                 hiddenIds={hiddenIds}
+                showDenseEdges={showDenseEdges}
+                onFitViewReady={handleFitViewReady}
               />
             </Suspense>
           )}
@@ -536,13 +658,11 @@ export default function GraphPage() {
             legendOpen={legendOpen}
             setLegendOpen={setLegendOpen}
             hiddenTypes={hiddenTypes}
-            setHiddenTypes={(updater) => setHiddenTypes((prev) => updater(prev))}
+            setHiddenTypes={updateHiddenTypes}
             hiddenSubTypes={hiddenSubTypes}
-            setHiddenSubTypes={(updater) => setHiddenSubTypes((prev) => updater(prev))}
+            setHiddenSubTypes={updateHiddenSubTypes}
             expandedSubtypeGroups={expandedSubtypeGroups}
-            setExpandedSubtypeGroups={(updater) =>
-              setExpandedSubtypeGroups((prev) => updater(prev))
-            }
+            setExpandedSubtypeGroups={updateExpandedSubtypeGroups}
           />
         </div>
 
@@ -554,8 +674,9 @@ export default function GraphPage() {
                 t={t}
                 selectedBasic={selectedBasic}
                 adjacency={adjacency}
-                onClose={() => handleSelectNode(null)}
+                onClose={closeInspector}
                 onSelectNode={handleSelectNode}
+                onFocusNeighborhood={setFocusedNeighborhoodId}
               />
             }
           >
@@ -565,8 +686,9 @@ export default function GraphPage() {
                   t={t}
                   selectedBasic={selectedBasic}
                   adjacency={adjacency}
-                  onClose={() => handleSelectNode(null)}
+                  onClose={closeInspector}
                   onSelectNode={handleSelectNode}
+                  onFocusNeighborhood={setFocusedNeighborhoodId}
                 />
               }
             >
@@ -575,8 +697,9 @@ export default function GraphPage() {
                 activeLibraryId={activeLibrary.id}
                 selectedBasic={selectedBasic}
                 adjacency={adjacency}
-                onClose={() => handleSelectNode(null)}
+                onClose={closeInspector}
                 onSelectNode={handleSelectNode}
+                onFocusNeighborhood={setFocusedNeighborhoodId}
               />
             </Suspense>
           </GraphInspectorErrorBoundary>

@@ -7,8 +7,8 @@ use super::concise_document_subject_label;
 use super::retrieve::focused_excerpt_for;
 use super::technical_literals::{
     TechnicalLiteralIntent, detect_technical_literal_intent_from_query_ir,
-    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
-    extract_prefix_literals, extract_url_literals, push_unique_limited,
+    extract_config_section_literals, extract_explicit_path_literals, extract_http_methods,
+    extract_parameter_literals, extract_prefix_literals, extract_url_literals, push_unique_limited,
     select_document_balanced_chunks, technical_literal_focus_keywords,
 };
 use super::types::RuntimeMatchedChunk;
@@ -25,6 +25,8 @@ pub(super) struct TechnicalLiteralDocumentGroup {
     pub(super) path_seen: HashSet<String>,
     pub(super) methods: Vec<String>,
     pub(super) method_seen: HashSet<String>,
+    pub(super) sections: Vec<String>,
+    pub(super) section_seen: HashSet<String>,
     pub(super) parameters: Vec<String>,
     pub(super) parameter_seen: HashSet<String>,
 }
@@ -40,6 +42,7 @@ impl TechnicalLiteralDocumentGroup {
             || !self.prefixes.is_empty()
             || !self.paths.is_empty()
             || !self.methods.is_empty()
+            || !self.sections.is_empty()
             || !self.parameters.is_empty()
     }
 }
@@ -61,13 +64,14 @@ pub(super) fn collect_technical_literal_groups(
 
     let max_chunks_per_document = technical_literal_group_chunks_per_document(query_ir, intent);
 
+    let max_total_chunks = technical_literal_group_total_chunks(query_ir, intent);
     for chunk in select_document_balanced_chunks(
         question,
         Some(query_ir),
         chunks,
         &literal_focus_keywords,
         pagination_requested,
-        8,
+        max_total_chunks,
         max_chunks_per_document,
     ) {
         let group_index = groups
@@ -141,6 +145,14 @@ pub(super) fn collect_technical_literal_groups(
             }
         }
         if intent.wants_parameters {
+            for value in extract_config_section_literals(literal_source_text, 12) {
+                push_unique_limited(&mut group.sections, &mut group.section_seen, value, 12);
+            }
+            if group.sections.len() < 12 {
+                for value in extract_config_section_literals(&chunk.source_text, 12) {
+                    push_unique_limited(&mut group.sections, &mut group.section_seen, value, 12);
+                }
+            }
             for value in extract_parameter_literals(literal_source_text, 24) {
                 push_unique_limited(&mut group.parameters, &mut group.parameter_seen, value, 24);
             }
@@ -177,6 +189,21 @@ fn technical_literal_group_chunks_per_document(
     }
 }
 
+fn technical_literal_group_total_chunks(
+    query_ir: &QueryIR,
+    intent: TechnicalLiteralIntent,
+) -> usize {
+    if intent.wants_parameters
+        && (matches!(query_ir.scope, QueryScope::SingleDocument)
+            || matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow)
+            || query_ir.is_exact_literal_technical())
+    {
+        16
+    } else {
+        8
+    }
+}
+
 pub(super) fn render_exact_technical_literals_section(
     groups: &[TechnicalLiteralDocumentGroup],
 ) -> Option<String> {
@@ -194,6 +221,7 @@ pub(super) fn render_exact_technical_literals_section(
         push_literal_inventory_lines(&mut lines, "Prefixes", &group.prefixes);
         push_literal_inventory_lines(&mut lines, "Paths", &group.paths);
         push_literal_inventory_lines(&mut lines, "HTTP methods", &group.methods);
+        push_literal_inventory_lines(&mut lines, "Sections", &group.sections);
         push_literal_inventory_lines(&mut lines, "Parameters", &group.parameters);
     }
 
@@ -225,4 +253,85 @@ pub(super) fn build_exact_technical_literals_section(
 #[cfg(test)]
 pub(super) fn infer_endpoint_subject_label(group: &TechnicalLiteralDocumentGroup) -> String {
     concise_document_subject_label(&group.document_label)
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
+    use crate::services::query::execution::{RuntimeChunkScoreKind, RuntimeMatchedChunk};
+
+    fn chunk(document_id: Uuid, label: &str, index: i32, source_text: &str) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id,
+            revision_id: Uuid::now_v7(),
+            chunk_index: index,
+            chunk_kind: Some("text".to_string()),
+            document_label: label.to_string(),
+            excerpt: source_text.to_string(),
+            score_kind: RuntimeChunkScoreKind::Relevance,
+            score: Some(1.0),
+            source_text: source_text.to_string(),
+        }
+    }
+
+    fn test_query_ir() -> QueryIR {
+        QueryIR {
+            act: QueryAct::ConfigureHow,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn exact_technical_literals_keep_second_round_parameter_inventory_on_large_result_sets() {
+        let target_document_id = Uuid::now_v7();
+        let mut chunks = vec![chunk(
+            target_document_id,
+            "Alpha Connector setup guide",
+            0,
+            "General setup overview without assignment literals.",
+        )];
+        for index in 0..9 {
+            chunks.push(chunk(
+                Uuid::now_v7(),
+                &format!("Reference document {index}"),
+                0,
+                "General reference text without configuration assignments.",
+            ));
+        }
+        chunks.push(chunk(
+            target_document_id,
+            "Alpha Connector setup guide",
+            1,
+            "[Main]\nalphaMerchantId = 10\nsecretKey = value\npollInterval = 30",
+        ));
+        let mut query_ir = test_query_ir();
+        query_ir.target_types = vec!["config_key".to_string(), "configuration_file".to_string()];
+
+        let section = build_exact_technical_literals_section(
+            "Alpha Connector configuration parameters",
+            &query_ir,
+            &chunks,
+        )
+        .expect("technical literal section");
+
+        assert!(section.contains("alphaMerchantId"));
+        assert!(section.contains("secretKey"));
+        assert!(section.contains("pollInterval"));
+    }
 }

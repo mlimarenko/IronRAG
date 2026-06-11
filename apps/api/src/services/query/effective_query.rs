@@ -31,6 +31,18 @@ fn question_line_start(query_text: &str) -> Option<usize> {
         .last()
 }
 
+/// The history-scope segment of a structured effective query: everything
+/// before the final `question:` line when the text follows the
+/// `scope: …\nquestion: …` shape composed for context-dependent follow-ups.
+/// `None` for plain (unscoped) questions.
+pub(crate) fn scope_segment(query_text: &str) -> Option<&str> {
+    let trimmed = query_text.trim();
+    structured_current_question_segment(trimmed)?;
+    question_line_start(trimmed)
+        .map(|question_start| trimmed[..question_start].trim())
+        .filter(|scope| !scope.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{current_question_segment, structured_current_question_segment};

@@ -152,7 +152,7 @@ export function hostnameFromUrl(value: string): string {
 export function localizeAttention(
   item: DashboardAttentionItem,
   t: TFunction,
-): { title: string; detail: string } {
+): { title: string; detail: string; action: string } {
   switch (item.code) {
     case 'failed_documents':
     case 'graph_sparse':
@@ -165,34 +165,25 @@ export function localizeAttention(
       return {
         title: t(`dashboard.attentionTitles.${item.code}`),
         detail: t(`dashboard.attentionDetails.${item.code}`),
+        action: t(`dashboard.attentionActions.${item.code}`),
       };
     default:
-      return { title: item.title, detail: item.detail };
+      return {
+        title: item.title,
+        detail: item.detail,
+        action: t('dashboard.attentionActions.default'),
+      };
   }
 }
 
 /**
- * Resolve the destination route for an attention item. Unknown codes fall
- * back to the backend-provided `routePath` so new backend categories keep
- * working without a frontend bump.
+ * Attention destinations are backend-owned. The frontend only keeps the
+ * navigation inside the app shell and rejects empty/external routes.
  */
-export function resolveAttentionRoute(
-  item: DashboardAttentionItem,
-  graphCoverageActionPath: string,
-): string {
-  switch (item.code) {
-    case 'failed_documents':
-    case 'retryable_document':
-    case 'failed_rebuilds':
-    case 'stale_vectors':
-    case 'graph_sparse':
-      return '/documents';
-    case 'graph_coverage_gap':
-      return graphCoverageActionPath;
-    case 'stale_relations':
-    case 'bundle_assembly_failures':
-      return '/graph';
-    default:
-      return item.routePath;
+export function resolveAttentionRoute(item: DashboardAttentionItem): string {
+  const route = item.routePath?.trim();
+  if (!route || !route.startsWith('/') || route.startsWith('//')) {
+    return '/dashboard';
   }
+  return route;
 }

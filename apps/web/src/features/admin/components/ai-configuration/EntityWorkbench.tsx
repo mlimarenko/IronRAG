@@ -94,6 +94,7 @@ type EntityWorkbenchProps<T> = {
   matchesFilter?: (row: T, filter: string) => boolean;
   searchPlaceholder?: string;
   toolbar?: ReactNode;
+  rowActions?: (row: T) => ReactNode;
   renderInspector?: (row: T) => EntityInspector<T> | null;
 };
 
@@ -109,6 +110,7 @@ export function EntityWorkbench<T>({
   matchesFilter,
   searchPlaceholder,
   toolbar,
+  rowActions,
   renderInspector,
 }: EntityWorkbenchProps<T>) {
   const { t } = useTranslation();
@@ -273,6 +275,11 @@ export function EntityWorkbench<T>({
                               </th>
                             );
                           })}
+                          {rowActions && (
+                            <th className="section-label w-24 whitespace-nowrap px-4 py-2.5 text-right">
+                              {t('admin.actions')}
+                            </th>
+                          )}
                         </tr>
                       </thead>
                       <tbody>
@@ -297,6 +304,16 @@ export function EntityWorkbench<T>({
                                   {col.cell(row)}
                                 </td>
                               ))}
+                              {rowActions && (
+                                <td
+                                  className="px-4 py-2.5 text-right align-middle"
+                                  onClick={event => event.stopPropagation()}
+                                >
+                                  <div className="inline-flex items-center gap-1">
+                                    {rowActions(row)}
+                                  </div>
+                                </td>
+                              )}
                             </tr>
                           );
                         })}

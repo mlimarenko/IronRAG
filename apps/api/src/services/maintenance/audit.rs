@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{Context, anyhow};
 use serde::Serialize;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{
@@ -80,6 +81,7 @@ pub struct OrphanLibrariesAudit {
     pub orphan_libraries: Vec<OrphanLibraryEntry>,
     pub totals: BTreeMap<String, u64>,
     pub live_library_count: usize,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +99,25 @@ pub async fn orphan_libraries(state: &AppState) -> anyhow::Result<OrphanLibrarie
     let live_libraries =
         catalog_repository::list_libraries(&state.persistence.postgres, None).await?;
     let live_ids: HashSet<Uuid> = live_libraries.iter().map(|row| row.id).collect();
+
+    match state.settings.knowledge_plane_backend.as_str() {
+        "arango" => {}
+        "postgres" => {
+            let note =
+                "not applicable for postgres knowledge plane: Arango orphan-library audit skipped";
+            info!(
+                knowledge_plane_backend = "postgres",
+                "skipping Arango orphan-library audit on postgres knowledge plane",
+            );
+            return Ok(OrphanLibrariesAudit {
+                orphan_libraries: Vec::new(),
+                totals: BTreeMap::new(),
+                live_library_count: live_ids.len(),
+                note: Some(note.to_string()),
+            });
+        }
+        backend => return Err(anyhow!("unsupported knowledge_plane_backend `{backend}`")),
+    }
 
     let arango = state.arango_client.as_ref();
     let mut doc_collections: Vec<String> =
@@ -140,7 +161,12 @@ pub async fn orphan_libraries(state: &AppState) -> anyhow::Result<OrphanLibrarie
     for (library_id, collections) in per_library {
         orphan_libraries.push(OrphanLibraryEntry { library_id, collections });
     }
-    Ok(OrphanLibrariesAudit { orphan_libraries, totals, live_library_count: live_ids.len() })
+    Ok(OrphanLibrariesAudit {
+        orphan_libraries,
+        totals,
+        live_library_count: live_ids.len(),
+        note: None,
+    })
 }
 
 /// Set of orphan library ids parsed from an [`OrphanLibrariesAudit`].

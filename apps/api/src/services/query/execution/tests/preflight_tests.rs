@@ -1,6 +1,7 @@
 use super::*;
 use crate::services::query::execution::preflight::{
     extend_setup_preflight_chunks_from_structured_context, merge_setup_preflight_structured_blocks,
+    query_ir_requests_low_confidence_setup_preflight, query_ir_requests_setup_literal_context,
     question_prefers_single_exact_literal_scope,
 };
 
@@ -360,6 +361,135 @@ Connector settings are stored in /opt/alpha/modules/connector/connector.conf und
 }
 
 #[test]
+fn canonical_preflight_answer_keeps_scoped_setup_inventory_generative() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let document_index = HashMap::from([(
+        document_id,
+        sample_document_row_for_preflight(document_id, "provider_alpha_setup.md"),
+    )]);
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id,
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id,
+        document_label: "Provider Alpha setup".to_string(),
+        excerpt: "Install alpha-connector and configure the connector file.".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(0.95),
+        source_text: repair_technical_layout_noise(
+            r#"
+Install the module:
+aptitude install alpha-connector
+
+Connector settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
+Row 1 | Name: alphaTimeout | Type: integer | Default: 10 | Description: Poll interval.
+"#,
+        ),
+    }];
+    let query_ir = query_ir_with_act_scope_literals_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["Provider Alpha", "alphaTimeout"],
+        ["package", "configuration_file", "parameter"],
+    );
+    let evidence = CanonicalAnswerEvidence {
+        bundle: None,
+        chunk_rows: Vec::new(),
+        structured_blocks: vec![KnowledgeStructuredBlockRow {
+            normalized_text: "Row 1 | Name: alphaTimeout | Type: integer | Default: 10 | Description: Poll interval."
+                .to_string(),
+            text: "Row 1 | Name: alphaTimeout | Type: integer | Default: 10 | Description: Poll interval."
+                .to_string(),
+            ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
+        }],
+        technical_facts: Vec::new(),
+    };
+    let scoped_question = "scope: previous answer mentioned package and configuration literals\nquestion: explain how to configure all settings";
+
+    let deterministic =
+        build_deterministic_grounded_answer(scoped_question, &query_ir, &evidence, &chunks)
+            .expect("deterministic setup answer without preflight guard");
+    assert!(deterministic.contains("`alpha-connector`"), "{deterministic}");
+
+    let answer = build_canonical_preflight_answer(
+        scoped_question,
+        &query_ir,
+        &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+        &document_index,
+        None,
+        &evidence,
+        &chunks,
+    );
+
+    assert!(answer.is_none());
+}
+
+#[test]
+fn canonical_preflight_answer_preserves_scoped_exact_setup_literal_answers() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let document_index = HashMap::from([(
+        document_id,
+        sample_document_row_for_preflight(document_id, "provider_alpha_setup.md"),
+    )]);
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id,
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id,
+        document_label: "Provider Alpha setup".to_string(),
+        excerpt: "Connector parameter table.".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(0.9),
+        source_text: repair_technical_layout_noise(
+            "Sheet: Connector settings | Row 1 | Name: alphaTimeout | Type: integer | Default: 10 | Description: Poll interval",
+        ),
+    }];
+    let query_ir = query_ir_with_act_scope_literals_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["Provider Alpha", "alphaTimeout"],
+        ["parameter"],
+    );
+    let evidence = CanonicalAnswerEvidence {
+        bundle: None,
+        chunk_rows: Vec::new(),
+        structured_blocks: vec![KnowledgeStructuredBlockRow {
+            normalized_text: "| `alphaTimeout` | integer | Default: 10 | Poll interval |"
+                .to_string(),
+            text: "| `alphaTimeout` | integer | Default: 10 | Poll interval |".to_string(),
+            ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
+        }],
+        technical_facts: vec![KnowledgeTechnicalFactRow {
+            fact_kind: "parameter_name".to_string(),
+            canonical_value_text: "alphaTimeout".to_string(),
+            canonical_value_exact: "alphaTimeout".to_string(),
+            canonical_value_json: json!({ "value_type": "text", "value": "alphaTimeout" }),
+            display_value: "alphaTimeout".to_string(),
+            ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+        }],
+    };
+    let scoped_question = "scope: previous answer mentioned several connector settings\nquestion: explain alphaTimeout";
+
+    let answer = build_canonical_preflight_answer(
+        scoped_question,
+        &query_ir,
+        &QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() },
+        &document_index,
+        None,
+        &evidence,
+        &chunks,
+    )
+    .expect("scoped exact setup literal answer");
+
+    assert!(answer.contains("`alphaTimeout`"), "{answer}");
+    assert!(answer.contains("integer"), "{answer}");
+}
+
+#[test]
 fn canonical_preflight_answer_preserves_direct_table_follow_up_answers() {
     let document_id = Uuid::now_v7();
     let document_index = HashMap::from([(
@@ -684,6 +814,102 @@ fn setup_module_and_configuration_targets_use_single_document_literal_scope() {
     assert!(question_prefers_single_exact_literal_scope(
         "How do I configure Provider Alpha package and configuration file?",
         &ir
+    ));
+}
+
+#[test]
+fn retrieve_value_config_key_with_focus_uses_setup_literal_context() {
+    let mut ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::RetrieveValue,
+        QueryScope::SingleDocument,
+        ["config_key"],
+    );
+    ir.target_entities
+        .push(EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject });
+
+    assert!(query_ir_requests_setup_literal_context(&ir));
+}
+
+#[test]
+fn low_confidence_short_technical_context_requests_preflight_bridge() {
+    let mut ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::Describe,
+        QueryScope::SingleDocument,
+        [],
+    );
+    ir.confidence = 0.25;
+    let source_context = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 12,
+        chunk_kind: None,
+        document_id: Uuid::now_v7(),
+        document_label: "Provider Alpha setup guide".to_string(),
+        excerpt: "QX visibleMode = true".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+        score: Some(0.42),
+        source_text: "QX visibleMode = true".to_string(),
+    };
+
+    assert!(query_ir_requests_low_confidence_setup_preflight(
+        "QX settings",
+        &ir,
+        &[source_context],
+    ));
+}
+
+#[test]
+fn low_confidence_setup_context_requests_preflight_bridge_without_short_focus_token() {
+    let mut ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::Describe,
+        QueryScope::SingleDocument,
+        [],
+    );
+    ir.confidence = 0.25;
+    let source_context = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 2,
+        chunk_kind: None,
+        document_id: Uuid::now_v7(),
+        document_label: "Provider Alpha setup guide".to_string(),
+        excerpt: "Configure /opt/alpha/alpha.conf section [Main].".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+        score: Some(0.42),
+        source_text: "Configure /opt/alpha/alpha.conf section [Main]. alphaMode = true".to_string(),
+    };
+
+    assert!(query_ir_requests_low_confidence_setup_preflight(
+        "Provide a complete configuration example",
+        &ir,
+        &[source_context],
+    ));
+}
+
+#[test]
+fn low_confidence_structural_setup_context_requests_preflight_bridge() {
+    let mut ir =
+        query_ir_with_act_scope_and_target_types(QueryAct::Describe, QueryScope::MultiDocument, []);
+    ir.confidence = 0.25;
+    ir.target_entities
+        .push(EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject });
+    let source_context = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 2,
+        chunk_kind: None,
+        document_id: Uuid::now_v7(),
+        document_label: "Provider Alpha setup guide".to_string(),
+        excerpt: "Configure /opt/alpha/alpha.conf section [Main].".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+        score: Some(0.42),
+        source_text: "Configure /opt/alpha/alpha.conf section [Main]. alphaMode = true".to_string(),
+    };
+
+    assert!(query_ir_requests_low_confidence_setup_preflight(
+        "Provider Alpha settings",
+        &ir,
+        &[source_context],
     ));
 }
 
@@ -1616,6 +1842,120 @@ fn preflight_exact_literal_scope_stays_broad_for_transport_inventory_intent() {
     assert_eq!(
         preflight_exact_literal_document_scope(
             "Which ports and network connections are required?",
+            &ir,
+            &profile,
+            &technical_literal_chunks,
+        ),
+        None
+    );
+}
+
+#[test]
+fn preflight_exact_literal_scope_stays_broad_for_low_confidence_unfocused_descriptive_ir() {
+    let screen_document_id = Uuid::now_v7();
+    let guide_document_id = Uuid::now_v7();
+    let profile =
+        QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() };
+    let mut ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::Describe,
+        QueryScope::SingleDocument,
+        [],
+    );
+    ir.confidence = 0.25;
+    let technical_literal_chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: screen_document_id,
+            document_label: "checkout-payment-screen.png".to_string(),
+            excerpt: "Terminal screen shows an interrupted payment confirmation flow."
+                .to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.99),
+            source_text: "Terminal screen shows an interrupted payment confirmation flow."
+                .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: guide_document_id,
+            document_label: "provider-alpha-payment-guide.md".to_string(),
+            excerpt: "The operator repeats status checks before closing the payment flow."
+                .to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+            score: Some(0.74),
+            source_text:
+                "The operator repeats status checks before closing the payment flow. If confirmation is still absent, the operator follows the documented reversal path."
+                    .to_string(),
+        },
+    ];
+
+    assert_eq!(
+        preflight_exact_literal_document_scope(
+            "What should the operator do when QX payment confirmation is missing?",
+            &ir,
+            &profile,
+            &technical_literal_chunks,
+        ),
+        None
+    );
+}
+
+#[test]
+fn preflight_exact_literal_scope_stays_broad_for_open_descriptive_context() {
+    let screen_document_id = Uuid::now_v7();
+    let guide_document_id = Uuid::now_v7();
+    let profile =
+        QueryIntentProfile { exact_literal_technical: true, ..QueryIntentProfile::default() };
+    let mut ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::Describe,
+        QueryScope::SingleDocument,
+        ["concept"],
+    );
+    ir.document_focus =
+        Some(DocumentHint { hint: "Provider Alpha terminal payment confirmation".to_string() });
+    ir.target_entities = vec![
+        EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject },
+        EntityMention { label: "terminal".to_string(), role: EntityRole::Subject },
+        EntityMention { label: "payment confirmation".to_string(), role: EntityRole::Object },
+    ];
+    let technical_literal_chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: screen_document_id,
+            document_label: "checkout-payment-screen.png".to_string(),
+            excerpt: "Payment type selector autonomous terminal provider alpha".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.99),
+            source_text: "Payment type selector autonomous terminal provider alpha".to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: guide_document_id,
+            document_label: "provider-alpha-payment-guide.md".to_string(),
+            excerpt: "Successful payment confirmation is received from provider alpha."
+                .to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.74),
+            source_text:
+                "Successful payment confirmation is received from provider alpha. Repeat status checks before closing the payment flow."
+                    .to_string(),
+        },
+    ];
+
+    assert_eq!(
+        preflight_exact_literal_document_scope(
+            "What should the operator do when payment confirmation is missing?",
             &ir,
             &profile,
             &technical_literal_chunks,

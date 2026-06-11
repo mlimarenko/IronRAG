@@ -6,11 +6,10 @@ metadata:
     {{- include "ironrag.labels" . | nindent 4 }}
 data:
   IRONRAG_ENVIRONMENT: {{ .Values.app.environment | quote }}
+  IRONRAG_DEPLOYMENT_ID: {{ .Values.observability.deploymentId | quote }}
   IRONRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
+  IRONRAG_KNOWLEDGE_PLANE_BACKEND: {{ .Values.app.knowledgePlaneBackend | quote }}
   IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: {{ .Values.app.queryAnswerSourceLinksEnabled | quote }}
-  IRONRAG_ARANGODB_URL: {{ include "ironrag.arangodbUrl" . | quote }}
-  IRONRAG_ARANGODB_DATABASE: {{ .Values.dependencies.arangodb.database | quote }}
-  IRONRAG_ARANGODB_USERNAME: {{ .Values.dependencies.arangodb.username | quote }}
   IRONRAG_LOG_FILTER: {{ .Values.app.logFilter | quote }}
   IRONRAG_FRONTEND_ORIGIN: {{ .Values.app.frontendOrigin | quote }}
   IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: {{ .Values.app.bootstrapAdmin.login | quote }}
@@ -28,7 +27,6 @@ data:
   IRONRAG_STARTUP_AUTHORITY_MODE: {{ .Values.startup.mode | quote }}
   IRONRAG_DEPENDENCY_POSTGRES_MODE: {{ .Values.dependencies.postgres.mode | quote }}
   IRONRAG_DEPENDENCY_REDIS_MODE: {{ .Values.dependencies.redis.mode | quote }}
-  IRONRAG_DEPENDENCY_ARANGODB_MODE: {{ .Values.dependencies.arangodb.mode | quote }}
   IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE: {{ include "ironrag.objectStorageMode" . | quote }}
   IRONRAG_CONTENT_STORAGE_PROVIDER: {{ .Values.storage.provider | quote }}
   IRONRAG_CONTENT_STORAGE_TOPOLOGY: {{ .Values.storage.topology | quote }}
@@ -38,10 +36,6 @@ data:
   IRONRAG_CONTENT_STORAGE_S3_ENDPOINT: {{ include "ironrag.s3Endpoint" . | quote }}
   IRONRAG_CONTENT_STORAGE_S3_REGION: {{ .Values.storage.s3.region | quote }}
   IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE: {{ .Values.storage.s3.forcePathStyle | quote }}
-  IRONRAG_ARANGODB_BOOTSTRAP_COLLECTIONS: {{ .Values.app.arangodbBootstrap.collections | quote }}
-  IRONRAG_ARANGODB_BOOTSTRAP_VIEWS: {{ .Values.app.arangodbBootstrap.views | quote }}
-  IRONRAG_ARANGODB_BOOTSTRAP_GRAPH: {{ .Values.app.arangodbBootstrap.graph | quote }}
-  IRONRAG_ARANGODB_BOOTSTRAP_VECTOR_INDEXES: {{ .Values.app.arangodbBootstrap.vectorIndexes | quote }}
   IRONRAG_OTEL_ENABLED: {{ .Values.observability.enabled | quote }}
   OTEL_RESOURCE_ATTRIBUTES: {{ .Values.observability.resourceAttributes | quote }}
   OTEL_TRACES_EXPORTER: {{ .Values.observability.tracesExporter | quote }}
@@ -63,7 +57,6 @@ stringData:
   IRONRAG_DATABASE_URL: {{ include "ironrag.databaseUrl" . | quote }}
   IRONRAG_REDIS_URL: {{ include "ironrag.redisUrl" . | quote }}
   IRONRAG_BOOTSTRAP_TOKEN: {{ .Values.app.bootstrapToken | quote }}
-  IRONRAG_ARANGODB_PASSWORD: {{ .Values.dependencies.arangodb.password | quote }}
   IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: {{ .Values.app.bootstrapAdmin.password | quote }}
   IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: {{ .Values.app.bootstrapAdmin.apiToken | quote }}
   IRONRAG_OPENAI_API_KEY: {{ .Values.app.providerSecrets.openaiApiKey | quote }}

@@ -96,12 +96,15 @@ expression: shapes
       "workspaceId": true
     },
     "structuredContentKeys": [
+      "answerBody",
       "conversationId",
       "executionDetail",
       "executionId",
       "finalAnswerReady",
+      "finalizable",
       "libraryId",
       "lifecycleState",
+      "mustPreserveSpans",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -250,12 +253,15 @@ expression: shapes
       "workspaceId": true
     },
     "structuredContentKeys": [
+      "answerBody",
       "conversationId",
       "executionDetail",
       "executionId",
       "finalAnswerReady",
+      "finalizable",
       "libraryId",
       "lifecycleState",
+      "mustPreserveSpans",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -353,12 +359,15 @@ expression: shapes
       "workspaceId": true
     },
     "structuredContentKeys": [
+      "answerBody",
       "conversationId",
       "executionDetail",
       "executionId",
       "finalAnswerReady",
+      "finalizable",
       "libraryId",
       "lifecycleState",
+      "mustPreserveSpans",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -510,12 +519,15 @@ expression: shapes
       "workspaceId": true
     },
     "structuredContentKeys": [
+      "answerBody",
       "conversationId",
       "executionDetail",
       "executionId",
       "finalAnswerReady",
+      "finalizable",
       "libraryId",
       "lifecycleState",
+      "mustPreserveSpans",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -659,12 +671,15 @@ expression: shapes
       "workspaceId": true
     },
     "structuredContentKeys": [
+      "answerBody",
       "conversationId",
       "executionDetail",
       "executionId",
       "finalAnswerReady",
+      "finalizable",
       "libraryId",
       "lifecycleState",
+      "mustPreserveSpans",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -803,12 +818,15 @@ expression: shapes
       "workspaceId": true
     },
     "structuredContentKeys": [
+      "answerBody",
       "conversationId",
       "executionDetail",
       "executionId",
       "finalAnswerReady",
+      "finalizable",
       "libraryId",
       "lifecycleState",
+      "mustPreserveSpans",
       "runtimeExecutionId",
       "workspaceId"
     ],

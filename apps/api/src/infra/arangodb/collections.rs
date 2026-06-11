@@ -6,6 +6,10 @@ pub const KNOWLEDGE_STRUCTURED_REVISION_COLLECTION: &str = "knowledge_structured
 pub const KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION: &str = "knowledge_structured_block";
 pub const KNOWLEDGE_CHUNK_COLLECTION: &str = "knowledge_chunk";
 pub const KNOWLEDGE_TECHNICAL_FACT_COLLECTION: &str = "knowledge_technical_fact";
+// LEGACY-SHIM(arango-era, remove>=0.7.0): non-suffixed single-dim vector
+// collections; migration receivers only — safe to delete once all deployments
+// have run `ironrag-maintenance migrate vector-per-dim` and the Arango backend
+// itself is dropped.
 /// Legacy single-dim vector collection. New per-library deployments use
 /// [`chunk_vector_collection_for_dim`] / [`entity_vector_collection_for_dim`]
 /// which return `knowledge_chunk_vector_d<dim>` / `knowledge_entity_vector_d<dim>`.
@@ -174,8 +178,13 @@ pub const KNOWLEDGE_SEARCH_VIEW: &str = "knowledge_search_view";
 pub const KNOWLEDGE_NGRAM_ANALYZER: &str = "ironrag_ngram";
 
 pub const KNOWLEDGE_GRAPH_NAME: &str = "knowledge_graph";
+// LEGACY-SHIM(arango-era, remove>=0.7.0): ANN index names on the non-suffixed
+// single-dim vector collections — safe to delete together with
+// KNOWLEDGE_CHUNK_VECTOR_COLLECTION / KNOWLEDGE_ENTITY_VECTOR_COLLECTION.
 pub const KNOWLEDGE_CHUNK_VECTOR_INDEX: &str = "knowledge_chunk_vector_index";
 pub const KNOWLEDGE_ENTITY_VECTOR_INDEX: &str = "knowledge_entity_vector_index";
+// LEGACY-SHIM(arango-era, remove>=0.7.0): persistent index names on the
+// non-suffixed single-dim chunk-vector collection — safe to delete with it.
 pub const KNOWLEDGE_CHUNK_VECTOR_REVISION_GENERATION_INDEX: &str =
     "knowledge_chunk_vector_revision_generation_index";
 pub const KNOWLEDGE_CHUNK_VECTOR_CHUNK_MODEL_INDEX: &str =
@@ -183,6 +192,8 @@ pub const KNOWLEDGE_CHUNK_VECTOR_CHUNK_MODEL_INDEX: &str =
 pub const KNOWLEDGE_CHUNK_VECTOR_LIBRARY_INDEX: &str = "knowledge_chunk_vector_library_index";
 pub const KNOWLEDGE_REVISION_LIBRARY_VECTOR_STATE_INDEX: &str =
     "knowledge_revision_library_vector_state_index";
+// LEGACY-SHIM(arango-era, remove>=0.7.0): persistent index name on the
+// non-suffixed single-dim entity-vector collection — safe to delete with it.
 pub const KNOWLEDGE_ENTITY_VECTOR_LIBRARY_INDEX: &str = "knowledge_entity_vector_library_index";
 pub const KNOWLEDGE_STRUCTURED_REVISION_REVISION_INDEX: &str =
     "knowledge_structured_revision_revision_index";
@@ -280,6 +291,10 @@ pub const KNOWLEDGE_PERSISTENT_INDEXES: &[ArangoPersistentIndexSpec] = &[
         unique: false,
         sparse: false,
     },
+    // LEGACY-SHIM(arango-era, remove>=0.7.0): persistent indexes on the
+    // non-suffixed single-dim chunk-vector / entity-vector collections;
+    // safe to delete once KNOWLEDGE_CHUNK_VECTOR_COLLECTION /
+    // KNOWLEDGE_ENTITY_VECTOR_COLLECTION are dropped.
     ArangoPersistentIndexSpec {
         collection: KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
         name: KNOWLEDGE_CHUNK_VECTOR_REVISION_GENERATION_INDEX,

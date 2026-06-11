@@ -165,6 +165,18 @@ pub struct PrincipalProfile {
     pub display_label: String,
 }
 
+/// System role assigned to a user principal (viewer < operator < admin).
+///
+/// Canonical source for the UI shell's capability gating. Mirrors the
+/// `public.iam_system_role` PG enum and the `ShellRole` shell-bootstrap field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemRole {
+    Viewer,
+    Operator,
+    Admin,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserProfile {
@@ -172,6 +184,7 @@ pub struct UserProfile {
     pub login: Option<String>,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    pub role: SystemRole,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

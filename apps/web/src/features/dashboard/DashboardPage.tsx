@@ -3,9 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import {
   Activity,
-  BarChart3,
   FileText,
-  Loader2,
+  MessageSquare,
   RefreshCw,
   Share2,
   XCircle,
@@ -20,6 +19,9 @@ import { LibraryHealthPanel, type HealthRow } from "./components/LibraryHealthPa
 import { RecentDocumentsList } from "./components/RecentDocumentsList";
 import { AttentionPanel } from "./components/AttentionPanel";
 import { LatestIngestPanel } from "./components/LatestIngestPanel";
+import { AssistantCtaPanel } from "./components/AssistantCtaPanel";
+import { DashboardSkeleton } from "./components/DashboardSkeleton";
+import { DashboardEmptyState } from "./components/DashboardEmptyState";
 import type { RecentWebRun } from "./model/types";
 import { buildDocumentsPath } from "./model/types";
 
@@ -36,31 +38,14 @@ function pickLatestRun(runs: RecentWebRun[]): RecentWebRun | undefined {
   return latest;
 }
 
-function DashboardLoadingFallback() {
-  const { t } = useTranslation();
-  return (
-    <div className="flex-1 flex flex-col">
-      <div className="page-header">
-        <h1 className="text-lg font-bold tracking-tight">{t('dashboard.title')}</h1>
-      </div>
-      <div className="flex-1 flex items-center justify-center" role="status" aria-live="polite">
-        <div className="flex flex-col items-center gap-3">
-          <Loader2 className="h-6 w-6 animate-spin text-primary/60" />
-          <span className="text-sm text-muted-foreground">
-            {t('dashboard.loadingDashboard')}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function DashboardContent({
   activeLibraryId,
   activeLibraryName,
+  queryReady,
 }: {
   activeLibraryId: string;
   activeLibraryName: string;
+  queryReady: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
@@ -108,8 +93,6 @@ function DashboardContent({
       totalDocuments > 0
         ? Math.min(100, Math.round((graphReadyCount / totalDocuments) * 100))
         : 0;
-    const graphCoverageActionPath =
-      graphSparseCount > 0 || readableWithoutGraphCount > 0 ? buildDocumentsPath() : '/graph';
     const latestRun = pickLatestRun(recentWebRuns);
 
     const summaryCards: SummaryCard[] = [
@@ -143,7 +126,8 @@ function DashboardContent({
             : graphReadyCount > 0
               ? 'warning'
               : 'processing',
-        actionPath: graphCoverageActionPath,
+        // Coverage is acted on in the Graph view, not Documents (DSH-01).
+        actionPath: '/graph',
       },
       {
         key: 'in-flight',
@@ -155,7 +139,7 @@ function DashboardContent({
             : t('dashboard.pipelineIdle'),
         icon: Activity,
         tone: inFlightCount > 0 ? 'processing' : 'neutral',
-        actionPath: buildDocumentsPath(),
+        actionPath: buildDocumentsPath({ status: 'processing' }),
       },
       {
         key: 'failed',
@@ -167,7 +151,7 @@ function DashboardContent({
             : t('dashboard.noFailedDesc'),
         icon: XCircle,
         tone: failedCount > 0 ? 'failed' : 'ready',
-        actionPath: buildDocumentsPath(),
+        actionPath: buildDocumentsPath({ status: 'failed' }),
       },
     ];
 
@@ -177,7 +161,7 @@ function DashboardContent({
         label: t('dashboard.graphReady'),
         count: graphReadyCount,
         className: 'bg-status-ready',
-        actionPath: buildDocumentsPath(),
+        actionPath: '/graph',
       },
       ...(readableWithoutGraphCount > 0
         ? [
@@ -186,7 +170,7 @@ function DashboardContent({
               label: t('dashboard.readableNoGraph'),
               count: readableWithoutGraphCount,
               className: 'bg-status-warning',
-              actionPath: buildDocumentsPath(),
+              actionPath: '/graph',
             },
           ]
         : []),
@@ -195,21 +179,21 @@ function DashboardContent({
         label: t('dashboard.graphSparse'),
         count: graphSparseCount,
         className: 'bg-status-warning',
-        actionPath: buildDocumentsPath(),
+        actionPath: '/graph',
       },
       {
         key: 'processing',
         label: t('dashboard.processing'),
         count: processingCount,
         className: 'bg-status-processing',
-        actionPath: buildDocumentsPath(),
+        actionPath: buildDocumentsPath({ status: 'processing' }),
       },
       {
         key: 'failed',
         label: t('dashboard.failed'),
         count: failedCount,
         className: 'bg-status-failed',
-        actionPath: buildDocumentsPath(),
+        actionPath: buildDocumentsPath({ status: 'failed' }),
       },
     ];
 
@@ -219,7 +203,6 @@ function DashboardContent({
       readyCount,
       readableWithoutGraphCount,
       graphReadyPct,
-      graphCoverageActionPath,
       latestRun,
       summaryCards,
       healthRows,
@@ -245,14 +228,14 @@ function DashboardContent({
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <Button variant="outline" size="sm" onClick={() => navigate('/documents')}>
-            <FileText className="h-3.5 w-3.5 mr-1.5" />
-            {t('dashboard.documents')}
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => navigate('/graph')}>
-            <Share2 className="h-3.5 w-3.5 mr-1.5" />
-            {t('dashboard.graph')}
-          </Button>
+          {/* Primary CTA toward the product's main verb — only when the
+              library is actually query-ready, otherwise it's a dead button. */}
+          {queryReady && (
+            <Button size="sm" onClick={() => navigate('/assistant')}>
+              <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
+              {t('dashboard.askAssistant')}
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing}>
             <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${refreshing ? 'animate-spin' : ''}`} />
             {t('dashboard.refresh')}
@@ -286,17 +269,21 @@ function DashboardContent({
           </div>
 
           <div className="grid gap-4">
+            <AssistantCtaPanel
+              t={t}
+              libraryName={activeLibraryName}
+              queryReady={queryReady}
+              onNavigate={navigate}
+            />
             <AttentionPanel
               t={t}
               attention={derived.attention}
-              graphCoverageActionPath={derived.graphCoverageActionPath}
               onNavigate={navigate}
             />
             <LatestIngestPanel
               t={t}
               locale={i18n.language}
               latestRun={derived.latestRun}
-              onNavigate={navigate}
             />
           </div>
         </div>
@@ -306,33 +293,18 @@ function DashboardContent({
 }
 
 export default function DashboardPage() {
-  const { t } = useTranslation();
   const { activeLibrary } = useApp();
 
   if (!activeLibrary) {
-    return (
-      <div className="flex-1 flex flex-col">
-        <div className="page-header">
-          <h1 className="text-lg font-bold tracking-tight">{t('dashboard.title')}</h1>
-        </div>
-        <div className="empty-state flex-1">
-          <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
-            <BarChart3 className="h-7 w-7 text-muted-foreground" />
-          </div>
-          <h2 className="text-base font-bold tracking-tight">{t('dashboard.noLibrary')}</h2>
-          <p className="text-sm text-muted-foreground mt-2 max-w-sm leading-relaxed">
-            {t('dashboard.noLibraryDesc')}
-          </p>
-        </div>
-      </div>
-    );
+    return <DashboardEmptyState />;
   }
 
   return (
-    <Suspense fallback={<DashboardLoadingFallback />}>
+    <Suspense fallback={<DashboardSkeleton />}>
       <DashboardContent
         activeLibraryId={activeLibrary.id}
         activeLibraryName={activeLibrary.name}
+        queryReady={activeLibrary.queryReady}
       />
     </Suspense>
   );

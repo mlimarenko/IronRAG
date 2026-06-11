@@ -27,7 +27,9 @@ pub use self::{
         FileExtractError, UploadAdmissionError, UploadRejectionDetails,
         classify_multipart_file_body_error,
     },
-    mime_detection::{detect_upload_file_kind, validate_upload_file_admission},
+    mime_detection::{
+        detect_declared_upload_file_kind, detect_upload_file_kind, validate_upload_file_admission,
+    },
 };
 
 pub const MULTIPART_UPLOAD_MODE: &str = "multipart_upload_v2";
@@ -150,6 +152,9 @@ const TEXT_LIKE_MIME_TYPES: &[&str] = &[
     "application/ndjson",
     "application/x-jsonlines",
     "application/x-ndjson",
+    "application/yaml",
+    "application/x-yaml",
+    "application/toml",
     "application/xml",
     "text/xml",
     "image/svg+xml",
@@ -381,6 +386,15 @@ pub fn build_local_file_extraction_plan(
                 extraction::record_jsonl::extract_record_jsonl(file_bytes).map_err(|error| {
                     FileExtractError::ExtractionFailed { file_kind, message: error.to_string() }
                 })?
+            } else if let Some(record_output) =
+                extraction::record_jsonl::structured_record_hint(file_name, mime_type).and_then(
+                    |hint| extraction::record_jsonl::normalize_structured_records(file_bytes, hint),
+                )
+            {
+                // Plain JSON (object/array) and YAML (doc/`---` stream) route
+                // through the same record renderer as JSONL. Non-record-shaped
+                // payloads return None above and fall through to the text path.
+                record_output
             } else if mime_detection::declared_payload_is_html(file_name, mime_type)
                 || mime_detection::payload_looks_like_html(file_bytes)
             {
@@ -1540,9 +1554,12 @@ mod tests {
         let source_text = plan.source_text.as_deref().expect("source text");
         assert!(source_text.contains("[source_profile source_format=record_jsonl"));
         assert!(source_text.contains("unit_count=1"));
-        assert!(source_text.contains(
-            "[unit_id=event-1 unit_kind=event occurred_at=2026-04-28T09:00:00+00:00] created item"
-        ));
+        // Generic rendering: the value-shaped timestamp stamps the record and
+        // every leaf value stays searchable text.
+        assert!(source_text.contains("[unit_ordinal=0 occurred_at=2026-04-28T09:00:00+00:00]"));
+        assert!(source_text.contains("id=event-1"));
+        assert!(source_text.contains("kind=event"));
+        assert!(source_text.contains("text=created item"));
     }
 
     #[test]

@@ -18,9 +18,9 @@ use crate::{
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_LIBRARY_WRITE, POLICY_MCP_DISCOVERY, POLICY_WORKSPACE_ADMIN,
-            authorize_library_discovery, authorize_workspace_discovery, load_library_and_authorize,
-            load_workspace_and_authorize,
+            POLICY_LIBRARY_WRITE, POLICY_MCP_DISCOVERY, authorize_library_discovery,
+            authorize_workspace_discovery, load_library_and_authorize,
+            load_workspace_and_authorize_library_write,
         },
         router_support::{ApiError, RequestId},
     },
@@ -402,7 +402,7 @@ pub async fn create_library(
     Path(workspace_id): Path<Uuid>,
     Json(payload): Json<CreateCatalogLibraryRequest>,
 ) -> Result<Json<CatalogLibraryResponse>, ApiError> {
-    load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
+    load_workspace_and_authorize_library_write(&auth, &state, workspace_id).await?;
 
     let library = state
         .canonical_services
@@ -472,7 +472,7 @@ pub async fn delete_library(
     Path((workspace_id, library_id)): Path<(Uuid, Uuid)>,
 ) -> Result<(StatusCode, Json<CatalogDeletionAcceptedResponse>), ApiError> {
     let request_id = request_id.map(|value| value.0.0);
-    load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
+    load_workspace_and_authorize_library_write(&auth, &state, workspace_id).await?;
 
     let admission = state
         .canonical_services
@@ -577,8 +577,7 @@ pub async fn update_library(
     Json(payload): Json<UpdateCatalogLibraryRequest>,
 ) -> Result<Json<CatalogLibraryResponse>, ApiError> {
     let existing = state.canonical_services.catalog.get_library(&state, library_id).await?;
-    load_workspace_and_authorize(&auth, &state, existing.workspace_id, POLICY_WORKSPACE_ADMIN)
-        .await?;
+    load_workspace_and_authorize_library_write(&auth, &state, existing.workspace_id).await?;
 
     let lifecycle_state = payload
         .lifecycle_state

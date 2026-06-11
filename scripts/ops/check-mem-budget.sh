@@ -1,25 +1,29 @@
 #!/usr/bin/env bash
 # Regression guard for the docker-compose memory budget.
 #
-# On the canonical swapless 16 GiB host the steady-state sum of `memory`
-# LIMITS is the only real containment lever (Compose does not enforce
-# `reservations`, and cgroup v2 lets the sum of caps exceed physical RAM —
-# a combined RSS above ~16 GiB trips the kernel global OOM killer). This
-# guard fails the build if a future edit to docker-compose.yml pushes the
-# steady-state limit sum past the ceiling, so the host can never be silently
-# re-oversubscribed. The one-shot `startup` migrator is excluded: it exits
-# before steady state and never co-resides under load.
+# The shipped defaults must fit a small 4 GiB VM. On a swapless host the
+# steady-state sum of `memory` LIMITS is the only real containment lever
+# (Compose does not enforce `reservations`, and cgroup v2 lets the sum of
+# caps exceed physical RAM — a combined RSS above physical RAM trips the
+# kernel global OOM killer). This guard fails the build if a future edit to
+# docker-compose.yml pushes the steady-state limit sum past the ceiling, so
+# the default stack can never silently outgrow a 4 GiB VM. The one-shot
+# `startup` migrator is excluded: it exits before steady state and never
+# co-resides under load.
 #
-# The large-host overlay (docker-compose.large.yml) intentionally exceeds
-# this ceiling and is NOT checked here — it targets 24-32 GiB hosts.
+# Each anchor's memory limit is env-overridable as
+# `memory: ${IRONRAG_*_MEMORY_LIMIT:-<default>}` (CPU likewise via
+# IRONRAG_*_CPUS); this guard parses the baseline DEFAULT (the 4 GiB-VM
+# sizing). Raising a cap via env for a bigger host (e.g. a 16 GiB stage)
+# intentionally exceeds this ceiling and is not checked here.
 #
 # Usage: scripts/ops/check-mem-budget.sh [compose-file] [ceiling-MiB]
-#   defaults: docker-compose.yml, 14848 MiB (16 GiB - 1.5 GiB headroom)
+#   defaults: docker-compose.yml, 3584 MiB (4 GiB - 0.5 GiB headroom)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${1:-${ROOT_DIR}/docker-compose.yml}"
-CEILING_MIB="${2:-14848}"
+CEILING_MIB="${2:-3584}"
 
 if [[ ! -f "${COMPOSE_FILE}" ]]; then
   echo "check-mem-budget: compose file not found: ${COMPOSE_FILE}" >&2
@@ -47,12 +51,33 @@ with open(compose_file, encoding="utf-8") as fh:
 EXCLUDED = {"startup"}
 
 
+def compose_default(raw: str) -> str:
+    """Resolve a docker-compose interpolation to its baseline default.
+
+    `memory: ${IRONRAG_DB_MEMORY_LIMIT:-1024M}` carries the 4 GiB-VM
+    baseline in the `:-<default>` clause; the guard sizes against that, not
+    the operator's env override. A plain literal (`memory: 1024M`) passes
+    through unchanged. An interpolation without a default is unparseable —
+    a future edit must keep a literal default so the baseline is knowable.
+    """
+    m = re.fullmatch(r"\s*\$\{[A-Za-z_][A-Za-z0-9_]*:-(.*?)\}\s*", raw)
+    if m:
+        return m.group(1)
+    if "${" in raw:
+        raise ValueError(
+            f"memory limit {raw!r} interpolates without a `:-<default>` "
+            "clause; the baseline budget cannot be verified"
+        )
+    return raw
+
+
 def mem_to_mib(raw: str) -> int:
     """Parse a docker-compose memory literal (e.g. 5120M, 2G) to MiB.
 
     Docker treats the b/k/m/g suffixes as binary (powers of 1024), so M == MiB
     and G == 1024 MiB. A bare integer is interpreted as bytes.
     """
+    raw = compose_default(raw)
     m = re.fullmatch(r"\s*(\d+)\s*([bkmgBKMG]?)\s*", raw)
     if not m:
         raise ValueError(f"unparseable memory literal: {raw!r}")
@@ -101,11 +126,16 @@ for line in lines:
             in_limits = False
 
 # ── Pass 2: service name → anchor (via `<<: *anchor` under deploy.resources). ─
+# Services gated behind a `profiles:` key (e.g. s4core under the `s4` profile)
+# are opt-in and never start in the default stack, so they are excluded from
+# the baseline budget exactly like the one-shot startup migrator.
 service_anchor: dict[str, str] = {}
+profiled: set[str] = set()
 in_services = False
 current_service = None
 svc_def = re.compile(r"^  (\w[\w-]*):\s*$")
 merge_ref = re.compile(r"<<:\s*\*(ironrag-resources-[\w-]+)")
+profiles_key = re.compile(r"^    profiles:")
 for line in lines:
     if re.match(r"^services:\s*$", line):
         in_services = True
@@ -121,6 +151,8 @@ for line in lines:
         current_service = m.group(1)
         continue
     if current_service is not None:
+        if profiles_key.match(line):
+            profiled.add(current_service)
         ref = merge_ref.search(line)
         if ref:
             service_anchor[current_service] = ref.group(1)
@@ -144,15 +176,19 @@ for svc in sorted(service_anchor):
         print(f"check-mem-budget: service {svc!r} references unknown anchor "
               f"{anchor!r}", file=sys.stderr)
         sys.exit(2)
-    excluded = svc in EXCLUDED
-    if not excluded:
+    if svc in EXCLUDED:
+        reason = "one-shot, excluded"
+    elif svc in profiled:
+        reason = "profile, excluded"
+    else:
+        reason = None
         total += mib
-    rows.append((svc, anchor, mib, excluded))
+    rows.append((svc, anchor, mib, reason))
 
 width = max(len(r[0]) for r in rows)
 print(f"docker-compose memory budget ({os.path.basename(compose_file)}):")
-for svc, anchor, mib, excluded in rows:
-    note = "  (one-shot, excluded)" if excluded else ""
+for svc, anchor, mib, reason in rows:
+    note = f"  ({reason})" if reason else ""
     print(f"  {svc:<{width}}  {mib:>5} MiB  [{anchor}]{note}")
 print(f"  {'─' * (width + 2)}")
 print(f"  steady-state Σ = {total} MiB = {total / 1024:.2f} GiB"
@@ -162,9 +198,10 @@ if total > ceiling_mib:
     over = total - ceiling_mib
     print(f"\nFAIL: steady-state memory limit sum exceeds the budget ceiling by "
           f"{over} MiB ({over / 1024:.2f} GiB).\n"
-          f"On a swapless 16 GiB host this risks the kernel global OOM killer. "
-          f"Lower a service cap, or if this is intentional for a bigger host, "
-          f"move the change into docker-compose.large.yml and raise the host.",
+          f"On a swapless 4 GiB VM this risks the kernel global OOM killer. "
+          f"Lower a service cap. The baseline defaults must fit a 4 GiB VM; a "
+          f"bigger host is opt-in via the IRONRAG_*_MEMORY_LIMIT env overrides, "
+          f"not by raising the defaults here.",
           file=sys.stderr)
     sys.exit(1)
 

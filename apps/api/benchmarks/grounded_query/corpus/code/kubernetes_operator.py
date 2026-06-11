@@ -14,7 +14,7 @@ Architecture decisions:
 Environment variables:
 - OPERATOR_NAMESPACE: Namespace the operator watches. Default: "default"
 - OPERATOR_NAME: Name for logging and leader election. Default: "postgres-operator"
-- POSTGRES_IMAGE: Default PostgreSQL image. Default: "postgres:16-alpine"
+- POSTGRES_IMAGE: Default PostgreSQL image. Default: "pgvector/pgvector:pg18"
 - POSTGRES_DEFAULT_STORAGE_SIZE: Default PVC size. Default: "10Gi"
 - POSTGRES_DEFAULT_CPU_LIMIT: Default CPU limit. Default: "1000m"
 - POSTGRES_DEFAULT_MEMORY_LIMIT: Default memory limit. Default: "2Gi"
@@ -77,7 +77,7 @@ class OperatorConfig:
         return cls(
             namespace=os.environ.get("OPERATOR_NAMESPACE", "default"),
             operator_name=os.environ.get("OPERATOR_NAME", "postgres-operator"),
-            postgres_image=os.environ.get("POSTGRES_IMAGE", "postgres:16-alpine"),
+            postgres_image=os.environ.get("POSTGRES_IMAGE", "pgvector/pgvector:pg18"),
             default_storage_size=os.environ.get("POSTGRES_DEFAULT_STORAGE_SIZE", "10Gi"),
             default_cpu_limit=os.environ.get("POSTGRES_DEFAULT_CPU_LIMIT", "1000m"),
             default_memory_limit=os.environ.get("POSTGRES_DEFAULT_MEMORY_LIMIT", "2Gi"),
@@ -122,7 +122,7 @@ class PostgresInstanceSpec:
     """Spec fields from the PostgresInstance CRD.
 
     CRD fields watched by the operator:
-    - spec.version: PostgreSQL major version (12, 13, 14, 15, 16). Required.
+    - spec.version: PostgreSQL major version (12, 13, 14, 15, 16, 18). Required.
     - spec.replicas: Number of replicas (1 for standalone, 2+ for HA). Default: 1.
     - spec.storage.size: PVC storage size (e.g., "50Gi"). Default: "10Gi".
     - spec.storage.storageClass: Kubernetes StorageClass name. Default: "standard".
@@ -169,7 +169,7 @@ class PostgresInstanceSpec:
         ha = spec.get("highAvailability", {})
 
         return cls(
-            version=int(spec.get("version", 16)),
+            version=int(spec.get("version", 18)),
             replicas=int(spec.get("replicas", CONFIG.default_replicas)),
             storage_size=storage.get("size", CONFIG.default_storage_size),
             storage_class=storage.get("storageClass", "standard"),
@@ -190,7 +190,7 @@ class PostgresInstanceSpec:
     def validate(self) -> List[str]:
         """Validate the spec and return a list of errors."""
         errors: List[str] = []
-        if self.version not in (12, 13, 14, 15, 16):
+        if self.version not in (12, 13, 14, 15, 16, 18):
             errors.append(f"Unsupported PostgreSQL version: {self.version}")
         if self.replicas < 1 or self.replicas > 10:
             errors.append(f"Replicas must be between 1 and 10, got {self.replicas}")
@@ -297,7 +297,7 @@ def build_statefulset(
     - Liveness and readiness probes
     - Anti-affinity rules for HA deployments
     """
-    image = f"postgres:{spec.version}-alpine"
+    image = f"pgvector/pgvector:pg{spec.version}"
 
     containers = [
         {

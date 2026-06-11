@@ -1515,7 +1515,7 @@ const FAISS_EMPIRICAL_BYTES_PER_LIST: u64 = 50_000_000;
 /// 5+ s `APPROX_NEAR_COSINE` scans on 650k-row shards and produced
 /// `retrieval.vector_failed` timeouts on the 30 s Arango HTTP client cap).
 ///
-/// Per the canonical multi-dim policy in the project CLAUDE.md, this budget is
+/// Per the canonical multi-dim vector-layer sizing policy, this budget is
 /// sized for the largest per-dim shard the deployment expects to host. When a
 /// heavier shard is rolled out on a larger host, the Arango container cap is
 /// raised in lock-step (e.g. the `docker-compose.large.yml` overlay) and the
@@ -1528,7 +1528,7 @@ const VECTOR_INDEX_TRAINING_BUDGET_BYTES: u64 = 3_000_000_000;
 /// Reads `IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES` so a larger-host overlay
 /// (e.g. `docker-compose.large.yml`, which also raises the Arango container
 /// cap) can widen the budget in lock-step without a recompile, satisfying the
-/// multi-dim vector-layer policy in the project CLAUDE.md. Falls back to
+/// canonical multi-dim vector-layer sizing policy. Falls back to
 /// [`VECTOR_INDEX_TRAINING_BUDGET_BYTES`] when unset, empty, or unparseable.
 fn vector_index_training_budget_bytes() -> u64 {
     parse_vector_index_training_budget(

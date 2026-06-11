@@ -262,6 +262,13 @@ pub async fn reconcile_revision_graph(
     let previous_active_revision_id = document_head
         .active_revision_id
         .filter(|active_revision_id| *active_revision_id != revision_id);
+    // Nodes/edges the superseded revision used to support. After its evidence
+    // is deleted these may drop to zero support and need pruning; we union them
+    // with the new revision's merge contributions so the projection refresh can
+    // stay targeted to this document's own graph footprint instead of forcing a
+    // library-wide rebuild (the OOM root cause for stuck re-revision jobs).
+    let mut superseded_node_ids = BTreeSet::<Uuid>::new();
+    let mut superseded_edge_ids = BTreeSet::<Uuid>::new();
     if let Some(previous_active_revision_id) = previous_active_revision_id {
         ensure_not_cancelled(cancellation_token)?;
         repositories::delete_query_execution_references_by_content_revision(
@@ -276,7 +283,7 @@ pub async fn reconcile_revision_graph(
                 "failed to delete stale query references for document {document_id} revision {previous_active_revision_id}"
             )
         })?;
-        repositories::deactivate_runtime_graph_evidence_by_content_revision(
+        let superseded_targets = repositories::deactivate_runtime_graph_evidence_by_content_revision(
             &state.persistence.postgres,
             library_id,
             document_id,
@@ -288,6 +295,17 @@ pub async fn reconcile_revision_graph(
                 "failed to deactivate stale graph evidence for document {document_id} revision {previous_active_revision_id}"
             )
         })?;
+        for target in superseded_targets {
+            match target.target_kind.as_str() {
+                "node" => {
+                    superseded_node_ids.insert(target.target_id);
+                }
+                "edge" => {
+                    superseded_edge_ids.insert(target.target_id);
+                }
+                _ => {}
+            }
+        }
         ensure_not_cancelled(cancellation_token)?;
     }
 
@@ -540,9 +558,24 @@ pub async fn reconcile_revision_graph(
             .await
             .context("failed to advance source truth during revision graph reconcile")?;
     ensure_not_cancelled(cancellation_token)?;
-    let summary_refresh = if previous_active_revision_id.is_some()
-        || (changed_node_ids.is_empty() && changed_edge_ids.is_empty())
-    {
+
+    // Union the new revision's merge contributions with the superseded
+    // revision's now-orphaned targets. This is the exact set of nodes/edges
+    // whose support must be re-derived and whose zero-support members must be
+    // pruned, and it bounds the projection to this document's graph footprint.
+    let targeted_node_ids = union_targeted_ids(&changed_node_ids, &superseded_node_ids);
+    let targeted_edge_ids = union_targeted_ids(&changed_edge_ids, &superseded_edge_ids);
+
+    let plan = revision_reconcile_projection_plan(
+        previous_active_revision_id.is_some(),
+        graph_contribution_count,
+        existing_graph_is_empty,
+        snapshot.is_some(),
+        &targeted_node_ids,
+        &targeted_edge_ids,
+    );
+
+    let summary_refresh = if plan.broad_summary_refresh() {
         crate::services::graph::summary::GraphSummaryRefreshRequest::broad()
     } else {
         crate::services::graph::summary::GraphSummaryRefreshRequest::targeted(
@@ -552,34 +585,65 @@ pub async fn reconcile_revision_graph(
     }
     .with_source_truth_version(source_truth_version);
     projection_scope = projection_scope.with_summary_refresh(summary_refresh);
-    if previous_active_revision_id.is_none()
-        && !existing_graph_is_empty
-        && (!changed_node_ids.is_empty() || !changed_edge_ids.is_empty())
-    {
-        projection_scope = projection_scope
-            .with_targeted_refresh(changed_node_ids.clone(), changed_edge_ids.clone());
-    }
 
-    let projection = if graph_contribution_count > 0
-        || previous_active_revision_id.is_some()
-        || existing_graph_is_empty
-    {
-        project_canonical_graph(state, &projection_scope)
+    let projection = match plan {
+        RevisionReconcileProjectionPlan::TargetedSupersede => {
+            // Prune the superseded revision's now-orphaned nodes/edges before
+            // the targeted projection republishes, mirroring the
+            // document-delete cleanup contract. Without this the old revision's
+            // entities stay alive via stale support counts.
+            prune_superseded_revision_graph(
+                state,
+                library_id,
+                projection_scope.projection_version,
+                &targeted_node_ids,
+                &targeted_edge_ids,
+            )
             .await
-            .context("failed to project reconciled revision graph")?
-    } else if let Some(snapshot) = snapshot {
-        preserve_runtime_graph_snapshot(
-            state,
-            library_id,
-            projection_scope.projection_version,
-            Some(snapshot),
-            "no-op revision graph reconcile",
-        )
-        .await?
-    } else {
-        ensure_empty_graph_snapshot(state, library_id, projection_scope.projection_version)
+            .context("failed to prune superseded revision graph before targeted projection")?;
+            ensure_not_cancelled(cancellation_token)?;
+            projection_scope = projection_scope
+                .with_targeted_refresh(targeted_node_ids.clone(), targeted_edge_ids.clone());
+            project_canonical_graph(state, &projection_scope)
+                .await
+                .context("failed to project reconciled revision graph")?
+        }
+        RevisionReconcileProjectionPlan::TargetedFresh => {
+            projection_scope = projection_scope
+                .with_targeted_refresh(targeted_node_ids.clone(), targeted_edge_ids.clone());
+            project_canonical_graph(state, &projection_scope)
+                .await
+                .context("failed to project reconciled revision graph")?
+        }
+        RevisionReconcileProjectionPlan::Full => project_canonical_graph(state, &projection_scope)
             .await
-            .context("failed to persist empty graph snapshot during no-op revision reconcile")?
+            .context("failed to project reconciled revision graph")?,
+        RevisionReconcileProjectionPlan::Preserve => {
+            // Safe to unwrap conceptually: the plan only selects Preserve when a
+            // snapshot exists, but stay defensive against a snapshot that
+            // disappeared between resolve and here.
+            if let Some(snapshot) = snapshot {
+                preserve_runtime_graph_snapshot(
+                    state,
+                    library_id,
+                    projection_scope.projection_version,
+                    Some(snapshot),
+                    "no-op revision graph reconcile",
+                )
+                .await?
+            } else {
+                ensure_empty_graph_snapshot(state, library_id, projection_scope.projection_version)
+                    .await
+                    .context(
+                        "failed to persist empty graph snapshot during no-op revision reconcile",
+                    )?
+            }
+        }
+        RevisionReconcileProjectionPlan::Empty => {
+            ensure_empty_graph_snapshot(state, library_id, projection_scope.projection_version)
+                .await
+                .context("failed to persist empty graph snapshot during no-op revision reconcile")?
+        }
     };
 
     Ok(RevisionGraphReconcileOutcome {
@@ -587,6 +651,159 @@ pub async fn reconcile_revision_graph(
         graph_contribution_count,
         projection,
     })
+}
+
+/// Projection strategy for one revision-graph reconcile.
+///
+/// `TargetedSupersede` and `TargetedFresh` both republish only the affected
+/// subgraph (bounded by the document's own node/edge footprint); the difference
+/// is that a supersede first prunes the old revision's now-orphaned rows.
+/// `Full` and `Preserve`/`Empty` keep the prior behavior for the first-ever
+/// graph build and genuine no-ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevisionReconcileProjectionPlan {
+    TargetedSupersede,
+    TargetedFresh,
+    Full,
+    Preserve,
+    Empty,
+}
+
+impl RevisionReconcileProjectionPlan {
+    /// A library-wide source-truth change needs a broad canonical-summary
+    /// supersede (the inline regeneration self-skips for large graphs). Targeted
+    /// refreshes can scope the summary supersede to their own contributions.
+    const fn broad_summary_refresh(self) -> bool {
+        matches!(self, Self::TargetedSupersede | Self::Full | Self::Preserve | Self::Empty)
+    }
+}
+
+/// Decides how to project a revision-graph reconcile.
+///
+/// The driving goal is that a per-document re-revision must NOT rebuild the
+/// whole library projection (the > 2 GiB resident load that OOM-killed the
+/// worker). When a previous revision existed we take the targeted supersede
+/// path whenever there is anything to change, falling back to preserve/empty
+/// only for a genuine no-op so an empty union can never silently route into the
+/// full (OOM) rebuild.
+fn revision_reconcile_projection_plan(
+    has_previous_revision: bool,
+    graph_contribution_count: usize,
+    existing_graph_is_empty: bool,
+    has_snapshot: bool,
+    targeted_node_ids: &[Uuid],
+    targeted_edge_ids: &[Uuid],
+) -> RevisionReconcileProjectionPlan {
+    let has_targets = !targeted_node_ids.is_empty() || !targeted_edge_ids.is_empty();
+
+    if has_previous_revision {
+        // Re-revision supersede. The existing graph is already populated for
+        // this library, so a targeted refresh over the union of new
+        // contributions and superseded orphans is correct and bounded. Only a
+        // truly empty union (nothing merged, nothing superseded) is a no-op.
+        if has_targets {
+            return RevisionReconcileProjectionPlan::TargetedSupersede;
+        }
+        return if has_snapshot {
+            RevisionReconcileProjectionPlan::Preserve
+        } else {
+            RevisionReconcileProjectionPlan::Empty
+        };
+    }
+
+    // First activation of this document's revision (no predecessor).
+    if existing_graph_is_empty {
+        // The library graph is empty/new; a full projection is cheap here and
+        // also covers the first-ever build for the library.
+        return RevisionReconcileProjectionPlan::Full;
+    }
+    if graph_contribution_count > 0 && has_targets {
+        return RevisionReconcileProjectionPlan::TargetedFresh;
+    }
+    if has_snapshot {
+        RevisionReconcileProjectionPlan::Preserve
+    } else {
+        RevisionReconcileProjectionPlan::Empty
+    }
+}
+
+fn union_targeted_ids(changed_ids: &[Uuid], superseded_ids: &BTreeSet<Uuid>) -> Vec<Uuid> {
+    let mut union = superseded_ids.clone();
+    union.extend(changed_ids.iter().copied());
+    union.into_iter().collect()
+}
+
+/// Re-derives support counts for `node_ids`/`edge_ids` from surviving active
+/// evidence, prunes any that dropped to zero support, drops their orphaned
+/// canonical summaries, and mirrors the node/edge deletions into ArangoDB.
+///
+/// Mirrors `refresh_deleted_library_graph_projection_for_cleanup` step-for-step
+/// so the superseded revision's contributions leave no graph trace while shared
+/// nodes/edges (still supported by other documents) survive.
+async fn prune_superseded_revision_graph(
+    state: &AppState,
+    library_id: Uuid,
+    projection_version: i64,
+    node_ids: &[Uuid],
+    edge_ids: &[Uuid],
+) -> Result<(), GraphServiceError> {
+    repositories::recalculate_runtime_graph_node_support_counts_by_ids(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+        node_ids,
+    )
+    .await
+    .context("failed to recalculate node support counts for superseded revision prune")?;
+    repositories::recalculate_runtime_graph_edge_support_counts_by_ids(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+        edge_ids,
+    )
+    .await
+    .context("failed to recalculate edge support counts for superseded revision prune")?;
+    let deleted_edge_keys = repositories::delete_runtime_graph_edges_without_support_by_ids(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+        edge_ids,
+    )
+    .await
+    .context("failed to prune zero-support edges for superseded revision")?;
+    let deleted_node_keys = repositories::delete_runtime_graph_nodes_without_support_by_ids(
+        &state.persistence.postgres,
+        library_id,
+        projection_version,
+        node_ids,
+    )
+    .await
+    .context("failed to prune zero-support nodes for superseded revision")?;
+    // Canonical summaries have no FK back to the node/edge tables, so the prune
+    // above does not cascade. Drop any summary whose target was just removed.
+    repositories::delete_runtime_graph_canonical_summaries_for_orphan_targets(
+        &state.persistence.postgres,
+        library_id,
+        node_ids,
+        edge_ids,
+    )
+    .await
+    .context("failed to prune orphan canonical summaries for superseded revision")?;
+    if !deleted_edge_keys.is_empty() {
+        state
+            .arango_graph_store
+            .delete_relations_by_canonical_keys(library_id, &deleted_edge_keys)
+            .await
+            .context("failed to sync superseded relation deletions to ArangoDB")?;
+    }
+    if !deleted_node_keys.is_empty() {
+        state
+            .arango_graph_store
+            .delete_entities_by_canonical_keys(library_id, &deleted_node_keys)
+            .await
+            .context("failed to sync superseded entity deletions to ArangoDB")?;
+    }
+    Ok(())
 }
 
 fn is_graph_reconcile_chunk_text_eligible(text: &str) -> bool {
@@ -776,6 +993,96 @@ mod tests {
         ];
 
         assert_eq!(count_surviving_documents(&records), 2);
+    }
+
+    #[test]
+    fn re_revision_with_changes_takes_targeted_supersede_path() {
+        // A re-revision on a populated library (the OOM scenario): there is a
+        // previous revision and the existing graph is non-empty. Even though the
+        // old full-rebuild trigger fired here, we now route to the bounded
+        // targeted supersede path instead of a library-wide rebuild.
+        let plan = revision_reconcile_projection_plan(
+            true,
+            3,
+            false,
+            true,
+            &[Uuid::now_v7()],
+            &[Uuid::now_v7()],
+        );
+        assert_eq!(plan, RevisionReconcileProjectionPlan::TargetedSupersede);
+        assert!(plan.broad_summary_refresh());
+    }
+
+    #[test]
+    fn re_revision_pruning_only_still_targeted_supersede() {
+        // Content-shrinking re-revision: the new revision contributes nothing
+        // (graph_contribution_count == 0) but the superseded revision left
+        // orphan targets that must be pruned. Must NOT fall through to preserve.
+        let plan = revision_reconcile_projection_plan(true, 0, false, true, &[Uuid::now_v7()], &[]);
+        assert_eq!(plan, RevisionReconcileProjectionPlan::TargetedSupersede);
+    }
+
+    #[test]
+    fn re_revision_empty_union_preserves_instead_of_full_rebuild() {
+        // Genuine no-op re-revision: nothing merged, nothing superseded. The
+        // empty union must route to preserve, never silently into the full
+        // (OOM) rebuild.
+        let plan = revision_reconcile_projection_plan(true, 0, false, true, &[], &[]);
+        assert_eq!(plan, RevisionReconcileProjectionPlan::Preserve);
+    }
+
+    #[test]
+    fn re_revision_empty_union_without_snapshot_is_empty() {
+        let plan = revision_reconcile_projection_plan(true, 0, false, false, &[], &[]);
+        assert_eq!(plan, RevisionReconcileProjectionPlan::Empty);
+    }
+
+    #[test]
+    fn first_revision_on_empty_library_is_full() {
+        // First-ever graph for the library: full projection is cheap on an
+        // empty/new graph.
+        let plan = revision_reconcile_projection_plan(
+            false,
+            5,
+            true,
+            false,
+            &[Uuid::now_v7()],
+            &[Uuid::now_v7()],
+        );
+        assert_eq!(plan, RevisionReconcileProjectionPlan::Full);
+    }
+
+    #[test]
+    fn first_revision_on_populated_library_is_targeted_fresh() {
+        let plan = revision_reconcile_projection_plan(
+            false,
+            5,
+            false,
+            true,
+            &[Uuid::now_v7()],
+            &[Uuid::now_v7()],
+        );
+        assert_eq!(plan, RevisionReconcileProjectionPlan::TargetedFresh);
+        assert!(!plan.broad_summary_refresh());
+    }
+
+    #[test]
+    fn first_revision_no_contribution_preserves() {
+        let plan = revision_reconcile_projection_plan(false, 0, false, true, &[], &[]);
+        assert_eq!(plan, RevisionReconcileProjectionPlan::Preserve);
+    }
+
+    #[test]
+    fn union_targeted_ids_dedups_and_merges() {
+        let shared = Uuid::now_v7();
+        let only_changed = Uuid::now_v7();
+        let only_superseded = Uuid::now_v7();
+        let superseded: BTreeSet<Uuid> = [shared, only_superseded].into_iter().collect();
+        let union = union_targeted_ids(&[shared, only_changed], &superseded);
+        assert_eq!(union.len(), 3);
+        assert!(union.contains(&shared));
+        assert!(union.contains(&only_changed));
+        assert!(union.contains(&only_superseded));
     }
 
     #[test]

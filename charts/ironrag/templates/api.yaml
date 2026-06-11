@@ -80,7 +80,7 @@ spec:
             # and can OOM the pod on a large file. Keeping it on disk lands
             # the bytes in ephemeral-storage (capped by the resource preset),
             # off the memory budget. Mirrors the host tmpfs /tmp trap fixed
-            # for docker-compose; see the OOM/vector policy in CLAUDE.md.
+            # for docker-compose; see the OOM/vector sizing policy.
             sizeLimit: 1Gi
         {{- if eq .Values.storage.provider "filesystem" }}
         - name: content-storage

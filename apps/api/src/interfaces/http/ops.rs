@@ -527,6 +527,7 @@ pub async fn get_library_dashboard(
         sort: crate::infra::repositories::content_repository::DocumentListSortColumn::CreatedAt,
         sort_desc: true,
         status_filter: Vec::new(),
+        id_filter: Vec::new(),
     };
     let (
         recent_page,
@@ -621,7 +622,7 @@ fn build_documents_overview_from_metrics(
         total_documents: saturating_i32(metrics.total.max(0) as usize),
         ready_documents: saturating_i32(metrics.ready.max(0) as usize),
         processing_documents: saturating_i32((metrics.processing + metrics.queued).max(0) as usize),
-        failed_documents: saturating_i32((metrics.failed + metrics.canceled).max(0) as usize),
+        failed_documents: saturating_i32(metrics.failed.max(0) as usize),
         graph_sparse_documents: saturating_i32(metrics.graph_sparse.max(0) as usize),
     }
 }
@@ -643,7 +644,7 @@ fn build_attention_items_bounded(
                 "{} documents are currently failed in the active library.",
                 ops_state.failed_document_count
             ),
-            route_path: "/documents".to_string(),
+            route_path: "/documents?status=failed".to_string(),
             level: MessageLevel::Error,
         });
     }
@@ -655,7 +656,7 @@ fn build_attention_items_bounded(
             detail: format!(
                 "{graph_coverage_gap_count} readable documents still do not contribute to the graph."
             ),
-            route_path: "/documents?status=processing".to_string(),
+            route_path: "/graph".to_string(),
             level: MessageLevel::Warning,
         });
     }
@@ -668,7 +669,7 @@ fn build_attention_items_bounded(
                 "{} reported a retryable failure or stalled ingest step.",
                 document.file_name
             ),
-            route_path: "/documents".to_string(),
+            route_path: "/documents?status=failed".to_string(),
             level: MessageLevel::Warning,
         });
     }
@@ -779,7 +780,7 @@ fn map_attention_item(warning: &OpsLibraryWarning) -> DashboardAttentionItem {
         "stale_vectors" => (
             "Vector rebuild is still running",
             "Some readable documents have not converged onto current vector state yet.",
-            "/documents",
+            "/documents?status=processing",
         ),
         "stale_relations" => (
             "Graph rebuild is still running",
@@ -789,7 +790,7 @@ fn map_attention_item(warning: &OpsLibraryWarning) -> DashboardAttentionItem {
         "failed_rebuilds" => (
             "Recent rebuild failed",
             "At least one recent ingestion rebuild failed and needs operator review.",
-            "/documents",
+            "/graph",
         ),
         "bundle_assembly_failures" => (
             "Context bundle assembly failed",

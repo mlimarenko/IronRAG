@@ -1,8 +1,24 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { TFunction } from 'i18next';
-import { ChevronLeft, ChevronRight, MessageSquareText, Plus, Search } from 'lucide-react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  MessageSquareText,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+} from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/shared/components/ui/dropdown-menu';
+import { cn } from '@/shared/lib/utils';
 import type { AssistantSession } from '@/shared/types';
 
 type SessionRailProps = {
@@ -13,12 +29,156 @@ type SessionRailProps = {
   activeSession: string | null;
   collapsed: boolean;
   disabled?: boolean;
+  loading?: boolean;
   sessionSearch: string;
   onCollapsedChange: (collapsed: boolean) => void;
   onSessionSearchChange: (value: string) => void;
   onNewSession: () => void;
   onSelectSession: (id: string) => void;
+  onRenameSession: (id: string, title: string) => void;
+  onDeleteSession: (id: string) => void;
 };
+
+type DateBucketId = 'Today' | 'Yesterday' | 'Earlier';
+
+type SessionGroup = {
+  id: DateBucketId;
+  sessions: AssistantSession[];
+};
+
+function startOfDay(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+/** Buckets a timestamp into Today / Yesterday / Earlier relative to `now`. */
+function bucketFor(updatedAt: string, todayStart: number, dayMs: number): DateBucketId {
+  const ts = Date.parse(updatedAt);
+  if (!Number.isFinite(ts)) return 'Earlier';
+  if (ts >= todayStart) return 'Today';
+  if (ts >= todayStart - dayMs) return 'Yesterday';
+  return 'Earlier';
+}
+
+function SessionRow({
+  t,
+  session,
+  active,
+  disabled,
+  dateLabel,
+  onSelect,
+  onRename,
+  onDelete,
+}: {
+  t: TFunction;
+  session: AssistantSession;
+  active: boolean;
+  disabled: boolean;
+  dateLabel: string;
+  onSelect: () => void;
+  onRename: (title: string) => void;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(session.title || '');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const title = session.title || t('assistant.untitledSession');
+
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (next && next !== title) onRename(next);
+  };
+
+  const handleEditKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commit();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      setEditing(false);
+      setDraft(session.title || '');
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="rounded-xl border border-primary/40 bg-card p-2 shadow-soft">
+        <Input
+          ref={inputRef}
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleEditKeyDown}
+          onBlur={commit}
+          aria-label={t('assistant.renameSession')}
+          className="h-8 text-sm"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        'group relative flex items-stretch rounded-xl transition-all duration-200',
+        active
+          ? 'border border-border/50 bg-card shadow-soft'
+          : 'border border-transparent hover:bg-accent/50',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        disabled={disabled}
+        className="min-w-0 flex-1 rounded-xl px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-not-allowed"
+      >
+        <div className={cn('truncate text-sm', active && 'font-semibold')}>{title}</div>
+        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span>{dateLabel}</span>
+          {session.turnCount > 0 && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="tabular-nums">
+                {t('assistant.turnCount', { count: session.turnCount })}
+              </span>
+            </>
+          )}
+        </div>
+      </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            disabled={disabled}
+            aria-label={t('assistant.sessionActions')}
+            className="mr-1 flex w-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-opacity duration-150 hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 data-[state=open]:opacity-100 disabled:cursor-not-allowed"
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-40">
+          <DropdownMenuItem
+            onSelect={() => {
+              setDraft(session.title || '');
+              setEditing(true);
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }}
+          >
+            <Pencil className="mr-2 h-3.5 w-3.5" />
+            {t('assistant.renameSession')}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={onDelete}
+            className="text-destructive focus:text-destructive"
+          >
+            <Trash2 className="mr-2 h-3.5 w-3.5" />
+            {t('assistant.deleteSession')}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
 
 function SessionRailImpl({
   id,
@@ -28,34 +188,60 @@ function SessionRailImpl({
   activeSession,
   collapsed,
   disabled = false,
+  loading = false,
   sessionSearch,
   onCollapsedChange,
   onSessionSearchChange,
   onNewSession,
   onSelectSession,
+  onRenameSession,
+  onDeleteSession,
 }: SessionRailProps) {
-  // Pre-compute the case-insensitive filtered list once per (sessions, search).
-  // Previously recomputed on every parent render during streaming.
   const filteredSessions = useMemo(() => {
     if (!sessionSearch.trim()) return sessions;
     const q = sessionSearch.toLowerCase();
-    return sessions.filter((s) => (s.title || t('assistant.untitledSession')).toLowerCase().includes(q));
+    return sessions.filter((s) =>
+      (s.title || t('assistant.untitledSession')).toLowerCase().includes(q),
+    );
   }, [sessions, sessionSearch, t]);
 
-  // Cache the date formatter so every row does not construct a fresh Intl
-  // formatter per render.
-  const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale), [locale]);
+  const dateFormatter = useMemo(
+    () => new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }),
+    [locale],
+  );
+
+  // Group the filtered list into Today / Yesterday / Earlier buckets. Sessions
+  // arrive newest-first from the API, so each bucket preserves that order.
+  const groups = useMemo<SessionGroup[]>(() => {
+    const dayMs = 86_400_000;
+    const todayStart = startOfDay(new Date());
+    const buckets: Record<DateBucketId, AssistantSession[]> = {
+      Today: [],
+      Yesterday: [],
+      Earlier: [],
+    };
+    for (const session of filteredSessions) {
+      buckets[bucketFor(session.updatedAt, todayStart, dayMs)].push(session);
+    }
+    return (['Today', 'Yesterday', 'Earlier'] as const)
+      .map((id) => ({ id, sessions: buckets[id] }))
+      .filter((g) => g.sessions.length > 0);
+  }, [filteredSessions]);
 
   return (
     <div
       id={id}
-      className={`${collapsed ? 'w-12' : 'w-64'} flex shrink-0 flex-col border-r bg-surface-sunken/30 transition-[width] duration-250`}
+      className={cn(
+        'flex shrink-0 flex-col border-r bg-surface-sunken/30 transition-[width] duration-250',
+        collapsed ? 'w-12' : 'w-64',
+      )}
     >
       <button
         type="button"
-        className={`flex h-12 items-center border-b text-sm font-semibold transition-colors hover:bg-accent/50 ${
-          collapsed ? 'justify-center' : 'justify-between'
-        } ${collapsed ? 'px-0' : 'px-3'}`}
+        className={cn(
+          'flex h-12 items-center border-b text-sm font-semibold transition-colors hover:bg-accent/50',
+          collapsed ? 'justify-center px-0' : 'justify-between px-3',
+        )}
         aria-expanded={!collapsed}
         aria-controls={`${id ?? 'assistant-session-rail'}-content`}
         aria-label={collapsed ? t('assistant.expandSessions') : t('assistant.collapseSessions')}
@@ -93,32 +279,54 @@ function SessionRailImpl({
             />
           </div>
         </div>
-        <div className="space-y-0.5 px-2 pb-3">
-          {filteredSessions.length === 0 ? (
+
+        <div className="px-2 pb-3">
+          {loading && sessions.length === 0 ? (
+            <div className="space-y-1.5 px-1">
+              {[0, 1, 2, 3].map((i) => (
+                <div
+                  key={i}
+                  className="h-12 animate-pulse rounded-xl bg-muted/60"
+                  style={{ animationDelay: `${i * 80}ms` }}
+                />
+              ))}
+            </div>
+          ) : filteredSessions.length === 0 ? (
             <div className="px-3 py-6 text-center">
-              <div className="text-sm font-semibold">{t('assistant.noSessions')}</div>
+              <div className="text-sm font-semibold">
+                {sessionSearch.trim()
+                  ? t('assistant.noSessionsMatch')
+                  : t('assistant.noSessions')}
+              </div>
               <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                {t('assistant.noSessionsDesc')}
+                {sessionSearch.trim()
+                  ? t('assistant.noSessionsMatchDesc')
+                  : t('assistant.noSessionsDesc')}
               </div>
             </div>
           ) : (
-            filteredSessions.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => onSelectSession(s.id)}
-                disabled={disabled}
-                className={`w-full rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-200 ${
-                  activeSession === s.id
-                    ? 'border border-border/50 bg-card font-semibold shadow-soft'
-                    : 'hover:bg-accent/50 disabled:hover:bg-transparent'
-                }`}
-              >
-                <div className="truncate">{s.title || t('assistant.untitledSession')}</div>
-                <div className="mt-0.5 text-[11px] text-muted-foreground">
-                  {dateFormatter.format(new Date(s.updatedAt))}
+            <div className="space-y-3">
+              {groups.map((group) => (
+                <div key={group.id} className="space-y-0.5">
+                  <div className="px-2 pb-1 pt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
+                    {t(`assistant.group${group.id}`)}
+                  </div>
+                  {group.sessions.map((session) => (
+                    <SessionRow
+                      key={session.id}
+                      t={t}
+                      session={session}
+                      active={activeSession === session.id}
+                      disabled={disabled}
+                      dateLabel={dateFormatter.format(new Date(session.updatedAt))}
+                      onSelect={() => onSelectSession(session.id)}
+                      onRename={(title) => onRenameSession(session.id, title)}
+                      onDelete={() => onDeleteSession(session.id)}
+                    />
+                  ))}
                 </div>
-              </button>
-            ))
+              ))}
+            </div>
           )}
         </div>
       </div>

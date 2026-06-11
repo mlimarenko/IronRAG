@@ -2,6 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// LEGACY-SHIM(arango-era, remove>=0.7.0): `key`, `arango_id`, `arango_rev`
+// fields in every *Row struct are ArangoDB document-identity fields; the
+// PostgreSQL layer projects `NULL::text` for arango_id/arango_rev and casts
+// the PK uuid to text for `key` — safe to collapse to a plain `id: Uuid`
+// once the Arango backend and its snapshot-import path are removed.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeDocumentRow {
     #[serde(rename = "_key")]
@@ -17,13 +22,29 @@ pub struct KnowledgeDocumentRow {
     #[serde(default)]
     pub file_name: Option<String>,
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_hint: Option<String>,
     pub document_state: String,
     pub active_revision_id: Option<Uuid>,
     pub readable_revision_id: Option<Uuid>,
     pub latest_revision_no: Option<i64>,
+    /// Canonical structural source parent (mirrored from
+    /// `content_document.parent_document_id`). `None` for primary documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_document_id: Option<Uuid>,
+    /// Typed document role mirrored from `content_document.document_role`
+    /// (`primary` | `attachment` | `attached_context`).
+    #[serde(default = "default_document_role")]
+    pub document_role: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+}
+
+fn default_document_role() -> String {
+    crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

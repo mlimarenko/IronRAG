@@ -66,39 +66,45 @@ describe("librarySnapshotApi", () => {
         requests.push({ input, init });
         return new Response(
           JSON.stringify({
+            operationId: "019e37a5-6295-7022-b0ec-cdc0bcd03716",
+            workspaceId: "019e37a5-6295-7022-b0ec-cdc0bcd03717",
             libraryId: "019e37a5-6295-7022-b0ec-cdc0bcd03715",
             overwriteMode: "replace",
-            includeKinds: ["library_data", "blobs"],
-            postgresRowsByTable: {},
-            arangoDocsByStore: {},
-            arangoEdgesByStore: {},
-            skippedArangoEdgesByStore: {},
-            blobsRestored: 0,
+            archiveBytes: payload.length,
           }),
           {
             headers: { "Content-Type": "application/json" },
-            status: 200,
+            status: 202,
           },
         );
       });
 
-    await librarySnapshotApi.import(
+    const result = await librarySnapshotApi.import(
       "019e37a5-6295-7022-b0ec-cdc0bcd03715",
       file,
       "replace",
     );
 
+    expect(result).toEqual({
+      kind: "accepted",
+      operation: {
+        operationId: "019e37a5-6295-7022-b0ec-cdc0bcd03716",
+        workspaceId: "019e37a5-6295-7022-b0ec-cdc0bcd03717",
+        libraryId: "019e37a5-6295-7022-b0ec-cdc0bcd03715",
+        overwriteMode: "replace",
+        archiveBytes: payload.length,
+      },
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(requests).toHaveLength(1);
     const request = requests[0];
-    const httpRequest = request.input as Request;
-    expect(typeof httpRequest.arrayBuffer).toBe("function");
-    expect(httpRequest.url).toContain(
-      "/v1/content/libraries/019e37a5-6295-7022-b0ec-cdc0bcd03715/snapshot?overwrite=replace",
+    expect(String(request.input)).toBe(
+      "http://localhost/v1/content/libraries/019e37a5-6295-7022-b0ec-cdc0bcd03715/snapshot?overwrite=replace",
     );
-    expect(httpRequest.method).toBe("POST");
-    expect(httpRequest.credentials).toBe("include");
-    expect(httpRequest.headers.get("Content-Type")).toBe("application/zstd");
-    expect(Array.from(new Uint8Array(await httpRequest.arrayBuffer()))).toEqual(payload);
+    expect(request.init?.method).toBe("POST");
+    expect(request.init?.credentials).toBe("include");
+    expect(request.init?.headers).toEqual({ "Content-Type": "application/zstd" });
+    const body = request.init?.body as File;
+    expect(Array.from(new Uint8Array(await body.arrayBuffer()))).toEqual(payload);
   });
 });

@@ -15,8 +15,9 @@ use crate::infra::arangodb::{
     graph_store::KnowledgeEvidenceRow,
 };
 use crate::services::query::execution::technical_literals::{
-    detect_technical_literal_intent_from_query_ir, extract_explicit_path_literals,
-    extract_http_methods, extract_parameter_literals, extract_url_literals,
+    detect_technical_literal_intent_from_query_ir, extract_config_section_literals,
+    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
+    extract_url_literals,
 };
 use crate::services::query::{
     assistant_grounding::AssistantGroundingEvidence,
@@ -116,10 +117,14 @@ fn sample_document_row_for_preflight(document_id: Uuid, file_name: &str) -> Know
         external_key: document_id.to_string(),
         file_name: Some(file_name.to_string()),
         title: Some(file_name.to_string()),
+        source_uri: None,
+        document_hint: None,
         document_state: "active".to_string(),
         active_revision_id: Some(Uuid::now_v7()),
         readable_revision_id: Some(Uuid::now_v7()),
         latest_revision_no: Some(1),
+        parent_document_id: None,
+        document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         deleted_at: None,

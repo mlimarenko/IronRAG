@@ -45,6 +45,7 @@ const ADMIN_AI_PROVIDERS_QUERY_KEY = ['admin', 'ai', 'providers'] as const;
 const ADMIN_AI_CREDENTIALS_QUERY_KEY = ['admin', 'ai', 'credentials'] as const;
 const ADMIN_AI_PRESETS_QUERY_KEY = ['admin', 'ai', 'presets'] as const;
 export const ADMIN_AI_BINDINGS_QUERY_KEY = ['admin', 'ai', 'bindings'] as const;
+export const ADMIN_AI_PRICES_QUERY_KEY = ['admin', 'ai', 'prices'] as const;
 
 function adminAiCredentialsQueryKey(params: AiScopeQuery) {
   return [...ADMIN_AI_CREDENTIALS_QUERY_KEY, params] as const;
@@ -111,11 +112,17 @@ export function useAiConfigQueries({
   const localCredentialsEnabled = active;
   const localPresetsEnabled = active;
   const bindingsEnabled = active;
+  const pricesEnabled = active;
 
   const providersQuery = useQuery({
     queryKey: ADMIN_AI_PROVIDERS_QUERY_KEY,
     queryFn: () => adminApi.listProviders(),
     enabled: active,
+  });
+  const pricesQuery = useQuery({
+    queryKey: [...ADMIN_AI_PRICES_QUERY_KEY, workspaceId ?? null],
+    queryFn: () => adminApi.listPrices(workspaceId ? { workspaceId } : {}),
+    enabled: pricesEnabled,
   });
   const modelsQuery = useQuery({
     ...adminModelCatalogOptions(visibleModelParams),
@@ -207,11 +214,14 @@ export function useAiConfigQueries({
     () => new Map(models.map(model => [model.id, model])),
     [models],
   );
+  const priceRuleCount = Array.isArray(pricesQuery.data) ? pricesQuery.data.length : 0;
 
   const invalidateAll = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ADMIN_AI_PROVIDERS_QUERY_KEY });
     void queryClient.invalidateQueries({ queryKey: ADMIN_AI_CREDENTIALS_QUERY_KEY });
     void queryClient.invalidateQueries({ queryKey: ADMIN_AI_PRESETS_QUERY_KEY });
     void queryClient.invalidateQueries({ queryKey: ADMIN_AI_BINDINGS_QUERY_KEY });
+    void queryClient.invalidateQueries({ queryKey: ADMIN_AI_PRICES_QUERY_KEY });
     void queryClient.invalidateQueries({ queryKey: ADMIN_MODEL_CATALOG_QUERY_KEY });
   }, [queryClient]);
 
@@ -244,6 +254,7 @@ export function useAiConfigQueries({
     libraryBindings,
     bindingsForScope,
     modelById,
+    priceRuleCount,
     invalidateAll,
     providersState: stateFor(
       active && activeSection === 'providers' && queryIsLoading(providersQuery),

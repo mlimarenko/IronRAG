@@ -109,7 +109,7 @@ impl From<ApiError> for ContentServiceError {
             | ApiError::GraphPersistenceIntegrity(message)
             | ApiError::SettlementRefreshFailed(message) => Self::StateConflict { message },
             ApiError::ProviderFailure(message) => Self::ProviderUnavailable { message },
-            ApiError::ArangoBootstrapFailed(message) => Self::StorageUnavailable { message },
+            ApiError::ServiceUnavailable { message, .. } => Self::StorageUnavailable { message },
             other => Self::Internal(anyhow::anyhow!(other.to_string())),
         }
     }

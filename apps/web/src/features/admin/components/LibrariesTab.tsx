@@ -21,6 +21,7 @@ import {
   Loader2,
   RotateCw,
   Search,
+  Settings2,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -394,6 +395,12 @@ export function LibrariesTab({ active }: { active: boolean }) {
     void navigate("/documents");
   };
 
+  // Rows link into the Library Hub (ADM-02) — the per-library detail route
+  // that absorbs operations, ingest jobs, backup, and MCP settings.
+  const openHub = (row: LibraryRow) => {
+    void navigate(`/admin/library/${row.library.id}`);
+  };
+
   const exportRows = (targetRows: LibraryRow[]) => {
     for (const row of targetRows) {
       librarySnapshotApi.downloadExport(row.library.id, ["library_data", "blobs"]);
@@ -524,8 +531,8 @@ export function LibrariesTab({ active }: { active: boolean }) {
                     setSelectedLibraryId(row.library.id);
                     setDeleteTarget("single");
                   }}
-                  onExport={(row) => exportRows([row])}
                   onOpenDocuments={openDocuments}
+                  onOpenHub={openHub}
                   onSelectRow={(row) => {
                     if (selectionMode) {
                       toggleRowSelection(row.library.id);
@@ -574,8 +581,8 @@ export function LibrariesTab({ active }: { active: boolean }) {
                 setSelectedLibraryId(row.library.id);
                 setDeleteTarget("single");
               }}
-              onExport={(row) => exportRows([row])}
               onOpenDocuments={openDocuments}
+              onOpenHub={openHub}
               row={selectedRow}
               t={t}
             />
@@ -836,6 +843,7 @@ function LibrariesTable({
   onDelete,
   onExport,
   onOpenDocuments,
+  onOpenHub,
   onSelectRow,
   onToggleSelection,
   onToggleSort,
@@ -852,8 +860,8 @@ function LibrariesTable({
   currencyCode: string;
   locale: string;
   onDelete: (row: LibraryRow) => void;
-  onExport: (row: LibraryRow) => void;
   onOpenDocuments: (row: LibraryRow) => void;
+  onOpenHub: (row: LibraryRow) => void;
   onSelectRow: (row: LibraryRow) => void;
   onToggleSelection: (libraryId: string) => void;
   onToggleSort: (key: SortKey) => void;
@@ -968,11 +976,11 @@ function LibrariesTable({
             </td>
             <td className="px-4 py-3.5">
               <div className="flex items-center gap-1">
+                <IconButton label={t("admin.libraries.openHub")} onClick={(event) => { event.stopPropagation(); onOpenHub(row); }}>
+                  <Settings2 className="h-3.5 w-3.5" />
+                </IconButton>
                 <IconButton label={t("admin.libraries.openDocuments")} onClick={(event) => { event.stopPropagation(); onOpenDocuments(row); }}>
                   <ExternalLink className="h-3.5 w-3.5" />
-                </IconButton>
-                <IconButton label={t("admin.snapshot.export")} onClick={(event) => { event.stopPropagation(); onExport(row); }}>
-                  <Download className="h-3.5 w-3.5" />
                 </IconButton>
                 <IconButton destructive label={t("admin.libraries.delete")} onClick={(event) => { event.stopPropagation(); onDelete(row); }}>
                   <Trash2 className="h-3.5 w-3.5" />
@@ -1202,16 +1210,16 @@ function LibraryInspector({
   currencyCode,
   locale,
   onDelete,
-  onExport,
   onOpenDocuments,
+  onOpenHub,
   row,
   t,
 }: {
   currencyCode: string;
   locale: string;
   onDelete: (row: LibraryRow) => void;
-  onExport: (row: LibraryRow) => void;
   onOpenDocuments: (row: LibraryRow) => void;
+  onOpenHub: (row: LibraryRow) => void;
   row: LibraryRow | null;
   t: TFunction;
 }) {
@@ -1242,13 +1250,13 @@ function LibraryInspector({
           <InspectorMetric label={t("admin.libraries.workspaceId")} value={row.workspace.id} mono />
         </div>
         <div className="mt-4 flex flex-col gap-2">
-          <Button onClick={() => onOpenDocuments(row)} size="sm">
+          <Button onClick={() => onOpenHub(row)} size="sm">
+            <Settings2 className="mr-1.5 h-3.5 w-3.5" />
+            {t("admin.libraries.openHub")}
+          </Button>
+          <Button onClick={() => onOpenDocuments(row)} size="sm" variant="outline">
             <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
             {t("admin.libraries.openDocuments")}
-          </Button>
-          <Button onClick={() => onExport(row)} size="sm" variant="outline">
-            <Download className="mr-1.5 h-3.5 w-3.5" />
-            {t("admin.snapshot.export")}
           </Button>
           <Button onClick={() => onDelete(row)} size="sm" variant="destructive">
             <Trash2 className="mr-1.5 h-3.5 w-3.5" />

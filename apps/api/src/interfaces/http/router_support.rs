@@ -89,8 +89,8 @@ pub enum ApiError {
     MissingPrice(String),
     #[error("conflict: {0}")]
     KnowledgeNotReady(String),
-    #[error("service unavailable: {0}")]
-    ArangoBootstrapFailed(String),
+    #[error("service unavailable: {message}")]
+    ServiceUnavailable { message: String, kind: &'static str },
     #[error("conflict: {0}")]
     GraphWriteContention(String),
     #[error("conflict: {0}")]
@@ -153,8 +153,8 @@ impl ApiError {
     }
 
     #[must_use]
-    pub fn arango_bootstrap_failed(message: impl Into<String>) -> Self {
-        Self::ArangoBootstrapFailed(message.into())
+    pub fn service_unavailable(message: impl Into<String>, kind: &'static str) -> Self {
+        Self::ServiceUnavailable { message: message.into(), kind }
     }
 
     #[must_use]
@@ -203,7 +203,7 @@ impl ApiError {
             | Self::GraphPersistenceIntegrity(_)
             | Self::SettlementRefreshFailed(_) => StatusCode::CONFLICT,
             Self::ProviderFailure(_) => StatusCode::BAD_GATEWAY,
-            Self::ArangoBootstrapFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal | Self::InternalMessage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -226,7 +226,7 @@ impl ApiError {
             Self::IdempotencyConflict(_) => "idempotency_conflict",
             Self::MissingPrice(_) => "missing_price",
             Self::KnowledgeNotReady(_) => "knowledge_not_ready",
-            Self::ArangoBootstrapFailed(_) => "arangodb_bootstrap_failed",
+            Self::ServiceUnavailable { kind, .. } => kind,
             Self::GraphWriteContention(_) => "graph_write_contention",
             Self::GraphPersistenceIntegrity(_) => "graph_persistence_integrity",
             Self::SettlementRefreshFailed(_) => "graph_state_refresh_failed",
@@ -265,7 +265,7 @@ impl From<ContentServiceError> for ApiError {
             ContentServiceError::InvalidRequest { message } => Self::BadRequest(message),
             ContentServiceError::StateConflict { message } => Self::Conflict(message),
             ContentServiceError::StorageUnavailable { message } => {
-                Self::ArangoBootstrapFailed(message)
+                Self::ServiceUnavailable { message, kind: "content_storage_unavailable" }
             }
             ContentServiceError::ProviderUnavailable { message } => Self::ProviderFailure(message),
             ContentServiceError::Cancelled => {
@@ -339,7 +339,7 @@ impl From<KnowledgeServiceError> for ApiError {
             KnowledgeServiceError::NotFound { message } => Self::NotFound(message),
             KnowledgeServiceError::GraphNotReady { message } => Self::KnowledgeNotReady(message),
             KnowledgeServiceError::CacheUnavailable { message } => {
-                Self::ArangoBootstrapFailed(message)
+                Self::ServiceUnavailable { message, kind: "cache_unavailable" }
             }
             KnowledgeServiceError::Repository(error) => {
                 Self::internal_with_log(error, "knowledge service repository failure")
@@ -362,7 +362,9 @@ impl From<QueryServiceError> for ApiError {
             QueryServiceError::BindingNotConfigured { message }
             | QueryServiceError::StateConflict { message } => Self::Conflict(message),
             QueryServiceError::ProviderUnavailable { message } => Self::ProviderFailure(message),
-            QueryServiceError::CacheUnavailable { message } => Self::ArangoBootstrapFailed(message),
+            QueryServiceError::CacheUnavailable { message } => {
+                Self::ServiceUnavailable { message, kind: "cache_unavailable" }
+            }
             QueryServiceError::Cancelled => Self::Conflict("query operation cancelled".to_string()),
             QueryServiceError::Repository(error) => {
                 Self::internal_with_log(error, "query service repository failure")

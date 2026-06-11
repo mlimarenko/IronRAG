@@ -68,7 +68,9 @@ function mapProvider(raw: ProviderCatalogEntryResponse): AIProvider {
         ? 'active'
         : raw.lifecycleState === 'deprecated'
           ? 'deprecated'
-          : 'preview',
+          : raw.lifecycleState === 'disabled'
+            ? 'disabled'
+            : 'preview',
     ...(raw.defaultBaseUrl ? { defaultBaseUrl: raw.defaultBaseUrl } : {}),
     apiKeyRequired: credentialPolicy.apiKeyRequired,
     baseUrlRequired: credentialPolicy.baseUrlRequired,
@@ -125,6 +127,9 @@ function mapModelOption(raw: ModelCatalogEntryResponse): AIModelOption {
     allowedBindingPurposes: raw.allowedBindingPurposes,
     ...(optionalNumber(raw.contextWindow) !== undefined ? { contextWindow: raw.contextWindow as number } : {}),
     ...(optionalNumber(raw.maxOutputTokens) !== undefined ? { maxOutputTokens: raw.maxOutputTokens as number } : {}),
+    lifecycleState: raw.lifecycleState === 'active' || raw.lifecycleState === 'preview' || raw.lifecycleState === 'deprecated' || raw.lifecycleState === 'disabled'
+      ? raw.lifecycleState
+      : 'active',
     availabilityState: raw.availabilityState,
     availableCredentialIds: raw.availableCredentialIds,
   };

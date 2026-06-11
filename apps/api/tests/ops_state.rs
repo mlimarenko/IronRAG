@@ -243,6 +243,7 @@ impl OpsStateFixture {
                     external_key: Some(format!("ops-state-doc-{suffix}")),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await

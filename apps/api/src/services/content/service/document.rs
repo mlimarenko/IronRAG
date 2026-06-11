@@ -9,7 +9,7 @@ use crate::{
     domains::content::{
         ContentChunk, ContentDocument, ContentDocumentHead, ContentDocumentPipelineJob,
         ContentDocumentPipelineState, ContentDocumentSummary, ContentMutation, ContentRevision,
-        WebPageProvenance,
+        DOCUMENT_ROLE_ATTACHED_CONTEXT, DOCUMENT_ROLE_ATTACHMENT, WebPageProvenance,
     },
     domains::knowledge::{PreparedSegmentDetail, PreparedSegmentListItem, TypedTechnicalFact},
     domains::ops::{ASYNC_OP_STATUS_FAILED, MUTATION_KIND_DELETE},
@@ -224,6 +224,7 @@ impl ContentService {
             sort,
             sort_desc,
             status_filter,
+            id_filter,
         } = command;
 
         let library =
@@ -244,6 +245,7 @@ impl ContentService {
             sort,
             sort_desc,
             &status_filter_values,
+            &id_filter,
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1053,6 +1055,24 @@ impl ContentService {
                     "outbound webhook publish error after delete_document_with_context"
                 );
             }
+
+            // Cascade the parentage lifecycle to this document's children. Only
+            // runs on the real delete transition (guarded by the non-deleted
+            // precondition above), so an idempotent re-delete never re-cascades.
+            // `attached_context` children are subordinate context whose value
+            // depends on the parent — they are soft-deleted through the normal
+            // per-document delete flow so each fires its own webhook/audit
+            // event. `attachment` children are peer documents that survive; they
+            // are detached (parent pointer cleared) but keep their declared
+            // `parent_external_key` so the resolver can re-attach if the parent
+            // reappears.
+            self.cascade_document_parentage_on_delete(
+                state,
+                document.library_id,
+                document_id,
+                refresh_graph_projection,
+            )
+            .await;
         }
 
         Ok(ContentDocument {
@@ -1063,6 +1083,83 @@ impl ContentService {
             document_state: document.document_state,
             created_at: document.created_at,
         })
+    }
+
+    /// Applies the parentage lifecycle to a deleted document's children:
+    /// soft-delete `attached_context` children through the normal per-document
+    /// delete flow, and detach `attachment` children (clear the parent pointer,
+    /// keep the declared key). Failures are logged and never fail the parent
+    /// delete, which is already committed by the time this runs.
+    async fn cascade_document_parentage_on_delete(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        parent_document_id: Uuid,
+        refresh_graph_projection: bool,
+    ) {
+        let children = match content_repository::list_active_children_by_parent(
+            &state.persistence.postgres,
+            library_id,
+            parent_document_id,
+        )
+        .await
+        {
+            Ok(children) => children,
+            Err(error) => {
+                tracing::warn!(
+                    parent_document_id = %parent_document_id,
+                    %library_id,
+                    ?error,
+                    "failed to load child documents for delete cascade; children left untouched"
+                );
+                return;
+            }
+        };
+
+        for child in children {
+            match child.document_role.as_str() {
+                DOCUMENT_ROLE_ATTACHED_CONTEXT => {
+                    // Boxed: `delete_document_with_context` -> cascade ->
+                    // `delete_document_with_context` is an async recursion cycle
+                    // (a parent's attached_context child is itself deleted
+                    // through the full per-document flow), which Rust requires to
+                    // be heap-pinned.
+                    if let Err(error) = Box::pin(self.delete_document_with_context(
+                        state,
+                        child.id,
+                        None,
+                        refresh_graph_projection,
+                    ))
+                    .await
+                    {
+                        tracing::warn!(
+                            parent_document_id = %parent_document_id,
+                            child_document_id = %child.id,
+                            %library_id,
+                            ?error,
+                            "failed to cascade-delete attached_context child after parent delete"
+                        );
+                    }
+                }
+                DOCUMENT_ROLE_ATTACHMENT => {
+                    if let Err(error) = content_repository::detach_document_parent(
+                        &state.persistence.postgres,
+                        child.id,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            parent_document_id = %parent_document_id,
+                            child_document_id = %child.id,
+                            %library_id,
+                            ?error,
+                            "failed to detach attachment child after parent delete"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Resolves the revision that retry should re-run against.
@@ -1607,6 +1704,11 @@ pub struct ListDocumentsPageCommand {
     /// `canceled`, `failed`, `processing`, `queued`, `ready` — matching the
     /// canonical `derived_status` column in `list_document_page_rows`.
     pub status_filter: Vec<DocumentStatus>,
+    /// Server-side document-id filter. Empty = no filter. When non-empty the
+    /// page is restricted to these ids, letting a caller resolve specific
+    /// documents (e.g. a deep link carrying `documentId`) through the same
+    /// canonical list derivation instead of a divergent per-id mapper.
+    pub id_filter: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]

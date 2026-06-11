@@ -15,6 +15,7 @@ use crate::{
 pub struct ParsedUploadMultipart {
     pub library_id: Uuid,
     pub external_key: Option<String>,
+    pub parent_external_key: Option<String>,
     pub idempotency_key: Option<String>,
     pub title: Option<String>,
     pub document_hint: Option<String>,
@@ -44,6 +45,7 @@ pub(super) async fn parse_upload_multipart(
 ) -> Result<ParsedUploadMultipart, ApiError> {
     let mut library_id = None;
     let mut external_key = None;
+    let mut parent_external_key = None;
     let mut idempotency_key = None;
     let mut title = None;
     let mut document_hint = None;
@@ -73,6 +75,11 @@ pub(super) async fn parse_upload_multipart(
                         .await
                         .map_err(|_| ApiError::BadRequest("invalid external_key".to_string()))?,
                 );
+            }
+            "parent_external_key" => {
+                parent_external_key = Some(field.text().await.map_err(|_| {
+                    ApiError::BadRequest("invalid parent_external_key".to_string())
+                })?);
             }
             "idempotency_key" => {
                 idempotency_key =
@@ -110,6 +117,7 @@ pub(super) async fn parse_upload_multipart(
         library_id: library_id
             .ok_or_else(|| ApiError::BadRequest("missing library_id".to_string()))?,
         external_key: external_key.and_then(normalize_optional_text),
+        parent_external_key: parent_external_key.and_then(normalize_optional_text),
         idempotency_key: idempotency_key.and_then(normalize_optional_text),
         title: title.and_then(normalize_optional_text),
         document_hint: normalize_optional_document_hint(document_hint)?,

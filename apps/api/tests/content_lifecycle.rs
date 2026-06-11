@@ -23,6 +23,126 @@ use content_lifecycle_support::{ContentLifecycleFixture, revision_command};
 
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]
+async fn delete_parent_cascades_attached_context_and_detaches_attachment_children() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+
+    let result = async {
+        let content = &fixture.state.canonical_services.content;
+        let pool = &fixture.state.persistence.postgres;
+        let parent_key = format!("parent-page-{}", Uuid::now_v7());
+
+        // Parent document.
+        let parent = content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(parent_key.clone()),
+                    file_name: None,
+                    created_by_principal_id: None,
+                    parent_external_key: None,
+                },
+            )
+            .await
+            .context("failed to create parent document")?;
+
+        // Two children declaring the parent: admission resolves parent_document_id.
+        let image_child = content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("image-child-{}", Uuid::now_v7())),
+                    file_name: None,
+                    created_by_principal_id: None,
+                    parent_external_key: Some(parent_key.clone()),
+                },
+            )
+            .await
+            .context("failed to create image child document")?;
+        let attachment_child = content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("doc-child-{}", Uuid::now_v7())),
+                    file_name: None,
+                    created_by_principal_id: None,
+                    parent_external_key: Some(parent_key.clone()),
+                },
+            )
+            .await
+            .context("failed to create attachment child document")?;
+
+        // Both children resolved the parent at admission (provisional role).
+        for child_id in [image_child.id, attachment_child.id] {
+            let row = repositories::content_repository::get_document_by_id(pool, child_id)
+                .await?
+                .context("child row missing after admission")?;
+            assert_eq!(row.parent_document_id, Some(parent.id));
+            assert_eq!(row.parent_external_key.as_deref(), Some(parent_key.as_str()));
+        }
+
+        // Finalize roles as the promote path would: the image child is
+        // subordinate attached context; the other stays a peer attachment.
+        sqlx::query("update content_document set document_role = 'attached_context' where id = $1")
+            .bind(image_child.id)
+            .execute(pool)
+            .await
+            .context("failed to set attached_context role")?;
+        sqlx::query("update content_document set document_role = 'attachment' where id = $1")
+            .bind(attachment_child.id)
+            .execute(pool)
+            .await
+            .context("failed to set attachment role")?;
+
+        // Delete the parent.
+        content
+            .delete_document(&fixture.state, parent.id)
+            .await
+            .context("failed to delete parent document")?;
+
+        // attached_context child is cascade-soft-deleted.
+        let image_row = repositories::content_repository::get_document_by_id(pool, image_child.id)
+            .await?
+            .context("image child row missing after cascade")?;
+        assert_eq!(
+            image_row.document_state, "deleted",
+            "attached_context child must be cascade-soft-deleted with its parent"
+        );
+
+        // attachment child survives, detached but keeps its declared key.
+        let attachment_row =
+            repositories::content_repository::get_document_by_id(pool, attachment_child.id)
+                .await?
+                .context("attachment child row missing after cascade")?;
+        assert_ne!(
+            attachment_row.document_state, "deleted",
+            "attachment child must survive the parent delete"
+        );
+        assert_eq!(
+            attachment_row.parent_document_id, None,
+            "attachment child must be detached from the deleted parent"
+        );
+        assert_eq!(
+            attachment_row.parent_external_key.as_deref(),
+            Some(parent_key.as_str()),
+            "detached attachment child must keep its declared parent key for re-resolution"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
 async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_active() -> Result<()>
 {
     let fixture = ContentLifecycleFixture::create().await?;
@@ -40,6 +160,7 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
                     external_key: Some(format!("head-doc-{}", Uuid::now_v7())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await
@@ -154,6 +275,7 @@ async fn canonical_content_lifecycle_head_promotion_fails_loudly_when_knowledge_
                     external_key: Some(format!("head-sync-failure-doc-{}", Uuid::now_v7())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await
@@ -226,6 +348,7 @@ async fn canonical_content_lifecycle_edit_mutation_persists_source_for_reprocess
                     external_key: Some(format!("edit-doc-{}", Uuid::now_v7())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await
@@ -448,6 +571,7 @@ async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job(
                     mime_type: Some("text/plain".to_string()),
                     file_bytes: b"Ada Lovelace wrote the note.\nCharles Babbage built the engine."
                         .to_vec(),
+                    parent_external_key: None,
                 },
             )
             .await
@@ -662,6 +786,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                     external_key: Some(format!("mutation-doc-{}", Uuid::now_v7())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await
@@ -1214,6 +1339,7 @@ async fn canonical_content_delete_succeeds_when_post_commit_cleanup_fails() -> R
                     external_key: Some(format!("delete-cleanup-doc-{}", Uuid::now_v7())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await
@@ -1367,6 +1493,7 @@ async fn canonical_content_delete_drops_orphan_runtime_graph_state() -> Result<(
                     external_key: Some(format!("graph-stranded-{}", Uuid::now_v7())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await
@@ -1416,6 +1543,7 @@ async fn canonical_content_delete_drops_orphan_runtime_graph_state() -> Result<(
                     external_key: Some(format!("graph-current-{}", Uuid::now_v7())),
                     file_name: None,
                     created_by_principal_id: None,
+                    parent_external_key: None,
                 },
             )
             .await

@@ -29,6 +29,7 @@ use crate::{
 };
 
 use super::{
+    MAX_DETAIL_GRAPH_EDGE_REFERENCES, MAX_DETAIL_GRAPH_NODE_REFERENCES,
     MAX_DETAIL_PREPARED_SEGMENT_REFERENCES, MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION,
     PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN, PreparedSegmentRevisionInfo, RankedBundleReference,
     turn::query_runtime_stage_label,
@@ -195,7 +196,7 @@ pub(crate) fn build_assistant_document_references(
                 document_id: Some(reference.document_id),
                 document_title: Some(reference.document_title.clone()),
                 source_uri: reference.source_uri.clone(),
-                document_hint: reference.source_uri.clone(),
+                document_hint: None,
                 source_access: reference.source_access.clone(),
             }
         })
@@ -374,7 +375,7 @@ pub(crate) fn map_entity_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryGraphNodeReference> {
     let execution_id = execution_id_of(bundle);
-    bundle
+    let mut references = bundle
         .entity_references
         .iter()
         .map(|reference| QueryGraphNodeReference {
@@ -386,7 +387,10 @@ pub(crate) fn map_entity_references(
             entity_type: None,
             summary: None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    sort_graph_node_references(&mut references);
+    references.truncate(MAX_DETAIL_GRAPH_NODE_REFERENCES);
+    references
 }
 
 pub(crate) async fn hydrate_entity_references(
@@ -475,7 +479,7 @@ pub(crate) fn map_relation_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryGraphEdgeReference> {
     let execution_id = execution_id_of(bundle);
-    bundle
+    let mut references = bundle
         .relation_references
         .iter()
         .map(|reference| QueryGraphEdgeReference {
@@ -486,7 +490,28 @@ pub(crate) fn map_relation_references(
             relation_type: String::new(),
             summary: None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    sort_graph_edge_references(&mut references);
+    references.truncate(MAX_DETAIL_GRAPH_EDGE_REFERENCES);
+    references
+}
+
+fn sort_graph_node_references(references: &mut [QueryGraphNodeReference]) {
+    references.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+}
+
+fn sort_graph_edge_references(references: &mut [QueryGraphEdgeReference]) {
+    references.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.edge_id.cmp(&right.edge_id))
+    });
 }
 
 pub(crate) async fn hydrate_relation_references(

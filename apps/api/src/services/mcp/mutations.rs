@@ -467,6 +467,7 @@ pub(crate) async fn process_upload_mutation(
                 document_hint: None,
                 mime_type,
                 file_bytes,
+                parent_external_key: None,
             },
         )
         .await?;

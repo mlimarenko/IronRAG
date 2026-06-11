@@ -128,6 +128,14 @@ pub struct PrincipalResponse {
     pub disabled_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemRole {
+    Viewer,
+    Operator,
+    Admin,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserResponse {
@@ -135,8 +143,25 @@ pub struct UserResponse {
     pub login: String,
     pub email: String,
     pub display_name: String,
+    pub role: SystemRole,
     pub auth_provider_kind: String,
     pub external_subject: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateUserRequest {
+    pub login: String,
+    pub email: String,
+    pub display_name: String,
+    pub password: String,
+    pub role: SystemRole,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetUserRoleRequest {
+    pub role: SystemRole,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -230,6 +255,70 @@ pub struct GrantResponse {
     pub granted_by_principal_id: Option<Uuid>,
     pub granted_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// One workspace the user has been granted access to, with the permission
+/// tier that access was granted at. Returned by `GET /iam/users/{id}/access`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserWorkspaceAccessResponse {
+    pub grant_id: Uuid,
+    pub workspace_id: Uuid,
+    pub display_name: String,
+    pub permission_kind: IamPermissionKind,
+}
+
+/// One library the user has been granted access to, with its workspace and the
+/// permission tier. Returned by `GET /iam/users/{id}/access`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserLibraryAccessResponse {
+    pub grant_id: Uuid,
+    pub library_id: Uuid,
+    pub workspace_id: Uuid,
+    pub display_name: String,
+    pub permission_kind: IamPermissionKind,
+}
+
+/// The full per-user access picture: every workspace- and library-scoped grant
+/// the admin can manage from the Users access editor.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserAccessResponse {
+    pub principal_id: Uuid,
+    pub workspaces: Vec<UserWorkspaceAccessResponse>,
+    pub libraries: Vec<UserLibraryAccessResponse>,
+}
+
+/// Desired workspace access entry in a `PUT /iam/users/{id}/access` request.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAccessEntryRequest {
+    pub workspace_id: Uuid,
+    pub permission_kind: IamPermissionKind,
+}
+
+/// Desired library access entry in a `PUT /iam/users/{id}/access` request.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryAccessEntryRequest {
+    pub library_id: Uuid,
+    pub permission_kind: IamPermissionKind,
+}
+
+/// Declarative target state for a user's workspace + library access.
+///
+/// The handler reconciles the user's existing workspace/library grants against
+/// this set: grants not present here are revoked, missing ones are created, and
+/// matching ones are left untouched. Other grant kinds (system, document, etc.)
+/// are not touched by this endpoint.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetUserAccessRequest {
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceAccessEntryRequest>,
+    #[serde(default)]
+    pub libraries: Vec<LibraryAccessEntryRequest>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

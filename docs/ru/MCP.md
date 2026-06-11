@@ -90,6 +90,7 @@ Response структура: текст tool-result содержит ответ;
 |------------|----------|----------------------|
 | `search_documents` | Поиск по библиотеке: гибридный BM25 + вектор. Возвращает хиты на уровне документов. Поиск можно сузить списком ref-ов через `libraries`. | `query` |
 | `read_document` | Прочитать документ полностью или частями (с continuation token). | `documentId` |
+| `view_document_image` | Получить оригинальные байты изображения (PNG/JPEG/и т.п.) документа-вложения, чтобы мультимодальная модель могла его увидеть напрямую. Показывается только когда активный Agent binding указывает на мультимодальную модель. | `documentId` |
 | `list_documents` | Список документов в библиотеке с фильтрацией по статусу. | `library` (опц.) |
 | `upload_documents` | Загрузить один или несколько документов. Поддерживает base64 и inline-текст. | `library`, `documents` |
 | `update_document` | Дописать или заменить содержимое документа. | `library`, `documentId`, `operationKind` |
@@ -121,7 +122,7 @@ Response структура: текст tool-result содержит ответ;
 | `get_runtime_execution` | Загрузить summary жизненного цикла runtime-исполнения. | `runtimeExecutionId` |
 | `get_runtime_execution_trace` | Полная трассировка стадий, действий и policy-решений. | `runtimeExecutionId` |
 
-Под капотом MCP использует те же сервисы, что и веб-приложение: Postgres для control state, ArangoDB для графа и документной истины, Redis-backed workers для ingestion.
+Под капотом MCP использует те же сервисы, что и веб-приложение: PostgreSQL для control state и knowledge-plane data, а также Redis-backed workers для ingestion.
 
 ## Quality-контракт graph tools
 
@@ -143,7 +144,7 @@ Response структура: текст tool-result содержит ответ;
 ## Что получает клиент
 
 - Ту же searchable и grounded базу знаний, что использует встроенный ассистент в UI.
-- Граф знаний с типизированными сущностями (person, organization, artifact, natural, process, concept и др.) и 88 типами связей.
+- Граф знаний с типизированными сущностями (person, organization, artifact, natural, process, concept и др.) и 90 типами связей.
 - Гибридный поиск (BM25 + vector) с учётом quality score чанков и field-weighted scoring заголовков.
 - Нормальный способ подключить внутреннего бота, саппорт-ассистента или персонального агента к управляемой knowledge base без отдельного адаптерного слоя.
 

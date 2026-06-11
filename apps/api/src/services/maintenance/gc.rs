@@ -39,6 +39,7 @@ use crate::{
     },
     services::{
         content::service::snapshot::clear_library_arango_footprint,
+        graph::gc as graph_gc,
         maintenance::audit::{OrphanLibrariesAudit, orphan_library_ids},
     },
 };
@@ -110,6 +111,9 @@ pub struct LibraryGcReport {
     pub null_head_docs_processed: i64,
     pub null_head_chunks_removed: i64,
     pub null_head_vectors_removed: i64,
+    pub runtime_graph_nodes_removed: i64,
+    pub runtime_graph_edges_removed: i64,
+    pub runtime_graph_evidence_removed: i64,
 }
 
 impl LibraryGcReport {
@@ -127,6 +131,12 @@ impl LibraryGcReport {
                 + other.null_head_chunks_removed,
             null_head_vectors_removed: self.null_head_vectors_removed
                 + other.null_head_vectors_removed,
+            runtime_graph_nodes_removed: self.runtime_graph_nodes_removed
+                + other.runtime_graph_nodes_removed,
+            runtime_graph_edges_removed: self.runtime_graph_edges_removed
+                + other.runtime_graph_edges_removed,
+            runtime_graph_evidence_removed: self.runtime_graph_evidence_removed
+                + other.runtime_graph_evidence_removed,
         }
     }
 
@@ -139,6 +149,9 @@ impl LibraryGcReport {
             + self.stale_vectors_removed
             + self.null_head_chunks_removed
             + self.null_head_vectors_removed
+            + self.runtime_graph_nodes_removed
+            + self.runtime_graph_edges_removed
+            + self.runtime_graph_evidence_removed
     }
 }
 
@@ -162,6 +175,8 @@ pub enum GcStaleChunksError {
     Sqlx(#[from] sqlx::Error),
     #[error("arango error during gc.stale-chunks for library {library_id}: {source}")]
     Arango { library_id: Uuid, source: anyhow::Error },
+    #[error("unsupported knowledge plane backend `{backend}` for gc.stale-chunks")]
+    UnsupportedBackend { backend: String },
 }
 
 impl GcStaleChunksError {
@@ -173,6 +188,7 @@ impl GcStaleChunksError {
             Self::ActiveIngest { .. } => "active_ingest",
             Self::Sqlx(_) => "postgres",
             Self::Arango { .. } => "arango",
+            Self::UnsupportedBackend { .. } => "unsupported_backend",
         }
     }
 }
@@ -242,8 +258,21 @@ async fn run_under_lock(
     library_id: Uuid,
     options: GcStaleChunksOptions,
 ) -> Result<LibraryGcReport, GcStaleChunksError> {
+    match state.settings.knowledge_plane_backend.as_str() {
+        "arango" => run_arango_under_lock(state, workspace_id, library_id, options).await,
+        "postgres" => run_postgres_under_lock(state, library_id, options).await,
+        backend => Err(GcStaleChunksError::UnsupportedBackend { backend: backend.to_string() }),
+    }
+}
+
+async fn run_arango_under_lock(
+    state: &AppState,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    options: GcStaleChunksOptions,
+) -> Result<LibraryGcReport, GcStaleChunksError> {
     let null_head_total = arango_scalar_i64(
-        state.arango_document_store.client(),
+        &state.arango_client,
         COUNT_NULL_HEAD_DOCS_AQL,
         serde_json::json!({
             "@document_collection": KNOWLEDGE_DOCUMENT_COLLECTION,
@@ -296,6 +325,47 @@ async fn run_under_lock(
     Ok(report)
 }
 
+async fn run_postgres_under_lock(
+    state: &AppState,
+    library_id: Uuid,
+    options: GcStaleChunksOptions,
+) -> Result<LibraryGcReport, GcStaleChunksError> {
+    let pool = &state.persistence.postgres;
+    let mut tx = pool.begin().await?;
+    let report = if options.dry_run {
+        count_postgres_gc_transaction(library_id, &mut tx).await?
+    } else {
+        let stale_evidence = run_stale_evidence_transaction(library_id, &mut tx).await?;
+        let graph_report = graph_gc::run_gc_postgres_transaction(library_id, &mut tx)
+            .await
+            .map_err(graph_gc_error_to_stale_chunks_error)?;
+        LibraryGcReport {
+            runtime_graph_nodes_removed: i64::from(graph_report.entities_deleted),
+            runtime_graph_edges_removed: i64::from(graph_report.relations_deleted),
+            runtime_graph_evidence_removed: stale_evidence.total_rows_removed()
+                + i64::from(graph_report.evidence_deleted),
+            ..LibraryGcReport::default()
+        }
+    };
+    tx.commit().await?;
+    Ok(report)
+}
+
+async fn count_postgres_gc_transaction(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<LibraryGcReport, GcStaleChunksError> {
+    let stale_evidence = count_stale_evidence_candidates_transaction(library_id, tx).await?;
+    let (orphan_evidence, zombie_edges, zombie_nodes) =
+        count_runtime_graph_gc_candidates_transaction(library_id, tx).await?;
+    Ok(LibraryGcReport {
+        runtime_graph_nodes_removed: zombie_nodes,
+        runtime_graph_edges_removed: zombie_edges,
+        runtime_graph_evidence_removed: stale_evidence.total_rows_removed() + orphan_evidence,
+        ..LibraryGcReport::default()
+    })
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct DocumentGcCounts {
     chunks_removed: i64,
@@ -329,7 +399,7 @@ async fn gc_document(
         .collect();
 
     let chunks_removed = arango_scalar_i64(
-        state.arango_document_store.client(),
+        &state.arango_client,
         if options.dry_run {
             COUNT_STALE_CHUNKS_FOR_DOC_AQL
         } else {
@@ -349,7 +419,7 @@ async fn gc_document(
     let vectors_removed = if stale_revision_ids.is_empty() {
         0
     } else {
-        let arango = state.arango_search_store.client();
+        let arango = &state.arango_client;
         let mut vector_collections: Vec<String> = vec![
             KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string(),
             KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string(),
@@ -572,6 +642,16 @@ async fn run_stale_evidence_under_lock(
     pool: &PgPool,
     library_id: Uuid,
 ) -> Result<StaleEvidenceReport, GcStaleChunksError> {
+    let mut tx = pool.begin().await?;
+    let report = run_stale_evidence_transaction(library_id, &mut tx).await?;
+    tx.commit().await?;
+    Ok(report)
+}
+
+async fn run_stale_evidence_transaction(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<StaleEvidenceReport, GcStaleChunksError> {
     let stale_revision_rows = sqlx::query_scalar::<_, i64>(
         "with deleted as ( \
              delete from runtime_graph_evidence ev \
@@ -595,7 +675,7 @@ async fn run_stale_evidence_under_lock(
          select count(*)::bigint from deleted",
     )
     .bind(library_id)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await?;
 
     let phantom_chunk_rows = sqlx::query_scalar::<_, i64>(
@@ -611,10 +691,120 @@ async fn run_stale_evidence_under_lock(
          select count(*)::bigint from deleted",
     )
     .bind(library_id)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await?;
 
     Ok(StaleEvidenceReport { stale_revision_rows, phantom_chunk_rows })
+}
+
+async fn count_stale_evidence_candidates_transaction(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<StaleEvidenceReport, GcStaleChunksError> {
+    let stale_revision_rows = sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint \
+         from runtime_graph_evidence ev \
+         join content_document_head h on h.document_id = ev.document_id \
+         where ev.library_id = $1 \
+           and ev.revision_id is not null \
+           and ev.revision_id not in ( \
+               coalesce(h.readable_revision_id, '00000000-0000-0000-0000-000000000000'::uuid), \
+               coalesce(h.active_revision_id,   '00000000-0000-0000-0000-000000000000'::uuid) \
+           ) \
+           and not exists ( \
+               select 1 from ingest_job j \
+               where j.library_id = ev.library_id \
+                 and j.knowledge_document_id = ev.document_id \
+                 and j.queue_state in ('queued','leased','paused') \
+                 and j.completed_at is null \
+           )",
+    )
+    .bind(library_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let phantom_chunk_rows = sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint \
+         from runtime_graph_evidence ev \
+         where ev.library_id = $1 \
+           and ev.chunk_id is not null \
+           and not exists (select 1 from content_chunk c where c.id = ev.chunk_id)",
+    )
+    .bind(library_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(StaleEvidenceReport { stale_revision_rows, phantom_chunk_rows })
+}
+
+async fn count_runtime_graph_gc_candidates_transaction(
+    library_id: Uuid,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(i64, i64, i64), GcStaleChunksError> {
+    sqlx::query_as::<_, (i64, i64, i64)>(
+        "with orphan_evidence as ( \
+             select evidence.id \
+             from runtime_graph_evidence evidence \
+             where evidence.library_id = $1 \
+               and ( \
+                   (evidence.target_kind = 'node' and not exists ( \
+                       select 1 from runtime_graph_node node \
+                       where node.library_id = evidence.library_id \
+                         and node.id = evidence.target_id \
+                   )) \
+                   or \
+                   (evidence.target_kind = 'edge' and not exists ( \
+                       select 1 from runtime_graph_edge edge \
+                       where edge.library_id = evidence.library_id \
+                         and edge.id = evidence.target_id \
+                   )) \
+               ) \
+         ), \
+         zombie_nodes as ( \
+             select node.id \
+             from runtime_graph_node node \
+             where node.library_id = $1 \
+               and not exists ( \
+                   select 1 from runtime_graph_evidence evidence \
+                   where evidence.library_id = node.library_id \
+                     and evidence.target_kind = 'node' \
+                     and evidence.target_id = node.id \
+               ) \
+         ), \
+         zombie_edges as ( \
+             select edge.id \
+             from runtime_graph_edge edge \
+             where edge.library_id = $1 \
+               and ( \
+                   not exists ( \
+                       select 1 from runtime_graph_evidence evidence \
+                       where evidence.library_id = edge.library_id \
+                         and evidence.target_kind = 'edge' \
+                         and evidence.target_id = edge.id \
+                   ) \
+                   or exists (select 1 from zombie_nodes node where node.id = edge.from_node_id) \
+                   or exists (select 1 from zombie_nodes node where node.id = edge.to_node_id) \
+               ) \
+         ) \
+         select \
+             (select count(*)::bigint from orphan_evidence), \
+             (select count(*)::bigint from zombie_edges), \
+             (select count(*)::bigint from zombie_nodes)",
+    )
+    .bind(library_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(GcStaleChunksError::Sqlx)
+}
+
+fn graph_gc_error_to_stale_chunks_error(error: graph_gc::GraphGcError) -> GcStaleChunksError {
+    match error {
+        graph_gc::GraphGcError::Postgres { source, .. } => GcStaleChunksError::Sqlx(source),
+        graph_gc::GraphGcError::Arango { library_id, source } => {
+            GcStaleChunksError::Arango { library_id, source }
+        }
+        other => GcStaleChunksError::Arango { library_id: Uuid::nil(), source: anyhow!(other) },
+    }
 }
 
 #[cfg(test)]
@@ -632,6 +822,9 @@ mod tests {
             null_head_docs_processed: 0,
             null_head_chunks_removed: 0,
             null_head_vectors_removed: 0,
+            runtime_graph_nodes_removed: 0,
+            runtime_graph_edges_removed: 0,
+            runtime_graph_evidence_removed: 0,
         };
         let b = LibraryGcReport {
             documents_visited: 5,
@@ -642,6 +835,9 @@ mod tests {
             null_head_docs_processed: 3,
             null_head_chunks_removed: 18,
             null_head_vectors_removed: 9,
+            runtime_graph_nodes_removed: 4,
+            runtime_graph_edges_removed: 6,
+            runtime_graph_evidence_removed: 8,
         };
         let merged = a.merge(b);
         assert_eq!(merged.documents_visited, 15);
@@ -652,6 +848,9 @@ mod tests {
         assert_eq!(merged.null_head_docs_processed, 3);
         assert_eq!(merged.null_head_chunks_removed, 18);
         assert_eq!(merged.null_head_vectors_removed, 9);
+        assert_eq!(merged.runtime_graph_nodes_removed, 4);
+        assert_eq!(merged.runtime_graph_edges_removed, 6);
+        assert_eq!(merged.runtime_graph_evidence_removed, 8);
     }
 
     #[test]
@@ -661,9 +860,12 @@ mod tests {
             stale_vectors_removed: 20,
             null_head_chunks_removed: 30,
             null_head_vectors_removed: 40,
+            runtime_graph_nodes_removed: 5,
+            runtime_graph_edges_removed: 6,
+            runtime_graph_evidence_removed: 7,
             ..LibraryGcReport::default()
         };
-        assert_eq!(report.total_rows_removed(), 100);
+        assert_eq!(report.total_rows_removed(), 118);
     }
 
     #[test]

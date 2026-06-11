@@ -1,9 +1,6 @@
 import type { TFunction } from 'i18next';
 
-import {
-  humanizeDocumentFailure,
-  humanizeDocumentStage,
-} from '@/shared/lib/document-processing';
+import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing';
 import { mapSourceAccess } from '@/shared/lib/source-access';
 import type { DocumentListItem } from '@/shared/api/documents';
 import type { DocumentItem, DocumentStatus } from '@/shared/types';
@@ -95,17 +92,18 @@ export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
   const progressPercent = normalizeProgressPercent(raw.progressPercent);
   const failureCode = raw.failureCode ?? undefined;
   const failureMessage = raw.failureMessage?.trim() || undefined;
-  const statusReason =
+  const failureNotice =
     raw.status === 'failed'
-      ? humanizeDocumentFailure(
+      ? buildDocumentFailureNotice(
           {
             failureCode,
-            stalledReason: failureMessage,
+            failureMessage,
             stage: raw.stage,
           },
           t,
         )
       : undefined;
+  const statusReason = failureNotice?.summary;
 
   return {
     id: raw.id,
@@ -122,6 +120,7 @@ export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
     processingFinishedAt: raw.processingFinishedAt,
     failureCode,
     failureMessage,
+    failureNotice,
     statusReason,
     canRetry: raw.retryable,
     documentHint: raw.documentHint?.trim() || undefined,

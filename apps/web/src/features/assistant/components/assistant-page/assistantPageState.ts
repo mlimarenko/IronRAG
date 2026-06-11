@@ -93,6 +93,43 @@ export function createErrorAssistantMessage(content: string): AssistantMessage {
   };
 }
 
+/**
+ * Server-authoritative turn wall-clock in milliseconds, measured entirely on
+ * the API host so it is immune to client↔server clock skew. Prefers the
+ * execution window (`completedAt − startedAt`); falls back to the request →
+ * response turn timestamps, which are likewise both server-stamped. Returns
+ * `undefined` when no consistent server pair is available.
+ */
+export function serverTurnDurationMs(
+  result: AssistantTurnExecutionResponse,
+): number | undefined {
+  const serverPairs: Array<[string | null | undefined, string | null | undefined]> = [
+    [result.execution?.startedAt, result.execution?.completedAt],
+    [result.requestTurn?.createdAt, result.responseTurn?.createdAt],
+  ];
+  for (const [startIso, endIso] of serverPairs) {
+    if (!startIso || !endIso) continue;
+    const start = Date.parse(startIso);
+    const end = Date.parse(endIso);
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+      return end - start;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Replaces the optimistic pending assistant message with the finalized turn.
+ *
+ * The optimistic user message is stamped with the *browser* clock at send time,
+ * whereas the turn's authoritative timestamps come from the API host. Computing
+ * "Reply: N s" as `serverAnswerTimestamp − browserUserTimestamp` therefore folds
+ * any client↔server clock skew straight into the displayed latency (a lagging
+ * browser clock inflates it). We instead carry the single-clock server duration
+ * as `durationMs`, and restamp both the request and response messages from their
+ * server turn timestamps so the two visible times stay mutually consistent and
+ * match what a later history reload renders.
+ */
 export function applyTurnResultToMessages(
   messages: AssistantMessage[],
   pendingId: string,
@@ -101,19 +138,59 @@ export function applyTurnResultToMessages(
 ): AssistantMessage[] {
   const answerText = result.responseTurn?.contentText ?? emptyAnswerText;
   const evidence = mapAssistantTurnToEvidence(result);
+  const durationMs = serverTurnDurationMs(result);
+  const answerTimestamp = result.execution?.completedAt ?? result.responseTurn?.createdAt;
+  // Always a server timestamp: prefer the user turn's own stamp, else the
+  // execution start. This guarantees the restamped question shares a clock with
+  // the server-stamped answer even in degenerate responses, so the reload-style
+  // timestamp-delta fallback can never silently subtract a browser timestamp
+  // from a server one.
+  const questionTimestamp = result.requestTurn?.createdAt ?? result.execution?.startedAt;
 
-  return messages.map((message) =>
-    message.id === pendingId
-      ? {
-          id: result.responseTurn?.id ?? pendingId,
-          role: 'assistant',
-          content: answerText,
-          timestamp: result.responseTurn?.createdAt ?? message.timestamp,
-          executionId: result.responseTurn?.executionId ?? null,
-          evidence,
-        }
-      : message,
-  );
+  // The user turn that triggered this answer is the nearest message preceding
+  // the pending placeholder; restamp it from the server so the question and
+  // answer share one clock.
+  const pendingIndex = messages.findIndex((message) => message.id === pendingId);
+  let userIndex = -1;
+  for (let i = pendingIndex - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') {
+      userIndex = i;
+      break;
+    }
+  }
+
+  return messages.map((message, index) => {
+    if (message.id === pendingId) {
+      return {
+        id: result.responseTurn?.id ?? pendingId,
+        role: 'assistant',
+        content: answerText,
+        timestamp: answerTimestamp ?? message.timestamp,
+        durationMs,
+        executionId: result.responseTurn?.executionId ?? null,
+        evidence,
+      };
+    }
+    if (index === userIndex && questionTimestamp) {
+      return { ...message, timestamp: questionTimestamp };
+    }
+    return message;
+  });
+}
+
+/**
+ * Total distinct evidence sources backing a message — used to drive the
+ * "See all N sources" affordance when the inline chip list is capped. Counts
+ * distinct source documents from segment refs plus entity references.
+ */
+export function countDistinctSources(message: AssistantMessage): number {
+  const evidence = message.evidence;
+  if (!evidence) return 0;
+  const documents = new Set<string>();
+  for (const ref of evidence.segmentRefs) {
+    documents.add(ref.documentId || ref.documentName);
+  }
+  return documents.size + evidence.entityRefs.length;
 }
 
 export function latestEvidenceFromMessages(

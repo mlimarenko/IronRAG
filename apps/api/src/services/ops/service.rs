@@ -584,7 +584,7 @@ fn map_library_facts_from_aggregate(
 ) -> OpsLibraryState {
     let latest_knowledge_generation = knowledge_generations.first();
     let readable_document_count = coverage.metrics.ready;
-    let failed_document_count = coverage.metrics.failed + coverage.metrics.canceled;
+    let failed_document_count = coverage.metrics.failed;
     // Approximation: "rebuilding" docs are those whose latest mutation is
     // still in-flight. The canonical metrics aggregate counts both
     // `processing` (running attempt) and `queued` (enqueued, not yet
@@ -737,9 +737,11 @@ mod tests {
     use super::{
         DocumentKnowledgeSignals, LibraryCoverageFast, build_library_warnings_from_aggregate,
         classify_document_knowledge_signals, derive_degraded_state,
+        map_library_facts_from_aggregate,
     };
     use crate::domains::knowledge::KnowledgeLibraryGeneration;
     use crate::domains::ops::OpsLibraryWarning;
+    use crate::infra::repositories::ops_repository;
     use chrono::Utc;
     use ironrag_contracts::documents::{DocumentReadiness, LibraryDocumentMetrics};
     use uuid::Uuid;
@@ -780,6 +782,38 @@ mod tests {
             created_at: Utc::now(),
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn library_state_does_not_fold_canceled_documents_into_failed_count() {
+        let coverage = LibraryCoverageFast {
+            metrics: LibraryDocumentMetrics {
+                total: 2,
+                ready: 0,
+                processing: 0,
+                queued: 0,
+                failed: 0,
+                canceled: 2,
+                graph_ready: 0,
+                graph_sparse: 0,
+                recomputed_at: Utc::now(),
+            },
+            graph_snapshot: None,
+            latest_generation_id: None,
+            vector_inventory_mismatch_count: 0,
+        };
+        let row = ops_repository::OpsLibraryFactsRow {
+            library_id: Uuid::now_v7(),
+            queue_depth: 0,
+            running_attempts: 0,
+            degraded_state: "ready".to_string(),
+            last_recomputed_at: Utc::now(),
+        };
+
+        let state = map_library_facts_from_aggregate(&row, &coverage, &[], false, false);
+
+        assert_eq!(state.failed_document_count, 0);
+        assert_eq!(state.degraded_state, "healthy");
     }
 
     #[test]

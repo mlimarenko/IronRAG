@@ -104,6 +104,8 @@ function LibraryHealthPanelImpl({
         })}
       </div>
 
+      {/* Graph stat tiles — honest affordance: these route to /graph rather
+          than looking clickable while doing nothing (DSH-04). */}
       <div className="mt-6 grid grid-cols-3 gap-3">
         {[
           { label: t('dashboard.nodes'), value: graph.nodeCount, icon: Share2 },
@@ -114,11 +116,13 @@ function LibraryHealthPanelImpl({
             icon: Database,
           },
         ].map((item) => (
-          <div
+          <button
             key={item.label}
-            className="rounded-xl border border-border/60 bg-background/70 p-3.5"
+            type="button"
+            onClick={() => onNavigate('/graph')}
+            className="group rounded-xl border border-border/60 bg-background/70 p-3.5 text-left transition-colors hover:border-primary/30 hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
           >
-            <div className="flex items-center gap-2 text-muted-foreground">
+            <div className="flex items-center gap-2 text-muted-foreground transition-colors group-hover:text-primary">
               <item.icon className="h-3.5 w-3.5" />
               <span className="text-[11px] font-semibold uppercase tracking-wider">
                 {item.label}
@@ -127,7 +131,7 @@ function LibraryHealthPanelImpl({
             <div className="mt-2 text-xl font-bold tracking-tight tabular-nums">
               {item.value}
             </div>
-          </div>
+          </button>
         ))}
       </div>
     </div>

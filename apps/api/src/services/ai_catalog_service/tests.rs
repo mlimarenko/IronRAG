@@ -29,6 +29,8 @@ fn sample_model(allowed_binding_purposes: Vec<AiBindingPurpose>) -> ModelCatalog
         model_name: "sample-model".to_string(),
         capability_kind: "chat".to_string(),
         modality_kind: "text".to_string(),
+        lifecycle_state: "active".to_string(),
+        metadata_json: serde_json::json!({}),
         allowed_binding_purposes,
         context_window: None,
         max_output_tokens: None,
@@ -535,6 +537,8 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
             model_name: "alpha-chat-mini".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -552,6 +556,8 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
             model_name: "alpha-chat-plus".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -569,6 +575,8 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
             model_name: "alpha-embedding-large".to_string(),
             capability_kind: "embedding".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::EmbedChunk,
                 AiBindingPurpose::QueryRetrieve,
@@ -653,6 +661,8 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
             model_name: "provider-gamma-chat-flash".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -669,6 +679,8 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
             model_name: "gamma-chat-max".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -685,6 +697,8 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
             model_name: "gamma-embedding-large".to_string(),
             capability_kind: "embedding".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::EmbedChunk,
                 AiBindingPurpose::QueryRetrieve,
@@ -698,6 +712,8 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
             model_name: "provider-gamma-vl-max".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -757,6 +773,8 @@ fn bootstrap_preset_descriptors_keep_partial_provider_presets() {
         model_name: "provider-delta-chat".to_string(),
         capability_kind: "chat".to_string(),
         modality_kind: "text".to_string(),
+        lifecycle_state: "active".to_string(),
+        metadata_json: serde_json::json!({}),
         allowed_binding_purposes: vec![
             AiBindingPurpose::ExtractText,
             AiBindingPurpose::ExtractGraph,
@@ -955,6 +973,8 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
             model_name: "beta-chat-small".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -971,6 +991,8 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
             model_name: "beta-embedding-small".to_string(),
             capability_kind: "embedding".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::EmbedChunk,
                 AiBindingPurpose::QueryRetrieve,
@@ -984,6 +1006,8 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
             model_name: "beta-chat-vision".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -1050,6 +1074,8 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
             model_name: "provider-omega/chat-mini".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -1067,6 +1093,8 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
             model_name: "provider-omega/chat-vision".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::QueryAnswer,
                 AiBindingPurpose::Vision,
@@ -1081,6 +1109,8 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
             model_name: "provider-omega/alpha-embedding-small".to_string(),
             capability_kind: "embedding".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::EmbedChunk,
                 AiBindingPurpose::QueryRetrieve,
@@ -1132,6 +1162,8 @@ fn bootstrap_model_list_presets_require_provider_discovered_models() {
             model_name: "beta-chat-small".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
             context_window: None,
             max_output_tokens: None,
@@ -1142,6 +1174,8 @@ fn bootstrap_model_list_presets_require_provider_discovered_models() {
             model_name: "beta-embedding-small".to_string(),
             capability_kind: "embedding".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::EmbedChunk,
                 AiBindingPurpose::QueryRetrieve,
@@ -1281,6 +1315,8 @@ fn configured_bootstrap_presets_inherit_provider_bundle_tuning_when_models_match
         model_name: "alpha-chat-mini".to_string(),
         capability_kind: "chat".to_string(),
         modality_kind: "multimodal".to_string(),
+        lifecycle_state: "active".to_string(),
+        metadata_json: serde_json::json!({}),
         allowed_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
         context_window: None,
         max_output_tokens: None,
@@ -1320,6 +1356,8 @@ fn bootstrap_bundle_omits_incomplete_provider_profiles() {
         model_name: "provider-delta-chat".to_string(),
         capability_kind: "chat".to_string(),
         modality_kind: "text".to_string(),
+        lifecycle_state: "active".to_string(),
+        metadata_json: serde_json::json!({}),
         allowed_binding_purposes: vec![
             AiBindingPurpose::ExtractText,
             AiBindingPurpose::ExtractGraph,
@@ -1353,6 +1391,8 @@ fn provider_bootstrap_bundle_never_borrows_models_from_another_provider() {
             model_name: "provider-delta-chat".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractText,
                 AiBindingPurpose::ExtractGraph,
@@ -1369,6 +1409,8 @@ fn provider_bootstrap_bundle_never_borrows_models_from_another_provider() {
             model_name: "alpha-embedding-large".to_string(),
             capability_kind: "embedding".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::EmbedChunk,
                 AiBindingPurpose::QueryRetrieve,
@@ -1382,6 +1424,8 @@ fn provider_bootstrap_bundle_never_borrows_models_from_another_provider() {
             model_name: "alpha-chat-plus".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::ExtractGraph,
                 AiBindingPurpose::QueryCompile,
@@ -1414,6 +1458,8 @@ fn required_bootstrap_bundle_is_self_contained_without_vision() {
             model_name: "alpha-chat-mini".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
             context_window: None,
             max_output_tokens: None,
@@ -1424,6 +1470,8 @@ fn required_bootstrap_bundle_is_self_contained_without_vision() {
             model_name: "alpha-embedding-large".to_string(),
             capability_kind: "embedding".to_string(),
             modality_kind: "text".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::EmbedChunk,
                 AiBindingPurpose::QueryRetrieve,
@@ -1437,6 +1485,8 @@ fn required_bootstrap_bundle_is_self_contained_without_vision() {
             model_name: "alpha-chat-plus".to_string(),
             capability_kind: "chat".to_string(),
             modality_kind: "multimodal".to_string(),
+            lifecycle_state: "active".to_string(),
+            metadata_json: serde_json::json!({}),
             allowed_binding_purposes: vec![
                 AiBindingPurpose::QueryCompile,
                 AiBindingPurpose::QueryAnswer,

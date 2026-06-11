@@ -83,7 +83,6 @@ Available permissions:
 - `query_run` -- execute queries (ask)
 - `ops_read`, `audit_read` -- operational and audit data
 - `credential_admin`, `binding_admin` -- integration management
-- `connector_admin` -- manage connectors
 
 Scope resolution (when `--scope` is not specified):
 - System permissions (`iam_admin`, `ops_read`, `audit_read`) → `system` scope
@@ -208,15 +207,14 @@ below. Each row links to the canonical command.
 | "Disk is filling up, what is eating it?" | [`audit storage-summary`](#audit-storage-summary) |
 | "Retrieval looks slow; suspect bad indexes" | [`audit index-bloat`](#audit-index-bloat) |
 | "A document never shows up in answers even though ingest reported success" | [`audit null-head-docs`](#audit-null-head-docs), then [`repair null-heads`](#repair-null-heads) |
-| "I deleted libraries last week, did Arango free their space?" | [`audit orphan-libraries`](#audit-orphan-libraries) |
+| "I deleted libraries last week, were their knowledge-plane rows removed?" | [`audit orphan-libraries`](#audit-orphan-libraries) |
 | "Old chunks pile up after we replace document revisions" | [`gc stale-chunks`](#gc-stale-chunks) |
 | "`runtime_graph_evidence` is bigger than the rest of the DB" | [`gc stale-evidence`](#gc-stale-evidence) |
-| "Confirmed orphan footprint in Arango, want to purge" | [`gc orphan-libraries --yes`](#gc-orphan-libraries) |
+| "Confirmed orphan knowledge-plane footprint, want to purge" | [`gc orphan-libraries --yes`](#gc-orphan-libraries) |
 | "Failed ingest left lots of `null-head` documents" | [`repair null-heads-auto`](#repair-null-heads-auto) |
 | "ingest_stage_event is months old, queries are slow" | [`retention stage-events`](#retention-stage-events) |
-| "Changed the embedding model; vectors need to move to new shard" | [`migrate vector-per-dim`](#migrate-vector-per-dim) |
+| "Changed the embedding model for a library; vectors need rebuilding" | [`rebuild vector-plane`](#rebuild-vector-plane) |
 | "JSONL chunks have no temporal bounds yet" | [`migrate chunk-temporal-bounds`](#migrate-chunk-temporal-bounds) |
-| "Chunk vectors are on the shared per-dim shard; want to move them into per-library shards" | [`migrate chunk-vector-per-library`](#migrate-chunk-vector-per-library) |
 | "Want to re-embed an entire library" | [`rebuild vector-plane`](#rebuild-vector-plane) |
 | "Graph went out of sync with documents" | [`rebuild runtime-graph`](#rebuild-runtime-graph) |
 | "Want to see what the background scheduler is doing right now" | [`lease summary`](#lease-summary) |
@@ -232,8 +230,8 @@ Ships in the Docker image at `/usr/local/bin/ironrag-maintenance`.
 
 ## Configuration
 
-Reads the same environment variables as the backend server (chiefly
-`DATABASE_URL` and the ArangoDB credentials).
+Reads the same environment variables as the backend server. The required
+database setting is `DATABASE_URL`.
 
 ## Replacement for legacy maintenance binaries
 
@@ -246,7 +244,6 @@ are gone — invoke the new subcommand instead.
 | `ironrag-gc-stale-chunks` | `ironrag-maintenance gc stale-chunks` |
 | `ironrag-audit-orphan-data` | `ironrag-maintenance audit orphan-libraries` (read-only) + `ironrag-maintenance gc orphan-libraries --yes` (destructive) |
 | `ironrag-promote-null-heads` | `ironrag-maintenance repair null-heads` |
-| `ironrag-vector-migrate-to-per-dim` | `ironrag-maintenance migrate vector-per-dim` |
 | `ironrag-vector-rebuild` | `ironrag-maintenance rebuild vector-plane --source-library <uuid>` |
 | `ironrag-backfill-chunk-temporal-bounds` | `ironrag-maintenance migrate chunk-temporal-bounds` |
 | `rebuild_runtime_graph` | `ironrag-maintenance rebuild runtime-graph` |
@@ -323,10 +320,10 @@ before retrying.
 
 ### `audit orphan-libraries`
 
-**What it tells you.** ArangoDB rows whose `library_id` does not
-match a live PostgreSQL `catalog_library` row. Such rows are left
-behind by older deletion paths and pre-cascade-fix code; the report
-counts orphan rows per library and per knowledge collection.
+**What it tells you.** PostgreSQL knowledge-plane rows whose
+`library_id` does not match a live `catalog_library` row. Such rows
+are left behind by older deletion paths and pre-cascade-fix code; the
+report counts orphan rows per library and per knowledge table.
 
 **When to run.** Periodic hygiene, especially after library deletions
 on older deployments. Always read-only — the destructive purge is a
@@ -353,21 +350,20 @@ cannot lose data to the sweeper.
 
 ### `gc stale-chunks`
 
-**What it does.** Deletes chunks from ArangoDB (and their vectors
-across every per-dim shard plus the legacy single-dim collection)
-whose revision is no longer the readable or active head of their
-document. The default is conservative: documents whose head is null
-on both pointers (failed ingest) are skipped so a recoverable doc
-isn't erased outright.
+**What it does.** Deletes chunks from PostgreSQL knowledge-plane
+tables, including vector material, whose revision is no longer the
+readable or active head of their document. The default is conservative:
+documents whose head is null on both pointers (failed ingest) are
+skipped so a recoverable doc is not erased outright.
 
-**When to run.** Disk pressure on the Arango volume, especially after
+**When to run.** Disk pressure on PostgreSQL storage, especially after
 many revision replacements. Suspect "we kept old chunks around"
-behaviour.
+behavior.
 
 **Example.**
 
 ```bash
-# Safe preview: count what would be removed without issuing destructive AQL.
+# Safe preview: count what would be removed without issuing destructive deletes.
 ironrag-maintenance gc stale-chunks --dry-run --json
 
 # Real run, single library.
@@ -406,8 +402,9 @@ already-deleted chunks.
 ### `gc orphan-libraries`
 
 **What it does.** Destructive companion to `audit orphan-libraries`.
-Wipes every ArangoDB row whose `library_id` no longer matches a live
-PostgreSQL `catalog_library` row. Refuses to run without `--yes`.
+Wipes every PostgreSQL knowledge-plane row whose `library_id` no
+longer matches a live `catalog_library` row. Refuses to run without
+`--yes`.
 
 **When to run.** Only after `audit orphan-libraries` has been
 reviewed and you accept the list it reports.
@@ -536,23 +533,6 @@ no-op. These are NOT recurring — they exist for the canonical
 "convert old shape to new" path and are removed from the operator
 catalog once a deployment is fully migrated.
 
-### `migrate vector-per-dim`
-
-**What it does.** Moves rows from the legacy single-dim
-`knowledge_chunk_vector` / `knowledge_entity_vector` collections
-into per-dim shards (`knowledge_*_vector_d<dim>`). Walks every
-distinct vector length present in the legacy collection and creates
-the matching shard on demand.
-
-**When to run.** Once per cluster, after upgrading to the per-dim
-schema. Re-runs are safe if migration was interrupted.
-
-**Example.**
-
-```bash
-ironrag-maintenance migrate vector-per-dim --json
-```
-
 ### `migrate chunk-temporal-bounds`
 
 **What it does.** Backfills `occurred_at` / `occurred_until` on
@@ -573,49 +553,22 @@ ironrag-maintenance migrate chunk-temporal-bounds --dry-run --json
 ironrag-maintenance migrate chunk-temporal-bounds --library <uuid> --json
 ```
 
-### `migrate chunk-vector-per-library`
-
-**What it does.** Drains chunk vectors from the shared per-dim shard
-(`knowledge_chunk_vector_d<dim>`) into per-`(library, dim)` shards
-(`knowledge_chunk_vector_d<dim>_l<library>`). Walks every distinct
-`(library_id, dim)` pair present in the shared shard and writes the
-rows into the matching per-library shard, creating the shard on demand
-if it does not exist yet. Idempotent: a second run after migration
-completes is a no-op. Entity vectors are not moved by this command —
-they remain on the shared per-dim shard.
-
-**When to run.** Once per cluster, after upgrading to the per-library
-shard schema. Re-runs after an interrupted migration are safe.
-
-**Example.**
-
-```bash
-# Drain the shared per-dim shard into per-library shards
-ironrag-maintenance migrate chunk-vector-per-library
-
-# Same, with a JSON summary instead of human-readable output
-ironrag-maintenance migrate chunk-vector-per-library --json
-```
-
----
-
 ## `rebuild` — heavy operator-only passes
 
 The rebuild family is intentionally *never* wired into the recurring
 scheduler. These passes consume significant provider budget or hold
-long-running ArangoDB resources; operators must trigger them
+long-running database resources; operators must trigger them
 explicitly with full context.
 
 ### `rebuild vector-plane`
 
-**What it does.** Reconciles the instance-wide ArangoDB vector index
-dimensions with the source library's active vector binding and
-rebuilds all library vector material that must share those indexes.
+**What it does.** Reconciles PostgreSQL pgvector material with the
+source library's active vector binding and rebuilds library vector
+material that must move to the matching `(library, dim)` relation.
 
-**When to run.** When changing the embedding dimension globally
-(e.g. swapping from 1536-dim to 3072-dim across the cluster). The
-source library tells the rebuilder which dimension is the new
-canonical.
+**When to run.** When changing the embedding dimension for a library
+or scope that already has vector material. The source library tells
+the rebuilder which active binding and dimension to use.
 
 **Example.**
 

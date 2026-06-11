@@ -19,16 +19,16 @@ export type DashboardGraph = GraphSurface;
 export type RecentWebRun = WebIngestRunSummary;
 export type DashboardData = DashboardSurface;
 
-/**
- * DocumentsPage drives its list state from the server's keyset pagination and
- * only supports search + sort + an optional `documentId` deep-link. Dashboard
- * CTAs therefore resolve to either "open a specific document" or "open the
- * documents list" — status/readiness filters no longer exist as URL state.
- */
-export function buildDocumentsPath(filters: { documentId?: string } = {}): string {
+export function buildDocumentsPath(
+  filters: { documentId?: string; status?: string } = {},
+): string {
+  const params = new URLSearchParams();
   if (filters.documentId) {
-    const params = new URLSearchParams({ documentId: filters.documentId });
-    return `/documents?${params.toString()}`;
+    params.set('documentId', filters.documentId);
   }
-  return '/documents';
+  if (filters.status) {
+    params.set('status', filters.status);
+  }
+  const query = params.toString();
+  return query ? `/documents?${query}` : '/documents';
 }

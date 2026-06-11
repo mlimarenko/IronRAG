@@ -25,7 +25,8 @@ Every admitted source is normalized into structured blocks before chunking, embe
 
 ### Supported source families
 
-- Text-like files: markdown, text, JSON, YAML, source code
+- Text-like files: markdown, text, source code
+- Structured-record files — JSON (object or array), YAML (single document, `---` stream, or sequence of mappings), JSONL/NDJSON, and TOML — through one key-agnostic record extractor. Every field at any nesting depth is flattened to searchable text, heterogeneous schemas (different keys per record) are profiled, and any value shaped like a timestamp (RFC3339 or epoch, under any key name) time-stamps its record for temporal retrieval. There is no per-format or per-field special-casing: an arbitrary export, event log, config dump, or session transcript all flow through the same generic path.
 - PDF through Docling-backed document-layout extraction with durable page-range checkpoints for stored revisions
 - Static raster images through Docling OCR by default, or through the active `vision` binding when the library recognition policy selects `vision`
 - DOCX and PPTX through Docling-backed structured block extraction
@@ -36,7 +37,7 @@ Every admitted source is normalized into structured blocks before chunking, embe
 
 Recognition routing is explicit catalog state, not a hidden runtime fallback.
 New libraries inherit `IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE`, which
-accepts `docling` or `vision` and defaults to `docling`. Per-library updates use
+accepts `docling` or `vision` and defaults to `vision`. Per-library updates use
 `PUT /v1/catalog/libraries/{libraryId}/recognition-policy`.
 
 PDF, DOCX, and PPTX layout extraction stays on the embedded Docling CPU runtime.
@@ -72,22 +73,32 @@ all converge to the same markdown-table representation plus row-oriented normali
 
 ## 3. Storage model
 
-### Postgres
+### PostgreSQL
 
-Postgres stores core control and content metadata:
+PostgreSQL stores the control plane and the knowledge plane:
 
 - IAM, users, sessions, tokens, grants
 - workspaces and libraries
 - documents, revisions, heads, mutations, async operations, and durable ingest units
 - costs, audit events, runtime execution metadata
+- structured blocks, chunks, technical facts, graph data, evidence, context bundles
+- pgvector embeddings and PostgreSQL full-text search material
+
+### Document parentage
+
+A document admitted as a dependent of another source document (a page
+attachment or inline image) records a canonical `parent_document_id` and a
+typed `document_role` (`primary`, `attachment`, or `attached_context`). The
+role is decided once — at admission or by the per-library parentage backfill —
+from structural inputs only: whether a parent was declared, plus the revision's
+media class (a raster-image child becomes `attached_context`; any other child
+stays a peer `attachment`; no parent makes it `primary`). Retrieval reads the
+typed role; it never inspects MIME, extension, or filename. The role is mirrored
+onto the knowledge-plane document row that the query path reads.
 
 ### Blob storage
 
 Source bytes live behind `content_revision.storage_key` in the configured storage backend.
-
-### ArangoDB
-
-Arango stores structured document and graph material used by ingestion, retrieval, and topology APIs. It is the runtime data surface for graph-oriented reads and staged extraction artifacts.
 
 ## 4. Chunking
 
@@ -148,6 +159,10 @@ The query path uses one retrieval stack:
 
 Exact-literal technical questions use the same answer contract but may take a lexical-only fast path when the question clearly targets an endpoint, parameter name, or transport literal.
 
+Documents whose typed role is `attached_context` (raster-image attachments of a parent page) are subordinate context, not competing peers: their chunks are demoted below peer and primary content when the final context is selected, they are excluded from the clarify-vs-answer disposition, and they never become a clarify variant. A page's one-chunk image attachments therefore cannot flood an answer's context or a clarification menu and displace the parent page's own evidence. The exception is a query that explicitly focuses on the attachment itself, which keeps it in the primary band.
+
+When retrieval shows that a subjectless question matches several distinct subjects, the answer leads with a grounded excerpt for one subject and asks which subject to focus on. The choice list is derived from the library's own data (document grouping or knowledge-graph entity evidence), never from a hardcoded subject list. This also covers the deterministic latest-version inventory path: a release-inventory question with no scoping subject clarifies when the listed release documents mention several distinct graph subjects, while a query scoped by an entity, a document focus, or a literal keeps the flat latest-versions list.
+
 ### Turn contract
 
 `POST /v1/query/sessions/{sessionId}/turns` creates one persisted assistant
@@ -193,12 +208,10 @@ The response streams a tar archive compressed with zstd. Contents:
 
 - `manifest.json` — schema version, library id, include scope
 - `postgres/<table>/part-NNNNNN.ndjson` — chunked rows per table (64 MiB soft cap)
-- `arango/<collection>/part-NNNNNN.ndjson` — knowledge docs
-- `arango-edges/<collection>/part-NNNNNN.ndjson` — knowledge edges
 - `blobs/<storage_key>` — original source files (opt-in via `blobs` include)
 - `summary.json` — row counts observed during export
 
-`include=library_data` covers all Postgres and Arango data. `blobs` adds the original uploaded files. The frontend uses a plain `<a href>` download — no JavaScript memory buffer.
+`include=library_data` covers the PostgreSQL library data, including knowledge-plane rows. `blobs` adds the original uploaded files. The frontend uses a plain `<a href>` download without a JavaScript memory buffer.
 
 ### Import
 
@@ -208,7 +221,7 @@ Content-Type: application/zstd
 Body: raw .tar.zst archive
 ```
 
-The import reads the manifest from the archive to determine what was exported. `overwrite=replace` clears the existing library footprint before inserting. Postgres rows are bulk-inserted via `jsonb_populate_recordset` (1000 rows per statement). Arango documents use bulk AQL inserts.
+The import reads the manifest from the archive to determine what was exported. `overwrite=replace` clears the existing library footprint before inserting. PostgreSQL rows are bulk-inserted via `jsonb_populate_recordset` (1000 rows per statement). The restore path accepts current v6 PostgreSQL archives and v5 archives from 0.4.x.
 
 ## 9. Hard invariants
 

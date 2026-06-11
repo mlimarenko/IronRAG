@@ -673,7 +673,7 @@ async fn rollback_failed_bootstrap_principal(state: &AppState, principal_id: Uui
     }
 }
 
-fn hash_password(password: &str) -> Result<String, ApiError> {
+pub(crate) fn hash_password(password: &str) -> Result<String, ApiError> {
     Argon2::default()
         .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
         .map(|hash| hash.to_string())

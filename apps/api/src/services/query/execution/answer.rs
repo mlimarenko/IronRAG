@@ -37,11 +37,11 @@ use super::{
 };
 use crate::services::query::latest_versions::{
     compare_version_desc, extract_semver_like_version, latest_version_family_key,
-    query_requests_latest_versions,
+    query_requests_latest_versions, requested_latest_version_count,
 };
 
-const SOURCE_COVERAGE_MAX_TOTAL_CHUNKS: usize = 24;
-const SOURCE_COVERAGE_MAX_CHUNKS_PER_DOCUMENT: usize = 12;
+const SOURCE_COVERAGE_MAX_TOTAL_CHUNKS: usize = 32;
+const SOURCE_COVERAGE_MAX_CHUNKS_PER_DOCUMENT: usize = 24;
 const PREPARED_SEGMENT_EXCERPT_CHARS: usize = 420;
 const SOURCE_SLICE_COMPACT_BODY_CHARS: usize = 720;
 const SOURCE_SLICE_COMPACT_BODY_LINES: usize = 8;
@@ -99,19 +99,21 @@ When the user asks for one example or one use case from a specific document, cho
 When the user asks for one example, one use case, or one named item besides an explicitly excluded item from a grounded list, choose a different grounded item from that same list and prefer the next distinct item after the excluded one when the list order is available.\n\
 When the user asks for examples across categories joined by \"and\", include grounded representatives from each requested category when they appear in the same grounded document.\n\
 When the user asks to describe, classify, or explain each item from a prior literal list, preserve visible coverage of that list. Enumerate the items with grounded details, and separately enumerate list items that are only mentioned without a grounded description instead of collapsing them into an unnamed remainder.\n\
+When Context includes a Source title inventory and the user asks a broad inventory, setup, configuration, or ambiguous family question, preserve each visible source title at least once before summarizing. If some listed titles have no grounded details, enumerate those titles separately instead of silently dropping them.\n\
 When recent conversation contains a line that begins `literals:`, use it as compact memory of identifier-shaped setting names already surfaced in the chat. For follow-up questions about those settings or previously mentioned items, preserve applicable identifier-shaped names that are also supported by the latest context; do not treat this line as new evidence for paths, URLs, commands, versions, or values.\n\
 For multi-role questions that ask which item fits each described role, bind each role to the source entity or document whose evidence directly satisfies that role. Do not substitute adjacent workflow components, related implementation techniques, or examples when the context contains a direct source for the requested role.\n\
 When the context includes a library summary, trust those summary counts and readiness facts over individual chunk snippets for totals and overall status.\n\
 When Context includes AGGREGATE_PROFILE blocks, treat them as source-level aggregate metadata for counts, time ranges, formats, roles, and unit distribution.\n\
 Treat EVIDENCE_CHUNK blocks as sampled excerpts. Do not make whole-source frequency, ranking, or coverage claims from EVIDENCE_CHUNK blocks unless an AGGREGATE_PROFILE block supports the claim.\n\
 When Context includes COMPARISON_COVERAGE status=partial, compare only the covered operands and explicitly state which requested operands are not grounded in Context.\n\
-When the context includes an Exact technical literals section, treat those literals as the highest-priority grounding for URLs, paths, parameter names, methods, ports, and status codes.\n\
+When the context includes an Exact technical literals section, treat those literals as the highest-priority grounding for URLs, paths, configuration section names, parameter names, methods, ports, and status codes.\n\
 Prefer exact literals extracted from documents over paraphrased graph summaries when both are present.\n\
 When Exact technical literals are presented as an inventory and the question asks to explain, describe, configure, or enumerate all items, cover each visible inventory item before summarizing; do not silently drop items from the inventory.\n\
 When Context contains directly relevant parameter tables or key/value row blocks, preserve every visible matching row before summarizing; do not reduce a grounded row set to examples unless the user asks for examples.\n\
 When answering from Context, do not mention the retrieval machinery or phrases such as \"retrieved context\"; present the grounded facts directly.\n\
 When a table block contains both a combined aggregate label and individual parameter rows, report the individual parameter names for parameter questions and do not present the aggregate label as a separate parameter.\n\
 When Context includes Retrieved graph evidence or graph-evidence blocks, treat their evidence text as direct source wording. If a graph-evidence block contains delimited row fields, preserve each requested field's own value and do not copy a neighboring field value into it.\n\
+For operational or status-handling questions, cover each distinct grounded outcome or action path visible in Context before saying a next action is unavailable. Include the success condition and any failure, timeout, cancellation, rollback, refund/return, retry, or exception-handling path when that path is present in Context.\n\
 When source evidence contains exact labels, headings, table names, field values, quoted phrases, identifiers, or short rare phrases that directly answer the question, copy those source spellings verbatim at least once before adding any paraphrase.\n\
 If the answer language differs from a source phrase that directly answers the question, keep that source phrase verbatim and explain around it in the answer language.\n\
 For rare graph-evidence phrases, include the shortest complete source phrase or row field value that contains the requested terms; do not substitute synonyms, translated equivalents, or inflected variants for the evidence phrase.\n\
@@ -122,8 +124,8 @@ For workflow, list, and procedural answers, direct document excerpts are normati
 When Exact technical literals are grouped by document, keep each literal attached to its document heading and do not mix endpoints, URLs, paths, or methods from different documents unless the question explicitly asks you to compare or combine them.\n\
 When Exact technical literals include both Paths and Prefixes, treat Paths as operation endpoints and use Prefixes only for questions that explicitly ask for a base prefix or base URL.\n\
 When a grouped document entry also includes a matched excerpt, use that excerpt to decide which literal answers the user's condition inside that document.\n\
-When the question asks for URLs, endpoints, paths, parameter names, HTTP methods, ports, status codes, field names, or exact behavioral rules, copy those literals verbatim from Context.\n\
-Wrap exact technical literals such as URLs, paths, parameter names, HTTP methods, ports, and status codes in backticks.\n\
+When the question asks for URLs, endpoints, paths, configuration section names, parameter names, HTTP methods, ports, status codes, field names, or exact behavioral rules, copy those literals verbatim from Context.\n\
+Wrap exact technical literals such as URLs, paths, configuration section names, parameter names, HTTP methods, ports, and status codes in backticks.\n\
 Do not normalize, rename, translate, repair, shorten, or expand technical literals from Context.\n\
 Do not combine parts from different snippets into a synthetic URL, endpoint, path, or rule.\n\
 If a literal does not appear verbatim in Context, do not invent it; state that the exact value is not grounded in the active library.\n\
@@ -131,7 +133,7 @@ If nearby snippets describe different examples or operations, answer only from t
 For definition questions, preserve concrete enumerations, examples, and listed categories from Context instead of collapsing them into a generic paraphrase.\n\
 When context includes a document summary, use it to understand the document's purpose before answering.\n\
 When Context includes a short title, report name, validation target, or formats-under-test line for the focused document, answer with that literal directly.\n\
-When Context includes SOURCE_SLICE_UNIT blocks, treat them as the runtime's canonical ordered source slice for the question, not as sampled excerpts. For positional source-slice requests, enumerate the matching records visible in those blocks and do not refuse merely because the blocks are a bounded slice. Use one visible answer item per SOURCE_SLICE_UNIT block, in block order, up to requested_count; do not split one block into multiple inventory items or add items absent from those blocks.\n\
+When Context includes SOURCE_SLICE_UNIT blocks, treat them as the runtime's canonical ordered source slice for the question, not as sampled excerpts. For positional source-slice requests, enumerate the matching records visible in those blocks and do not refuse merely because the blocks are a bounded slice. Use one visible answer item per SOURCE_SLICE_UNIT block, in block order, up to requested_count; include the block's document=\"...\" value as that item's source label when present; do not split one block into multiple inventory items or add items absent from those blocks. Treat markdown image syntax, link-only decoration, and heading markers inside the block body as document formatting, not answer content.\n\
 \n{}\nContext:\n{}\n\
 \nQuestion: {}",
         instruction,
@@ -497,6 +499,10 @@ pub(crate) struct OrderedSourceSliceAnswer {
     pub(crate) answer: String,
     pub(crate) unit_count: usize,
     pub(crate) used_context_fallback: bool,
+    /// Chunk ids of the exact units the deterministic answer was built from
+    /// (post filtering, dedup, dominant-family retention and truncation).
+    /// Downstream probes must scope to these, not the wider context set.
+    pub(crate) unit_chunk_ids: Vec<Uuid>,
 }
 
 pub(crate) fn build_ordered_source_slice_answer(
@@ -507,7 +513,13 @@ pub(crate) fn build_ordered_source_slice_answer(
     let used_context_fallback = source_units.is_empty();
     let units = source_slice_answer_units(query_ir, source_units, context_chunks);
     let answer = build_ordered_source_units_answer(query_ir, &units)?;
-    Some(OrderedSourceSliceAnswer { answer, unit_count: units.len(), used_context_fallback })
+    let unit_chunk_ids = units.iter().map(|unit| unit.chunk_id).collect();
+    Some(OrderedSourceSliceAnswer {
+        answer,
+        unit_count: units.len(),
+        used_context_fallback,
+        unit_chunk_ids,
+    })
 }
 
 fn source_slice_answer_units(
@@ -515,7 +527,13 @@ fn source_slice_answer_units(
     source_units: &[RuntimeMatchedChunk],
     context_chunks: &[RuntimeMatchedChunk],
 ) -> Vec<RuntimeMatchedChunk> {
-    if query_ir.source_slice.is_none() {
+    let explicit_latest_version_inventory = query_requests_latest_versions(query_ir);
+    let inferred_latest_version_inventory = !explicit_latest_version_inventory
+        && context_supports_latest_version_inventory(query_ir, context_chunks);
+    if query_ir.source_slice.is_none()
+        && !explicit_latest_version_inventory
+        && !inferred_latest_version_inventory
+    {
         return Vec::new();
     }
     if !source_units.is_empty() {
@@ -523,15 +541,24 @@ fn source_slice_answer_units(
         sort_source_slice_answer_units(query_ir, &mut units);
         return units;
     }
-    if !query_requests_latest_versions(query_ir) {
+    if !explicit_latest_version_inventory && !inferred_latest_version_inventory {
         return Vec::new();
     }
 
-    let requested_count = super::source_slice_requested_count(query_ir).unwrap_or_default();
+    let requested_count = latest_source_slice_requested_count(query_ir);
     let mut units = context_chunks
         .iter()
         .filter(|chunk| !is_source_profile_runtime_chunk(chunk))
-        .filter(|chunk| matches!(chunk.score_kind, RuntimeChunkScoreKind::DocumentIdentity))
+        .filter(|chunk| {
+            if explicit_latest_version_inventory {
+                matches!(
+                    chunk.score_kind,
+                    RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion
+                )
+            } else {
+                latest_source_slice_answer_unit_version(chunk).is_some()
+            }
+        })
         .filter(|chunk| latest_source_slice_answer_unit_version(chunk).is_some())
         .cloned()
         .collect::<Vec<_>>();
@@ -550,12 +577,77 @@ fn sort_source_slice_answer_units(
     query_ir: &crate::domains::query_ir::QueryIR,
     units: &mut [RuntimeMatchedChunk],
 ) {
-    if query_requests_latest_versions(query_ir) {
+    if query_requests_latest_versions(query_ir)
+        || context_supports_latest_version_inventory(query_ir, units)
+    {
         units.sort_by(latest_source_slice_answer_unit_order);
     } else {
         units
             .sort_by_key(|chunk| (chunk.document_label.clone(), chunk.chunk_index, chunk.chunk_id));
     }
+}
+
+pub(crate) fn context_supports_latest_version_inventory(
+    query_ir: &crate::domains::query_ir::QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    if !query_ir_allows_latest_version_context_fallback(query_ir) {
+        return false;
+    }
+
+    let mut family_documents = HashMap::<String, HashSet<Uuid>>::new();
+    let mut family_chunk_counts = HashMap::<String, usize>::new();
+    for chunk in chunks.iter().filter(|chunk| !is_source_profile_runtime_chunk(chunk)) {
+        if latest_source_slice_answer_unit_version(chunk).is_none() {
+            continue;
+        }
+        let family_key = latest_version_family_key(&chunk.document_label);
+        family_documents.entry(family_key.clone()).or_default().insert(chunk.document_id);
+        *family_chunk_counts.entry(family_key).or_default() += 1;
+    }
+
+    let mut candidates = family_documents
+        .iter()
+        .map(|(family_key, document_ids)| {
+            (
+                family_key.clone(),
+                document_ids.len(),
+                family_chunk_counts.get(family_key).copied().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right.1.cmp(&left.1).then_with(|| right.2.cmp(&left.2)).then_with(|| left.0.cmp(&right.0))
+    });
+    let Some((_family_key, document_count, chunk_count)) = candidates.first() else {
+        return false;
+    };
+    let runner_up_document_count = candidates.get(1).map(|candidate| candidate.1).unwrap_or(0);
+    *document_count >= 2 && *document_count > runner_up_document_count && *chunk_count >= 2
+}
+
+fn query_ir_allows_latest_version_context_fallback(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.35
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_entities.is_empty()
+        && query_ir.comparison.is_none()
+        && query_ir.temporal_constraints.is_empty()
+        && !query_ir
+            .literal_constraints
+            .iter()
+            .any(|literal| matches!(literal.kind, LiteralKind::Version))
+        && query_ir
+            .literal_constraints
+            .iter()
+            .all(|literal| matches!(literal.kind, LiteralKind::NumericCode))
+        && query_ir.target_types.iter().all(|target_type| {
+            matches!(
+                canonical_target_type_tag(target_type).as_str(),
+                "concept" | "document" | "release" | "version" | "changelog"
+            )
+        })
 }
 
 fn latest_source_slice_answer_unit_order(
@@ -622,14 +714,22 @@ fn build_ordered_source_units_answer(
     query_ir: &crate::domains::query_ir::QueryIR,
     source_units: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    query_ir.source_slice.as_ref()?;
+    let latest_version_inventory = query_requests_latest_versions(query_ir)
+        || context_supports_latest_version_inventory(query_ir, source_units);
+    if query_ir.source_slice.is_none() && !latest_version_inventory {
+        return None;
+    }
     if source_units.is_empty() {
         return None;
     }
 
     let mut units = source_units.to_vec();
     sort_source_slice_answer_units(query_ir, &mut units);
-    let requested_count = super::source_slice_requested_count(query_ir).unwrap_or(units.len());
+    let requested_count = if query_requests_latest_versions(query_ir) {
+        latest_source_slice_requested_count(query_ir)
+    } else {
+        super::source_slice_requested_count(query_ir).unwrap_or(units.len())
+    };
     if requested_count > 0 && units.len() > requested_count {
         units.truncate(requested_count);
     }
@@ -653,7 +753,7 @@ fn build_ordered_source_units_answer(
         let parsed = parse_source_unit_text(&unit.source_text);
         let mut heading_parts = Vec::<String>::new();
         if include_document_label {
-            heading_parts.push(format!("`{}`", unit.document_label.trim()));
+            heading_parts.push(format!("source=`{}`", unit.document_label.trim()));
         }
         if let Some(timestamp) = parsed.field("occurred_at") {
             heading_parts.push(format!("**{}**", timestamp));
@@ -672,7 +772,7 @@ fn build_ordered_source_units_answer(
         }
         lines.push(format!("{}. {}", index + 1, heading_parts.join(" - ")));
 
-        let body = source_slice_unit_body_for_answer(query_ir, parsed.body.trim());
+        let body = source_slice_unit_body_for_answer(latest_version_inventory, parsed.body.trim());
         if !body.is_empty() {
             lines.push(indent_source_unit_body(&body));
         }
@@ -681,11 +781,8 @@ fn build_ordered_source_units_answer(
     Some(lines.join("\n"))
 }
 
-fn source_slice_unit_body_for_answer(
-    query_ir: &crate::domains::query_ir::QueryIR,
-    body: &str,
-) -> String {
-    if query_requests_latest_versions(query_ir) {
+fn source_slice_unit_body_for_answer(latest_version_inventory: bool, body: &str) -> String {
+    if latest_version_inventory {
         compact_source_slice_inventory_body(body)
     } else {
         body.trim().to_string()
@@ -695,10 +792,12 @@ fn source_slice_unit_body_for_answer(
 fn compact_source_slice_inventory_body(body: &str) -> String {
     let mut lines = Vec::<String>::new();
     let mut used_chars = 0usize;
-    for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in
+        body.lines().filter_map(compact_source_slice_inventory_line).filter(|line| !line.is_empty())
+    {
         let line_chars = line.chars().count();
         if lines.is_empty() && line_chars > SOURCE_SLICE_COMPACT_BODY_CHARS {
-            lines.push(excerpt_for(line, SOURCE_SLICE_COMPACT_BODY_CHARS));
+            lines.push(excerpt_for(&line, SOURCE_SLICE_COMPACT_BODY_CHARS));
             break;
         }
         let projected = used_chars.saturating_add(line_chars).saturating_add(1);
@@ -708,13 +807,44 @@ fn compact_source_slice_inventory_body(body: &str) -> String {
             break;
         }
         used_chars = projected;
-        lines.push(line.to_string());
+        lines.push(line);
     }
     if lines.is_empty() {
         excerpt_for(body, SOURCE_SLICE_COMPACT_BODY_CHARS)
     } else {
         lines.join("\n")
     }
+}
+
+fn latest_source_slice_requested_count(query_ir: &crate::domains::query_ir::QueryIR) -> usize {
+    super::source_slice_requested_count(query_ir)
+        .unwrap_or_else(|| requested_latest_version_count(query_ir))
+}
+
+fn compact_source_slice_inventory_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || is_markdown_image_line(trimmed)
+        || is_markdown_link_only_line(trimmed)
+        || is_markdown_horizontal_rule(trimmed)
+    {
+        return None;
+    }
+    let without_heading = trimmed.trim_start_matches('#').trim_start();
+    if without_heading.is_empty() { None } else { Some(without_heading.to_string()) }
+}
+
+fn is_markdown_image_line(line: &str) -> bool {
+    line.starts_with("![") && line.contains("](") && line.ends_with(')')
+}
+
+fn is_markdown_link_only_line(line: &str) -> bool {
+    line.starts_with('[') && line.contains("](") && line.ends_with(')')
+}
+
+fn is_markdown_horizontal_rule(line: &str) -> bool {
+    let marker_count = line.chars().filter(|ch| matches!(ch, '-' | '_' | '*')).count();
+    marker_count >= 3 && marker_count == line.chars().count()
 }
 
 pub(crate) fn build_missing_explicit_document_answer(
@@ -1000,7 +1130,7 @@ pub(crate) fn render_canonical_chunk_section(
     let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let pagination_requested = false;
     let (max_total_chunks, max_chunks_per_document) = if query_ir.requests_source_coverage_context()
-        || query_ir_needs_expanded_setup_evidence(query_ir, &filtered_chunks)
+        || query_ir_needs_expanded_setup_evidence(question, query_ir, &filtered_chunks)
     {
         (SOURCE_COVERAGE_MAX_TOTAL_CHUNKS, SOURCE_COVERAGE_MAX_CHUNKS_PER_DOCUMENT)
     } else {
@@ -1047,7 +1177,7 @@ pub(crate) fn render_canonical_chunk_section(
     // command and a configuration path) in full, ahead of the sampled excerpts.
     // The score-balanced selection above can otherwise drop or window-truncate
     // the "what to install" line in favour of denser parameter-table chunks.
-    let setup_install_anchor = focused_setup_install_anchor(query_ir, &filtered_chunks);
+    let setup_install_anchor = focused_setup_install_anchor(question, query_ir, &filtered_chunks);
     let anchor_chunk_id = setup_install_anchor.map(|chunk| chunk.chunk_id);
     let (source_profile_chunks, content_chunks): (Vec<_>, Vec<_>) = selected
         .iter()
@@ -1088,16 +1218,26 @@ pub(crate) fn render_canonical_chunk_section(
 }
 
 fn focused_setup_install_anchor<'a>(
+    question: &str,
     query_ir: &QueryIR,
     chunks: &'a [RuntimeMatchedChunk],
 ) -> Option<&'a RuntimeMatchedChunk> {
-    if !matches!(query_ir.act, QueryAct::ConfigureHow)
-        || !matches!(query_ir.scope, QueryScope::SingleDocument)
-        || query_ir.document_focus.is_none()
+    let focus_tokens = if matches!(query_ir.act, QueryAct::ConfigureHow)
+        && matches!(query_ir.scope, QueryScope::SingleDocument)
+        && query_ir.document_focus.is_some()
     {
+        query_ir_document_focus_tokens(query_ir)?
+    } else if query_ir_allows_setup_anchor_fallback(query_ir) {
+        let tokens = technical_literal_focus_keywords(question, Some(query_ir))
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if tokens.is_empty() {
+            return None;
+        }
+        tokens
+    } else {
         return None;
-    }
-    let focus_tokens = query_ir_document_focus_tokens(query_ir)?;
+    };
     chunks
         .iter()
         .filter(|chunk| chunk_is_setup_focus_package_path_anchor(chunk))
@@ -1108,19 +1248,35 @@ fn focused_setup_install_anchor<'a>(
         .max_by(|left, right| left.score.unwrap_or(0.0).total_cmp(&right.score.unwrap_or(0.0)))
 }
 
+fn query_ir_allows_setup_anchor_fallback(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.3
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.target_entities.is_empty()
+        && query_ir.literal_constraints.is_empty()
+}
+
 fn query_ir_needs_expanded_setup_evidence(
+    question: &str,
     query_ir: &crate::domains::query_ir::QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> bool {
     if !chunks.iter().any(|chunk| {
         matches!(
             chunk.score_kind,
-            RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::SourceContext
+            RuntimeChunkScoreKind::DocumentIdentity
+                | RuntimeChunkScoreKind::LatestVersion
+                | RuntimeChunkScoreKind::SourceContext
         )
     }) {
         return false;
     }
     if matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow) {
+        return true;
+    }
+    if query_ir_needs_expanded_short_technical_evidence(question, query_ir, chunks) {
         return true;
     }
     query_ir.target_types.iter().any(|target_type| {
@@ -1129,6 +1285,25 @@ fn query_ir_needs_expanded_setup_evidence(
             "configuration_file" | "config_key" | "parameter" | "package"
         )
     })
+}
+
+fn query_ir_needs_expanded_short_technical_evidence(
+    question: &str,
+    query_ir: &crate::domains::query_ir::QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    query_ir_allows_setup_anchor_fallback(query_ir)
+        && technical_literal_focus_keywords(question, Some(query_ir))
+            .iter()
+            .any(|keyword| keyword.chars().count() < 4)
+        && chunks.iter().any(|chunk| {
+            chunk.score_kind == RuntimeChunkScoreKind::SourceContext
+                && !extract_parameter_literals(
+                    &format!("{}\n{}", chunk.excerpt, chunk.source_text),
+                    2,
+                )
+                .is_empty()
+        })
 }
 
 fn render_ordered_source_slice_unit_section(
@@ -1385,6 +1560,25 @@ mod source_unit_answer_tests {
         ir
     }
 
+    fn low_confidence_concept_ir() -> crate::domains::query_ir::QueryIR {
+        crate::domains::query_ir::QueryIR {
+            act: crate::domains::query_ir::QueryAct::Describe,
+            scope: crate::domains::query_ir::QueryScope::LibraryMeta,
+            language: crate::domains::query_ir::QueryLanguage::Auto,
+            target_types: vec!["concept".to_string()],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.25,
+        }
+    }
+
     fn exact_version_ir(version: &str) -> crate::domains::query_ir::QueryIR {
         crate::domains::query_ir::QueryIR {
             act: crate::domains::query_ir::QueryAct::Describe,
@@ -1482,6 +1676,106 @@ mod source_unit_answer_tests {
         assert!(!section.contains("Setup install anchor"));
     }
 
+    #[test]
+    fn render_canonical_chunk_section_surfaces_setup_anchor_for_low_confidence_fallback_ir() {
+        let mut anchor = evidence_chunk(
+            1,
+            Some("paragraph"),
+            "Module configuration\naptitude install alpha-connector\nSettings are defined in the file /opt/alpha/connector/connector.conf",
+        );
+        anchor.document_label = "Alpha Suite admin guide".to_string();
+        anchor.score = Some(1.0);
+        let mut query_ir = configure_how_focus_ir("Alpha Suite");
+        query_ir.act = QueryAct::Describe;
+        query_ir.confidence = 0.25;
+        query_ir.target_types.clear();
+        query_ir.document_focus = None;
+
+        let section =
+            render_canonical_chunk_section("configure Alpha Suite", &query_ir, &[anchor], false);
+
+        assert!(section.contains("Setup install anchor"), "fallback anchor must be rendered");
+        assert!(
+            section.contains("aptitude install alpha-connector"),
+            "install command must remain in the prompt context"
+        );
+    }
+
+    #[test]
+    fn render_canonical_chunk_section_expands_low_confidence_short_technical_rows() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut query_ir = configure_how_focus_ir("Provider Alpha setup");
+        query_ir.act = QueryAct::Describe;
+        query_ir.confidence = 0.25;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.document_focus = None;
+
+        let mut chunks = vec![
+            source_context_chunk(document_id, revision_id, 1, "QX alphaFlag = true"),
+            source_context_chunk(document_id, revision_id, 2, "QX betaFlag = true"),
+            source_context_chunk(document_id, revision_id, 3, "QX gammaFlag = true"),
+            source_context_chunk(document_id, revision_id, 4, "QX deltaFlag = true"),
+            source_context_chunk(document_id, revision_id, 5, "QX epsilonFlag = true"),
+            source_context_chunk(document_id, revision_id, 6, "QX zetaFlag = true"),
+            source_context_chunk(document_id, revision_id, 7, "QX etaFlag = true"),
+            source_context_chunk(document_id, revision_id, 8, "QX thetaFlag = true"),
+            source_context_chunk(document_id, revision_id, 9, "QX iotaFlag = true"),
+            source_context_chunk(document_id, revision_id, 10, "QX kappaFlag = true"),
+            source_context_chunk(document_id, revision_id, 11, "QX lambdaFlag = true"),
+            source_context_chunk(document_id, revision_id, 12, "QX visibleMode = true"),
+        ];
+        for (rank, chunk) in chunks.iter_mut().enumerate() {
+            chunk.document_label = "Provider Alpha setup".to_string();
+            chunk.score = Some(100.0 - rank as f32);
+        }
+
+        let section = render_canonical_chunk_section("QX settings", &query_ir, &chunks, false);
+
+        assert!(
+            section.contains("visibleMode"),
+            "low-confidence short-token structured rows below the old per-document cap must remain visible"
+        );
+    }
+
+    #[test]
+    fn render_canonical_chunk_section_keeps_late_setup_code_blocks() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut query_ir = configure_how_focus_ir("Provider Alpha setup");
+        query_ir.act = QueryAct::Describe;
+        query_ir.confidence = 0.25;
+        query_ir.target_types.clear();
+        query_ir.document_focus = None;
+
+        let mut chunks = (1..=21)
+            .map(|index| {
+                source_context_chunk(
+                    document_id,
+                    revision_id,
+                    index,
+                    &format!("QX tableFlag{index} | boolean | true"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut late_example = source_context_chunk(
+            document_id,
+            revision_id,
+            22,
+            "[UI.Component]\nvisibleMode = true",
+        );
+        late_example.chunk_kind = Some("code_block".to_string());
+        chunks.push(late_example);
+
+        let section = render_canonical_chunk_section("QX settings", &query_ir, &chunks, false);
+
+        assert!(
+            section.contains("visibleMode = true"),
+            "late code-block assignments retained by source-context retrieval must also be rendered for the answer model"
+        );
+    }
+
     fn source_unit(index: i32, text: &str) -> RuntimeMatchedChunk {
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
@@ -1532,6 +1826,20 @@ mod source_unit_answer_tests {
             score: Some(score),
             source_text: text.to_string(),
         }
+    }
+
+    fn release_relevance_chunk(
+        document_id: Uuid,
+        revision_id: Uuid,
+        index: i32,
+        score: f32,
+        label: &str,
+        text: &str,
+    ) -> RuntimeMatchedChunk {
+        let mut chunk = release_identity_chunk(document_id, revision_id, index, score, label, text);
+        chunk.score_kind = crate::services::query::execution::RuntimeChunkScoreKind::Relevance;
+        chunk.chunk_kind = Some("paragraph".to_string());
+        chunk
     }
 
     fn source_context_chunk(
@@ -1717,6 +2025,74 @@ mod source_unit_answer_tests {
     }
 
     #[test]
+    fn latest_source_slice_answer_does_not_require_explicit_source_slice() {
+        let mut ir = latest_source_slice_ir(2);
+        ir.source_slice = None;
+        ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
+            text: "2".to_string(),
+            kind: crate::domains::query_ir::LiteralKind::NumericCode,
+        }];
+        let older_id = Uuid::now_v7();
+        let newer_id = Uuid::now_v7();
+        let chunks = vec![
+            release_identity_chunk(
+                older_id,
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Alpha Suite Release 1.0.1",
+                "older detail",
+            ),
+            release_identity_chunk(
+                newer_id,
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Alpha Suite Release 1.0.2",
+                "newer detail",
+            ),
+        ];
+
+        let answer = build_ordered_source_slice_answer(&ir, &[], &chunks)
+            .expect("latest source-slice answer");
+
+        assert_eq!(answer.unit_count, 2);
+        assert!(answer.used_context_fallback);
+        assert!(answer.answer.starts_with("2/2"));
+        assert!(answer.answer.contains("source=`Alpha Suite Release 1.0.2`"));
+        assert!(
+            answer.answer.find("Alpha Suite Release 1.0.2").unwrap()
+                < answer.answer.find("Alpha Suite Release 1.0.1").unwrap()
+        );
+    }
+
+    #[test]
+    fn latest_source_slice_answer_removes_markdown_decoration() {
+        let mut ir = latest_source_slice_ir(1);
+        ir.source_slice = None;
+        let document_id = Uuid::now_v7();
+        let chunks = vec![release_identity_chunk(
+            document_id,
+            Uuid::now_v7(),
+            0,
+            10.0,
+            "Alpha Suite Release 1.0.2",
+            "# Version 1.0.2\n![preview](https://example.invalid/preview.png)\n[diagram](https://example.invalid/diagram.png)\n---\n## Changes\nAdded deterministic inventory output.",
+        )];
+
+        let answer = build_ordered_source_slice_answer(&ir, &[], &chunks)
+            .expect("latest source-slice answer");
+
+        assert!(answer.answer.contains("Version 1.0.2"));
+        assert!(answer.answer.contains("Changes"));
+        assert!(answer.answer.contains("Added deterministic inventory output."));
+        assert!(!answer.answer.contains("# Version"));
+        assert!(!answer.answer.contains("![preview]"));
+        assert!(!answer.answer.contains("[diagram]("));
+        assert!(!answer.answer.contains("---"));
+    }
+
+    #[test]
     fn latest_source_slice_answer_keeps_dominant_release_family() {
         let chunks = vec![
             release_identity_chunk(
@@ -1752,6 +2128,115 @@ mod source_unit_answer_tests {
         assert!(answer.answer.contains("Alpha Suite Release 1.0.2"));
         assert!(answer.answer.contains("Alpha Suite Release 1.0.1"));
         assert!(!answer.answer.contains("Beta Tool Release 9.0.0"));
+    }
+
+    #[test]
+    fn low_confidence_context_release_series_uses_latest_inventory_fallback() {
+        let alpha_new_id = Uuid::now_v7();
+        let alpha_old_id = Uuid::now_v7();
+        let beta_id = Uuid::now_v7();
+        let mut ir = low_confidence_concept_ir();
+        ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
+            text: "2".to_string(),
+            kind: crate::domains::query_ir::LiteralKind::NumericCode,
+        }];
+        let chunks = vec![
+            release_relevance_chunk(
+                alpha_old_id,
+                Uuid::now_v7(),
+                0,
+                5.0,
+                "Alpha Suite Release 1.0.1",
+                "older alpha detail",
+            ),
+            release_relevance_chunk(
+                beta_id,
+                Uuid::now_v7(),
+                0,
+                100.0,
+                "Beta Tool Release 9.0.0",
+                "beta distractor",
+            ),
+            release_relevance_chunk(
+                alpha_new_id,
+                Uuid::now_v7(),
+                0,
+                1.0,
+                "Alpha Suite Release 1.0.2",
+                "newer alpha detail",
+            ),
+        ];
+
+        let answer = build_ordered_source_slice_answer(&ir, &[], &chunks)
+            .expect("semver document series should infer latest inventory answer");
+
+        assert_eq!(answer.unit_count, 2);
+        assert!(answer.used_context_fallback);
+        assert!(answer.answer.starts_with("2/2"));
+        assert!(
+            answer.answer.find("Alpha Suite Release 1.0.2").unwrap()
+                < answer.answer.find("Alpha Suite Release 1.0.1").unwrap()
+        );
+        assert!(!answer.answer.contains("Beta Tool Release 9.0.0"));
+    }
+
+    #[test]
+    fn context_release_series_fallback_skips_exact_version_questions() {
+        let mut ir = low_confidence_concept_ir();
+        ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
+            text: "1.0.2".to_string(),
+            kind: crate::domains::query_ir::LiteralKind::Version,
+        }];
+        let chunks = vec![
+            release_relevance_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Alpha Suite Release 1.0.2",
+                "exact detail",
+            ),
+            release_relevance_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                9.0,
+                "Alpha Suite Release 1.0.1",
+                "older detail",
+            ),
+        ];
+
+        let answer = build_ordered_source_slice_answer(&ir, &[], &chunks);
+
+        assert!(answer.is_none());
+    }
+
+    #[test]
+    fn context_release_series_fallback_skips_high_confidence_non_release_ir() {
+        let mut ir = low_confidence_concept_ir();
+        ir.confidence = 0.9;
+        let chunks = vec![
+            release_relevance_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Alpha Suite Release 1.0.2",
+                "newer detail",
+            ),
+            release_relevance_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                9.0,
+                "Alpha Suite Release 1.0.1",
+                "older detail",
+            ),
+        ];
+
+        let answer = build_ordered_source_slice_answer(&ir, &[], &chunks);
+
+        assert!(answer.is_none());
     }
 
     #[test]

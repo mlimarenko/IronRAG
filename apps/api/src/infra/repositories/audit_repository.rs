@@ -290,6 +290,29 @@ fn push_list_audit_event_filters(
         builder.push(
             " or exists (
                     select 1
+                    from iam_principal actor_principal
+                    left join iam_user actor_user
+                      on actor_user.principal_id = actor_principal.id
+                    where actor_principal.id = ae.actor_principal_id
+                      and (
+                            actor_principal.display_label ilike ",
+        );
+        builder.push_bind(pattern.clone());
+        builder.push("       or actor_principal.principal_kind::text ilike ");
+        builder.push_bind(pattern.clone());
+        builder.push("       or coalesce(actor_user.login, '') ilike ");
+        builder.push_bind(pattern.clone());
+        builder.push("       or coalesce(actor_user.display_name, '') ilike ");
+        builder.push_bind(pattern.clone());
+        builder.push("       or coalesce(actor_user.role::text, '') ilike ");
+        builder.push_bind(pattern.clone());
+        builder.push(
+            "      )
+                )",
+        );
+        builder.push(
+            " or exists (
+                    select 1
                     from audit_event_subject aes
                     where aes.audit_event_id = ae.id
                       and (

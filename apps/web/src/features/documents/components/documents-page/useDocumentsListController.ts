@@ -159,6 +159,18 @@ export function useDocumentsListController({
     },
     [setTableState],
   );
+  const toggleDetailColumns = useCallback(() => {
+    setTableState((prev) => {
+      const next = !prev.showDetailColumns;
+      return {
+        ...prev,
+        showDetailColumns: next,
+        // Collapsing the detail columns also clears any page-scoped sort so
+        // the hidden in-memory ordering does not silently persist.
+        localSort: next ? prev.localSort : null,
+      };
+    });
+  }, [setTableState]);
 
   const selectAllMatching = useCallback(async () => {
     if (expandingSelection) return;
@@ -300,6 +312,7 @@ export function useDocumentsListController({
       filteredTotal != null &&
       filteredTotal > items.length &&
       selectedIds.size < filteredTotal,
+    toggleDetailColumns,
     toggleLocalSort,
     toggleSelection,
     toggleSortDirection,

@@ -9,19 +9,26 @@ use crate::{
     app::state::AppState,
     domains::{
         ai::AiBindingPurpose,
+        content::{attachment_parent_page_id, revision_text_state_is_readable, source_page_id},
         provider_profiles::EffectiveProviderProfile,
         query::RuntimeQueryMode,
-        query_ir::{EntityRole, QueryAct, QueryIR, QueryScope, TemporalConstraint},
+        query_ir::{
+            EntityRole, LiteralKind, QueryAct, QueryIR, QueryScope, TemporalConstraint,
+            literal_kind_has_exact_technical_shape,
+        },
     },
     infra::{
         arangodb::document_store::{
             KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
+            KnowledgeRevisionRow,
         },
         repositories,
     },
     services::{
+        content::document_hint::resolve_document_hint,
         knowledge::runtime_read::load_active_runtime_graph_projection,
         query::{
+            effective_query::structured_current_question_segment,
             latest_versions::{
                 LATEST_VERSION_CHUNKS_PER_DOCUMENT, compare_version_desc,
                 extract_semver_like_version, latest_version_chunk_score,
@@ -51,7 +58,7 @@ use super::technical_literals::{
     extract_explicit_path_literals, extract_package_command_literals, extract_parameter_literals,
     technical_literal_focus_keyword_segments,
 };
-use super::tuning::DOCUMENT_IDENTITY_SCORE_FLOOR;
+use super::tuning::{DOCUMENT_IDENTITY_SCORE_FLOOR, FOCUS_BROADEN_MIN_CHUNKS};
 use super::types::*;
 use super::{
     GraphTargetEntityCoverageField, GraphTargetEntityCoverageFieldKind, GraphTargetEntityProfile,
@@ -68,6 +75,8 @@ const DIRECT_TABLE_AGGREGATION_ROW_LIMIT: usize = 24;
 const DIRECT_TABLE_AGGREGATION_CHUNK_LIMIT: usize = 32;
 const DOCUMENT_IDENTITY_CHUNKS_PER_DOCUMENT: usize = 3;
 const DOCUMENT_IDENTITY_FOCUSED_CHUNKS_PER_DOCUMENT: usize = 4;
+const FALLBACK_LATEST_VERSION_DEFAULT_COUNT: usize = FALLBACK_LATEST_VERSION_MAX_COUNT;
+const FALLBACK_LATEST_VERSION_MAX_COUNT: usize = 10;
 const DOCUMENT_IDENTITY_FOCUS_PREFIX_CHARS: usize = 6;
 const LINKED_ANCHOR_CONTEXT_QUERY_CAP: usize = 4;
 const LINKED_ANCHOR_CONTEXT_CHUNKS_PER_QUERY: usize = 4;
@@ -165,10 +174,14 @@ pub(crate) async fn load_document_index(
             d.library_id,
             d.external_key,
             r.title,
+            r.source_uri,
+            r.document_hint,
             d.document_state::text as document_state,
             h.active_revision_id,
             h.readable_revision_id,
             latest_revision.latest_revision_no,
+            d.parent_document_id,
+            d.document_role,
             d.created_at,
             coalesce(h.head_updated_at, d.created_at) as updated_at,
             d.deleted_at
@@ -203,10 +216,14 @@ struct QueryDocumentIndexRow {
     library_id: Uuid,
     external_key: String,
     title: Option<String>,
+    source_uri: Option<String>,
+    document_hint: Option<String>,
     document_state: String,
     active_revision_id: Option<Uuid>,
     readable_revision_id: Option<Uuid>,
     latest_revision_no: Option<i64>,
+    parent_document_id: Option<Uuid>,
+    document_role: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     deleted_at: Option<DateTime<Utc>>,
@@ -226,10 +243,14 @@ fn query_document_index_row_to_knowledge_document_row(
         external_key: row.external_key,
         file_name,
         title: row.title,
+        source_uri: row.source_uri,
+        document_hint: row.document_hint,
         document_state: row.document_state,
         active_revision_id: row.active_revision_id,
         readable_revision_id: row.readable_revision_id,
         latest_revision_no: row.latest_revision_no,
+        parent_document_id: row.parent_document_id,
+        document_role: row.document_role,
         created_at: row.created_at,
         updated_at: row.updated_at,
         deleted_at: row.deleted_at,
@@ -243,6 +264,7 @@ const ENTITY_BIO_CHUNK_CAP: usize = 24;
 const GRAPH_EVIDENCE_CHUNK_CAP: usize = 24;
 const GRAPH_EVIDENCE_TARGET_CAP: usize = 48;
 const QUERY_IR_FOCUS_CHUNK_CAP: usize = 32;
+const QUERY_IR_FOCUS_SOURCE_CONTEXT_RESERVATION_LIMIT: usize = 8;
 const QUERY_IR_FOCUS_CHUNKS_PER_QUERY: usize = 12;
 const SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP: usize = 128;
 const SETUP_FOCUS_DOCUMENT_SCAN_CHUNKS: i32 = 32;
@@ -251,6 +273,20 @@ const SETUP_FOCUS_DOCUMENT_CHUNK_CAP: usize = 24;
 const SETUP_FOCUS_DOCUMENT_SCORE_BASE: f32 = DOCUMENT_IDENTITY_SCORE_FLOOR * 20.0;
 const SETUP_FOCUS_CONFIG_PATH_EXTENSIONS: [&str; 8] =
     [".conf", ".ini", ".cfg", ".properties", ".yaml", ".yml", ".toml", ".json"];
+const RAW_SETUP_FOCUS_CANDIDATE_TOKEN_MAX_DOC_FREQUENCY_FLOOR: usize = 8;
+const RAW_SETUP_FOCUS_CANDIDATE_TOKEN_MAX_DOC_FREQUENCY_CAP: usize = 512;
+const RAW_SETUP_FOCUS_CANDIDATE_TOKEN_DOCUMENT_DIVISOR: usize = 50;
+const RAW_SETUP_FOCUS_PRIMARY_SUPPORT_CHUNK_LIMIT: usize = 16;
+const RAW_SETUP_FOCUS_PRIMARY_LABEL_MIN_OVERLAP: usize = 2;
+const RAW_SETUP_FOCUS_STRUCTURAL_DOCUMENT_SCORE_FLOOR: usize = 24;
+const RAW_SETUP_FOCUS_STRUCTURAL_DOCUMENT_CHUNK_FLOOR: usize = 2;
+const ARTIFACT_SIBLING_SOURCE_DOCUMENT_CAP: usize = 3;
+const ARTIFACT_SIBLING_SOURCE_CHUNKS_PER_DOCUMENT: i32 = 4;
+const ARTIFACT_SIBLING_SOURCE_STRUCTURAL_CHUNKS_PER_DOCUMENT: usize = 8;
+const ARTIFACT_SIBLING_SOURCE_REVISION_CAP: usize = 8;
+const ARTIFACT_SIBLING_SOURCE_FOCUS_TERM_CAP: usize = 24;
+const ARTIFACT_SIBLING_SOURCE_SCORE_BASE: f32 = 1.1;
+const ARTIFACT_SIBLING_SOURCE_SCORE_STEP: f32 = 0.01;
 
 const ENTITY_BIO_CHUNK_SCORE_BASE: f32 = 1.0;
 const ENTITY_BIO_CHUNK_SCORE_STEP: f32 = 0.001;
@@ -339,7 +375,8 @@ async fn load_entity_bio_chunks(
     }
 
     let mut seen_nodes: HashSet<Uuid> = HashSet::new();
-    let mut all_evidence_chunk_ids: Vec<Uuid> = Vec::new();
+    let mut evidence_targets = Vec::<(String, Uuid)>::new();
+    let target_kind = "node".to_string();
     for mention in &proper_name_mentions {
         if mention.label.trim().is_empty() {
             continue;
@@ -354,33 +391,34 @@ async fn load_entity_bio_chunks(
         .await
         .context("failed to search graph entities by label for entity-bio retrieval")?;
         for node in nodes {
-            if !seen_nodes.insert(node.id) {
-                continue;
+            if seen_nodes.insert(node.id) {
+                evidence_targets.push((target_kind.clone(), node.id));
             }
-            let evidence = repositories::list_runtime_graph_evidence_by_target(
-                &state.persistence.postgres,
-                library_id,
-                "node",
-                node.id,
-            )
-            .await
-            .context("failed to list graph evidence for entity-bio retrieval")?;
-            for row in evidence {
-                if let Some(chunk_id) = row.chunk_id {
-                    if all_evidence_chunk_ids.len() >= ENTITY_BIO_CHUNK_CAP {
-                        break;
-                    }
-                    if !all_evidence_chunk_ids.contains(&chunk_id) {
-                        all_evidence_chunk_ids.push(chunk_id);
-                    }
-                }
-            }
+        }
+    }
+
+    let mut all_evidence_chunk_ids: Vec<Uuid> = Vec::new();
+    if !evidence_targets.is_empty() {
+        let evidence_limit =
+            evidence_targets.len().saturating_mul(ENTITY_BIO_CHUNK_CAP).min(i64::MAX as usize)
+                as i64;
+        let evidence = repositories::list_runtime_graph_evidence_by_targets(
+            &state.persistence.postgres,
+            library_id,
+            &evidence_targets,
+            evidence_limit,
+        )
+        .await
+        .context("failed to list graph evidence for entity-bio retrieval")?;
+        for row in evidence {
             if all_evidence_chunk_ids.len() >= ENTITY_BIO_CHUNK_CAP {
                 break;
             }
-        }
-        if all_evidence_chunk_ids.len() >= ENTITY_BIO_CHUNK_CAP {
-            break;
+            if let Some(chunk_id) = row.chunk_id
+                && !all_evidence_chunk_ids.contains(&chunk_id)
+            {
+                all_evidence_chunk_ids.push(chunk_id);
+            }
         }
     }
 
@@ -498,9 +536,17 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
         build_graph_evidence_text_queries(question, plan, &query_ir_focus_queries, query_ir);
     let context_focus_keywords =
         graph_evidence_context_line_focus_keywords(question, &text_queries);
+    let context_source_labels = load_graph_evidence_context_source_labels(
+        state,
+        library_id,
+        &ranked_evidence.rows,
+        document_index,
+    )
+    .await;
     let context_lines = graph_evidence_context_lines_from_rows(
         &ranked_evidence.rows,
         graph_index,
+        &context_source_labels,
         &context_focus_keywords,
     );
     let source_document_ids = graph_evidence_source_document_ids_with_priority(
@@ -581,14 +627,77 @@ pub(crate) fn graph_evidence_source_document_ids_with_priority(
         .collect()
 }
 
+async fn load_graph_evidence_context_source_labels(
+    state: &AppState,
+    library_id: Uuid,
+    rows: &[repositories::RuntimeGraphEvidenceRow],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> HashMap<Uuid, String> {
+    let mut revision_ids = Vec::new();
+    let mut seen_revisions = HashSet::new();
+    for row in rows {
+        let Some(document_id) = row.document_id else {
+            continue;
+        };
+        let Some(revision_id) =
+            document_index.get(&document_id).and_then(canonical_document_revision_id)
+        else {
+            continue;
+        };
+        if seen_revisions.insert(revision_id) {
+            revision_ids.push(revision_id);
+        }
+    }
+    if revision_ids.is_empty() {
+        return HashMap::new();
+    }
+
+    let library_setting = repositories::catalog_repository::get_library_by_id(
+        &state.persistence.postgres,
+        library_id,
+    )
+    .await
+    .ok()
+    .flatten()
+    .map(|library| library.include_document_hint_in_mcp_answers)
+    .unwrap_or(true);
+
+    state
+        .arango_document_store
+        .list_revisions_by_ids(&revision_ids)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|revision| {
+            let document = document_index.get(&revision.document_id)?;
+            let document_title = document.title.as_deref().or(Some(document.external_key.as_str()));
+            let source_label = resolve_document_hint(
+                &revision.revision_kind,
+                revision.source_uri.as_deref(),
+                revision.document_hint.as_deref(),
+                document_title,
+                library_setting,
+            )?;
+            let source_label = source_label.trim().to_string();
+            (!source_label.is_empty()).then_some((revision.document_id, source_label))
+        })
+        .collect()
+}
+
 fn graph_evidence_context_lines_from_rows(
     rows: &[repositories::RuntimeGraphEvidenceRow],
     graph_index: &QueryGraphIndex,
+    source_labels_by_document_id: &HashMap<Uuid, String>,
     focus_keywords: &[String],
 ) -> Vec<String> {
     let mut lines = Vec::with_capacity(rows.len());
     for row in rows.iter().take(GRAPH_EVIDENCE_CONTEXT_LINE_CAP) {
-        let Some(line) = graph_evidence_context_line(row, graph_index, focus_keywords) else {
+        let Some(line) = graph_evidence_context_line(
+            row,
+            graph_index,
+            source_labels_by_document_id,
+            focus_keywords,
+        ) else {
             continue;
         };
         lines.push(line);
@@ -650,25 +759,6 @@ async fn load_ranked_graph_evidence_rows_for_query(
     let db_text_queries = graph_evidence_db_text_queries(&text_queries);
     let query_build_elapsed_ms = query_build_started.elapsed().as_millis();
 
-    let text_started = std::time::Instant::now();
-    let text_evidence = repositories::search_runtime_graph_evidence_by_text(
-        &state.persistence.postgres,
-        library_id,
-        &db_text_queries,
-        graph_evidence_context_fetch_cap() as i64,
-    )
-    .await
-    .context("failed to search graph evidence context by evidence text")?;
-    let text_search_elapsed_ms = text_started.elapsed().as_millis();
-    let text_filter_started = std::time::Instant::now();
-    let text_evidence = if targeted_document_ids.is_empty() {
-        text_evidence
-    } else {
-        filter_graph_evidence_rows_for_target_documents(state, text_evidence, targeted_document_ids)
-            .await?
-    };
-    let text_filter_elapsed_ms = text_filter_started.elapsed().as_millis();
-
     let target_search_started = std::time::Instant::now();
     let target_evidence = if targets.is_empty() {
         Vec::new()
@@ -696,14 +786,39 @@ async fn load_ranked_graph_evidence_rows_for_query(
     };
     let target_filter_elapsed_ms = target_filter_started.elapsed().as_millis();
 
-    let rank_started = std::time::Instant::now();
     let target_source_document_ids = graph_evidence_source_document_ids_from_scored_targets(
         &target_evidence,
         question,
         &text_queries,
         graph_index,
-        &target_entity_profiles,
+        target_entity_profiles,
     );
+    let text_search_document_ids = graph_evidence_text_search_document_scope(
+        targeted_document_ids,
+        &target_source_document_ids,
+    );
+
+    let text_started = std::time::Instant::now();
+    let text_evidence = repositories::search_runtime_graph_evidence_by_text(
+        &state.persistence.postgres,
+        library_id,
+        &db_text_queries,
+        &text_search_document_ids,
+        graph_evidence_context_fetch_cap() as i64,
+    )
+    .await
+    .context("failed to search graph evidence context by evidence text")?;
+    let text_search_elapsed_ms = text_started.elapsed().as_millis();
+    let text_filter_started = std::time::Instant::now();
+    let text_evidence = if targeted_document_ids.is_empty() {
+        text_evidence
+    } else {
+        filter_graph_evidence_rows_for_target_documents(state, text_evidence, targeted_document_ids)
+            .await?
+    };
+    let text_filter_elapsed_ms = text_filter_started.elapsed().as_millis();
+
+    let rank_started = std::time::Instant::now();
     let rows = rank_graph_evidence_context_rows(
         &text_evidence,
         &target_evidence,
@@ -729,6 +844,9 @@ async fn load_ranked_graph_evidence_rows_for_query(
         text_filter_elapsed_ms,
         target_search_elapsed_ms,
         target_filter_elapsed_ms,
+        text_search_document_scope_count = text_search_document_ids.len(),
+        target_document_scope_count = targeted_document_ids.len(),
+        target_source_document_count = target_source_document_ids.len(),
         rank_elapsed_ms,
         total_elapsed_ms = started.elapsed().as_millis(),
         "graph evidence retrieval substeps completed",
@@ -743,6 +861,21 @@ async fn load_ranked_graph_evidence_rows_for_query(
         text_evidence_count: text_evidence.len(),
         target_evidence_count: target_evidence.len(),
     })
+}
+
+pub(crate) fn graph_evidence_text_search_document_scope(
+    targeted_document_ids: &BTreeSet<Uuid>,
+    target_source_document_ids: &[Uuid],
+) -> Vec<Uuid> {
+    if !targeted_document_ids.is_empty() {
+        return targeted_document_ids.iter().copied().collect();
+    }
+    let mut seen = BTreeSet::new();
+    target_source_document_ids
+        .iter()
+        .copied()
+        .filter(|document_id| seen.insert(*document_id))
+        .collect()
 }
 
 pub(crate) fn graph_evidence_source_document_ids_from_scored_targets(
@@ -1204,6 +1337,7 @@ fn graph_evidence_context_body_key(evidence_text: &str) -> String {
 pub(crate) fn graph_evidence_context_line(
     row: &repositories::RuntimeGraphEvidenceRow,
     graph_index: &QueryGraphIndex,
+    source_labels_by_document_id: &HashMap<Uuid, String>,
     focus_keywords: &[String],
 ) -> Option<String> {
     let evidence_text = graph_evidence_text_for_context(&row.evidence_text);
@@ -1221,10 +1355,8 @@ pub(crate) fn graph_evidence_context_line(
     {
         attrs.push(("target", target_label));
     }
-    if let Some(source) =
-        row.source_file_name.as_deref().map(str::trim).filter(|value| !value.is_empty())
-    {
-        attrs.push(("source", source.to_string()));
+    if let Some(source) = graph_evidence_context_source_label(row, source_labels_by_document_id) {
+        attrs.push(("source", source));
     }
     if let Some(page) = row.page_ref.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         attrs.push(("page", page.to_string()));
@@ -1241,6 +1373,24 @@ pub(crate) fn graph_evidence_context_line(
         format!("[graph-evidence {attr_text}]")
     };
     Some(format!("{header}\n{evidence_text}"))
+}
+
+fn graph_evidence_context_source_label(
+    row: &repositories::RuntimeGraphEvidenceRow,
+    source_labels_by_document_id: &HashMap<Uuid, String>,
+) -> Option<String> {
+    if let Some(document_id) = row.document_id
+        && let Some(source_label) = source_labels_by_document_id.get(&document_id)
+        && let Some(source_label) = trimmed_non_empty(Some(source_label.as_str()))
+    {
+        return Some(source_label);
+    }
+
+    trimmed_non_empty(row.source_file_name.as_deref())
+}
+
+fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
 }
 
 fn graph_evidence_context_line_focus_keywords(
@@ -1496,6 +1646,7 @@ async fn load_query_ir_focus_chunks(
 
 async fn load_setup_focus_document_chunks(
     state: &AppState,
+    question: &str,
     query_ir: Option<&QueryIR>,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     plan_keywords: &[String],
@@ -1505,17 +1656,41 @@ async fn load_setup_focus_document_chunks(
     let Some(query_ir) = query_ir else {
         return Ok(Vec::new());
     };
-    if !query_ir_requests_setup_focus_document_candidates(query_ir) {
-        return Ok(Vec::new());
-    }
     if temporal_start.is_some() || temporal_end.is_some() {
         return Ok(Vec::new());
     }
-    let candidate_document_ids = setup_focus_candidate_document_ids(
-        query_ir,
-        document_index,
-        SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
-    );
+    let typed_setup_focus = query_ir_requests_setup_focus_document_candidates(query_ir);
+    let structural_setup_focus = query_ir_warrants_structural_setup_focus_fallback(query_ir);
+    let raw_setup_focus = setup_focus_uses_raw_question_fallback(query_ir);
+    if !typed_setup_focus && !structural_setup_focus && !raw_setup_focus {
+        return Ok(Vec::new());
+    }
+    let raw_question_tokens =
+        (!typed_setup_focus).then(|| raw_question_setup_focus_tokens(question));
+    let mut candidate_document_ids = if typed_setup_focus || structural_setup_focus {
+        let candidate_document_ids = setup_focus_candidate_document_ids(
+            query_ir,
+            document_index,
+            SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
+        );
+        if candidate_document_ids.is_empty() && structural_setup_focus {
+            raw_question_setup_focus_candidate_document_ids(
+                raw_question_tokens.as_ref(),
+                document_index,
+                SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
+            )
+        } else {
+            candidate_document_ids
+        }
+    } else {
+        raw_question_setup_focus_candidate_document_ids(
+            raw_question_tokens.as_ref(),
+            document_index,
+            SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
+        )
+    };
+    let mut seen_candidate_document_ids = HashSet::new();
+    candidate_document_ids.retain(|document_id| seen_candidate_document_ids.insert(*document_id));
     if candidate_document_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -1542,7 +1717,12 @@ async fn load_setup_focus_document_chunks(
         if selected_rows.is_empty() {
             continue;
         }
-        let document_score = setup_focus_document_candidate_score(&selected_rows, query_ir);
+        let mut document_score = setup_focus_document_candidate_score(&selected_rows, query_ir);
+        if let Some(tokens) = raw_question_tokens.as_ref() {
+            document_score = document_score.saturating_add(
+                raw_question_setup_focus_document_score(tokens, document).saturating_mul(64),
+            );
+        }
         let mut document_chunks = Vec::new();
         for row in selected_rows {
             if let Some(mut chunk) = map_chunk_hit(row, 0.0, document_index, plan_keywords) {
@@ -1564,6 +1744,23 @@ async fn load_setup_focus_document_chunks(
         );
     }
     Ok(chunks)
+}
+
+fn setup_focus_uses_raw_question_fallback(query_ir: &QueryIR) -> bool {
+    !query_ir_requests_setup_focus_document_candidates(query_ir)
+        && query_ir_allows_raw_question_setup_focus_fallback(query_ir)
+}
+
+fn query_ir_warrants_structural_setup_focus_fallback(query_ir: &QueryIR) -> bool {
+    query_ir.confidence < 0.4
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
+        && query_ir.source_slice.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.document_focus.is_none()
+        && query_ir.comparison.is_none()
+        && query_ir.temporal_constraints.is_empty()
+        && query_ir.conversation_refs.is_empty()
+        && (!query_ir.target_entities.is_empty() || !query_ir.literal_constraints.is_empty())
 }
 
 fn select_setup_focus_document_chunks(
@@ -1630,6 +1827,18 @@ fn query_ir_requests_setup_focus_document_candidates(query_ir: &QueryIR) -> bool
         }
     }
     has_package_target && has_configuration_target
+}
+
+fn query_ir_allows_raw_question_setup_focus_fallback(query_ir: &QueryIR) -> bool {
+    query_ir.confidence < 0.4
+        && matches!(query_ir.scope, QueryScope::SingleDocument | QueryScope::MultiDocument)
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
+        && query_ir.source_slice.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.target_entities.is_empty()
+        && query_ir.document_focus.is_none()
+        && query_ir.literal_constraints.is_empty()
+        && query_ir.conversation_refs.is_empty()
 }
 
 fn query_ir_has_setup_focus_identity(query_ir: &QueryIR) -> bool {
@@ -1703,6 +1912,190 @@ fn setup_focus_candidate_document_ids(
     candidates.into_iter().map(|(_, document_id)| document_id).take(limit).collect()
 }
 
+fn raw_question_setup_focus_tokens(question: &str) -> BTreeSet<String> {
+    normalized_alnum_tokens(strip_leading_question_marker(question), 3)
+}
+
+fn raw_question_setup_focus_candidate_document_ids(
+    question_tokens: Option<&BTreeSet<String>>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    limit: usize,
+) -> Vec<Uuid> {
+    let Some(question_tokens) = question_tokens else {
+        return Vec::new();
+    };
+    if question_tokens.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let distinctive_tokens =
+        raw_setup_focus_distinctive_question_tokens(question_tokens, document_index);
+    if distinctive_tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = document_index
+        .values()
+        .filter(|document| !setup_focus_document_is_standalone_image(document))
+        .filter_map(|document| {
+            let score = raw_question_setup_focus_document_score(&distinctive_tokens, document);
+            (score > 0).then_some((score, document.document_id))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left_score, left_id), (right_score, right_id)| {
+        right_score.cmp(left_score).then_with(|| left_id.cmp(right_id))
+    });
+    candidates.into_iter().map(|(_, document_id)| document_id).take(limit).collect()
+}
+
+fn raw_question_setup_focus_document_score(
+    question_tokens: &BTreeSet<String>,
+    document: &KnowledgeDocumentRow,
+) -> usize {
+    setup_focus_document_identity_values(document)
+        .into_iter()
+        .map(|value| {
+            let value_tokens = normalized_alnum_tokens(&value, 3);
+            let overlap = question_tokens.intersection(&value_tokens).count();
+            if overlap < 2 {
+                return 0;
+            }
+            overlap.saturating_mul(32).saturating_add(value_tokens.len().min(16))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn raw_setup_focus_distinctive_question_tokens(
+    question_tokens: &BTreeSet<String>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> BTreeSet<String> {
+    if question_tokens.is_empty() || document_index.is_empty() {
+        return BTreeSet::new();
+    }
+    let max_document_frequency =
+        raw_setup_focus_candidate_token_max_document_frequency(document_index.len());
+    let mut document_frequency = HashMap::<String, usize>::new();
+    for document in document_index.values() {
+        let mut seen_for_document = BTreeSet::<String>::new();
+        for value in setup_focus_document_identity_values(document) {
+            for token in normalized_alnum_tokens(&value, 3) {
+                if question_tokens.contains(&token) {
+                    seen_for_document.insert(token);
+                }
+            }
+        }
+        for token in seen_for_document {
+            *document_frequency.entry(token).or_default() += 1;
+        }
+    }
+    question_tokens
+        .iter()
+        .filter(|token| {
+            document_frequency
+                .get(*token)
+                .is_some_and(|frequency| *frequency <= max_document_frequency)
+        })
+        .cloned()
+        .collect()
+}
+
+fn raw_setup_focus_candidate_token_max_document_frequency(document_count: usize) -> usize {
+    document_count.saturating_div(RAW_SETUP_FOCUS_CANDIDATE_TOKEN_DOCUMENT_DIVISOR).clamp(
+        RAW_SETUP_FOCUS_CANDIDATE_TOKEN_MAX_DOC_FREQUENCY_FLOOR,
+        RAW_SETUP_FOCUS_CANDIDATE_TOKEN_MAX_DOC_FREQUENCY_CAP,
+    )
+}
+
+fn filter_raw_setup_focus_chunks_by_primary_context(
+    setup_focus_chunks: Vec<RuntimeMatchedChunk>,
+    primary_chunks: &[RuntimeMatchedChunk],
+) -> Vec<RuntimeMatchedChunk> {
+    if setup_focus_chunks.is_empty() || primary_chunks.is_empty() {
+        return Vec::new();
+    }
+    let primary_document_labels = primary_chunks
+        .iter()
+        .take(RAW_SETUP_FOCUS_PRIMARY_SUPPORT_CHUNK_LIMIT)
+        .map(|chunk| (chunk.document_id, normalized_alnum_tokens(&chunk.document_label, 3)))
+        .collect::<Vec<_>>();
+    let (supported, unsupported): (Vec<_>, Vec<_>) =
+        setup_focus_chunks.into_iter().partition(|chunk| {
+            raw_setup_focus_chunk_has_primary_context_support(chunk, &primary_document_labels)
+        });
+    if !supported.is_empty() {
+        return supported;
+    }
+
+    retain_raw_setup_focus_structural_document(unsupported)
+}
+
+fn raw_setup_focus_chunk_has_primary_context_support(
+    chunk: &RuntimeMatchedChunk,
+    primary_document_labels: &[(Uuid, BTreeSet<String>)],
+) -> bool {
+    let chunk_label_tokens = normalized_alnum_tokens(&chunk.document_label, 3);
+    if chunk_label_tokens.is_empty() {
+        return false;
+    }
+    primary_document_labels.iter().any(|(document_id, label_tokens)| {
+        *document_id == chunk.document_id
+            || chunk_label_tokens.intersection(label_tokens).count()
+                >= RAW_SETUP_FOCUS_PRIMARY_LABEL_MIN_OVERLAP
+    })
+}
+
+fn retain_raw_setup_focus_structural_document(
+    setup_focus_chunks: Vec<RuntimeMatchedChunk>,
+) -> Vec<RuntimeMatchedChunk> {
+    if setup_focus_chunks.is_empty() {
+        return Vec::new();
+    }
+    let mut document_stats = HashMap::<Uuid, (usize, usize)>::new();
+    for chunk in &setup_focus_chunks {
+        let score = raw_setup_focus_chunk_structural_score(chunk);
+        if score == 0 {
+            continue;
+        }
+        let stats = document_stats.entry(chunk.document_id).or_default();
+        stats.0 = stats.0.saturating_add(score);
+        stats.1 = stats.1.saturating_add(1);
+    }
+    let Some((document_id, (score, chunk_count))) =
+        document_stats.into_iter().max_by(|(left_id, left), (right_id, right)| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| right_id.cmp(left_id))
+        })
+    else {
+        return Vec::new();
+    };
+    if score < RAW_SETUP_FOCUS_STRUCTURAL_DOCUMENT_SCORE_FLOOR
+        || chunk_count < RAW_SETUP_FOCUS_STRUCTURAL_DOCUMENT_CHUNK_FLOOR
+    {
+        return Vec::new();
+    }
+
+    setup_focus_chunks.into_iter().filter(|chunk| chunk.document_id == document_id).collect()
+}
+
+fn raw_setup_focus_chunk_structural_score(chunk: &RuntimeMatchedChunk) -> usize {
+    let text = format!("{}\n{}", chunk.source_text, chunk.excerpt);
+    let package_count = extract_package_command_literals(&text, 2).len();
+    let configuration_path_count = setup_focus_configuration_path_count(&text);
+    let assignment_count = setup_focus_parameter_assignment_count(&text);
+    let parameter_literal_count = setup_focus_parameter_literal_count(&text);
+    let section_count = setup_focus_section_header_count(&text);
+    let url_count = setup_focus_url_count(&text);
+
+    package_count
+        .saturating_mul(8)
+        .saturating_add(configuration_path_count.saturating_mul(12))
+        .saturating_add(assignment_count.saturating_mul(4))
+        .saturating_add(parameter_literal_count.saturating_mul(6))
+        .saturating_add(section_count.saturating_mul(3))
+        .saturating_add(url_count.saturating_mul(4))
+}
+
 fn setup_focus_query_identity_terms(query_ir: &QueryIR) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut terms = Vec::new();
@@ -1716,6 +2109,12 @@ fn setup_focus_query_identity_terms(query_ir: &QueryIR) -> Vec<String> {
         let focus = document_focus.hint.trim();
         if !focus.is_empty() && seen.insert(focus.to_lowercase()) {
             terms.push(focus.to_string());
+        }
+    }
+    for literal in &query_ir.literal_constraints {
+        let literal = literal.text.trim();
+        if !literal.is_empty() && seen.insert(literal.to_lowercase()) {
+            terms.push(literal.to_string());
         }
     }
     terms
@@ -1970,6 +2369,454 @@ pub(crate) fn linked_anchor_hydration_target_filter() -> BTreeSet<Uuid> {
     BTreeSet::new()
 }
 
+async fn load_artifact_sibling_source_chunks(
+    state: &AppState,
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    let candidate_document_ids = artifact_sibling_source_document_ids(
+        chunks,
+        document_index,
+        ARTIFACT_SIBLING_SOURCE_DOCUMENT_CAP,
+    );
+    if candidate_document_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let anchor_document_ids = chunks.iter().map(|chunk| chunk.document_id).collect::<BTreeSet<_>>();
+    let structural_parent_document_ids = artifact_sibling_source_parent_page_document_ids(
+        chunks,
+        document_index,
+        &anchor_document_ids,
+        ARTIFACT_SIBLING_SOURCE_DOCUMENT_CAP,
+    )
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let focus_terms = artifact_sibling_source_focus_terms(plan_keywords, chunks);
+    let mut selected = Vec::new();
+    for (document_rank, document_id) in candidate_document_ids.iter().enumerate() {
+        let Some(document) = document_index.get(document_id) else {
+            continue;
+        };
+        let Some(revision_id) = canonical_document_revision_id(document) else {
+            continue;
+        };
+        let include_revision_history = structural_parent_document_ids.contains(document_id);
+        let rows = load_artifact_sibling_source_rows_for_document(
+            state,
+            document,
+            revision_id,
+            include_revision_history,
+            &focus_terms,
+        )
+        .await?;
+        for (chunk_rank, row) in rows.into_iter().enumerate() {
+            let score = artifact_sibling_source_chunk_score(document_rank, chunk_rank);
+            if let Some(mut chunk) = map_chunk_hit(row, score, document_index, plan_keywords) {
+                chunk.score = Some(score);
+                chunk.score_kind = RuntimeChunkScoreKind::SourceContext;
+                selected.push(chunk);
+            }
+        }
+    }
+    if !selected.is_empty() {
+        tracing::info!(
+            stage = "retrieval.artifact_sibling_source",
+            sibling_document_count = candidate_document_ids.len(),
+            structural_parent_document_count = structural_parent_document_ids.len(),
+            sibling_chunk_count = selected.len(),
+            "artifact sibling source chunks loaded from structurally related documents",
+        );
+    }
+    Ok(selected)
+}
+
+async fn load_artifact_sibling_source_rows_for_document(
+    state: &AppState,
+    document: &KnowledgeDocumentRow,
+    canonical_revision_id: Uuid,
+    include_revision_history: bool,
+    focus_terms: &[String],
+) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+    let revision_ids = if include_revision_history {
+        let revisions = state
+            .arango_document_store
+            .list_revisions_by_document(document.document_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to list artifact sibling source revisions for document {}",
+                    document.document_id
+                )
+            })?;
+        artifact_sibling_source_revision_ids(
+            document,
+            canonical_revision_id,
+            &revisions,
+            ARTIFACT_SIBLING_SOURCE_REVISION_CAP,
+        )
+    } else {
+        vec![canonical_revision_id]
+    };
+    if revision_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let chunk_cap = if include_revision_history {
+        ARTIFACT_SIBLING_SOURCE_STRUCTURAL_CHUNKS_PER_DOCUMENT
+    } else {
+        ARTIFACT_SIBLING_SOURCE_CHUNKS_PER_DOCUMENT.max(0) as usize
+    };
+    let mut rows = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if include_revision_history {
+        let windows =
+            revision_ids.iter().map(|revision_id| (*revision_id, 0, 0)).collect::<Vec<_>>();
+        for row in state
+            .arango_document_store
+            .list_chunks_by_revisions_windows(&windows)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load artifact sibling source head chunks for document {}",
+                    document.document_id
+                )
+            })?
+        {
+            if seen.insert(row.chunk_id) {
+                rows.push(row);
+            }
+            if rows.len() >= chunk_cap {
+                return Ok(rows);
+            }
+        }
+    }
+
+    if !focus_terms.is_empty() && rows.len() < chunk_cap {
+        for row in state
+            .arango_document_store
+            .list_chunks_by_revisions_matching_terms(&revision_ids, focus_terms, chunk_cap)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load artifact sibling source focused chunks for document {}",
+                    document.document_id
+                )
+            })?
+        {
+            if seen.insert(row.chunk_id) {
+                rows.push(row);
+            }
+            if rows.len() >= chunk_cap {
+                return Ok(rows);
+            }
+        }
+    }
+
+    if rows.len() < chunk_cap {
+        let fallback_max_index = ARTIFACT_SIBLING_SOURCE_CHUNKS_PER_DOCUMENT.saturating_sub(1);
+        for row in state
+            .arango_document_store
+            .list_chunks_by_revision_range(canonical_revision_id, 0, fallback_max_index)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load artifact sibling source fallback chunks for document {} revision {}",
+                    document.document_id, canonical_revision_id
+                )
+            })?
+        {
+            if seen.insert(row.chunk_id) {
+                rows.push(row);
+            }
+            if rows.len() >= chunk_cap {
+                break;
+            }
+        }
+    }
+
+    Ok(rows)
+}
+
+fn artifact_sibling_source_revision_ids(
+    document: &KnowledgeDocumentRow,
+    canonical_revision_id: Uuid,
+    revisions: &[KnowledgeRevisionRow],
+    limit: usize,
+) -> Vec<Uuid> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut revision_ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    if seen.insert(canonical_revision_id) {
+        revision_ids.push(canonical_revision_id);
+    }
+    for revision in revisions {
+        if revision_ids.len() >= limit {
+            break;
+        }
+        if revision.document_id != document.document_id
+            || !revision_text_state_is_readable(&revision.text_state)
+            || !seen.insert(revision.revision_id)
+        {
+            continue;
+        }
+        revision_ids.push(revision.revision_id);
+    }
+    revision_ids
+}
+
+fn artifact_sibling_source_focus_terms(
+    plan_keywords: &[String],
+    chunks: &[RuntimeMatchedChunk],
+) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = BTreeSet::new();
+    for keyword in plan_keywords {
+        push_artifact_sibling_source_focus_term(keyword, &mut seen, &mut terms);
+        for token in normalized_alnum_token_sequence(keyword, 3) {
+            push_artifact_sibling_source_focus_term(&token, &mut seen, &mut terms);
+        }
+        if terms.len() >= ARTIFACT_SIBLING_SOURCE_FOCUS_TERM_CAP {
+            return terms;
+        }
+    }
+    for chunk in chunks {
+        push_artifact_sibling_source_focus_term(&chunk.document_label, &mut seen, &mut terms);
+        for token in normalized_alnum_token_sequence(&chunk.document_label, 3) {
+            push_artifact_sibling_source_focus_term(&token, &mut seen, &mut terms);
+        }
+        if terms.len() >= ARTIFACT_SIBLING_SOURCE_FOCUS_TERM_CAP {
+            return terms;
+        }
+    }
+    terms
+}
+
+fn push_artifact_sibling_source_focus_term(
+    value: &str,
+    seen: &mut BTreeSet<String>,
+    terms: &mut Vec<String>,
+) {
+    if terms.len() >= ARTIFACT_SIBLING_SOURCE_FOCUS_TERM_CAP {
+        return;
+    }
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().filter(|ch| ch.is_alphanumeric()).count() < 3 {
+        return;
+    }
+    let key = normalized.to_lowercase();
+    if seen.insert(key) {
+        terms.push(normalized);
+    }
+}
+
+fn artifact_sibling_source_document_ids(
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    limit: usize,
+) -> Vec<Uuid> {
+    if chunks.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let anchor_document_ids = chunks.iter().map(|chunk| chunk.document_id).collect::<BTreeSet<_>>();
+    let mut selected = Vec::<Uuid>::new();
+    let mut seen = BTreeSet::<Uuid>::new();
+    for document_id in artifact_sibling_source_parent_page_document_ids(
+        chunks,
+        document_index,
+        &anchor_document_ids,
+        limit,
+    ) {
+        if seen.insert(document_id) {
+            selected.push(document_id);
+        }
+        if selected.len() >= limit {
+            return selected;
+        }
+    }
+
+    let anchors = artifact_sibling_source_anchor_tokens(chunks, document_index);
+    if anchors.is_empty() {
+        return selected;
+    }
+    let mut candidates = document_index
+        .values()
+        .filter(|document| !anchor_document_ids.contains(&document.document_id))
+        .filter(|document| !seen.contains(&document.document_id))
+        .filter(|document| !setup_focus_document_is_standalone_image(document))
+        .filter_map(|document| {
+            let score = artifact_sibling_source_document_score(&anchors, document);
+            (score > 0).then_some((score, document.document_id))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left_score, left_id), (right_score, right_id)| {
+        right_score.cmp(left_score).then_with(|| left_id.cmp(right_id))
+    });
+    for (_, document_id) in candidates {
+        if seen.insert(document_id) {
+            selected.push(document_id);
+        }
+        if selected.len() >= limit {
+            break;
+        }
+    }
+    selected
+}
+
+fn artifact_sibling_source_parent_page_document_ids(
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    anchor_document_ids: &BTreeSet<Uuid>,
+    limit: usize,
+) -> Vec<Uuid> {
+    let page_ids = artifact_sibling_source_attachment_page_ids(chunks, document_index);
+    if page_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = document_index
+        .values()
+        .filter(|document| !anchor_document_ids.contains(&document.document_id))
+        .filter(|document| !setup_focus_document_is_standalone_image(document))
+        .filter_map(|document| {
+            let score = artifact_sibling_source_parent_page_score(&page_ids, document);
+            (score > 0).then_some((score, document.document_id))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left_score, left_id), (right_score, right_id)| {
+        right_score.cmp(left_score).then_with(|| left_id.cmp(right_id))
+    });
+    candidates.into_iter().map(|(_, document_id)| document_id).take(limit).collect()
+}
+
+fn artifact_sibling_source_attachment_page_ids(
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> BTreeSet<String> {
+    chunks
+        .iter()
+        .filter_map(|chunk| document_index.get(&chunk.document_id))
+        .flat_map(document_structural_source_values)
+        .filter_map(attachment_parent_page_id)
+        .collect()
+}
+
+fn artifact_sibling_source_parent_page_score(
+    page_ids: &BTreeSet<String>,
+    document: &KnowledgeDocumentRow,
+) -> usize {
+    document_structural_source_values(document)
+        .into_iter()
+        .filter_map(source_page_id)
+        .filter(|page_id| page_ids.contains(page_id))
+        .map(|page_id| 10_000usize.saturating_add(page_id.len()))
+        .max()
+        .unwrap_or(0)
+}
+
+fn artifact_sibling_source_anchor_tokens(
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> Vec<BTreeSet<String>> {
+    let mut anchors = Vec::new();
+    let mut seen = BTreeSet::<Vec<String>>::new();
+    for chunk in chunks {
+        let Some(document) = document_index.get(&chunk.document_id) else {
+            continue;
+        };
+        if !setup_focus_document_is_standalone_image(document) {
+            continue;
+        }
+        for value in setup_focus_document_identity_values(document) {
+            for prefix in artifact_sibling_identity_prefixes(&value) {
+                let tokens = normalized_alnum_tokens(&prefix, 3);
+                if tokens.len() < 2 {
+                    continue;
+                }
+                let token_vec = tokens.iter().cloned().collect::<Vec<_>>();
+                if seen.insert(token_vec) {
+                    anchors.push(tokens);
+                }
+            }
+        }
+    }
+    anchors
+}
+
+fn document_structural_source_values(document: &KnowledgeDocumentRow) -> Vec<&str> {
+    let mut values = Vec::new();
+    values.push(document.external_key.as_str());
+    if let Some(file_name) = document.file_name.as_deref() {
+        values.push(file_name);
+    }
+    if let Some(source_uri) = document.source_uri.as_deref() {
+        values.push(source_uri);
+    }
+    if let Some(document_hint) = document.document_hint.as_deref() {
+        values.push(document_hint);
+    }
+    values
+}
+
+fn artifact_sibling_identity_prefixes(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut prefixes = Vec::new();
+    prefixes.push(trimmed.to_string());
+    for separator in [":", " - ", " – ", " — "] {
+        if let Some((prefix, _)) = trimmed.split_once(separator) {
+            let prefix = prefix.trim();
+            if !prefix.is_empty() {
+                prefixes.push(prefix.to_string());
+            }
+        }
+    }
+    prefixes
+}
+
+fn artifact_sibling_source_document_score(
+    anchors: &[BTreeSet<String>],
+    document: &KnowledgeDocumentRow,
+) -> usize {
+    setup_focus_document_identity_values(document)
+        .into_iter()
+        .map(|value| {
+            let normalized_value = normalize_document_identity_value(&value);
+            let value_tokens = normalized_alnum_tokens(&value, 3);
+            anchors
+                .iter()
+                .map(|anchor_tokens| {
+                    let overlap = near_token_overlap_count(anchor_tokens, &value_tokens);
+                    if overlap < 2 {
+                        return 0;
+                    }
+                    let normalized_anchor =
+                        anchor_tokens.iter().cloned().collect::<Vec<_>>().join(" ");
+                    let prefix_score =
+                        common_prefix_char_count(&normalized_value, &normalized_anchor);
+                    overlap
+                        .saturating_mul(64)
+                        .saturating_add(prefix_score.min(48))
+                        .saturating_add(value_tokens.len().min(16))
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn artifact_sibling_source_chunk_score(document_rank: usize, chunk_rank: usize) -> f32 {
+    ARTIFACT_SIBLING_SOURCE_SCORE_BASE
+        - (document_rank as f32 * ARTIFACT_SIBLING_SOURCE_SCORE_STEP * 16.0)
+        - (chunk_rank as f32 * ARTIFACT_SIBLING_SOURCE_SCORE_STEP)
+}
+
 /// Wrap a companion chunk-loader future so it emits a `lane`-kind turn span
 /// (elapsed + returned chunk count) into the active inspector sink. The spans
 /// surface which retrieval companion lane was heavy on a given turn without
@@ -2002,10 +2849,93 @@ pub(crate) async fn retrieve_document_chunks(
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     query_ir: Option<&QueryIR>,
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    let forced_pin = forced_target_document_ids.is_some_and(|ids| !ids.is_empty());
     let targeted_document_ids = forced_target_document_ids
         .filter(|ids| !ids.is_empty())
         .cloned()
         .unwrap_or_else(|| resolve_scoped_target_document_ids(question, query_ir, document_index));
+    // P3 coverage fallback is armed only for a *compiler-inferred*
+    // single-document focus pin. An explicit document reference (forced
+    // target, or a title/filename the user literally named) is an intent
+    // signal we must honour even when the doc is thin — broadening it would
+    // answer "tell me about doc X" from the whole library. An inferred pin,
+    // by contrast, can hard-lock onto a thin same-titled stub and exclude
+    // the real procedure docs; if it comes back near-empty we re-broaden.
+    let pin_is_inferred = !forced_pin
+        && !targeted_document_ids.is_empty()
+        && query_ir.is_some_and(query_ir_focus_pin_is_inferred);
+    retrieve_document_chunks_with_targets(
+        state,
+        library_id,
+        provider_profile,
+        question,
+        targeted_document_ids,
+        plan,
+        limit,
+        question_embedding,
+        document_index,
+        query_ir,
+        pin_is_inferred,
+    )
+    .await
+}
+
+/// `true` when the single-document focus pin was derived from a
+/// compiler-inferred `document_focus` hint rather than from an explicit
+/// document reference the user named verbatim. Only inferred pins are
+/// eligible for the P3 coverage-broaden fallback.
+fn query_ir_focus_pin_is_inferred(ir: &QueryIR) -> bool {
+    matches!(ir.scope, QueryScope::SingleDocument)
+        && ir.document_focus.is_some()
+        && !ir.is_follow_up()
+}
+
+/// Decide whether a focus-locked retrieval came back too thin to trust and
+/// the pin should be dropped for a single broad re-retrieval.
+///
+/// Fires only when the pin was compiler-inferred AND the narrowed retrieval
+/// is at or below a small coverage floor — a genuinely thin stub, not merely
+/// a small-but-sufficient document. Bounding it to near-empty results keeps
+/// the fallback to at most one extra retrieval inside the 30s tool-call SLO.
+pub(crate) fn should_broaden_focus(pin_is_inferred: bool, post_filter_chunk_count: usize) -> bool {
+    pin_is_inferred && post_filter_chunk_count <= FOCUS_BROADEN_MIN_CHUNKS
+}
+
+#[cfg(test)]
+mod focus_broaden_decision_tests {
+    use super::{FOCUS_BROADEN_MIN_CHUNKS, should_broaden_focus};
+
+    #[test]
+    fn inferred_pin_broadens_only_when_coverage_is_at_or_below_floor() {
+        // A thin inferred-focus pin (e.g. a 2-chunk same-titled stub) broadens.
+        assert!(should_broaden_focus(true, 0));
+        assert!(should_broaden_focus(true, FOCUS_BROADEN_MIN_CHUNKS));
+        // A focused document with sufficient coverage keeps its pin.
+        assert!(!should_broaden_focus(true, FOCUS_BROADEN_MIN_CHUNKS + 1));
+    }
+
+    #[test]
+    fn non_inferred_pin_never_broadens() {
+        // A user-referenced (non-inferred) pin is honored even when thin.
+        assert!(!should_broaden_focus(false, 0));
+        assert!(!should_broaden_focus(false, FOCUS_BROADEN_MIN_CHUNKS));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retrieve_document_chunks_with_targets(
+    state: &AppState,
+    library_id: Uuid,
+    provider_profile: &EffectiveProviderProfile,
+    question: &str,
+    targeted_document_ids: BTreeSet<Uuid>,
+    plan: &RuntimeQueryPlan,
+    limit: usize,
+    question_embedding: &[f32],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    query_ir: Option<&QueryIR>,
+    allow_broaden: bool,
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
     let initial_table_row_count = requested_initial_table_row_count(query_ir);
     let targeted_table_aggregation =
         question_asks_table_aggregation(question, query_ir) && !targeted_document_ids.is_empty();
@@ -2155,23 +3085,18 @@ pub(crate) async fn retrieve_document_chunks(
         lane_outcome.lexical_hits,
         limit.max(initial_table_row_count.unwrap_or(0)),
     );
-    let latest_version_requested_count = query_ir
-        .filter(|ir| query_requests_latest_versions(ir))
-        .map(requested_latest_version_count)
-        .unwrap_or_default();
-    let latest_version_scope_terms = query_ir
-        .filter(|ir| query_requests_latest_versions(ir))
-        .map(latest_version_scope_terms)
-        .unwrap_or_default();
-    let latest_version_documents = if latest_version_requested_count == 0 {
-        Vec::new()
-    } else {
-        latest_version_documents(
-            document_index,
+    let latest_version_selection =
+        select_latest_version_documents(query_ir, question, document_index, &chunks);
+    let latest_version_requested_count = latest_version_selection.requested_count;
+    let latest_version_documents = latest_version_selection.documents;
+    if latest_version_selection.inferred_from_retrieved_evidence {
+        tracing::info!(
+            stage = "retrieval.latest_version_evidence_fallback",
             latest_version_requested_count,
-            &latest_version_scope_terms,
-        )
-    };
+            latest_version_document_count = latest_version_documents.len(),
+            "enabled latest-version lane from retrieved document evidence"
+        );
+    }
     let latest_version_document_ids = latest_version_documents
         .iter()
         .map(|document| document.document_id)
@@ -2230,6 +3155,7 @@ pub(crate) async fn retrieve_document_chunks(
         "retrieve.setup_focus",
         load_setup_focus_document_chunks(
             state,
+            question,
             query_ir,
             document_index,
             plan_keywords,
@@ -2264,13 +3190,19 @@ pub(crate) async fn retrieve_document_chunks(
     }
     let latest_version_chunks = latest_version_result?;
     if !latest_version_chunks.is_empty() {
-        chunks = merge_chunks(
-            chunks,
-            latest_version_chunks,
-            // query_ir is always Some when latest_version_chunks is non-empty (guarded by caller).
+        let latest_version_context_limit = if latest_version_selection
+            .inferred_from_retrieved_evidence
+        {
+            limit.max(
+                latest_version_requested_count.saturating_mul(LATEST_VERSION_CHUNKS_PER_DOCUMENT),
+            )
+        } else {
+            // query_ir is always Some when explicit latest-version chunks are
+            // non-empty (guarded by select_latest_version_documents).
             #[allow(clippy::expect_used)]
-            latest_version_context_top_k(query_ir.expect("latest chunks require QueryIR"), limit),
-        );
+            latest_version_context_top_k(query_ir.expect("latest chunks require QueryIR"), limit)
+        };
+        chunks = merge_chunks(chunks, latest_version_chunks, latest_version_context_limit);
     }
     let entity_bio_chunks = entity_bio_result?;
     if !entity_bio_chunks.is_empty() {
@@ -2303,14 +3235,30 @@ pub(crate) async fn retrieve_document_chunks(
     }
     let mut setup_focus_document_ids = BTreeSet::new();
     match setup_focus_document_chunks_result {
-        Ok(setup_focus_document_chunks) if !setup_focus_document_chunks.is_empty() => {
+        Ok(mut setup_focus_document_chunks) if !setup_focus_document_chunks.is_empty() => {
+            if query_ir.is_some_and(setup_focus_uses_raw_question_fallback) {
+                let loaded_chunk_count = setup_focus_document_chunks.len();
+                setup_focus_document_chunks = filter_raw_setup_focus_chunks_by_primary_context(
+                    setup_focus_document_chunks,
+                    &chunks,
+                );
+                if setup_focus_document_chunks.is_empty() {
+                    tracing::info!(
+                        stage = "retrieval.setup_focus_document_filtered",
+                        loaded_chunk_count,
+                        "raw setup-focused document chunks lacked primary retrieval support"
+                    );
+                }
+            }
             setup_focus_document_ids
                 .extend(setup_focus_document_chunks.iter().map(|chunk| chunk.document_id));
-            chunks = merge_query_ir_focus_chunks(
-                chunks,
-                setup_focus_document_chunks,
-                query_ir_focus_context_top_k(limit),
-            );
+            if !setup_focus_document_chunks.is_empty() {
+                chunks = merge_query_ir_focus_chunks(
+                    chunks,
+                    setup_focus_document_chunks,
+                    query_ir_focus_context_top_k(limit),
+                );
+            }
         }
         Ok(_) => {}
         Err(error) if !chunks.is_empty() => {
@@ -2356,6 +3304,30 @@ pub(crate) async fn retrieve_document_chunks(
                 failed_source = "linked_anchor_context",
                 retained_chunk_count = chunks.len(),
                 "linked anchor context retrieval failed; continuing with primary retrieved chunks"
+            );
+        }
+        Err(error) => return Err(error),
+    }
+    let artifact_sibling_source_chunks_result =
+        load_artifact_sibling_source_chunks(state, &chunks, document_index, plan_keywords).await;
+    match artifact_sibling_source_chunks_result {
+        Ok(artifact_sibling_source_chunks) if !artifact_sibling_source_chunks.is_empty() => {
+            chunks = merge_query_ir_focus_chunks(
+                chunks,
+                artifact_sibling_source_chunks,
+                query_ir_focus_context_top_k(limit),
+            );
+        }
+        Ok(_) => {}
+        Err(error) if !chunks.is_empty() => {
+            let summary = format!("{error:#}");
+            tracing::warn!(
+                stage = "retrieval.artifact_sibling_source_failed",
+                error = %summary,
+                retrieval_degraded = true,
+                failed_source = "artifact_sibling_source",
+                retained_chunk_count = chunks.len(),
+                "artifact sibling source retrieval failed; continuing with primary retrieved chunks"
             );
         }
         Err(error) => return Err(error),
@@ -2459,6 +3431,38 @@ pub(crate) async fn retrieve_document_chunks(
             direct_row_chunks,
             limit.max(DIRECT_TABLE_AGGREGATION_CHUNK_LIMIT),
         );
+    }
+
+    // P3 coverage fallback. A compiler-inferred single-document focus pin
+    // can hard-lock onto a thin same-titled stub and exclude the real
+    // procedure docs. When the narrowed retrieval comes back at/below the
+    // coverage floor, drop the pin once and re-broaden to the whole library
+    // so the answer step has material to work with. `allow_broaden` is false
+    // on the recursive call, so this costs at most one extra retrieval and
+    // respects the 30s tool-call SLO.
+    if should_broaden_focus(allow_broaden, chunks.len()) {
+        tracing::info!(
+            stage = "retrieval.focus_broaden_fallback",
+            library_id = %library_id,
+            pinned_document_count = targeted_document_ids.len(),
+            narrowed_chunk_count = chunks.len(),
+            coverage_floor = FOCUS_BROADEN_MIN_CHUNKS,
+            "inferred focus pin returned too few chunks; dropping pin and re-broadening retrieval"
+        );
+        return Box::pin(retrieve_document_chunks_with_targets(
+            state,
+            library_id,
+            provider_profile,
+            question,
+            BTreeSet::new(),
+            plan,
+            limit,
+            question_embedding,
+            document_index,
+            query_ir,
+            false,
+        ))
+        .await;
     }
 
     Ok(chunks)
@@ -2768,6 +3772,186 @@ fn document_identity_focus_terms(
     terms
 }
 
+struct LatestVersionSelection {
+    requested_count: usize,
+    documents: Vec<LatestVersionDocument>,
+    inferred_from_retrieved_evidence: bool,
+}
+
+fn select_latest_version_documents(
+    query_ir: Option<&QueryIR>,
+    question: &str,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    chunks: &[RuntimeMatchedChunk],
+) -> LatestVersionSelection {
+    let Some(query_ir) = query_ir else {
+        return LatestVersionSelection {
+            requested_count: 0,
+            documents: Vec::new(),
+            inferred_from_retrieved_evidence: false,
+        };
+    };
+    if query_requests_latest_versions(query_ir) {
+        let requested_count = requested_latest_version_count(query_ir);
+        let scope_terms = latest_version_scope_terms(query_ir);
+        return LatestVersionSelection {
+            requested_count,
+            documents: latest_version_documents(document_index, requested_count, &scope_terms),
+            inferred_from_retrieved_evidence: false,
+        };
+    }
+    let requested_count = fallback_latest_version_requested_count(question);
+    let documents = fallback_latest_version_documents_from_retrieved_evidence(
+        query_ir,
+        question,
+        chunks,
+        document_index,
+        requested_count,
+    );
+    let inferred_from_retrieved_evidence = !documents.is_empty();
+    LatestVersionSelection {
+        requested_count: inferred_from_retrieved_evidence
+            .then_some(requested_count)
+            .unwrap_or_default(),
+        documents,
+        inferred_from_retrieved_evidence,
+    }
+}
+
+pub(crate) fn infer_latest_version_query_ir_from_retrieved_evidence(
+    query_ir: &QueryIR,
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> Option<QueryIR> {
+    let latest_version_chunks = chunks
+        .iter()
+        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::LatestVersion)
+        .cloned()
+        .collect::<Vec<_>>();
+    if latest_version_chunks.is_empty() {
+        return None;
+    }
+    let requested_count = fallback_latest_version_requested_count(question);
+    let documents = fallback_latest_version_documents_from_retrieved_evidence(
+        query_ir,
+        question,
+        &latest_version_chunks,
+        document_index,
+        requested_count,
+    );
+    if documents.is_empty() {
+        return None;
+    }
+
+    let mut inferred = query_ir.clone();
+    inferred.act = QueryAct::Enumerate;
+    inferred.scope = QueryScope::MultiDocument;
+    inferred.target_types = vec!["release".to_string(), "version".to_string()];
+    inferred.source_slice = Some(crate::domains::query_ir::SourceSliceSpec {
+        direction: crate::domains::query_ir::SourceSliceDirection::Tail,
+        count: Some(requested_count as u16),
+        filter: crate::domains::query_ir::SourceSliceFilter::ReleaseMarker,
+    });
+    inferred.confidence = inferred.confidence.max(0.5);
+    Some(inferred)
+}
+
+fn fallback_latest_version_documents_from_retrieved_evidence(
+    query_ir: &QueryIR,
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    requested_count: usize,
+) -> Vec<LatestVersionDocument> {
+    if !query_ir_allows_retrieved_latest_version_fallback(query_ir, question) {
+        return Vec::new();
+    }
+    let Some(family_key) = retrieved_latest_version_family_key(chunks, document_index) else {
+        return Vec::new();
+    };
+    latest_version_documents_for_family(document_index, requested_count, &family_key)
+}
+
+fn query_ir_allows_retrieved_latest_version_fallback(query_ir: &QueryIR, question: &str) -> bool {
+    if structured_current_question_segment(question).is_some()
+        || !query_ir.conversation_refs.is_empty()
+    {
+        return false;
+    }
+    query_ir.confidence <= 0.6
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
+        && query_ir.source_slice.is_none()
+        && query_ir.target_types.is_empty()
+        && !latest_version_fallback_has_blocking_literal_constraints(query_ir)
+        && extract_semver_like_version(question).is_none()
+}
+
+fn latest_version_fallback_has_blocking_literal_constraints(query_ir: &QueryIR) -> bool {
+    query_ir.literal_constraints.iter().any(|literal| match literal.kind {
+        LiteralKind::NumericCode => false,
+        kind => literal_kind_has_exact_technical_shape(
+            kind,
+            literal.text.trim_matches(|ch: char| ch.is_ascii_punctuation()),
+        ),
+    })
+}
+
+fn fallback_latest_version_requested_count(question: &str) -> usize {
+    question
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .find_map(|part| {
+            let value = part.parse::<usize>().ok()?;
+            if value == 0 || (1900..=2100).contains(&value) {
+                return None;
+            }
+            Some(value.clamp(1, FALLBACK_LATEST_VERSION_MAX_COUNT))
+        })
+        .unwrap_or(FALLBACK_LATEST_VERSION_DEFAULT_COUNT)
+}
+
+fn retrieved_latest_version_family_key(
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> Option<String> {
+    let mut family_documents = HashMap::<String, BTreeSet<Uuid>>::new();
+    let mut family_chunk_counts = HashMap::<String, usize>::new();
+    for chunk in chunks {
+        let Some(document) = document_index.get(&chunk.document_id) else {
+            continue;
+        };
+        let Some(latest_document) = latest_version_document_from_index_row(document) else {
+            continue;
+        };
+        family_documents
+            .entry(latest_document.family_key.clone())
+            .or_default()
+            .insert(latest_document.document_id);
+        *family_chunk_counts.entry(latest_document.family_key).or_default() += 1;
+    }
+    let mut candidates = family_documents
+        .iter()
+        .map(|(family_key, document_ids)| {
+            (
+                family_key.clone(),
+                document_ids.len(),
+                family_chunk_counts.get(family_key).copied().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right.1.cmp(&left.1).then_with(|| right.2.cmp(&left.2)).then_with(|| left.0.cmp(&right.0))
+    });
+    let (family_key, document_count, chunk_count) = candidates.first()?.clone();
+    let runner_up_document_count = candidates.get(1).map(|candidate| candidate.1).unwrap_or(0);
+    if document_count >= 2 && document_count > runner_up_document_count && chunk_count >= 2 {
+        Some(family_key)
+    } else {
+        None
+    }
+}
+
 async fn load_latest_version_document_chunks(
     state: &AppState,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
@@ -2809,7 +3993,7 @@ async fn load_latest_version_document_chunks(
             );
             if let Some(mut chunk) = map_chunk_hit(row, score, document_index, plan_keywords) {
                 chunk.score = Some(score);
-                chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+                chunk.score_kind = RuntimeChunkScoreKind::LatestVersion;
                 chunks.push(chunk);
             }
         }
@@ -2833,31 +4017,14 @@ pub(crate) fn latest_version_documents(
 ) -> Vec<LatestVersionDocument> {
     let rows = document_index
         .values()
-        .filter(|document| document.document_state == "active")
         .filter_map(|document| {
-            let primary_title = document
-                .title
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .or(document.file_name.as_deref())?;
-            if !text_has_release_version_marker(primary_title) {
-                return None;
-            }
-            let primary_title_lower = primary_title.to_lowercase();
-            let version = extract_semver_like_version(&primary_title_lower)?;
-            let revision_id = canonical_document_revision_id(document)?;
-            let identity_text =
-                format!("{primary_title_lower} {}", document.external_key.to_lowercase());
-            Some((
-                LatestVersionDocument {
-                    document_id: document.document_id,
-                    revision_id,
-                    version,
-                    title: primary_title.to_string(),
-                    family_key: latest_version_family_key(primary_title),
-                },
-                identity_text,
-            ))
+            let latest_document = latest_version_document_from_index_row(document)?;
+            let identity_text = format!(
+                "{} {}",
+                latest_document.title.to_lowercase(),
+                document.external_key.to_lowercase()
+            );
+            Some((latest_document, identity_text))
         })
         .collect::<Vec<_>>();
     let scoped_rows = if scope_terms.is_empty() {
@@ -2900,6 +4067,48 @@ pub(crate) fn latest_version_documents(
     rows.sort_by(compare_latest_version_documents);
     rows.truncate(count);
     rows
+}
+
+fn latest_version_documents_for_family(
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    count: usize,
+    family_key: &str,
+) -> Vec<LatestVersionDocument> {
+    let mut rows = document_index
+        .values()
+        .filter_map(latest_version_document_from_index_row)
+        .filter(|document| document.family_key == family_key)
+        .collect::<Vec<_>>();
+    rows.sort_by(compare_latest_version_documents);
+    rows = dedupe_latest_version_documents(rows);
+    rows.truncate(count);
+    rows
+}
+
+fn latest_version_document_from_index_row(
+    document: &KnowledgeDocumentRow,
+) -> Option<LatestVersionDocument> {
+    if document.document_state != "active" {
+        return None;
+    }
+    let primary_title = document
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(document.file_name.as_deref())?;
+    if !text_has_release_version_marker(primary_title) {
+        return None;
+    }
+    let primary_title_lower = primary_title.to_lowercase();
+    let version = extract_semver_like_version(&primary_title_lower)?;
+    let revision_id = canonical_document_revision_id(document)?;
+    Some(LatestVersionDocument {
+        document_id: document.document_id,
+        revision_id,
+        version,
+        title: primary_title.to_string(),
+        family_key: latest_version_family_key(primary_title),
+    })
 }
 
 fn compare_latest_version_documents(
@@ -3832,10 +5041,14 @@ mod document_index_tests {
             library_id,
             external_key: "event-stream.jsonl".to_string(),
             title: Some("Event Stream".to_string()),
+            source_uri: Some("https://example.invalid/events".to_string()),
+            document_hint: None,
             document_state: "active".to_string(),
             active_revision_id: Some(active_revision_id),
             readable_revision_id: Some(readable_revision_id),
             latest_revision_no: Some(4),
+            parent_document_id: None,
+            document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
             created_at,
             updated_at,
             deleted_at: None,
@@ -3847,6 +5060,8 @@ mod document_index_tests {
         assert_eq!(row.external_key, "event-stream.jsonl");
         assert_eq!(row.file_name.as_deref(), Some("event-stream.jsonl"));
         assert_eq!(row.title.as_deref(), Some("Event Stream"));
+        assert_eq!(row.source_uri.as_deref(), Some("https://example.invalid/events"));
+        assert_eq!(row.document_hint.as_deref(), None);
         assert_eq!(canonical_document_revision_id(&row), Some(readable_revision_id));
         assert_eq!(row.active_revision_id, Some(active_revision_id));
         assert_eq!(row.latest_revision_no, Some(4));
@@ -3953,6 +5168,512 @@ mod document_index_tests {
             vec![EntityMention { label: "retry timeout".to_string(), role: EntityRole::Object }];
 
         assert!(!query_ir_requests_setup_focus_document_candidates(&query_ir));
+    }
+
+    #[test]
+    fn low_confidence_untyped_ir_allows_raw_question_setup_focus_fallback() {
+        let mut query_ir = setup_query_ir("Alpha Suite");
+        query_ir.act = QueryAct::Describe;
+        query_ir.confidence = 0.25;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.document_focus = None;
+
+        assert!(query_ir_allows_raw_question_setup_focus_fallback(&query_ir));
+
+        query_ir.confidence = 0.4;
+        assert!(!query_ir_allows_raw_question_setup_focus_fallback(&query_ir));
+
+        query_ir.confidence = 0.25;
+        query_ir.target_types = vec!["configuration_file".to_string()];
+        assert!(!query_ir_allows_raw_question_setup_focus_fallback(&query_ir));
+    }
+
+    #[test]
+    fn raw_question_setup_focus_candidates_match_document_identity_without_typed_ir() {
+        let target = document_row("alpha-suite-x9.md", "Alpha Suite X9 setup reference");
+        let screenshot = document_row("alpha-suite-x9.png", "Alpha Suite X9 screenshot");
+        let weaker = document_row("alpha-suite-y1.md", "Alpha Suite Y1 setup reference");
+        let unrelated = document_row("beta-suite.md", "Beta Suite setup reference");
+        let unrelated_id = unrelated.document_id;
+        let document_index = HashMap::from([
+            (target.document_id, target.clone()),
+            (screenshot.document_id, screenshot),
+            (weaker.document_id, weaker.clone()),
+            (unrelated.document_id, unrelated),
+        ]);
+        let question_tokens = raw_question_setup_focus_tokens("Alpha Suite X9");
+
+        let candidates = raw_question_setup_focus_candidate_document_ids(
+            Some(&question_tokens),
+            &document_index,
+            8,
+        );
+
+        assert_eq!(candidates.first(), Some(&target.document_id));
+        assert!(candidates.contains(&weaker.document_id));
+        assert!(!candidates.contains(&unrelated_id));
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_selects_dominant_semver_family() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let alpha_old = document_row("alpha-2-2.md", "Alpha Suite 2.2.0 changelog");
+        let beta_new = document_row("beta-2-4.md", "Beta Suite 2.4.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+            (alpha_old.document_id, alpha_old.clone()),
+            (beta_new.document_id, beta_new.clone()),
+        ]);
+        let chunks = vec![
+            setup_focus_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+            setup_focus_runtime_chunk(alpha_new.document_id, 0, 1.0),
+            setup_focus_runtime_chunk(beta_new.document_id, 0, 1.0),
+        ];
+        let query_ir = low_confidence_untyped_query_ir();
+
+        let selection = select_latest_version_documents(
+            Some(&query_ir),
+            "show latest 2 records",
+            &index,
+            &chunks,
+        );
+
+        assert!(selection.inferred_from_retrieved_evidence);
+        assert_eq!(selection.requested_count, 2);
+        assert_eq!(
+            selection.documents.iter().map(|document| document.title.as_str()).collect::<Vec<_>>(),
+            vec!["Alpha Suite 2.4.0 changelog", "Alpha Suite 2.3.0 changelog"]
+        );
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_defaults_to_max_inventory_window() {
+        let documents = (1..=11)
+            .map(|minor| {
+                document_row(
+                    &format!("alpha-2-{minor}.md"),
+                    &format!("Alpha Suite 2.{minor}.0 changelog"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let index = documents
+            .iter()
+            .cloned()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+        let chunks = documents
+            .iter()
+            .take(3)
+            .map(|document| setup_focus_runtime_chunk(document.document_id, 0, 1.0))
+            .collect::<Vec<_>>();
+        let query_ir = low_confidence_untyped_query_ir();
+
+        let selection = select_latest_version_documents(
+            Some(&query_ir),
+            "show latest records",
+            &index,
+            &chunks,
+        );
+
+        assert!(selection.inferred_from_retrieved_evidence);
+        assert_eq!(selection.requested_count, FALLBACK_LATEST_VERSION_MAX_COUNT);
+        assert_eq!(selection.documents.len(), FALLBACK_LATEST_VERSION_MAX_COUNT);
+        assert_eq!(
+            selection.documents.first().map(|document| document.title.as_str()),
+            Some("Alpha Suite 2.11.0 changelog")
+        );
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_repairs_moderate_confidence_untyped_ir() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let alpha_old = document_row("alpha-2-2.md", "Alpha Suite 2.2.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+            (alpha_old.document_id, alpha_old.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+            latest_version_runtime_chunk(alpha_old.document_id, 0, 1.0),
+        ];
+        let mut query_ir = low_confidence_untyped_query_ir();
+        query_ir.confidence = 0.55;
+
+        let inferred = infer_latest_version_query_ir_from_retrieved_evidence(
+            &query_ir,
+            "show latest 2 records",
+            &chunks,
+            &index,
+        )
+        .expect("moderate confidence untyped version evidence should repair QueryIR");
+
+        assert!(query_requests_latest_versions(&inferred));
+        assert_eq!(inferred.source_slice.as_ref().and_then(|slice| slice.count), Some(2));
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_allows_untyped_target_entity() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let alpha_old = document_row("alpha-2-2.md", "Alpha Suite 2.2.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+            (alpha_old.document_id, alpha_old.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+            latest_version_runtime_chunk(alpha_old.document_id, 0, 1.0),
+        ];
+        let mut query_ir = low_confidence_untyped_query_ir();
+        query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
+            label: "Alpha Suite records".to_string(),
+            role: crate::domains::query_ir::EntityRole::Subject,
+        }];
+
+        let inferred = infer_latest_version_query_ir_from_retrieved_evidence(
+            &query_ir,
+            "show latest 2 records",
+            &chunks,
+            &index,
+        )
+        .expect("untyped target entities must not suppress latest-version evidence repair");
+
+        assert!(query_requests_latest_versions(&inferred));
+        assert_eq!(inferred.source_slice.as_ref().and_then(|slice| slice.count), Some(2));
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_ignores_plain_word_literal_echo() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let alpha_old = document_row("alpha-2-2.md", "Alpha Suite 2.2.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+            (alpha_old.document_id, alpha_old.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+            latest_version_runtime_chunk(alpha_old.document_id, 0, 1.0),
+        ];
+        let mut query_ir = low_confidence_untyped_query_ir();
+        query_ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
+            text: "records.".to_string(),
+            kind: crate::domains::query_ir::LiteralKind::Identifier,
+        }];
+
+        let inferred = infer_latest_version_query_ir_from_retrieved_evidence(
+            &query_ir,
+            "show latest 2 records",
+            &chunks,
+            &index,
+        )
+        .expect("sentence-edge word echoes must not block latest-version evidence repair");
+
+        assert!(query_requests_latest_versions(&inferred));
+        assert_eq!(inferred.source_slice.as_ref().and_then(|slice| slice.count), Some(2));
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_keeps_exact_identifier_constraints_blocking() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_new.document_id, 0, 1.0),
+            latest_version_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+        ];
+        let mut query_ir = low_confidence_untyped_query_ir();
+        query_ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
+            text: "callbackUrl".to_string(),
+            kind: crate::domains::query_ir::LiteralKind::Identifier,
+        }];
+
+        assert!(
+            infer_latest_version_query_ir_from_retrieved_evidence(
+                &query_ir,
+                "show latest records for callbackUrl",
+                &chunks,
+                &index,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_repairs_query_ir_for_ordered_answer() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_new.document_id, 0, 1.0),
+            latest_version_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+        ];
+        let query_ir = low_confidence_untyped_query_ir();
+
+        let inferred = infer_latest_version_query_ir_from_retrieved_evidence(
+            &query_ir,
+            "latest 10 records",
+            &chunks,
+            &index,
+        )
+        .expect("retrieved semver family should infer ordered source slice");
+
+        assert!(query_requests_latest_versions(&inferred));
+        assert_eq!(inferred.scope, QueryScope::MultiDocument);
+        assert_eq!(inferred.source_slice.as_ref().and_then(|slice| slice.count), Some(10));
+    }
+
+    #[test]
+    fn retrieved_latest_version_query_ir_repair_skips_structured_follow_up_context() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_new.document_id, 0, 1.0),
+            latest_version_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+        ];
+        let query_ir = low_confidence_untyped_query_ir();
+
+        assert!(
+            infer_latest_version_query_ir_from_retrieved_evidence(
+                &query_ir,
+                "scope: Provider Alpha configuration literals\nquestion: explain these settings",
+                &chunks,
+                &index,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn retrieved_latest_version_query_ir_repair_ignores_plain_semver_relevance_chunks() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+        ]);
+        let chunks = vec![
+            setup_focus_runtime_chunk(alpha_new.document_id, 0, 1.0),
+            setup_focus_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+        ];
+        let query_ir = low_confidence_untyped_query_ir();
+
+        assert!(
+            infer_latest_version_query_ir_from_retrieved_evidence(
+                &query_ir,
+                "latest 10 records",
+                &chunks,
+                &index,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn config_queries_reserve_source_context_chunks_during_truncation() {
+        let document_id = Uuid::now_v7();
+        let mut query_ir = setup_query_ir("Provider Alpha");
+        query_ir.target_types = vec!["configuration_file".to_string(), "parameter".to_string()];
+
+        let mut chunks = (0..6)
+            .map(|index| setup_focus_runtime_chunk(Uuid::now_v7(), index, 1.0))
+            .collect::<Vec<_>>();
+        chunks.extend(
+            [
+                "[Main] url = https://alpha.local/api",
+                "| fillDetails | boolean | true false | Fill detail fields |",
+                "[Display] visible = true",
+                "| visible | boolean | true false | Display code |",
+                "printSlip = true",
+                "secretKey = value",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(offset, text)| {
+                let mut chunk = setup_focus_runtime_chunk(document_id, 20 + offset as i32, 0.1);
+                chunk.score_kind = RuntimeChunkScoreKind::SourceContext;
+                chunk.document_label = "Provider Alpha setup manual".to_string();
+                chunk.excerpt = text.to_string();
+                chunk.source_text = text.to_string();
+                chunk
+            }),
+        );
+        let mut bundle =
+            RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+        truncate_bundle(&mut bundle, 8, Some(&query_ir), &std::collections::HashSet::new());
+
+        let retained_source_text =
+            bundle.chunks.iter().map(|chunk| chunk.source_text.as_str()).collect::<Vec<_>>();
+        assert!(
+            bundle
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+                .count()
+                >= 6,
+            "{retained_source_text:?}"
+        );
+        assert!(retained_source_text.iter().any(|text| text.contains("fillDetails")));
+        assert!(retained_source_text.iter().any(|text| text.contains("visible = true")));
+        assert!(retained_source_text.iter().any(|text| text.contains("secretKey")));
+    }
+
+    #[test]
+    fn low_confidence_structured_fallback_reserves_source_context_chunks() {
+        let document_id = Uuid::now_v7();
+        let query_ir = low_confidence_untyped_query_ir();
+
+        let mut chunks = (0..6)
+            .map(|index| setup_focus_runtime_chunk(Uuid::now_v7(), index, 1.0))
+            .collect::<Vec<_>>();
+        chunks.extend(
+            [
+                "[Main] endpointUrl = https://alpha.local/api",
+                "| fillDetails | boolean | true false | Fill detail fields |",
+                "[Display] visible = true",
+                "| visible | boolean | true false | Display code |",
+                "printSlip = false",
+                "secretKey = value",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(offset, text)| {
+                let mut chunk = setup_focus_runtime_chunk(document_id, 20 + offset as i32, 0.1);
+                chunk.score_kind = RuntimeChunkScoreKind::SourceContext;
+                chunk.document_label = "Provider Alpha setup manual".to_string();
+                chunk.excerpt = text.to_string();
+                chunk.source_text = text.to_string();
+                chunk
+            }),
+        );
+        let mut bundle =
+            RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+        truncate_bundle(&mut bundle, 8, Some(&query_ir), &std::collections::HashSet::new());
+
+        let retained_source_text =
+            bundle.chunks.iter().map(|chunk| chunk.source_text.as_str()).collect::<Vec<_>>();
+        assert!(
+            bundle
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+                .count()
+                >= 6,
+            "{retained_source_text:?}"
+        );
+        assert!(retained_source_text.iter().any(|text| text.contains("endpointUrl")));
+        assert!(retained_source_text.iter().any(|text| text.contains("visible = true")));
+        assert!(retained_source_text.iter().any(|text| text.contains("printSlip = false")));
+    }
+
+    #[test]
+    fn low_confidence_structured_fallback_keeps_late_source_context_examples() {
+        let document_id = Uuid::now_v7();
+        let query_ir = low_confidence_untyped_query_ir();
+
+        let mut chunks = (0..8)
+            .map(|index| setup_focus_runtime_chunk(Uuid::now_v7(), index, 1.0))
+            .collect::<Vec<_>>();
+        chunks.extend((0..28).map(|offset| {
+            let text = match offset {
+                24 => "[Display] visible = true".to_string(),
+                26 => "[Receipt] printSlip = false".to_string(),
+                _ => format!("tableRow{offset} = value"),
+            };
+            let mut chunk = setup_focus_runtime_chunk(document_id, 20 + offset, 0.1);
+            chunk.score_kind = RuntimeChunkScoreKind::SourceContext;
+            chunk.document_label = "Provider Alpha setup manual".to_string();
+            chunk.excerpt = text.clone();
+            chunk.source_text = text;
+            chunk
+        }));
+        let mut bundle =
+            RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+        truncate_bundle(&mut bundle, 32, Some(&query_ir), &std::collections::HashSet::new());
+
+        let retained_source_text =
+            bundle.chunks.iter().map(|chunk| chunk.source_text.as_str()).collect::<Vec<_>>();
+        assert!(
+            bundle
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+                .count()
+                >= 28,
+            "{retained_source_text:?}"
+        );
+        assert!(retained_source_text.iter().any(|text| text.contains("visible = true")));
+        assert!(retained_source_text.iter().any(|text| text.contains("printSlip = false")));
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_skips_exact_version_questions() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let alpha_mid = document_row("alpha-2-3.md", "Alpha Suite 2.3.0 changelog");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (alpha_mid.document_id, alpha_mid.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_new.document_id, 0, 1.0),
+            latest_version_runtime_chunk(alpha_mid.document_id, 0, 1.0),
+        ];
+        let query_ir = low_confidence_untyped_query_ir();
+
+        assert!(
+            infer_latest_version_query_ir_from_retrieved_evidence(
+                &query_ir,
+                "show 2.4.0",
+                &chunks,
+                &index,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn retrieved_latest_version_fallback_requires_multiple_family_documents() {
+        let alpha_new = document_row("alpha-2-4.md", "Alpha Suite 2.4.0 changelog");
+        let generic = document_row("overview.md", "Alpha Suite overview");
+        let index = HashMap::from([
+            (alpha_new.document_id, alpha_new.clone()),
+            (generic.document_id, generic.clone()),
+        ]);
+        let chunks = vec![
+            latest_version_runtime_chunk(alpha_new.document_id, 0, 1.0),
+            latest_version_runtime_chunk(generic.document_id, 0, 1.0),
+        ];
+        let query_ir = low_confidence_untyped_query_ir();
+
+        assert!(
+            infer_latest_version_query_ir_from_retrieved_evidence(
+                &query_ir,
+                "show latest records",
+                &chunks,
+                &index,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -4375,7 +6096,322 @@ mod document_index_tests {
         assert!(candidates.contains(&target.document_id));
     }
 
+    #[test]
+    fn raw_setup_focus_candidates_ignore_high_frequency_title_tokens() {
+        let documents = (0..12)
+            .map(|index| {
+                document_row(
+                    &format!("shared-device-{index}.md"),
+                    &format!("Shared Device operator note {index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let document_index = documents
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+        let question_tokens = raw_question_setup_focus_tokens("Shared Device status");
+
+        let candidates = raw_question_setup_focus_candidate_document_ids(
+            Some(&question_tokens),
+            &document_index,
+            SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
+        );
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn raw_setup_focus_candidates_keep_rare_subject_token() {
+        let mut documents = (0..12)
+            .map(|index| {
+                document_row(
+                    &format!("shared-device-{index}.md"),
+                    &format!("Shared Device operator note {index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let target = document_row("alpha-connector.md", "Alpha Connector setup reference");
+        documents.push(target.clone());
+        let document_index = documents
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+        let question_tokens = raw_question_setup_focus_tokens("Alpha Connector settings");
+
+        let candidates = raw_question_setup_focus_candidate_document_ids(
+            Some(&question_tokens),
+            &document_index,
+            SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
+        );
+
+        assert_eq!(candidates.first().copied(), Some(target.document_id));
+    }
+
+    #[test]
+    fn structural_setup_focus_fallback_uses_provider_free_entity_identity() {
+        let target = document_row("alpha-connector.md", "Alpha Connector setup reference");
+        let unrelated = document_row("beta-connector.md", "Beta Connector setup reference");
+        let document_index = [unrelated, target.clone()]
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+        let mut query_ir = setup_query_ir("");
+        query_ir.act = QueryAct::Describe;
+        query_ir.scope = QueryScope::MultiDocument;
+        query_ir.target_types.clear();
+        query_ir.target_entities =
+            vec![EntityMention { label: "Alpha Connector".to_string(), role: EntityRole::Subject }];
+        query_ir.document_focus = None;
+        query_ir.confidence = 0.25;
+
+        assert!(query_ir_warrants_structural_setup_focus_fallback(&query_ir));
+        let candidates = setup_focus_candidate_document_ids(
+            &query_ir,
+            &document_index,
+            SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
+        );
+
+        assert_eq!(candidates.first().copied(), Some(target.document_id));
+    }
+
+    #[test]
+    fn raw_setup_focus_fallback_accepts_low_confidence_multi_document_ir() {
+        let target = document_row("alpha-connector.md", "Alpha Connector setup reference");
+        let unrelated = document_row("beta-connector.md", "Beta Connector setup reference");
+        let document_index = [unrelated, target.clone()]
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+        let mut query_ir = setup_query_ir("");
+        query_ir.act = QueryAct::Describe;
+        query_ir.scope = QueryScope::MultiDocument;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.document_focus = None;
+        query_ir.confidence = 0.25;
+        let question_tokens = raw_question_setup_focus_tokens("Alpha Connector");
+
+        assert!(setup_focus_uses_raw_question_fallback(&query_ir));
+        let candidates = raw_question_setup_focus_candidate_document_ids(
+            Some(&question_tokens),
+            &document_index,
+            SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP,
+        );
+
+        assert_eq!(candidates.first().copied(), Some(target.document_id));
+    }
+
+    #[test]
+    fn raw_setup_focus_score_does_not_expand_distinctive_tokens_by_near_match() {
+        let document = document_row("cash-desk.md", "Cash desk operator reference");
+        let question_tokens = BTreeSet::from(["desks".to_string()]);
+
+        assert_eq!(raw_question_setup_focus_document_score(&question_tokens, &document), 0);
+    }
+
+    #[test]
+    fn raw_setup_focus_filter_keeps_primary_supported_sibling_documents() {
+        let setup_document_id = Uuid::now_v7();
+        let mut setup_chunk = setup_focus_runtime_chunk(setup_document_id, 0, 1.0);
+        setup_chunk.document_label = "Alpha Connector setup reference".to_string();
+        let mut unrelated_setup_chunk = setup_focus_runtime_chunk(Uuid::now_v7(), 0, 1.0);
+        unrelated_setup_chunk.document_label = "Gamma Verifier setup reference".to_string();
+        let mut primary_chunk = setup_focus_runtime_chunk(Uuid::now_v7(), 0, 1.0);
+        primary_chunk.document_label = "Alpha Connector status screen".to_string();
+
+        let filtered = filter_raw_setup_focus_chunks_by_primary_context(
+            vec![setup_chunk.clone(), unrelated_setup_chunk],
+            &[primary_chunk],
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].document_id, setup_document_id);
+    }
+
+    #[test]
+    fn raw_setup_focus_filter_keeps_exact_primary_document() {
+        let document_id = Uuid::now_v7();
+        let mut setup_chunk = setup_focus_runtime_chunk(document_id, 0, 1.0);
+        setup_chunk.document_label = "Standalone setup reference".to_string();
+        let mut primary_chunk = setup_focus_runtime_chunk(document_id, 3, 1.0);
+        primary_chunk.document_label = "Different title for same document".to_string();
+
+        let filtered =
+            filter_raw_setup_focus_chunks_by_primary_context(vec![setup_chunk], &[primary_chunk]);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].document_id, document_id);
+    }
+
+    #[test]
+    fn raw_setup_focus_filter_keeps_structural_config_document_without_primary_label_support() {
+        let document_id = Uuid::now_v7();
+        let mut anchor_chunk = setup_focus_runtime_chunk(document_id, 0, 1.0);
+        anchor_chunk.document_label = "Provider Alpha setup reference".to_string();
+        anchor_chunk.source_text = [
+            "Install `alpha-module`.",
+            "Edit /opt/alpha/alpha.conf.",
+            "[Main]",
+            "endpointUrl = https://alpha.example/api",
+        ]
+        .join("\n");
+        let mut parameter_chunk = setup_focus_runtime_chunk(document_id, 1, 1.0);
+        parameter_chunk.document_label = anchor_chunk.document_label.clone();
+        parameter_chunk.source_text =
+            "fillDetails = true\nvisible = true\nprintSlip = false".to_string();
+        let mut primary_chunk = setup_focus_runtime_chunk(Uuid::now_v7(), 0, 1.0);
+        primary_chunk.document_label = "General payment operations".to_string();
+
+        let filtered = filter_raw_setup_focus_chunks_by_primary_context(
+            vec![anchor_chunk, parameter_chunk],
+            &[primary_chunk],
+        );
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|chunk| chunk.document_id == document_id));
+    }
+
+    #[test]
+    fn raw_setup_focus_filter_discards_weak_unbacked_candidates() {
+        let mut setup_chunk = setup_focus_runtime_chunk(Uuid::now_v7(), 0, 1.0);
+        setup_chunk.document_label = "Provider Alpha setup reference".to_string();
+        setup_chunk.source_text = "General setup overview.".to_string();
+        let mut primary_chunk = setup_focus_runtime_chunk(Uuid::now_v7(), 0, 1.0);
+        primary_chunk.document_label = "Unrelated operations".to_string();
+
+        let filtered =
+            filter_raw_setup_focus_chunks_by_primary_context(vec![setup_chunk], &[primary_chunk]);
+
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn artifact_sibling_source_candidates_use_image_title_prefix() {
+        let image =
+            document_row("alpha-connector-screen.png", "Alpha Connector: status screen.png");
+        let manual = document_row("alpha-connector-manual.md", "Alpha Connector - operator manual");
+        let unrelated =
+            document_row("beta-connector-manual.md", "Beta Connector - operator manual");
+        let document_index = [image.clone(), manual.clone(), unrelated]
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+        let mut image_chunk = setup_focus_runtime_chunk(image.document_id, 0, 1.0);
+        image_chunk.score_kind = RuntimeChunkScoreKind::Relevance;
+
+        let candidates = artifact_sibling_source_document_ids(&[image_chunk], &document_index, 10);
+
+        assert_eq!(candidates.first().copied(), Some(manual.document_id));
+        assert!(!candidates.contains(&image.document_id));
+    }
+
+    #[test]
+    fn artifact_sibling_source_candidates_follow_attachment_parent_page_id() {
+        let image = document_row_with_source(
+            "alpha-connector-screen.png",
+            "Alpha Connector: status screen.png",
+            Some("upload://alpha-connector-screen.png"),
+            Some("https://example.invalid/download/attachments/12345/status-screen.png"),
+        );
+        let parent_page = document_row_with_source(
+            "alpha-connector-page.html",
+            "Alpha Connector",
+            Some("upload://file.html"),
+            Some("https://example.invalid/pages/viewpage.action?pageId=12345"),
+        );
+        let title_neighbor =
+            document_row("alpha-connector-notes.md", "Alpha Connector - screenshot notes");
+        let document_index = [image.clone(), title_neighbor, parent_page.clone()]
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+        let mut image_chunk = setup_focus_runtime_chunk(image.document_id, 0, 1.0);
+        image_chunk.score_kind = RuntimeChunkScoreKind::Relevance;
+
+        let candidates = artifact_sibling_source_document_ids(&[image_chunk], &document_index, 10);
+
+        assert_eq!(candidates.first().copied(), Some(parent_page.document_id));
+        assert!(!candidates.contains(&image.document_id));
+    }
+
+    #[test]
+    fn artifact_sibling_source_revision_ids_include_readable_history() {
+        let document = document_row("alpha-connector-page.html", "Alpha Connector");
+        let canonical_revision_id = document.readable_revision_id.expect("readable head");
+        let older_revision_id = Uuid::now_v7();
+        let processing_revision_id = Uuid::now_v7();
+        let other_document_id = Uuid::now_v7();
+        let other_revision_id = Uuid::now_v7();
+        let revisions = vec![
+            revision_row(document.document_id, canonical_revision_id, 4, "ready"),
+            revision_row(document.document_id, processing_revision_id, 3, "processing"),
+            revision_row(other_document_id, other_revision_id, 2, "ready"),
+            revision_row(document.document_id, older_revision_id, 1, "readable"),
+        ];
+
+        let revision_ids =
+            artifact_sibling_source_revision_ids(&document, canonical_revision_id, &revisions, 8);
+
+        assert_eq!(revision_ids, vec![canonical_revision_id, older_revision_id]);
+    }
+
+    #[test]
+    fn artifact_sibling_source_merge_keeps_source_context_kind() {
+        let mut primary_chunk = setup_focus_runtime_chunk(Uuid::now_v7(), 0, 0.9);
+        primary_chunk.score_kind = RuntimeChunkScoreKind::Relevance;
+        let mut sibling_chunk =
+            setup_focus_runtime_chunk(Uuid::now_v7(), 0, artifact_sibling_source_chunk_score(0, 0));
+        sibling_chunk.score_kind = RuntimeChunkScoreKind::SourceContext;
+        let sibling_chunk_id = sibling_chunk.chunk_id;
+
+        let merged = merge_query_ir_focus_chunks(vec![primary_chunk], vec![sibling_chunk], 8);
+        let merged_sibling = merged
+            .iter()
+            .find(|chunk| chunk.chunk_id == sibling_chunk_id)
+            .expect("sibling source context chunk retained");
+
+        assert_eq!(merged_sibling.score_kind, RuntimeChunkScoreKind::SourceContext);
+        assert!(score_value(merged_sibling.score) < DOCUMENT_IDENTITY_SCORE_FLOOR);
+    }
+
+    #[test]
+    fn query_ir_focus_merge_reserves_source_context_against_document_identity_hits() {
+        let primary_chunks = (0..16)
+            .map(|index| {
+                let mut chunk = setup_focus_runtime_chunk(
+                    Uuid::now_v7(),
+                    index,
+                    DOCUMENT_IDENTITY_SCORE_FLOOR + 100.0 - index as f32,
+                );
+                chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+                chunk
+            })
+            .collect::<Vec<_>>();
+        let mut source_context =
+            setup_focus_runtime_chunk(Uuid::now_v7(), 20, ARTIFACT_SIBLING_SOURCE_SCORE_BASE);
+        source_context.score_kind = RuntimeChunkScoreKind::SourceContext;
+        source_context.source_text = "companion source evidence".to_string();
+        let source_context_chunk_id = source_context.chunk_id;
+
+        let merged = merge_query_ir_focus_chunks(primary_chunks, vec![source_context], 8);
+
+        assert!(
+            merged.iter().any(|chunk| chunk.chunk_id == source_context_chunk_id),
+            "{merged:#?}"
+        );
+    }
+
     fn document_row(file_name: &str, title: &str) -> KnowledgeDocumentRow {
+        document_row_with_source(file_name, title, None, None)
+    }
+
+    fn document_row_with_source(
+        file_name: &str,
+        title: &str,
+        source_uri: Option<&str>,
+        document_hint: Option<&str>,
+    ) -> KnowledgeDocumentRow {
         let document_id = Uuid::now_v7();
         KnowledgeDocumentRow {
             key: document_id.to_string(),
@@ -4387,13 +6423,56 @@ mod document_index_tests {
             external_key: file_name.to_string(),
             file_name: Some(file_name.to_string()),
             title: Some(title.to_string()),
+            source_uri: source_uri.map(str::to_string),
+            document_hint: document_hint.map(str::to_string),
             document_state: "active".to_string(),
             active_revision_id: Some(Uuid::now_v7()),
             readable_revision_id: Some(Uuid::now_v7()),
             latest_revision_no: Some(1),
+            parent_document_id: None,
+            document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             deleted_at: None,
+        }
+    }
+
+    fn revision_row(
+        document_id: Uuid,
+        revision_id: Uuid,
+        revision_number: i64,
+        text_state: &str,
+    ) -> KnowledgeRevisionRow {
+        let now = Utc::now();
+        KnowledgeRevisionRow {
+            key: revision_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            revision_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            document_id,
+            revision_number,
+            revision_state: "active".to_string(),
+            revision_kind: "snapshot".to_string(),
+            storage_ref: None,
+            source_uri: None,
+            document_hint: None,
+            mime_type: "text/plain".to_string(),
+            checksum: revision_id.to_string(),
+            title: Some("Alpha Connector".to_string()),
+            byte_size: 128,
+            normalized_text: None,
+            text_checksum: None,
+            image_checksum: None,
+            text_state: text_state.to_string(),
+            vector_state: "ready".to_string(),
+            graph_state: "ready".to_string(),
+            text_readable_at: Some(now),
+            vector_ready_at: Some(now),
+            graph_ready_at: Some(now),
+            superseded_by_revision_id: None,
+            created_at: now,
         }
     }
 
@@ -4419,6 +6498,16 @@ mod document_index_tests {
             retrieval_query: None,
             confidence: 1.0,
         }
+    }
+
+    fn low_confidence_untyped_query_ir() -> QueryIR {
+        let mut query_ir = setup_query_ir("Alpha Suite");
+        query_ir.act = QueryAct::Describe;
+        query_ir.confidence = 0.25;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.document_focus = None;
+        query_ir
     }
 
     fn chunk_row(
@@ -4478,6 +6567,16 @@ mod document_index_tests {
             score_kind: RuntimeChunkScoreKind::DocumentIdentity,
             source_text: "setup evidence".to_string(),
         }
+    }
+
+    fn latest_version_runtime_chunk(
+        document_id: Uuid,
+        chunk_index: i32,
+        score: f32,
+    ) -> RuntimeMatchedChunk {
+        let mut chunk = setup_focus_runtime_chunk(document_id, chunk_index, score);
+        chunk.score_kind = RuntimeChunkScoreKind::LatestVersion;
+        chunk
     }
 }
 
@@ -4540,7 +6639,7 @@ fn score_kind_priority(kind: RuntimeChunkScoreKind) -> u8 {
         | RuntimeChunkScoreKind::SourceContext
         | RuntimeChunkScoreKind::FocusedDocument => 1,
         RuntimeChunkScoreKind::QueryIrFocus => 2,
-        RuntimeChunkScoreKind::DocumentIdentity => 3,
+        RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion => 3,
     }
 }
 
@@ -4553,6 +6652,9 @@ fn effective_merge_score_kind(
     lane: RetrievalMergeLane,
     raw_score: f32,
 ) -> RuntimeChunkScoreKind {
+    if chunk.score_kind == RuntimeChunkScoreKind::LatestVersion {
+        return RuntimeChunkScoreKind::LatestVersion;
+    }
     if raw_score >= DOCUMENT_IDENTITY_SCORE_FLOOR {
         return RuntimeChunkScoreKind::DocumentIdentity;
     }
@@ -4641,8 +6743,49 @@ fn rrf_merge_chunks(
             .then_with(|| left.chunk_index.cmp(&right.chunk_index))
             .then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
-    values.truncate(top_k);
-    values
+    truncate_merged_chunks_for_lane(values, top_k, right_lane)
+}
+
+fn truncate_merged_chunks_for_lane(
+    values: Vec<RuntimeMatchedChunk>,
+    top_k: usize,
+    right_lane: RetrievalMergeLane,
+) -> Vec<RuntimeMatchedChunk> {
+    if top_k == 0 || values.is_empty() {
+        return Vec::new();
+    }
+    if right_lane != RetrievalMergeLane::QueryIrFocus {
+        return values.into_iter().take(top_k).collect();
+    }
+    let reserved_source_context_count = values
+        .iter()
+        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+        .count()
+        .min(top_k.saturating_sub(1))
+        .min(QUERY_IR_FOCUS_SOURCE_CONTEXT_RESERVATION_LIMIT);
+    if reserved_source_context_count == 0 {
+        return values.into_iter().take(top_k).collect();
+    }
+
+    let mut selected = Vec::with_capacity(top_k);
+    let mut selected_chunk_ids = HashSet::<Uuid>::new();
+    for chunk in values
+        .iter()
+        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
+        .take(reserved_source_context_count)
+    {
+        selected_chunk_ids.insert(chunk.chunk_id);
+        selected.push(chunk.clone());
+    }
+    for chunk in values {
+        if selected.len() >= top_k {
+            break;
+        }
+        if selected_chunk_ids.insert(chunk.chunk_id) {
+            selected.push(chunk);
+        }
+    }
+    selected
 }
 
 pub(crate) fn score_desc_chunks(
@@ -4660,10 +6803,11 @@ pub(crate) fn truncate_bundle(
     bundle: &mut RetrievalBundle,
     top_k: usize,
     query_ir: Option<&QueryIR>,
+    demoted_document_ids: &HashSet<Uuid>,
 ) {
     bundle.entities.truncate(entity_context_top_k(top_k, query_ir));
     bundle.relationships.truncate(top_k);
-    truncate_chunks_for_context(&mut bundle.chunks, top_k, query_ir);
+    truncate_chunks_for_context(&mut bundle.chunks, top_k, query_ir, demoted_document_ids);
 }
 
 fn entity_context_top_k(top_k: usize, query_ir: Option<&QueryIR>) -> usize {
@@ -4682,14 +6826,26 @@ fn truncate_chunks_for_context(
     chunks: &mut Vec<RuntimeMatchedChunk>,
     top_k: usize,
     query_ir: Option<&QueryIR>,
+    demoted_document_ids: &HashSet<Uuid>,
 ) {
     if chunks.len() <= top_k {
         return;
     }
     let mut indexed = std::mem::take(chunks).into_iter().enumerate().collect::<Vec<_>>();
+    // Attached-context documents (image attachments collapsed onto their parent
+    // page) sink below every peer/primary chunk so they fill only the residual
+    // budget after real content — they are searchable context, not competing
+    // documents. The demotion is the FIRST sort key so a flood of one-chunk
+    // image siblings can never displace the parent's procedural/graph evidence.
+    // The set already excludes any document the query explicitly targets, so an
+    // exact "show screenshot X" ask is not demoted.
     indexed.sort_by(|(left_index, left), (right_index, right)| {
-        score_kind_priority(right.score_kind)
-            .cmp(&score_kind_priority(left.score_kind))
+        demoted_document_ids
+            .contains(&left.document_id)
+            .cmp(&demoted_document_ids.contains(&right.document_id))
+            .then_with(|| {
+                score_kind_priority(right.score_kind).cmp(&score_kind_priority(left.score_kind))
+            })
             .then_with(|| score_desc_chunks(left, right))
             .then_with(|| left_index.cmp(right_index))
     });
@@ -4706,10 +6862,10 @@ fn truncate_chunks_for_context(
         {
             truncate_chunks_with_source_context_reservation(&indexed, top_k, reserved_count)
         } else {
-            indexed.into_iter().take(top_k).collect::<Vec<_>>()
+            indexed.iter().take(top_k).cloned().collect::<Vec<_>>()
         }
     } else {
-        indexed.into_iter().take(top_k).collect::<Vec<_>>()
+        indexed.iter().take(top_k).cloned().collect::<Vec<_>>()
     };
     if let Some(anchor) = reserved_anchor {
         ensure_setup_focus_anchor_retained(&mut selected, anchor, top_k);
@@ -4789,9 +6945,21 @@ fn source_context_reservation_count(
             .target_types
             .iter()
             .any(|target_type| target_type.trim().eq_ignore_ascii_case("connection"));
+    let requests_configuration_context = has_question_intent(&intents, QuestionIntent::ConfigKey)
+        || has_question_intent(&intents, QuestionIntent::Parameter)
+        || query_ir.target_types.iter().any(|target_type| {
+            matches!(
+                canonical_target_type_tag(target_type).as_str(),
+                "configuration_file" | "config_key" | "parameter"
+            )
+        });
+    let requests_structured_fallback_context =
+        query_ir_requests_structured_source_context_reservation(query_ir);
     let reserves_source_context = query_ir.is_exact_literal_technical()
         || requests_error_code_context
-        || requests_transport_context;
+        || requests_transport_context
+        || requests_configuration_context
+        || requests_structured_fallback_context;
     if top_k < 2 || !reserves_source_context {
         return None;
     }
@@ -4806,10 +6974,24 @@ fn source_context_reservation_count(
         2
     } else if requests_transport_context {
         8
+    } else if requests_structured_fallback_context {
+        top_k.saturating_sub(4).clamp(8, 28)
+    } else if requests_configuration_context {
+        top_k.saturating_sub(2).clamp(4, 12)
     } else {
         4
     };
     Some(source_context_count.min(top_k.saturating_sub(1)).min(max_reserved))
+}
+
+fn query_ir_requests_structured_source_context_reservation(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.3
+        && matches!(query_ir.scope, QueryScope::SingleDocument)
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.literal_constraints.is_empty()
 }
 
 fn truncate_chunks_with_source_context_reservation(

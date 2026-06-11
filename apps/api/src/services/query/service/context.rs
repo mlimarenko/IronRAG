@@ -40,6 +40,10 @@ use super::{
     merge_ranked_reference, runtime_mode_label, saturating_rank, top_ranked_ids,
 };
 
+const CONTEXT_BUNDLE_GRAPH_SEED_LIMIT: usize = 4;
+const CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH: usize = 1;
+const CONTEXT_BUNDLE_GRAPH_TRAVERSAL_LIMIT_MULTIPLIER: usize = 2;
+
 pub(crate) async fn assemble_context_bundle(
     state: &AppState,
     conversation: &query_repository::QueryConversationRow,
@@ -118,7 +122,12 @@ pub(crate) async fn assemble_context_bundle(
         );
     }
 
-    let entity_seed_ids = top_ranked_ids(&entity_refs, top_k.max(3));
+    let graph_seed_limit = top_k.max(3).min(CONTEXT_BUNDLE_GRAPH_SEED_LIMIT);
+    let graph_traversal_limit = candidate_limit
+        .saturating_mul(CONTEXT_BUNDLE_GRAPH_TRAVERSAL_LIMIT_MULTIPLIER)
+        .max(candidate_limit)
+        .min(super::MAX_DETAIL_GRAPH_EDGE_REFERENCES);
+    let entity_seed_ids = top_ranked_ids(&entity_refs, graph_seed_limit);
     let mut entity_neighborhood_rows = 0usize;
     // Parallel entity-neighborhood fan-out. Each seed entity issues a
     // single Arango traversal; they're fully independent, so running
@@ -134,8 +143,8 @@ pub(crate) async fn assemble_context_bundle(
                 .list_entity_neighborhood(
                     entity_id,
                     conversation.library_id,
-                    2,
-                    candidate_limit * 4,
+                    CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
+                    graph_traversal_limit.min(super::MAX_DETAIL_GRAPH_NODE_REFERENCES),
                 )
                 .await
                 .with_context(|| {
@@ -161,7 +170,7 @@ pub(crate) async fn assemble_context_bundle(
         }
     }
 
-    let relation_seed_ids = top_ranked_ids(&relation_refs, top_k.max(3));
+    let relation_seed_ids = top_ranked_ids(&relation_refs, graph_seed_limit);
     let mut relation_traversal_rows = 0usize;
     let mut relation_evidence_rows = 0usize;
     // Parallel relation fan-out. For each seed relation we issue two
@@ -175,8 +184,8 @@ pub(crate) async fn assemble_context_bundle(
             let expand_future = state.arango_graph_store.expand_relation_centric(
                 relation_id,
                 conversation.library_id,
-                2,
-                candidate_limit * 4,
+                CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
+                graph_traversal_limit,
             );
             let evidence_future = state.arango_graph_store.list_relation_evidence_lookup(
                 relation_id,
@@ -387,6 +396,9 @@ pub(crate) async fn assemble_context_bundle(
 
     let candidate_summary = json!({
         "answerContextChunkReferences": answer_chunk_references.len(),
+        "graphSeedLimit": graph_seed_limit,
+        "graphTraversalDepth": CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
+        "graphTraversalLimit": graph_traversal_limit,
         "lexicalFactHits": lexical_fact_hits.len(),
         "lexicalEntityHits": lexical_entity_hits.len(),
         "vectorEntityHits": 0,
@@ -408,6 +420,9 @@ pub(crate) async fn assemble_context_bundle(
         "requestedMode": runtime_mode_label(requested_mode),
         "resolvedMode": runtime_mode_label(resolved_mode),
         "candidateLimit": candidate_limit,
+        "graphSeedLimit": graph_seed_limit,
+        "graphTraversalDepth": CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
+        "graphTraversalLimit": graph_traversal_limit,
         "vectorCandidateLimit": 0,
         "vectorEnabled": false,
         "exactLiteralBias": exact_literal_bias,

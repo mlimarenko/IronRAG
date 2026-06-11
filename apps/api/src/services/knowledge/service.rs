@@ -135,10 +135,17 @@ impl KnowledgeService {
                 external_key: command.external_key,
                 file_name: command.file_name,
                 title: command.title,
+                source_uri: None,
+                document_hint: None,
                 document_state: command.document_state,
                 active_revision_id: None,
                 readable_revision_id: None,
                 latest_revision_no: None,
+                // Parentage/role are finalized on the promote path once the
+                // content document's parent is resolved and a revision lands;
+                // the shell mirror starts as an unparented primary document.
+                parent_document_id: None,
+                document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
@@ -217,15 +224,36 @@ impl KnowledgeService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let title_source_revision_id = command.readable_revision_id.or(command.active_revision_id);
-        let resolved_title = match title_source_revision_id {
+        let title_source_revision = match title_source_revision_id {
             Some(revision_id) => state
                 .arango_document_store
                 .get_revision(revision_id)
                 .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .and_then(|row| row.title),
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
             None => None,
         };
+        let resolved_title = title_source_revision.as_ref().and_then(|row| row.title.clone());
+        // Finalize the typed role from structural inputs now that a revision has
+        // landed and its media class is known. The role is decided once, here,
+        // from the canonical media-class classifier — never from extension/MIME
+        // parsing in retrieval. The document's `external_key` carries the
+        // attachment file name for the extension signal; the revision supplies
+        // the declared MIME type.
+        let file_name_for_media_class = existing_projection
+            .as_ref()
+            .and_then(|row| row.file_name.clone())
+            .unwrap_or_else(|| content_document.external_key.clone());
+        let is_raster_image = title_source_revision.as_ref().is_some_and(|revision| {
+            crate::domains::content::revision_is_raster_image(
+                Some(file_name_for_media_class.as_str()),
+                Some(revision.mime_type.as_str()),
+            )
+        });
+        let document_role = crate::domains::content::derive_document_role(
+            content_document.parent_document_id.is_some(),
+            is_raster_image,
+        )
+        .to_string();
         let row = state
             .arango_document_store
             .upsert_document(&crate::infra::arangodb::document_store::KnowledgeDocumentRow {
@@ -239,10 +267,16 @@ impl KnowledgeService {
                 file_name: existing_projection.as_ref().and_then(|row| row.file_name.clone()),
                 title: resolved_title
                     .or_else(|| existing_projection.as_ref().and_then(|row| row.title.clone())),
+                source_uri: existing_projection.as_ref().and_then(|row| row.source_uri.clone()),
+                document_hint: existing_projection
+                    .as_ref()
+                    .and_then(|row| row.document_hint.clone()),
                 document_state: command.document_state,
                 active_revision_id: command.active_revision_id,
                 readable_revision_id: command.readable_revision_id,
                 latest_revision_no: command.latest_revision_no,
+                parent_document_id: content_document.parent_document_id,
+                document_role,
                 created_at: existing_projection
                     .as_ref()
                     .map(|row| row.created_at)

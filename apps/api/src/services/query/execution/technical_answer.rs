@@ -1,8 +1,8 @@
-use std::sync::LazyLock;
+use std::{collections::BTreeSet, sync::LazyLock};
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::{QueryAct, QueryIR};
+use crate::domains::query_ir::{QueryAct, QueryIR, QueryScope};
 use crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow;
 
 use super::question_intent::{
@@ -10,10 +10,16 @@ use super::question_intent::{
 };
 #[cfg(test)]
 use super::technical_literals::technical_chunk_selection_score;
-use super::technical_literals::{extract_explicit_path_literals, extract_package_command_literals};
+use super::technical_literals::{
+    extract_config_section_literals, extract_explicit_path_literals,
+    extract_package_command_literals, extract_parameter_literals,
+};
 use super::technical_parameter_answer::build_exact_parameter_answer;
 use super::technical_url_answer::build_exact_url_answer;
 use super::{CanonicalAnswerEvidence, RuntimeMatchedChunk};
+use crate::services::query::text_match::{
+    near_token_match, near_token_overlap_count, normalized_alnum_tokens,
+};
 
 static ERROR_CODE_ASSIGNMENT_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     #[allow(clippy::expect_used)]
@@ -56,11 +62,19 @@ pub(super) fn build_exact_technical_literal_answer(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
+    if !query_ir_allows_exact_technical_literal_answer(query_ir) {
+        return None;
+    }
     build_module_configuration_setup_answer(question, query_ir, evidence, chunks)
         .or_else(|| build_transport_config_assignment_answer(question, query_ir, chunks))
         .or_else(|| build_error_code_mapping_answer(question, query_ir, chunks))
         .or_else(|| build_exact_parameter_answer(question, query_ir, evidence, chunks))
         .or_else(|| build_exact_url_answer(question, query_ir, evidence, chunks))
+}
+
+fn query_ir_allows_exact_technical_literal_answer(query_ir: &QueryIR) -> bool {
+    !classify_question_or_ir_intents("", query_ir).is_empty()
+        || query_ir_requests_module_configuration_setup(query_ir)
 }
 
 pub(super) fn build_module_configuration_setup_answer(
@@ -71,12 +85,20 @@ pub(super) fn build_module_configuration_setup_answer(
 ) -> Option<String> {
     let explicitly_requested = query_ir_requests_module_configuration_setup(query_ir);
     if !explicitly_requested
-        && !query_ir_allows_evidence_driven_module_configuration_setup(query_ir)
+        && !query_ir_allows_evidence_driven_module_configuration_setup(question, query_ir)
     {
         return None;
     }
     let scoped_chunks = module_configuration_scope_chunks(question, chunks);
     let candidate_chunks = if scoped_chunks.is_empty() { chunks } else { scoped_chunks.as_slice() };
+    let low_confidence_evidence_driven = (low_confidence_unfocused_configuration_ir(query_ir)
+        && query_text_has_configuration_setup_anchor(question))
+        || low_confidence_structural_configuration_ir(query_ir);
+    if low_confidence_evidence_driven
+        && !module_configuration_candidate_matches_question(question, candidate_chunks)
+    {
+        return None;
+    }
     let packages = collect_module_packages_with_structured_blocks(
         candidate_chunks,
         &evidence.structured_blocks,
@@ -88,9 +110,11 @@ pub(super) fn build_module_configuration_setup_answer(
         16,
     );
     let config_path = select_module_configuration_path_from_paths(&config_paths, &packages)?;
-    if !explicitly_requested && packages.is_empty() {
-        return None;
-    }
+    let config_sections = collect_configuration_sections_with_structured_blocks(
+        candidate_chunks,
+        &evidence.structured_blocks,
+        8,
+    );
     let parameter_focus_terms = query_ir
         .literal_constraints
         .iter()
@@ -102,6 +126,16 @@ pub(super) fn build_module_configuration_setup_answer(
         &parameter_focus_terms,
         32,
     );
+    if !explicitly_requested
+        && !evidence_supports_module_configuration_answer(
+            &packages,
+            &config_paths,
+            &config_sections,
+            &parameters,
+        )
+    {
+        return None;
+    }
     if packages.is_empty() && parameters.is_empty() {
         return None;
     }
@@ -132,6 +166,12 @@ pub(super) fn build_module_configuration_setup_answer(
         answer.push_str(&format!("\n- `{path}`"));
     }
     answer.push('\n');
+    if !config_sections.is_empty() {
+        for section in config_sections {
+            answer.push_str(&format!("\n- `{section}`"));
+        }
+        answer.push('\n');
+    }
     if !parameters.is_empty() {
         for parameter in parameters {
             answer.push_str("\n- ");
@@ -143,23 +183,135 @@ pub(super) fn build_module_configuration_setup_answer(
 }
 
 fn query_ir_requests_module_configuration_setup(query_ir: &QueryIR) -> bool {
-    matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::Describe | QueryAct::RetrieveValue)
-        && query_ir.target_types.iter().any(|target_type| {
-            matches!(
-                canonical_target_type_tag(target_type).as_str(),
-                "configuration_file" | "config_key"
-            )
-        })
-        && query_ir.target_types.iter().any(|target_type| {
-            matches!(canonical_target_type_tag(target_type).as_str(), "package" | "parameter")
-        })
+    if !matches!(
+        query_ir.act,
+        QueryAct::ConfigureHow | QueryAct::Describe | QueryAct::RetrieveValue
+    ) {
+        return false;
+    }
+    let has_focus_signal = query_ir.document_focus.is_some()
+        || !query_ir.target_entities.is_empty()
+        || !query_ir.literal_constraints.is_empty()
+        || !query_ir.conversation_refs.is_empty();
+    let requests_configuration = query_ir.target_types.iter().any(|target_type| {
+        matches!(
+            canonical_target_type_tag(target_type).as_str(),
+            "configuration_file" | "config_key"
+        )
+    });
+    let requests_module_or_parameter = query_ir.target_types.iter().any(|target_type| {
+        matches!(canonical_target_type_tag(target_type).as_str(), "package" | "parameter")
+    });
+    requests_configuration && (requests_module_or_parameter || has_focus_signal)
 }
 
-fn query_ir_allows_evidence_driven_module_configuration_setup(query_ir: &QueryIR) -> bool {
-    matches!(query_ir.act, QueryAct::ConfigureHow)
+fn query_ir_allows_evidence_driven_module_configuration_setup(
+    question: &str,
+    query_ir: &QueryIR,
+) -> bool {
+    (matches!(query_ir.act, QueryAct::ConfigureHow)
         && (matches!(query_ir.scope, crate::domains::query_ir::QueryScope::SingleDocument)
             || query_ir.document_focus.is_some()
-            || !query_ir.target_entities.is_empty())
+            || !query_ir.target_entities.is_empty()))
+        || (low_confidence_unfocused_configuration_ir(query_ir)
+            && query_text_has_configuration_setup_anchor(question))
+        || low_confidence_structural_configuration_ir(query_ir)
+}
+
+fn low_confidence_unfocused_configuration_ir(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.35
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.target_entities.is_empty()
+        && query_ir.literal_constraints.is_empty()
+        && query_ir.temporal_constraints.is_empty()
+        && query_ir.conversation_refs.is_empty()
+}
+
+fn low_confidence_structural_configuration_ir(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.35
+        && matches!(query_ir.scope, QueryScope::SingleDocument | QueryScope::MultiDocument)
+        && matches!(
+            query_ir.act,
+            QueryAct::Describe | QueryAct::ConfigureHow | QueryAct::RetrieveValue
+        )
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.comparison.is_none()
+        && query_ir.temporal_constraints.is_empty()
+        && query_ir.conversation_refs.is_empty()
+        && (!query_ir.target_entities.is_empty() || !query_ir.literal_constraints.is_empty())
+}
+
+fn evidence_supports_module_configuration_answer(
+    packages: &[String],
+    config_paths: &[String],
+    config_sections: &[String],
+    parameters: &[String],
+) -> bool {
+    (!packages.is_empty() && !config_paths.is_empty())
+        || (!config_paths.is_empty() && !config_sections.is_empty() && parameters.len() >= 2)
+        || (!config_paths.is_empty() && parameters.len() >= 4)
+}
+
+fn query_text_has_configuration_setup_anchor(question: &str) -> bool {
+    !extract_explicit_path_literals(question, 1).is_empty()
+        || !extract_config_section_literals(question, 1).is_empty()
+        || extract_parameter_literals(question, 2).len() >= 2
+}
+
+fn module_configuration_candidate_matches_question(
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    let question_tokens = normalized_alnum_tokens(question, 3);
+    if question_tokens.len() < 2 {
+        return false;
+    }
+    let question_uppercase_codes = uppercase_code_tokens(question);
+    chunks.iter().any(|chunk| {
+        let label_tokens = normalized_alnum_tokens(&chunk.document_label, 3);
+        let overlap = near_token_overlap_count(&question_tokens, &label_tokens);
+        if overlap >= 3 {
+            return true;
+        }
+        if overlap < 2 {
+            return false;
+        }
+        if document_label_has_distinctive_overlap(&question_tokens, &label_tokens) {
+            return true;
+        }
+        if question_uppercase_codes.is_empty() {
+            return true;
+        }
+        let label_uppercase_codes = uppercase_code_tokens(&chunk.document_label);
+        question_uppercase_codes.iter().any(|code| label_uppercase_codes.contains(code))
+    })
+}
+
+fn document_label_has_distinctive_overlap(
+    question_tokens: &BTreeSet<String>,
+    label_tokens: &BTreeSet<String>,
+) -> bool {
+    question_tokens.iter().any(|question_token| {
+        question_token.chars().count() >= 8
+            && label_tokens.iter().any(|label_token| near_token_match(question_token, label_token))
+    })
+}
+
+fn uppercase_code_tokens(text: &str) -> BTreeSet<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter_map(|token| {
+            let letters = token.chars().filter(|ch| ch.is_alphabetic()).collect::<Vec<_>>();
+            if letters.len() < 2 || !letters.iter().all(|ch| ch.is_uppercase()) {
+                return None;
+            }
+            Some(token.chars().flat_map(char::to_lowercase).collect::<String>())
+        })
+        .collect()
 }
 
 fn module_configuration_scope_chunks(
@@ -297,6 +449,41 @@ fn collect_configuration_paths_from_texts<'a>(
     paths
 }
 
+fn collect_configuration_sections_with_structured_blocks(
+    chunks: &[RuntimeMatchedChunk],
+    blocks: &[KnowledgeStructuredBlockRow],
+    limit: usize,
+) -> Vec<String> {
+    let chunk_document_ids =
+        chunks.iter().map(|chunk| chunk.document_id).collect::<std::collections::BTreeSet<_>>();
+    collect_configuration_sections_from_texts(
+        chunks.iter().map(runtime_chunk_text).chain(blocks.iter().filter_map(|block| {
+            (chunk_document_ids.is_empty() || chunk_document_ids.contains(&block.document_id))
+                .then_some(block.text.as_str())
+        })),
+        limit,
+    )
+}
+
+fn collect_configuration_sections_from_texts<'a>(
+    texts: impl IntoIterator<Item = &'a str>,
+    limit: usize,
+) -> Vec<String> {
+    let mut sections = Vec::<String>::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for text in texts {
+        for section in extract_config_section_literals(text, limit) {
+            if seen.insert(section.to_ascii_lowercase()) {
+                sections.push(section);
+                if sections.len() >= limit {
+                    return sections;
+                }
+            }
+        }
+    }
+    sections
+}
+
 fn package_module_stem(package: &str) -> Option<String> {
     package
         .split(|ch: char| !(ch.is_ascii_alphanumeric()))
@@ -393,7 +580,9 @@ struct VisibleParameterRow {
 }
 
 fn parse_visible_parameter_row(line: &str) -> Option<VisibleParameterRow> {
-    parse_markdown_parameter_row(line).or_else(|| parse_structured_table_parameter_row(line))
+    parse_markdown_parameter_row(line)
+        .or_else(|| parse_structured_table_parameter_row(line))
+        .or_else(|| parse_config_assignment_parameter_row(line))
 }
 
 fn parse_markdown_parameter_row(line: &str) -> Option<VisibleParameterRow> {
@@ -421,18 +610,57 @@ fn parse_structured_table_parameter_row(line: &str) -> Option<VisibleParameterRo
     if parameter.is_empty() {
         return None;
     }
-    let rendered = std::iter::once(parameter.to_string())
-        .chain(
-            cells
-                .iter()
-                .skip(row_position.saturating_add(2))
-                .map(|cell| cell.trim_matches('`').trim())
-                .filter(|cell| !cell.is_empty())
-                .map(str::to_string),
-        )
-        .collect::<Vec<_>>()
-        .join(" — ");
+    let rest_cells = cells
+        .iter()
+        .skip(row_position.saturating_add(2))
+        .map(|cell| cell.trim_matches('`').trim())
+        .filter(|cell| !cell.is_empty())
+        .collect::<Vec<_>>();
+    let mut rendered_parts = Vec::new();
+    if let Some(value) = infer_boolean_assignment_value_from_cells(&rest_cells) {
+        rendered_parts.push(format!("{parameter} = {value}"));
+    } else {
+        rendered_parts.push(parameter.to_string());
+    }
+    rendered_parts.extend(rest_cells.iter().map(|cell| (*cell).to_string()));
+    let rendered = rendered_parts.join(" — ");
     Some(VisibleParameterRow { parameter_key: parameter.to_string(), rendered })
+}
+
+fn infer_boolean_assignment_value_from_cells(cells: &[&str]) -> Option<&'static str> {
+    let mut last_value = None;
+    let mut true_count = 0usize;
+    let mut false_count = 0usize;
+    for cell in cells {
+        for token in cell.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+            if token.eq_ignore_ascii_case("true") {
+                true_count = true_count.saturating_add(1);
+                last_value = Some("true");
+            } else if token.eq_ignore_ascii_case("false") {
+                false_count = false_count.saturating_add(1);
+                last_value = Some("false");
+            }
+        }
+    }
+    if true_count == 0 && false_count == 0 {
+        return None;
+    }
+    let boolean_token_count = true_count.saturating_add(false_count);
+    let carries_boolean_domain = true_count > 0 && false_count > 0;
+    (carries_boolean_domain && boolean_token_count >= 3).then_some(last_value).flatten()
+}
+
+fn parse_config_assignment_parameter_row(line: &str) -> Option<VisibleParameterRow> {
+    let capture = CONFIG_ASSIGNMENT_REGEX.captures(line)?;
+    let parameter = capture.get(1)?.as_str().trim().trim_matches('`');
+    let value = clean_config_assignment_value(capture.get(2)?.as_str());
+    if parameter.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some(VisibleParameterRow {
+        parameter_key: parameter.to_string(),
+        rendered: format!("{parameter} = {value}"),
+    })
 }
 
 fn focused_parameter_row_score(row: &VisibleParameterRow, focus_terms: &[&str]) -> usize {
@@ -456,7 +684,12 @@ fn render_delimited_table_row(line: &str) -> Option<String> {
     if cells.is_empty() {
         return None;
     }
-    let mut rendered = cells[0].to_string();
+    let rest_cells = cells.iter().skip(1).copied().collect::<Vec<_>>();
+    let mut rendered = if let Some(value) = infer_boolean_assignment_value_from_cells(&rest_cells) {
+        format!("{} = {value}", cells[0])
+    } else {
+        cells[0].to_string()
+    };
     for cell in cells.iter().skip(1) {
         rendered.push_str(" — ");
         rendered.push_str(cell);
@@ -468,6 +701,24 @@ fn render_parameter_bullet(row: &str) -> String {
     let row = row.trim();
     if row.is_empty() {
         return String::new();
+    }
+    if let Some((parameter, value)) = row.split_once(" = ") {
+        let (value, rest) = value
+            .split_once(" — ")
+            .map_or((value, ""), |(value, rest)| (value.trim(), rest.trim()));
+        let rendered = format!(
+            "`{} = {}`",
+            parameter.trim().trim_matches('`'),
+            value.trim().trim_matches('`')
+        );
+        if !rest.is_empty() {
+            return format!("{rendered} — {rest}");
+        }
+        return format!(
+            "`{} = {}`",
+            parameter.trim().trim_matches('`'),
+            value.trim().trim_matches('`')
+        );
     }
     let Some((parameter, rest)) = row.split_once(" — ") else {
         return format!("`{}`", row.trim_matches('`'));
@@ -734,7 +985,8 @@ pub(super) fn document_focus_preference(
 mod tests {
     use super::*;
     use crate::domains::query_ir::{
-        DocumentHint, QueryLanguage, QueryScope, SourceSliceSpec, UnresolvedRef,
+        DocumentHint, EntityMention, EntityRole, QueryLanguage, QueryScope, SourceSliceSpec,
+        UnresolvedRef,
     };
     use crate::services::query::execution::RuntimeChunkScoreKind;
 
@@ -954,6 +1206,304 @@ The module configuration file is /opt/alpha/modules/connector/connector.conf.
     }
 
     #[test]
+    fn module_configuration_setup_answer_uses_structural_evidence_for_untyped_low_confidence_ir() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![
+            runtime_chunk(
+                document_id,
+                1,
+                "Provider Alpha setup",
+                r#"
+Install the module:
+aptitude install alpha-connector
+
+The module configuration file is /opt/alpha/modules/connector/connector.conf.
+[Main]
+endpointUrl = https://alpha.example/api
+partnerId = alpha-partner
+"#,
+            ),
+            runtime_chunk(
+                document_id,
+                2,
+                "Provider Alpha setup",
+                r#"
+| endpointUrl | string | Service endpoint |
+| partnerId | string | Partner identifier |
+| visible | boolean | true false | Display the code |
+"#,
+            ),
+        ];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.literal_constraints.clear();
+        query_ir.temporal_constraints.clear();
+        query_ir.document_focus = None;
+        query_ir.source_slice = None;
+        query_ir.conversation_refs.clear();
+        query_ir.confidence = 0.25;
+
+        let answer = build_module_configuration_setup_answer(
+            "Provider Alpha setup `/opt/alpha/modules/connector/connector.conf` `endpointUrl`",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        )
+        .expect("setup answer from structural evidence");
+
+        assert!(answer.contains("`alpha-connector`"));
+        assert!(answer.contains("`/opt/alpha/modules/connector/connector.conf`"));
+        assert!(answer.contains("endpointUrl"));
+        assert!(answer.contains("partnerId"));
+        assert!(answer.contains("visible"));
+    }
+
+    #[test]
+    fn low_confidence_untyped_ir_requires_query_anchor_before_setup_answer() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            1,
+            "Provider Alpha setup",
+            r#"
+Install the module:
+aptitude install alpha-connector
+
+The module configuration file is /opt/alpha/modules/connector/connector.conf.
+[Main]
+endpointUrl = https://alpha.example/api
+partnerId = alpha-partner
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.literal_constraints.clear();
+        query_ir.temporal_constraints.clear();
+        query_ir.document_focus = None;
+        query_ir.source_slice = None;
+        query_ir.conversation_refs.clear();
+        query_ir.confidence = 0.25;
+
+        let answer = build_module_configuration_setup_answer(
+            "Provider Alpha terminal loses payment confirmation",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        );
+
+        assert!(answer.is_none(), "{answer:?}");
+    }
+
+    #[test]
+    fn low_confidence_untyped_ir_does_not_turn_unmatched_config_evidence_into_setup_answer() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            1,
+            "Provider Beta setup",
+            r#"
+Install the module:
+aptitude install beta-connector
+
+The module configuration file is /opt/beta/modules/connector/connector.conf.
+[Main]
+endpointUrl = https://beta.example/api
+partnerId = beta-partner
+visible = true
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.literal_constraints.clear();
+        query_ir.temporal_constraints.clear();
+        query_ir.document_focus = None;
+        query_ir.source_slice = None;
+        query_ir.conversation_refs.clear();
+        query_ir.confidence = 0.25;
+
+        let answer = build_module_configuration_setup_answer(
+            "Provider Alpha operational troubleshooting",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        );
+
+        assert!(answer.is_none(), "{answer:?}");
+    }
+
+    #[test]
+    fn low_confidence_untyped_ir_requires_shared_code_for_weak_label_overlap() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            1,
+            "Cash link setup",
+            r#"
+Install the module:
+aptitude install cash-link
+
+The module configuration file is /opt/cash/link/link.conf.
+[Main]
+endpointUrl = https://cash.example/api
+partnerId = cash-partner
+visible = true
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.literal_constraints.clear();
+        query_ir.temporal_constraints.clear();
+        query_ir.document_focus = None;
+        query_ir.source_slice = None;
+        query_ir.conversation_refs.clear();
+        query_ir.confidence = 0.25;
+
+        let answer = build_module_configuration_setup_answer(
+            "PAY cash link troubleshooting",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        );
+
+        assert!(answer.is_none(), "{answer:?}");
+    }
+
+    #[test]
+    fn low_confidence_untyped_ir_accepts_shared_code_for_config_evidence() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            1,
+            "PAY cash link setup",
+            r#"
+Install the module:
+aptitude install cash-link
+
+The module configuration file is /opt/cash/link/link.conf.
+[Main]
+endpointUrl = https://cash.example/api
+partnerId = cash-partner
+visible = true
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.literal_constraints.clear();
+        query_ir.temporal_constraints.clear();
+        query_ir.document_focus = None;
+        query_ir.source_slice = None;
+        query_ir.conversation_refs.clear();
+        query_ir.confidence = 0.25;
+
+        let answer = build_module_configuration_setup_answer(
+            "PAY cash link setup `/opt/cash/link/link.conf` `visible`",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        )
+        .expect("setup answer");
+
+        assert!(answer.contains("`cash-link`"));
+        assert!(answer.contains("`/opt/cash/link/link.conf`"));
+        assert!(answer.contains("visible"));
+    }
+
+    #[test]
+    fn low_confidence_structural_ir_uses_matching_config_evidence() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            1,
+            "Provider Alpha setup",
+            r#"
+Install the module:
+aptitude install alpha-connector
+
+The module configuration file is /opt/alpha/modules/connector/connector.conf.
+[Main]
+endpointUrl = https://alpha.example/api
+partnerId = alpha-partner
+visible = true
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.scope = QueryScope::MultiDocument;
+        query_ir.target_types.clear();
+        query_ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        query_ir.literal_constraints.clear();
+        query_ir.temporal_constraints.clear();
+        query_ir.document_focus = None;
+        query_ir.source_slice = None;
+        query_ir.conversation_refs.clear();
+        query_ir.confidence = 0.25;
+
+        let answer = build_module_configuration_setup_answer(
+            "Provider Alpha settings",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        )
+        .expect("setup answer");
+
+        assert!(answer.contains("`alpha-connector`"));
+        assert!(answer.contains("`/opt/alpha/modules/connector/connector.conf`"));
+        assert!(answer.contains("`visible = true`"));
+    }
+
+    #[test]
+    fn low_confidence_structural_ir_rejects_unmatched_config_evidence() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            1,
+            "Provider Beta setup",
+            r#"
+Install the module:
+aptitude install beta-connector
+
+The module configuration file is /opt/beta/modules/connector/connector.conf.
+[Main]
+endpointUrl = https://beta.example/api
+partnerId = beta-partner
+visible = true
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.scope = QueryScope::MultiDocument;
+        query_ir.target_types.clear();
+        query_ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        query_ir.literal_constraints.clear();
+        query_ir.temporal_constraints.clear();
+        query_ir.document_focus = None;
+        query_ir.source_slice = None;
+        query_ir.conversation_refs.clear();
+        query_ir.confidence = 0.25;
+
+        let answer = build_module_configuration_setup_answer(
+            "Provider Alpha settings",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        );
+
+        assert!(answer.is_none(), "{answer:?}");
+    }
+
+    #[test]
     fn module_configuration_setup_answer_adds_structured_rows_for_focused_document() {
         let setup_document_id = Uuid::now_v7();
         let other_document_id = Uuid::now_v7();
@@ -1084,6 +1634,52 @@ The module configuration file is /opt/delta/modules/connector/connector.conf.
         assert!(!answer.contains("- ``"));
         assert!(!answer.contains("omega-connector"));
         assert!(!answer.contains("/opt/omega/omega.conf"));
+    }
+
+    #[test]
+    fn exact_technical_literal_answer_abstains_for_untyped_entity_only_fallback_ir() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            0,
+            "Provider Alpha setup",
+            r#"
+Install the module:
+aptitude install alpha-connector
+
+Settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
+endpointUrl = https://alpha.example/api
+partnerId = alpha-partner
+"#,
+        )];
+        let evidence = empty_evidence();
+        let mut low_confidence_ir = configuration_setup_ir();
+        low_confidence_ir.act = QueryAct::Describe;
+        low_confidence_ir.target_types.clear();
+        low_confidence_ir.target_entities =
+            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+        low_confidence_ir.confidence = 0.25;
+
+        assert!(
+            build_exact_technical_literal_answer(
+                "What operational limits apply to Provider Alpha?",
+                &low_confidence_ir,
+                &evidence,
+                &chunks,
+            )
+            .is_none(),
+            "entity-only provider-free fallback IR must not turn setup literals into a final operational answer"
+        );
+
+        let typed_ir = configuration_setup_ir();
+        let answer = build_exact_technical_literal_answer(
+            "How do I configure Provider Alpha?",
+            &typed_ir,
+            &evidence,
+            &chunks,
+        )
+        .expect("typed configuration IR should still allow deterministic literal answer");
+        assert!(answer.contains("`alpha-connector`"), "{answer}");
     }
 
     fn configuration_setup_ir() -> QueryIR {

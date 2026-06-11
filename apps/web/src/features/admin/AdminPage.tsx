@@ -1,144 +1,103 @@
-import { useCallback } from 'react';
-import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
-import { Activity, Brain, Database, DollarSign, Key, ListOrdered, Settings, Terminal } from 'lucide-react';
-import { useApp } from '@/shared/contexts/app-context';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
-import AiConfigurationPanel from '@/features/admin/components/AiConfigurationPanel';
-import { AccessTab } from '@/features/admin/components/AccessTab';
-import { McpTab } from '@/features/admin/components/McpTab';
-import { IngestQueueTab } from '@/features/admin/components/IngestQueueTab';
-import { LibrariesTab } from '@/features/admin/components/LibrariesTab';
-import { OperationsTab } from '@/features/admin/components/OperationsTab';
-import { PricingTab } from '@/features/admin/components/PricingTab';
-import { SettingsTab } from '@/features/admin/components/SettingsTab';
+import { Navigate, Route, Routes } from 'react-router-dom';
 
-const TAB_VALUES = ['access', 'libraries', 'mcp', 'operations', 'queue', 'ai', 'pricing', 'settings'] as const;
-type AdminTab = (typeof TAB_VALUES)[number];
+import { useCan } from '@/shared/auth/useCan';
+import { AdminLayout } from '@/features/admin/components/AdminLayout';
+import AdminLibrariesPage from '@/features/admin/components/AdminLibrariesPage';
+import LibraryHubPage from '@/features/admin/components/LibraryHubPage';
+import AdminAiPage from '@/features/admin/components/AdminAiPage';
+import AdminAccessPage from '@/features/admin/components/AdminAccessPage';
+import AdminQueuePage from '@/features/admin/components/AdminQueuePage';
+import AdminUsersPage from '@/features/admin/components/AdminUsersPage';
+import AdminSystemPage from '@/features/admin/components/AdminSystemPage';
 
-function parseTab(value: string | null): AdminTab {
-  return TAB_VALUES.includes(value as AdminTab) ? (value as AdminTab) : 'access';
-}
-
+/**
+ * Admin router (§3.4 of the 0.5.0 UX plan). The flat eight-tab `?tab=` page is
+ * dissolved into nested, bookmarkable routes under the role-gated `/admin`:
+ *
+ *   /admin                    → redirect to /admin/libraries
+ *   /admin/libraries          → catalog (rows → Library Hub)
+ *   /admin/library/:libraryId → Library Hub (Overview · Activity · Backup · MCP · Configure AI)
+ *   /admin/queue              → global ingest queue
+ *   /admin/ai                 → AI configuration (+ wizard, Pricing folded into Catalog)
+ *   /admin/access             → API tokens
+ *   /admin/users              → user management (gated users.manage)
+ *   /admin/system             → instance settings, theme/locale, version, API explorer
+ *
+ * Every legacy admin capability stays reachable; only the organization changes.
+ * The Library Hub renders full-bleed (its own header), so it sits outside the
+ * shared `AdminLayout` chrome; every other section renders inside the layout's
+ * section rail.
+ */
 export default function AdminPage() {
-  const { t } = useTranslation();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const { activeWorkspace, activeLibrary, locale, refreshSession, setLocale } = useApp();
-
-  const activeTab = parseTab(searchParams.get('tab'));
-
-  const handleTabChange = useCallback(
-    (nextTab: string) => {
-      const parsed = parseTab(nextTab);
-      const nextParams = new URLSearchParams(searchParams);
-      nextParams.set('tab', parsed);
-      setSearchParams(nextParams, { replace: true });
-    },
-    [searchParams, setSearchParams],
-  );
-
-  const tabDescriptors = [
-    { value: 'access' as const, label: t('admin.access'), icon: Key },
-    { value: 'libraries' as const, label: t('admin.libraries.label'), icon: Database },
-    { value: 'mcp' as const, label: t('admin.mcp.label'), icon: Terminal },
-    { value: 'operations' as const, label: t('admin.operations'), icon: Activity },
-    { value: 'queue' as const, label: t('admin.ingestQueue'), icon: ListOrdered },
-    { value: 'ai' as const, label: t('admin.ai'), icon: Brain },
-    { value: 'pricing' as const, label: t('admin.pricing'), icon: DollarSign },
-    { value: 'settings' as const, label: t('admin.settings'), icon: Settings },
-  ];
+  const { can } = useCan();
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="page-header">
-        <h1 className="text-lg font-bold tracking-tight">{t('admin.title')}</h1>
-        <p className="text-sm text-muted-foreground">
-          {activeWorkspace?.name}
-          {activeLibrary ? (
-            <>
-              <span className="mx-2 text-border">&middot;</span>
-              {activeLibrary.name}
-            </>
-          ) : (
-            ''
-          )}
-        </p>
-      </div>
+    <Routes>
+      {/* Library Hub is a full-bleed detail route — no shared section rail. */}
+      <Route path="library/:libraryId" element={<LibraryHubPage />} />
 
-      <Tabs
-        value={activeTab}
-        onValueChange={handleTabChange}
-        className="flex-1 flex flex-col overflow-hidden"
-      >
-        <div
-          className="border-b px-6"
-          style={{ background: 'linear-gradient(180deg, hsl(var(--card) / 0.8), transparent)' }}
-        >
-          <TabsList className="bg-transparent h-auto p-0 gap-0">
-            {tabDescriptors.map((tab) => (
-              <TabsTrigger
-                key={tab.value}
-                value={tab.value}
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-3 gap-1.5 font-semibold text-sm transition-all duration-200"
-              >
-                <tab.icon className="h-3.5 w-3.5" /> {tab.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </div>
+      <Route
+        path="libraries"
+        element={
+          <AdminLayout>
+            <AdminLibrariesPage />
+          </AdminLayout>
+        }
+      />
+      {can('queue.manage') && (
+        <Route
+          path="queue"
+          element={
+            <AdminLayout>
+              <AdminQueuePage />
+            </AdminLayout>
+          }
+        />
+      )}
+      {can('ai.configure') && (
+        <Route
+          path="ai"
+          element={
+            <AdminLayout>
+              <AdminAiPage />
+            </AdminLayout>
+          }
+        />
+      )}
+      <Route
+        path="access"
+        element={
+          <AdminLayout>
+            <AdminAccessPage />
+          </AdminLayout>
+        }
+      />
+      {can('users.manage') && (
+        <Route
+          path="users"
+          element={
+            <AdminLayout>
+              <AdminUsersPage />
+            </AdminLayout>
+          }
+        />
+      )}
+      {can('system.manage') && (
+        <Route
+          path="system"
+          element={
+            <AdminLayout>
+              <AdminSystemPage />
+            </AdminLayout>
+          }
+        />
+      )}
 
-        <div className="flex flex-1 min-h-0 flex-col">
-          <TabsContent value="access" className="mt-0 flex-1 min-h-0 overflow-auto p-6 animate-fade-in">
-            <AccessTab
-              t={t}
-              activeWorkspaceId={activeWorkspace?.id}
-              active={activeTab === 'access'}
-            />
-          </TabsContent>
-
-          <TabsContent value="libraries" className="mt-0 flex-1 min-h-0 overflow-hidden p-0 animate-fade-in">
-            <LibrariesTab active={activeTab === 'libraries'} />
-          </TabsContent>
-
-          <TabsContent value="mcp" className="mt-0 flex-1 min-h-0 overflow-auto p-6 animate-fade-in">
-            <McpTab
-              t={t}
-              activeLibrary={activeLibrary}
-              active={activeTab === 'mcp'}
-              refreshSession={refreshSession}
-            />
-          </TabsContent>
-
-          <TabsContent value="operations" className="mt-0 flex-1 min-h-0 overflow-auto p-6 animate-fade-in">
-            <OperationsTab
-              t={t}
-              activeWorkspaceId={activeWorkspace?.id}
-              activeLibraryId={activeLibrary?.id}
-              active={activeTab === 'operations'}
-            />
-          </TabsContent>
-
-          <TabsContent value="queue" className="mt-0 flex-1 min-h-0 overflow-hidden p-6 animate-fade-in">
-            <IngestQueueTab t={t} active={activeTab === 'queue'} />
-          </TabsContent>
-
-          <TabsContent value="ai" className="mt-0 flex-1 min-h-0 flex flex-col p-6 animate-fade-in data-[state=inactive]:hidden">
-            <AiConfigurationPanel active={activeTab === 'ai'} />
-          </TabsContent>
-
-          <TabsContent value="pricing" className="mt-0 flex-1 min-h-0 flex flex-col p-6 animate-fade-in data-[state=inactive]:hidden">
-            <PricingTab
-              t={t}
-              activeWorkspaceId={activeWorkspace?.id}
-              active={activeTab === 'pricing'}
-            />
-          </TabsContent>
-
-          <TabsContent value="settings" className="mt-0 flex-1 min-h-0 overflow-auto p-6 animate-fade-in">
-            <SettingsTab t={t} locale={locale} setLocale={setLocale} />
-          </TabsContent>
-        </div>
-      </Tabs>
-    </div>
+      {/* Absolute targets — a relative `to="libraries"` from the catch-all at
+          e.g. /admin/users would resolve to /admin/users/libraries, never
+          match, and re-hit the catch-all in an infinite redirect loop. */}
+      <Route index element={<Navigate to="/admin/libraries" replace />} />
+      <Route path="*" element={<Navigate to="/admin/libraries" replace />} />
+    </Routes>
   );
 }

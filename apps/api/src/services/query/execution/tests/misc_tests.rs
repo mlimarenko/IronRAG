@@ -620,7 +620,7 @@ fn apply_rerank_outcome_reorders_bundle_before_final_truncation() {
             },
         },
     );
-    truncate_bundle(&mut bundle, 1, None);
+    truncate_bundle(&mut bundle, 1, None, &std::collections::HashSet::new());
 
     assert_eq!(bundle.entities[0].node_id, entity_b);
     assert_eq!(bundle.chunks[0].chunk_id, chunk_b);

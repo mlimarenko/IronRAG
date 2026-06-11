@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::query_ir::{QueryIR, QueryScope},
+    domains::query_ir::{QueryAct, QueryIR, QueryScope},
     infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
+    services::query::effective_query::structured_current_question_segment,
     services::query::text_match::{near_token_match, normalized_alnum_tokens},
     shared::extraction::text_render::repair_technical_layout_noise,
 };
@@ -21,6 +22,8 @@ use super::{
     question_asks_table_value_inventory, render_canonical_chunk_section,
     render_canonical_technical_fact_section, render_prepared_segment_section,
     render_table_summary_chunk_section, requested_initial_table_row_count, score_desc_chunks,
+    technical_literal_focus_keywords,
+    technical_literals::{extract_explicit_path_literals, extract_parameter_literals},
 };
 
 const MAX_DIRECT_TABLE_ANALYTICS_ROWS: usize = 2_000;
@@ -366,7 +369,9 @@ pub(crate) fn merge_runtime_context_chunks(
     for runtime_chunk in runtime_chunks {
         if !matches!(
             runtime_chunk.score_kind,
-            RuntimeChunkScoreKind::GraphEvidence | RuntimeChunkScoreKind::SourceContext
+            RuntimeChunkScoreKind::GraphEvidence
+                | RuntimeChunkScoreKind::LatestVersion
+                | RuntimeChunkScoreKind::SourceContext
         ) || !seen_chunk_ids.insert(runtime_chunk.chunk_id)
         {
             continue;
@@ -784,6 +789,7 @@ pub(crate) fn build_canonical_answer_context(
     }
 
     let graph_evidence_section = render_graph_evidence_context_lines_for_focus(
+        question,
         graph_evidence_context_lines,
         focused_document_label.as_deref(),
         query_ir,
@@ -861,11 +867,21 @@ fn render_graph_evidence_context_lines(graph_evidence_context_lines: &[String]) 
 }
 
 fn render_graph_evidence_context_lines_for_focus(
+    question: &str,
     graph_evidence_context_lines: &[String],
     focused_document_label: Option<&str>,
     query_ir: &QueryIR,
 ) -> String {
     let Some(focused_document_label) = focused_document_label else {
+        if low_confidence_short_technical_context(query_ir, question) {
+            let short_keywords = short_technical_focus_keywords(question, query_ir);
+            let focused_lines = graph_evidence_context_lines
+                .iter()
+                .filter(|line| line_contains_any_focus_keyword(line, &short_keywords))
+                .cloned()
+                .collect::<Vec<_>>();
+            return render_graph_evidence_context_lines(&focused_lines);
+        }
         return render_graph_evidence_context_lines(graph_evidence_context_lines);
     };
     if !matches!(query_ir.scope, QueryScope::SingleDocument) {
@@ -887,11 +903,41 @@ fn render_graph_evidence_context_lines_for_focus(
     render_graph_evidence_context_lines(&focused_lines)
 }
 
+fn low_confidence_short_technical_context(query_ir: &QueryIR, question: &str) -> bool {
+    query_ir.confidence <= 0.3
+        && matches!(query_ir.scope, QueryScope::SingleDocument)
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.target_entities.is_empty()
+        && query_ir.literal_constraints.is_empty()
+        && !short_technical_focus_keywords(question, query_ir).is_empty()
+}
+
+fn short_technical_focus_keywords(question: &str, query_ir: &QueryIR) -> Vec<String> {
+    technical_literal_focus_keywords(question, Some(query_ir))
+        .into_iter()
+        .filter(|keyword| keyword.chars().count() < 4)
+        .collect()
+}
+
+fn line_contains_any_focus_keyword(line: &str, keywords: &[String]) -> bool {
+    if keywords.is_empty() {
+        return false;
+    }
+    let lower = line.to_lowercase();
+    keywords.iter().any(|keyword| lower.contains(keyword))
+}
+
 fn canonical_context_document_id(
     question: &str,
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<Uuid> {
+    if contextual_low_confidence_setup_context_should_stay_broad(question, query_ir, chunks) {
+        return None;
+    }
     let document_ids = explicit_target_document_ids_from_values(
         question,
         chunks.iter().map(|chunk| (chunk.document_id, chunk.document_label.as_str())),
@@ -902,6 +948,90 @@ fn canonical_context_document_id(
             chunks.iter().map(|chunk| (chunk.document_id, chunk.document_label.as_str())),
         )
     })
+}
+
+fn contextual_low_confidence_setup_context_should_stay_broad(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    structured_current_question_segment(question).is_some()
+        && low_confidence_unfocused_descriptive_query(query_ir)
+        && setup_like_document_count(chunks) > 1
+}
+
+fn low_confidence_unfocused_descriptive_query(query_ir: &QueryIR) -> bool {
+    query_ir.confidence <= 0.3
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.target_entities.is_empty()
+        && query_ir.literal_constraints.is_empty()
+}
+
+fn setup_like_document_count(chunks: &[RuntimeMatchedChunk]) -> usize {
+    chunks
+        .iter()
+        .filter(|chunk| {
+            setup_like_text_signal(&chunk.excerpt) || setup_like_text_signal(&chunk.source_text)
+        })
+        .map(|chunk| chunk.document_id)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn setup_like_text_signal(text: &str) -> bool {
+    setup_like_configuration_path_count(text) > 0
+        || setup_like_assignment_count(text) > 0
+        || setup_like_section_count(text) > 0
+        || extract_parameter_literals(text, 8).len() >= 2
+}
+
+fn setup_like_configuration_path_count(text: &str) -> usize {
+    extract_explicit_path_literals(text, 8)
+        .into_iter()
+        .filter(|path| {
+            let lowered = path.to_ascii_lowercase();
+            [".conf", ".ini", ".cfg", ".properties", ".yaml", ".yml", ".toml", ".json"]
+                .iter()
+                .any(|extension| lowered.ends_with(extension))
+        })
+        .count()
+}
+
+fn setup_like_assignment_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|token| {
+            let Some((name, _)) = token.split_once('=') else {
+                return false;
+            };
+            let name = name.trim_matches(|ch: char| {
+                matches!(ch, '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}')
+            });
+            let Some(first) = name.chars().next() else {
+                return false;
+            };
+            first.is_ascii_alphabetic()
+                && name.chars().any(|ch| ch.is_ascii_alphabetic())
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        })
+        .take(8)
+        .count()
+}
+
+fn setup_like_section_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|token| {
+            let cleaned = token.trim_matches(|ch: char| {
+                matches!(ch, '`' | '"' | '\'' | ',' | ';' | ':' | '.' | '(' | ')' | '{' | '}')
+            });
+            cleaned.len() > 2 && cleaned.starts_with('[') && cleaned.ends_with(']')
+        })
+        .take(8)
+        .count()
 }
 
 fn query_ir_canonical_context_document_id<'a, I>(
@@ -1079,6 +1209,99 @@ mod source_coverage_tests {
             retrieval_query: None,
             confidence: 1.0,
         }
+    }
+
+    fn low_confidence_short_token_ir() -> QueryIR {
+        QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.25,
+        }
+    }
+
+    #[test]
+    fn low_confidence_short_token_graph_evidence_keeps_only_focused_lines() {
+        let lines = vec![
+            "[graph-evidence target=\"QX\"] QX alphaFlag = true".to_string(),
+            "[graph-evidence target=\"ZZ\"] ZZ betaFlag = true".to_string(),
+        ];
+
+        let rendered = render_graph_evidence_context_lines_for_focus(
+            "QX settings",
+            &lines,
+            None,
+            &low_confidence_short_token_ir(),
+        );
+
+        assert!(rendered.contains("QX alphaFlag"));
+        assert!(!rendered.contains("ZZ betaFlag"));
+    }
+
+    #[test]
+    fn contextual_low_confidence_setup_context_keeps_related_parameter_chunks() {
+        let setup_document_id = Uuid::now_v7();
+        let parameter_document_id = Uuid::now_v7();
+        let setup_revision_id = Uuid::now_v7();
+        let parameter_revision_id = Uuid::now_v7();
+        let question = "scope: Provider Alpha setup was selected earlier\nliteral anchors: `https://alpha.local/api`\nquestion: provider_alpha_setup.md Provider Alpha module configuration all parameters url";
+        let chunks = vec![
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: setup_revision_id,
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: setup_document_id,
+                document_label: "provider_alpha_setup.md".to_string(),
+                excerpt: "Install alpha-module and edit /opt/alpha/alpha.conf.".to_string(),
+                score_kind: RuntimeChunkScoreKind::Relevance,
+                score: Some(0.96),
+                source_text:
+                    "Install alpha-module. Edit /opt/alpha/alpha.conf in [Main]. url = https://alpha.local/api."
+                        .to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: parameter_revision_id,
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: parameter_document_id,
+                document_label: "provider_alpha_change_notes.md".to_string(),
+                excerpt: "Provider Alpha parameter table.".to_string(),
+                score_kind: RuntimeChunkScoreKind::Relevance,
+                score: Some(0.95),
+                source_text:
+                    "| alphaPrintSlip | boolean | true false | Print the slip | | alphaFillDetails | boolean | true false | Fill detail fields |"
+                        .to_string(),
+            },
+        ];
+        let context = build_canonical_answer_context(
+            question,
+            &low_confidence_short_token_ir(),
+            None,
+            &CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: Vec::new(),
+                structured_blocks: Vec::new(),
+                technical_facts: Vec::new(),
+            },
+            &chunks,
+            &[],
+        );
+
+        assert!(context.contains("/opt/alpha/alpha.conf"), "{context}");
+        assert!(context.contains("alphaPrintSlip"), "{context}");
+        assert!(context.contains("alphaFillDetails"), "{context}");
     }
 
     #[test]

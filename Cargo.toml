@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.23"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -15,9 +15,9 @@ license = "MIT"
 chrono = { version = "0.4.44", features = ["serde"] }
 rust_decimal = { version = "1.41.0", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 utoipa = { version = "=5.5.0", features = ["chrono", "decimal", "uuid", "axum_extras", "yaml"] }
-uuid = { version = "1.23.1", features = ["serde", "v7"] }
+uuid = { version = "1.23.2", features = ["serde", "v7"] }
 
 [profile.profiling]
 inherits = "release"

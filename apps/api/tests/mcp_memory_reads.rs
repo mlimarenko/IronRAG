@@ -147,6 +147,9 @@ impl McpReadFixture {
                 external_key,
                 document_state: "active",
                 created_by_principal_id: None,
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
             },
         )
         .await

@@ -53,6 +53,11 @@ pub struct ListDocumentsQuery {
     /// absent = no filter. Matches the canonical `derived_status` column
     /// in the list CTE and the 5 status pills on the documents page.
     pub status: Option<String>,
+    /// Comma-separated list of document ids to keep. Empty or absent = no
+    /// filter. Lets a caller resolve specific documents (e.g. a deep link
+    /// carrying `documentId`) through the same canonical list derivation
+    /// that powers the table, instead of a divergent per-id detail mapper.
+    pub ids: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
@@ -182,6 +187,11 @@ pub struct CreateDocumentRequest {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub external_key: Option<String>,
+    /// Optional connector-declared structural parent identity
+    /// (`content_document.external_key` of the parent document). When the
+    /// parent already exists in the library it is resolved at admission;
+    /// otherwise the deferred resolver reconciles it later.
+    pub parent_external_key: Option<String>,
     pub idempotency_key: Option<String>,
     pub content_source_kind: Option<String>,
     pub checksum: Option<String>,

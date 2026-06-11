@@ -78,11 +78,53 @@ fn grouped_reference_candidates_prefer_document_deduping() {
             },
         ],
         4,
+        &std::collections::HashSet::new(),
     );
 
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].dedupe_key, format!("document:{document_id}"));
     assert_eq!(candidates[1].dedupe_key, format!("document:{document_id}"));
+}
+
+#[test]
+fn grouped_reference_candidates_skip_attached_context_documents() {
+    let attached_doc = Uuid::now_v7();
+    let primary_doc = Uuid::now_v7();
+    let chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: attached_doc,
+            document_label: "screenshot.png".to_string(),
+            excerpt: "image".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.9),
+            source_text: "image".to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id: primary_doc,
+            document_label: "Setup guide".to_string(),
+            excerpt: "steps".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.8),
+            source_text: "steps".to_string(),
+        },
+    ];
+    let mut demoted = std::collections::HashSet::new();
+    demoted.insert(attached_doc);
+
+    let candidates = build_grouped_reference_candidates(&[], &[], &chunks, 4, &demoted);
+
+    // The attached-context document produces no clarify variant; only the
+    // primary document remains.
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].dedupe_key, format!("document:{primary_doc}"));
 }
 
 #[test]

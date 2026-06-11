@@ -64,6 +64,25 @@ const vendorChunk = (id: string) => {
     return "vendor-query";
   }
 
+  // Radix primitives back the shell, dialogs, selects and dropdowns across
+  // both eager (AppShell) and lazy (admin/documents/assistant) surfaces.
+  // Pinning them to one chunk keeps a single cached copy instead of letting
+  // the splitter inline Radix into whichever feature chunk touches it first.
+  if (normalizedId.includes("/node_modules/@radix-ui/")) {
+    return "vendor-radix";
+  }
+
+  // Form stack (react-hook-form + zod resolver + zod). Lives behind admin and
+  // bootstrap forms only, so isolating it keeps validation weight out of the
+  // index chunk while still sharing one copy between those routes.
+  if (
+    normalizedId.includes("/node_modules/react-hook-form/") ||
+    normalizedId.includes("/node_modules/@hookform/") ||
+    normalizedId.includes("/node_modules/zod/")
+  ) {
+    return "vendor-forms";
+  }
+
   if (
     normalizedId.includes("/node_modules/i18next/") ||
     normalizedId.includes("/node_modules/react-i18next/")

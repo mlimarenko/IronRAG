@@ -1220,6 +1220,110 @@ fn build_deterministic_grounded_answer_uses_parameter_meaning_from_structured_bl
 }
 
 #[test]
+fn build_deterministic_grounded_answer_preserves_setup_config_sections() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let answer = build_deterministic_grounded_answer(
+        "How do I configure Provider Alpha: package, primary file, and parameters?",
+        &query_ir_with_act_scope_and_target_types(
+            QueryAct::ConfigureHow,
+            QueryScope::SingleDocument,
+            ["package", "configuration_file", "parameter"],
+        ),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![KnowledgeStructuredBlockRow {
+                normalized_text:
+                    "[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://demo.local\nRow 2 | Name: partnerId | Type: string | Default: empty\nRow 3 | Name: fillDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSlip | Type: boolean | Values: true false | Default: false\n| captureSlip | boolean | true false | false |"
+                        .to_string(),
+                text:
+                    "[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://demo.local\nRow 2 | Name: partnerId | Type: string | Default: empty\nRow 3 | Name: fillDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSlip | Type: boolean | Values: true false | Default: false\n| captureSlip | boolean | true false | false |"
+                        .to_string(),
+                ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "Provider Alpha setup".to_string(),
+            excerpt: "Install alpha provider module and configure CFG.".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.96),
+            source_text: repair_technical_layout_noise(
+                "apt install alpha-provider-module\nPrimary file: /opt/provider-alpha/alpha.conf\n[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://demo.local\nRow 2 | Name: partnerId | Type: string | Default: empty\nRow 3 | Name: fillDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSlip | Type: boolean | Values: true false | Default: false\n| captureSlip | boolean | true false | false |\n[UI.ScanPanel.qrCode]\nvisible = true",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`alpha-provider-module`"), "{answer}");
+    assert!(answer.contains("`/opt/provider-alpha/alpha.conf`"), "{answer}");
+    assert!(answer.contains("`[CFG]`"), "{answer}");
+    assert!(answer.contains("`endpointUrl`"), "{answer}");
+    assert!(answer.contains("`partnerId`"), "{answer}");
+    assert!(answer.contains("`fillDetails = true`"), "{answer}");
+    assert!(answer.contains("`printSlip = false`"), "{answer}");
+    assert!(answer.contains("`captureSlip = false`"), "{answer}");
+    assert!(answer.contains("`[UI.ScanPanel.qrCode]`"), "{answer}");
+    assert!(answer.contains("`visible = true`"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_preserves_retrieve_value_config_key_sections() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::RetrieveValue,
+        QueryScope::SingleDocument,
+        ["config_key"],
+    );
+    query_ir
+        .target_entities
+        .push(EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject });
+    let answer = build_deterministic_grounded_answer(
+        "Where is Provider Alpha display enabled: section, key, and value?",
+        &query_ir,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: vec![KnowledgeStructuredBlockRow {
+                normalized_text:
+                    "/opt/provider-alpha/ui.ini\n[UI.ScanPanel.qrCode]\nvisible = true"
+                        .to_string(),
+                text: "/opt/provider-alpha/ui.ini\n[UI.ScanPanel.qrCode]\nvisible = true"
+                    .to_string(),
+                ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
+            }],
+            technical_facts: Vec::new(),
+        },
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 9,
+            chunk_kind: None,
+            document_id,
+            document_label: "Provider Alpha setup".to_string(),
+            excerpt: "Provider Alpha display settings.".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(0.91),
+            source_text: repair_technical_layout_noise(
+                "Provider Alpha display settings are stored in /opt/provider-alpha/ui.ini.\n[UI.ScanPanel.qrCode]\nvisible = true",
+            ),
+        }],
+    )
+    .unwrap_or_default();
+
+    assert!(answer.contains("`/opt/provider-alpha/ui.ini`"), "{answer}");
+    assert!(answer.contains("`[UI.ScanPanel.qrCode]`"), "{answer}");
+    assert!(answer.contains("`visible = true`"), "{answer}");
+}
+
+#[test]
 fn build_deterministic_grounded_answer_extracts_error_code_assignment_mapping() {
     let document_id = Uuid::now_v7();
     let answer = build_deterministic_grounded_answer(

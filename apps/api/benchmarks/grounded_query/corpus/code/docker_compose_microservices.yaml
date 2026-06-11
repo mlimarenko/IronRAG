@@ -9,8 +9,8 @@
 # - Payment service integrates with Stripe and manages transactions.
 # - Notification service sends email (SMTP), SMS (Twilio), and push notifications.
 # - Inventory service tracks stock levels and reservations.
-# - PostgreSQL as the primary relational database on port 5432.
-# - Redis for caching, sessions, and pub/sub on port 6379.
+# - PostgreSQL 18 (pgvector) as the primary relational database on port 5432.
+# - Redis 8.8 for caching, sessions, and pub/sub on port 6379.
 # - RabbitMQ for asynchronous messaging on ports 5672/15672.
 # - Elasticsearch for full-text search and logging on port 9200.
 # - Kibana for log visualization on port 5601.
@@ -78,7 +78,7 @@ services:
   # Port: 5432
   # =========================================================================
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg18
     container_name: microservices-postgres
     restart: unless-stopped
     ports:
@@ -121,7 +121,7 @@ services:
   # Port: 6379
   # =========================================================================
   redis:
-    image: redis:7-alpine
+    image: redis:8.8
     container_name: microservices-redis
     restart: unless-stopped
     ports:

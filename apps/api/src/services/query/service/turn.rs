@@ -93,13 +93,16 @@ use super::{
         build_conversation_runtime_context_with_external_history, derive_conversation_title,
         enrich_query_with_coreference_entities, load_prior_grounded_answer_context_messages,
         map_conversation_row, map_execution_row, map_turn_row, normalize_required_text,
-        should_refresh_conversation_title,
+        should_refresh_conversation_title, should_replay_prior_grounded_answer_context,
     },
 };
 
 const REFERENCE_CONTEXT_HYDRATION_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const ASSISTANT_AGENT_LOOP_DEADLINE_MS: u64 = 180_000;
 pub(crate) const ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS: u64 = 35_000;
+const ASSISTANT_AGENT_LOOP_MIN_ITERATIONS: usize = 10;
+#[cfg(test)]
+const ASSISTANT_AGENT_LOOP_MIN_ITERATION_BUDGET_MS: u64 = 15_000;
 const ASSISTANT_LITERAL_INVENTORY_REVISION_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Debug, Clone)]
@@ -212,10 +215,9 @@ impl QueryService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("workspace", library.workspace_id))?;
         let library_ref = library_catalog_ref(&workspace.slug, &library.slug);
-        let prior_grounded_answer_context_messages = if conversation_context
-            .prompt_history_messages
-            .is_empty()
-        {
+        let prior_grounded_answer_context_messages = if !should_replay_prior_grounded_answer_context(
+            &conversation_context,
+        ) {
             Vec::new()
         } else {
             match load_prior_grounded_answer_context_messages(state, conversation.id, library.id)
@@ -323,6 +325,7 @@ impl QueryService {
                     library_id: library.id,
                     library_ref: &library_ref,
                     user_question: &content_text,
+                    contextual_follow_up: conversation_context.contextual_follow_up,
                     conversation_history: &agent_conversation_history,
                     follow_up_context_messages: &prior_grounded_answer_context_messages,
                     grounded_answer_tool_history: &conversation_context
@@ -501,55 +504,75 @@ impl QueryService {
                                                 .await
                                                 {
                                                     Ok(revision) => {
-                                                        match verify_agent_answer_against_tool_evidence(
-                                                            state,
-                                                            &execution,
-                                                            execution_context_bundle_id,
-                                                            &revision.answer,
-                                                            &agent_result.assistant_grounding,
-                                                        )
-                                                        .await
+                                                        if let Some((before, after, total)) =
+                                                            literal_revision_history_literal_coverage(
+                                                                &agent_result.answer,
+                                                                &revision.answer,
+                                                                &conversation_context
+                                                                    .grounded_answer_tool_history,
+                                                            )
+                                                            .filter(|(before, after, _)| {
+                                                                after < before
+                                                            })
                                                         {
-                                                            Ok(revised_verification)
-                                                                if revised_verification.state
-                                                                    == QueryVerificationState::Verified =>
+                                                            tracing::info!(
+                                                                execution_id = %execution.id,
+                                                                history_literal_count = total,
+                                                                draft_visible_literals = before,
+                                                                revised_visible_literals = after,
+                                                                "rejected literal-fidelity revision that dropped prior literal anchors"
+                                                            );
+                                                        } else {
+                                                            match verify_agent_answer_against_tool_evidence(
+                                                                state,
+                                                                &execution,
+                                                                execution_context_bundle_id,
+                                                                &revision.answer,
+                                                                &agent_result.assistant_grounding,
+                                                            )
+                                                            .await
                                                             {
-                                                                tracing::info!(
-                                                                    execution_id = %execution.id,
-                                                                    unsupported_literals =
-                                                                        verification.unsupported_literals.len(),
-                                                                    revised_answer_chars =
-                                                                        revision.answer.chars().count(),
-                                                                    "accepted literal-fidelity revision for UI agent answer"
-                                                                );
-                                                                crate::services::query::agent_loop::merge_usage_into(
-                                                                    &mut agent_result.usage_json,
-                                                                    &revision.usage_json,
-                                                                );
-                                                                agent_result
-                                                                    .debug_iterations
-                                                                    .extend(revision.debug_iterations);
-                                                                agent_result.answer = revision.answer;
-                                                                revised_agent_answer_for_snapshot = true;
-                                                            }
-                                                            Ok(revised_verification) => {
-                                                                tracing::info!(
-                                                                    execution_id = %execution.id,
-                                                                    original_state = ?verification.state,
-                                                                    revised_state = ?revised_verification.state,
-                                                                    original_warnings =
-                                                                        verification.warnings.len(),
-                                                                    revised_warnings =
-                                                                        revised_verification.warnings.len(),
-                                                                    "literal-fidelity revision for UI agent answer was not verified"
-                                                                );
-                                                            }
-                                                            Err(error) => {
-                                                                warn!(
-                                                                    error = %error,
-                                                                    execution_id = %execution.id,
-                                                                    "failed to verify literal-fidelity revision for UI agent answer"
-                                                                );
+                                                                Ok(revised_verification)
+                                                                    if revised_verification.state
+                                                                        == QueryVerificationState::Verified =>
+                                                                {
+                                                                    tracing::info!(
+                                                                        execution_id = %execution.id,
+                                                                        unsupported_literals =
+                                                                            verification.unsupported_literals.len(),
+                                                                        revised_answer_chars =
+                                                                            revision.answer.chars().count(),
+                                                                        "accepted literal-fidelity revision for UI agent answer"
+                                                                    );
+                                                                    crate::services::query::agent_loop::merge_usage_into(
+                                                                        &mut agent_result.usage_json,
+                                                                        &revision.usage_json,
+                                                                    );
+                                                                    agent_result
+                                                                        .debug_iterations
+                                                                        .extend(revision.debug_iterations);
+                                                                    agent_result.answer = revision.answer;
+                                                                    revised_agent_answer_for_snapshot = true;
+                                                                }
+                                                                Ok(revised_verification) => {
+                                                                    tracing::info!(
+                                                                        execution_id = %execution.id,
+                                                                        original_state = ?verification.state,
+                                                                        revised_state = ?revised_verification.state,
+                                                                        original_warnings =
+                                                                            verification.warnings.len(),
+                                                                        revised_warnings =
+                                                                            revised_verification.warnings.len(),
+                                                                        "literal-fidelity revision for UI agent answer was not verified"
+                                                                    );
+                                                                }
+                                                                Err(error) => {
+                                                                    warn!(
+                                                                        error = %error,
+                                                                        execution_id = %execution.id,
+                                                                        "failed to verify literal-fidelity revision for UI agent answer"
+                                                                    );
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -590,61 +613,77 @@ impl QueryService {
                                             .await
                                             {
                                                 Ok(Ok(revision)) => {
-                                                    match verify_agent_answer_against_tool_evidence(
-                                                        state,
-                                                        &execution,
-                                                        execution_context_bundle_id,
+                                                    if !literal_revision_covers_required_literals(
                                                         &revision.answer,
-                                                        &agent_result.assistant_grounding,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(revised_verification)
-                                                            if revised_verification.state
-                                                                == QueryVerificationState::Verified =>
+                                                        &coverage_targets,
+                                                    ) {
+                                                        tracing::info!(
+                                                            stage = "literal_inventory_coverage_revision",
+                                                            execution_id = %execution.id,
+                                                            required_literal_count =
+                                                                coverage_targets.len(),
+                                                            elapsed_ms = revision_started
+                                                                .elapsed()
+                                                                .as_millis(),
+                                                            "rejected literal-inventory coverage revision missing required anchors"
+                                                        );
+                                                    } else {
+                                                        match verify_agent_answer_against_tool_evidence(
+                                                            state,
+                                                            &execution,
+                                                            execution_context_bundle_id,
+                                                            &revision.answer,
+                                                            &agent_result.assistant_grounding,
+                                                        )
+                                                        .await
                                                         {
-                                                            tracing::info!(
-                                                                stage = "literal_inventory_coverage_revision",
-                                                                execution_id = %execution.id,
-                                                                required_literal_count =
-                                                                    coverage_targets.len(),
-                                                                elapsed_ms = revision_started
-                                                                    .elapsed()
-                                                                    .as_millis(),
-                                                                revised_answer_chars =
-                                                                    revision.answer.chars().count(),
-                                                                "accepted literal-inventory coverage revision for UI agent answer"
-                                                            );
-                                                            crate::services::query::agent_loop::merge_usage_into(
-                                                                &mut agent_result.usage_json,
-                                                                &revision.usage_json,
-                                                            );
-                                                            agent_result
-                                                                .debug_iterations
-                                                                .extend(revision.debug_iterations);
-                                                            agent_result.answer = revision.answer;
-                                                            revised_agent_answer_for_snapshot =
-                                                                true;
-                                                        }
-                                                        Ok(revised_verification) => {
-                                                            tracing::info!(
-                                                                stage = "literal_inventory_coverage_revision",
-                                                                execution_id = %execution.id,
-                                                                revised_state = ?revised_verification.state,
-                                                                revised_warnings =
-                                                                    revised_verification.warnings.len(),
-                                                                required_literal_count =
-                                                                    coverage_targets.len(),
-                                                                "literal-inventory coverage revision for UI agent answer was not verified"
-                                                            );
-                                                        }
-                                                        Err(error) => {
-                                                            warn!(
-                                                                stage = "literal_inventory_coverage_revision",
-                                                                error = %error,
-                                                                execution_id = %execution.id,
-                                                                "failed to verify literal-inventory coverage revision for UI agent answer"
-                                                            );
+                                                            Ok(revised_verification)
+                                                                if revised_verification.state
+                                                                    == QueryVerificationState::Verified =>
+                                                            {
+                                                                tracing::info!(
+                                                                    stage = "literal_inventory_coverage_revision",
+                                                                    execution_id = %execution.id,
+                                                                    required_literal_count =
+                                                                        coverage_targets.len(),
+                                                                    elapsed_ms = revision_started
+                                                                        .elapsed()
+                                                                        .as_millis(),
+                                                                    revised_answer_chars =
+                                                                        revision.answer.chars().count(),
+                                                                    "accepted literal-inventory coverage revision for UI agent answer"
+                                                                );
+                                                                crate::services::query::agent_loop::merge_usage_into(
+                                                                    &mut agent_result.usage_json,
+                                                                    &revision.usage_json,
+                                                                );
+                                                                agent_result
+                                                                    .debug_iterations
+                                                                    .extend(revision.debug_iterations);
+                                                                agent_result.answer = revision.answer;
+                                                                revised_agent_answer_for_snapshot =
+                                                                    true;
+                                                            }
+                                                            Ok(revised_verification) => {
+                                                                tracing::info!(
+                                                                    stage = "literal_inventory_coverage_revision",
+                                                                    execution_id = %execution.id,
+                                                                    revised_state = ?revised_verification.state,
+                                                                    revised_warnings =
+                                                                        revised_verification.warnings.len(),
+                                                                    required_literal_count =
+                                                                        coverage_targets.len(),
+                                                                    "literal-inventory coverage revision for UI agent answer was not verified"
+                                                                );
+                                                            }
+                                                            Err(error) => {
+                                                                warn!(
+                                                                    stage = "literal_inventory_coverage_revision",
+                                                                    error = %error,
+                                                                    execution_id = %execution.id,
+                                                                    "failed to verify literal-inventory coverage revision for UI agent answer"
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -2804,6 +2843,59 @@ fn literal_inventory_coverage_revision_targets(
         .collect()
 }
 
+fn literal_revision_covers_required_literals(answer: &str, required_literals: &[String]) -> bool {
+    required_literals.iter().all(|literal| text_contains_literal(answer, literal))
+}
+
+fn literal_revision_history_literal_coverage(
+    draft_answer: &str,
+    revised_answer: &str,
+    history: &[ExternalConversationTurn],
+) -> Option<(usize, usize, usize)> {
+    const MIN_HISTORY_ANCHOR_LITERALS: usize = 4;
+    const MIN_DRAFT_VISIBLE_LITERALS: usize = 2;
+
+    let inventory = latest_dense_history_revision_anchor_literals(history);
+    if inventory.len() < MIN_HISTORY_ANCHOR_LITERALS {
+        return None;
+    }
+    let draft_visible = literal_visibility_count(draft_answer, &inventory);
+    if draft_visible < MIN_DRAFT_VISIBLE_LITERALS {
+        return None;
+    }
+    let revised_visible = literal_visibility_count(revised_answer, &inventory);
+    Some((draft_visible, revised_visible, inventory.len()))
+}
+
+fn literal_visibility_count(answer: &str, literals: &[String]) -> usize {
+    literals.iter().filter(|literal| text_contains_literal(answer, literal)).count()
+}
+
+fn latest_dense_history_revision_anchor_literals(
+    history: &[ExternalConversationTurn],
+) -> Vec<String> {
+    let mut literals = history
+        .iter()
+        .rev()
+        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
+        .map(|turn| dense_history_literals(&turn.content_text))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|literal| literal_text_is_revision_anchor_shaped(literal))
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::<String>::new();
+    literals.retain(|literal| seen.insert(literal.clone()));
+    literals
+}
+
+fn literal_text_is_revision_anchor_shaped(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && !trimmed.chars().any(char::is_whitespace)
+        && (literal_text_is_identifier_shaped(trimmed)
+            || trimmed.chars().any(|ch| !ch.is_alphanumeric()))
+}
+
 fn latest_dense_history_identifier_literals(history: &[ExternalConversationTurn]) -> Vec<String> {
     let mut literals = history
         .iter()
@@ -2969,7 +3061,9 @@ fn verification_fragment_is_verifier_grade_tool_evidence(fragment: &str) -> bool
 }
 
 fn ui_agent_iteration_cap() -> usize {
-    usize::from(QueryAnswerTask::spec().max_turns).saturating_add(1)
+    usize::from(QueryAnswerTask::spec().max_turns)
+        .saturating_add(2)
+        .max(ASSISTANT_AGENT_LOOP_MIN_ITERATIONS)
 }
 
 fn agent_grounding_assembly_diagnostics(
@@ -3511,10 +3605,12 @@ mod tests {
     use crate::services::query::service::ExternalConversationTurn;
 
     use super::{
-        ASSISTANT_AGENT_LOOP_DEADLINE_MS, ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS,
+        ASSISTANT_AGENT_LOOP_DEADLINE_MS, ASSISTANT_AGENT_LOOP_MIN_ITERATION_BUDGET_MS,
+        ASSISTANT_AGENT_LOOP_MIN_ITERATIONS, ASSISTANT_AGENT_LOOP_TOOL_COLLECTION_TARGET_MS,
         agent_answer_requires_parent_tool_evidence_verification,
         agent_has_verifiable_tool_evidence, is_query_vector_source_mismatch,
         latest_dense_history_identifier_literals, literal_inventory_coverage_revision_targets,
+        literal_revision_covers_required_literals, literal_revision_history_literal_coverage,
         no_agent_tool_evidence_warnings, should_backfill_graph_entity_references,
         text_contains_literal, ui_agent_iteration_cap,
     };
@@ -3645,6 +3741,52 @@ mod tests {
     }
 
     #[test]
+    fn literal_fidelity_revision_detects_history_anchor_loss() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text:
+                "literals: `alphaPackage`, `/opt/alpha.ini`, `[Main]`, `retryTimeout`, `visible`, `false`"
+                    .to_string(),
+        }];
+        let draft =
+            "Install `alphaPackage`, edit `/opt/alpha.ini`, use `[Main]`, and set `retryTimeout`.";
+        let revised = "Set `retryTimeout` after installation.";
+
+        assert_eq!(
+            literal_revision_history_literal_coverage(draft, revised, &history),
+            Some((4, 1, 4))
+        );
+    }
+
+    #[test]
+    fn literal_fidelity_revision_ignores_plain_boolean_memory_values() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: "literals: `true`, `false`, `enabled`, `disabled`".to_string(),
+        }];
+
+        assert_eq!(
+            literal_revision_history_literal_coverage(
+                "Set `true` and `false`.",
+                "Set the supported values.",
+                &history,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn literal_inventory_revision_requires_target_coverage() {
+        let required = vec!["alphaPackage".to_string(), "retryTimeout".to_string()];
+
+        assert!(literal_revision_covers_required_literals(
+            "Use `alphaPackage` and set `retryTimeout`.",
+            &required,
+        ));
+        assert!(!literal_revision_covers_required_literals("Use `alphaPackage`.", &required,));
+    }
+
+    #[test]
     fn literal_inventory_presence_uses_identifier_boundaries() {
         assert!(text_contains_literal("Set `retryTimeout`.", "retryTimeout"));
         assert!(!text_contains_literal("Set `retryTimeoutMs`.", "retryTimeout"));
@@ -3687,7 +3829,11 @@ mod tests {
     fn ui_agent_deadline_budget_covers_runtime_turns() {
         let iteration_cap = ui_agent_iteration_cap();
 
-        assert!(ASSISTANT_AGENT_LOOP_DEADLINE_MS / iteration_cap as u64 >= 30_000);
+        assert!(iteration_cap >= ASSISTANT_AGENT_LOOP_MIN_ITERATIONS);
+        assert!(
+            ASSISTANT_AGENT_LOOP_DEADLINE_MS / iteration_cap as u64
+                >= ASSISTANT_AGENT_LOOP_MIN_ITERATION_BUDGET_MS
+        );
     }
 
     #[test]

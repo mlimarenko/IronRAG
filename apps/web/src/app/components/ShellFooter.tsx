@@ -1,6 +1,7 @@
-import { ArrowUpRight } from "lucide-react";
+import { ArrowUpRight, Code2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 
 import { versionApi } from "@/shared/api/version";
 import { BUILD_VERSION_LABEL, formatVersionTag } from "@/shared/lib/build-version";
@@ -49,6 +50,14 @@ export function ShellFooter() {
       <span className="hidden sm:inline">
         {t("common.copyright", { year: new Date().getFullYear() })}
       </span>
+      {/* API explorer — demoted here out of the primary nav. */}
+      <Link
+        to="/swagger"
+        className="flex items-center gap-1 transition-colors hover:text-foreground"
+      >
+        <Code2 className="h-3.5 w-3.5" />
+        <span>{t("shell.apiDocs")}</span>
+      </Link>
       <a
         href="https://github.com/mlimarenko/IronRAG"
         target="_blank"

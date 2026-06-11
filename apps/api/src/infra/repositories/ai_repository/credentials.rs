@@ -276,3 +276,14 @@ pub async fn update_provider_credential(
     .fetch_optional(postgres)
     .await
 }
+
+pub async fn delete_provider_credential(
+    postgres: &PgPool,
+    credential_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("delete from ai_provider_credential where id = $1")
+        .bind(credential_id)
+        .execute(postgres)
+        .await?;
+    Ok(result.rows_affected())
+}

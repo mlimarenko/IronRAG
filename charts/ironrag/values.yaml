@@ -12,7 +12,7 @@ fullnameOverride: ""
 # pressure the kubelet evicts/OOM-kills Burstable pods before Guaranteed ones
 # and ranks them by how far each exceeds its requests — mirroring the compose
 # `oom_score_adj` ladder that sacrifices the worker first and the stateful
-# stores (postgres/redis/arangodb) last.
+# stores (postgres/redis) last.
 resourcePresets:
   # Web SPA + nginx. Mirrors x-ironrag-resources-frontend.
   frontend: &ironrag-resources-frontend
@@ -30,17 +30,17 @@ resourcePresets:
     limits:
       cpu: "1"
       memory: 768Mi
-  # Postgres relational store + one-shot startup migrator share this tier.
-  # Mirrors x-ironrag-resources-db. ephemeral-storage covers migration scratch
-  # and the migrator's /tmp.
+  # Postgres relational + pgvector knowledge plane and the one-shot startup
+  # migrator share this tier. Mirrors x-ironrag-resources-db.
+  # ephemeral-storage covers migration scratch and the migrator's /tmp.
   db: &ironrag-resources-db
     requests:
       cpu: 500m
-      memory: 256Mi
+      memory: 512Mi
       ephemeral-storage: 1Gi
     limits:
       cpu: "2"
-      memory: 1536Mi
+      memory: 4096Mi
       ephemeral-storage: 4Gi
   # Ingest worker. Mirrors x-ironrag-resources-worker. 3 GiB is the canonical
   # docling containment: auto_docling_max_concurrency_for_limits resolves a
@@ -67,25 +67,6 @@ resourcePresets:
       cpu: "4"
       memory: 3584Mi
       ephemeral-storage: 4Gi
-  # ArangoDB sits alone on the vector tier. Mirrors x-ironrag-resources-vector.
-  # The 5 GiB ceiling is sized for ArangoDB's IVF vector-index build: with
-  # multi-dim per-(library,dim) bindings, the largest per-(library,dim) shard
-  # `knowledge_chunk_vector_d{dim}_l{libhex}` can hold hundreds of thousands of
-  # rows, and Arango must train + ingest the IVF index under the pod cap. The
-  # builder fail-soft-caps nLists to the training budget (default 3 GB, env-
-  # overridable via IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES) ÷ the empirical
-  # 50 MB/list, so a smaller cap means a cheaper build, never an OOM. Do not
-  # lower below the largest active shard's IVF build need; raise it (and the
-  # training budget) in lockstep with a bigger model/corpus — see the vector-
-  # layer policy in CLAUDE.md and the matching docker-compose.yml anchor.
-  vector: &ironrag-resources-vector
-    requests:
-      cpu: "1"
-      memory: 1Gi
-    limits:
-      cpu: "4"
-      memory: 5Gi
-
 imagePullSecrets: []
 commonLabels: {}
 podAnnotations: {}
@@ -102,6 +83,7 @@ app:
   frontendOrigin: https://ironrag.example.com
   logFilter: info
   databaseMaxConnections: 20
+  knowledgePlaneBackend: postgres
   queryAnswerSourceLinksEnabled: false
   uiDefaultLocale: ru
   bootstrapToken: bootstrap-local
@@ -125,12 +107,6 @@ app:
   runtimePolicy:
     rejectTaskKinds: ""
     rejectTargetKinds: ""
-  arangodbBootstrap:
-    collections: true
-    views: true
-    graph: true
-    vectorIndexes: true
-
 observability:
   enabled: true
   # Empty endpoint/protocol defer to the compiled-in diagnostics defaults
@@ -141,8 +117,14 @@ observability:
   resourceAttributes: service.namespace=ironrag
   tracesExporter: otlp
   metricsExporter: otlp
-  logsExporter: otlp
+  # Logs are the only content-bearing signal (query text, document chunk
+  # previews); off by default so the shipped telemetry is performance-only.
+  # Set to otlp to ship logs to your own collector.
+  logsExporter: none
   metricsTemporality: cumulative
+  # Stable per-deployment telemetry id. Empty -> auto-derived from the Postgres
+  # cluster identity. Set only to override or when releases share one database.
+  deploymentId: ""
 
 startup:
   mode: startup_job
@@ -175,6 +157,11 @@ api:
   affinity: {}
 
 worker:
+  # Number of ingest workers — the single k8s scale knob. Scale-out is safe:
+  # jobs are claimed with `for update skip locked` under concurrency caps, so
+  # replicas never double-process a job. The Docker Compose baseline defaults to
+  # 1 worker (IRONRAG_WORKER_REPLICAS); this k8s default is 2. Raise for faster
+  # ingest; size nodes for replicaCount × the worker memory limit.
   replicaCount: 2
   image:
     repository: pipingspace/ironrag-backend
@@ -244,6 +231,7 @@ storage:
       storageClassName: ""
     resources: *ironrag-resources-db
 
+# Bundled dependency images stay in lockstep with docker-compose.yml defaults.
 dependencies:
   postgres:
     mode: bundled
@@ -261,8 +249,8 @@ dependencies:
     # pod memory limit, so keep it modest.
     shmSize: 256Mi
     image:
-      repository: postgres
-      tag: 18-alpine
+      repository: pgvector/pgvector
+      tag: pg18
       pullPolicy: IfNotPresent
     persistence:
       size: 20Gi
@@ -275,23 +263,7 @@ dependencies:
     port: 6379
     image:
       repository: redis
-      tag: "8.6"
+      tag: "8.8"
       pullPolicy: IfNotPresent
     maxMemory: 512mb
     resources: *ironrag-resources-cache
-  arangodb:
-    mode: bundled
-    url: ""
-    host: ""
-    port: 8529
-    database: ironrag
-    username: root
-    password: ironrag-dev
-    image:
-      repository: arangodb
-      tag: 3.12.4
-      pullPolicy: IfNotPresent
-    persistence:
-      size: 20Gi
-      storageClassName: ""
-    resources: *ironrag-resources-vector

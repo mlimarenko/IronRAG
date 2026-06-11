@@ -192,7 +192,19 @@ pub async fn merge_chunk_graph_candidates(
     let mut seen_entity_keys: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     for entity in &candidates.entities {
-        let aliases = normalize_graph_aliases(&entity.label, &entity.aliases);
+        // Capture corpus-gloss acronym aliases the chunk text spells for this
+        // entity via a parenthetical gloss (`<label> ( <short> )`), so a
+        // later short-form query resolves to this concept node. Evidence-local
+        // by construction: only this chunk's text drives detection and the
+        // alias lands on the node whose evidence is this chunk.
+        let mut entity_aliases = entity.aliases.clone();
+        entity_aliases.extend(
+            crate::services::graph::extract::acronym_gloss::detect_acronym_aliases_for_label(
+                &chunk.content,
+                &entity.label,
+            ),
+        );
+        let aliases = normalize_graph_aliases(&entity.label, &entity_aliases);
         let canonical_node_key = entity_key_index.canonical_node_key_for_label(&entity.label);
         let canonical_node_type =
             crate::services::graph::identity::runtime_node_type_from_key(&canonical_node_key);

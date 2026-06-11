@@ -303,7 +303,7 @@ impl GraphService {
         library_id: Uuid,
         extra_fields: serde_json::Value,
     ) -> Result<()> {
-        let client = state.arango_graph_store.client();
+        let client = &state.arango_client;
         let query = "UPSERT { _key: @key }
                      INSERT {
                         _key: @key,

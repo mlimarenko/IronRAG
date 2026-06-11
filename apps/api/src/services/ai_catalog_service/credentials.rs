@@ -130,6 +130,21 @@ impl AiCatalogService {
         sync_provider_model_catalog_after_credential_save(state, provider, &credential).await;
         Ok(credential)
     }
+
+    pub async fn delete_provider_credential(
+        &self,
+        state: &AppState,
+        credential_id: Uuid,
+    ) -> Result<(), ApiError> {
+        let affected =
+            ai_repository::delete_provider_credential(&state.persistence.postgres, credential_id)
+                .await
+                .map_err(map_ai_delete_error)?;
+        if affected == 0 {
+            return Err(ApiError::resource_not_found("provider_credential", credential_id));
+        }
+        Ok(())
+    }
 }
 
 fn map_provider_credential_row(row: ai_repository::AiProviderCredentialRow) -> ProviderCredential {

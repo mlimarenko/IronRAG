@@ -344,7 +344,9 @@ fn parse_class(value: &str) -> Result<MaintenanceClass, String> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings = Settings::from_env().context("load settings from env")?;
-    ironrag_backend::observability::init_tracing().context("init tracing")?;
+    let deployment_id =
+        ironrag_backend::observability::resolve_deployment_id(&settings.database_url).await;
+    ironrag_backend::observability::init_tracing(deployment_id).context("init tracing")?;
     let state = AppState::new(settings).await.context("init application state")?;
     let pool = &state.persistence.postgres;
 

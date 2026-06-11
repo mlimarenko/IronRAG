@@ -7,14 +7,12 @@ import { attentionClass, localizeAttention, resolveAttentionRoute } from "../mod
 type AttentionPanelProps = {
   t: TFunction;
   attention: DashboardAttentionItem[];
-  graphCoverageActionPath: string;
   onNavigate: (path: string) => void;
 };
 
 function AttentionPanelImpl({
   t,
   attention,
-  graphCoverageActionPath,
   onNavigate,
 }: AttentionPanelProps) {
   return (
@@ -32,7 +30,7 @@ function AttentionPanelImpl({
         <div className="mt-4 space-y-2">
           {attention.map((item) => {
             const content = localizeAttention(item, t);
-            const route = resolveAttentionRoute(item, graphCoverageActionPath);
+            const route = resolveAttentionRoute(item);
 
             return (
               <button
@@ -58,11 +56,14 @@ function AttentionPanelImpl({
                       <span className="text-sm font-semibold text-foreground">
                         {content.title}
                       </span>
-                      <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                     </div>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       {content.detail}
                     </p>
+                    <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-primary">
+                      <span>{content.action}</span>
+                      <ArrowRight className="h-3 w-3" />
+                    </div>
                   </div>
                 </div>
               </button>

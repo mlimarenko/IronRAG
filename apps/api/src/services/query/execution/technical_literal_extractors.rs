@@ -11,6 +11,15 @@ static PACKAGE_COMMAND_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     .expect("package command regex must compile")
 });
 
+static CONFIG_ASSIGNMENT_LITERAL_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    #[allow(clippy::expect_used)]
+    regex::RegexBuilder::new(
+        r"(?m)(?:^|[`;\r\n])\s*[#;]?\s*([A-Za-z][A-Za-z0-9_.-]{1,160})\s*=\s*([^`;\r\n]{1,220})",
+    )
+    .build()
+    .expect("config assignment literal regex must compile")
+});
+
 pub(super) fn push_unique_limited(
     target: &mut Vec<String>,
     seen: &mut HashSet<String>,
@@ -224,10 +233,24 @@ pub(super) fn extract_parameter_literals(text: &str, limit: usize) -> Vec<String
     let mut parameters = Vec::new();
     let mut seen = HashSet::new();
 
+    for capture in CONFIG_ASSIGNMENT_LITERAL_REGEX.captures_iter(text) {
+        let Some(name) = capture.get(1).map(|value| clean_parameter_candidate(value.as_str()))
+        else {
+            continue;
+        };
+        if looks_like_parameter_assignment_name(name) {
+            push_unique_limited(&mut parameters, &mut seen, name.to_string(), limit);
+        }
+    }
+
     for token in text.split_whitespace() {
         let has_literal_marker =
             token.contains('`') || token.starts_with('?') || token.contains('=');
-        let cleaned = trim_literal_token(token).trim_end_matches(|ch: char| {
+        if looks_like_config_section_literal(clean_config_section_candidate(token)) {
+            continue;
+        }
+        let literal_candidate = trim_literal_token(token);
+        let cleaned = literal_candidate.trim_end_matches(|ch: char| {
             matches!(ch, '.' | ':' | ';' | '?' | '!' | ',' | ')' | ']' | '}')
         });
         if let Some((name, value)) = cleaned.split_once('=') {
@@ -250,4 +273,62 @@ pub(super) fn extract_parameter_literals(text: &str, limit: usize) -> Vec<String
     }
 
     parameters
+}
+
+pub(super) fn extract_config_assignment_literals(text: &str, limit: usize) -> Vec<String> {
+    let mut assignments = Vec::new();
+    let mut seen = HashSet::new();
+
+    for capture in CONFIG_ASSIGNMENT_LITERAL_REGEX.captures_iter(text) {
+        let Some(name) = capture.get(1).map(|value| clean_parameter_candidate(value.as_str()))
+        else {
+            continue;
+        };
+        let Some(value) = capture.get(2).map(|value| value.as_str().trim()) else {
+            continue;
+        };
+        if !looks_like_parameter_assignment_name(name) || value.is_empty() {
+            continue;
+        }
+        push_unique_limited(&mut assignments, &mut seen, format!("{name} = {value}"), limit);
+    }
+
+    assignments
+}
+
+fn clean_config_section_candidate(candidate: &str) -> &str {
+    candidate
+        .trim_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | ':' | '.')
+        })
+        .trim_matches(|ch: char| matches!(ch, '(' | ')' | '{' | '}'))
+}
+
+fn looks_like_config_section_literal(candidate: &str) -> bool {
+    let Some(inner) = candidate.strip_prefix('[').and_then(|value| value.strip_suffix(']')) else {
+        return false;
+    };
+    if inner.len() < 2 || inner.len() > 160 || !inner.is_ascii() {
+        return false;
+    }
+    let Some(first) = inner.chars().next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && inner.chars().any(|ch| ch.is_ascii_alphabetic())
+        && inner.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+}
+
+pub(super) fn extract_config_section_literals(text: &str, limit: usize) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut seen = HashSet::new();
+
+    for token in text.split_whitespace() {
+        let cleaned = clean_config_section_candidate(token);
+        if looks_like_config_section_literal(cleaned) {
+            push_unique_limited(&mut sections, &mut seen, cleaned.to_string(), limit);
+        }
+    }
+
+    sections
 }

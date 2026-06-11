@@ -18,12 +18,13 @@ use super::{
     graph_evidence_chunk_score, graph_evidence_context_line, graph_evidence_source_document_ids,
     graph_evidence_source_document_ids_from_scored_targets,
     graph_evidence_source_document_ids_with_priority, graph_evidence_targets,
-    graph_evidence_targets_for_query, latest_version_documents, linked_anchor_focus_queries,
-    linked_anchor_hydration_target_filter, map_chunk_hit, merge_chunks, merge_entity_bio_chunks,
-    merge_graph_evidence_chunks, merge_query_ir_focus_chunks, query_ir_focus_chunk_score,
-    query_ir_focus_search_queries, query_ir_lexical_focus_queries,
-    rank_graph_evidence_context_rows, retain_canonical_document_head_chunks,
-    retain_entity_bio_candidates, retain_scoped_documents, truncate_bundle,
+    graph_evidence_targets_for_query, graph_evidence_text_search_document_scope,
+    latest_version_documents, linked_anchor_focus_queries, linked_anchor_hydration_target_filter,
+    map_chunk_hit, merge_chunks, merge_entity_bio_chunks, merge_graph_evidence_chunks,
+    merge_query_ir_focus_chunks, query_ir_focus_chunk_score, query_ir_focus_search_queries,
+    query_ir_lexical_focus_queries, rank_graph_evidence_context_rows,
+    retain_canonical_document_head_chunks, retain_entity_bio_candidates, retain_scoped_documents,
+    truncate_bundle,
 };
 use crate::domains::query_ir::{
     ComparisonSpec, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct,
@@ -420,10 +421,10 @@ fn latest_version_question_detection_uses_query_ir() {
 
 #[test]
 fn requested_latest_version_count_defaults_and_caps() {
-    assert_eq!(requested_latest_version_count(&release_query_ir(None, None)), 5);
+    assert_eq!(requested_latest_version_count(&release_query_ir(None, None)), 10);
     assert_eq!(requested_latest_version_count(&release_query_ir(Some("3"), None)), 3);
     assert_eq!(requested_latest_version_count(&release_query_ir(Some("100"), None)), 10);
-    assert_eq!(requested_latest_version_count(&release_query_ir(Some("2024"), None)), 5);
+    assert_eq!(requested_latest_version_count(&release_query_ir(Some("2024"), None)), 10);
     assert_eq!(
         requested_latest_version_count(&release_query_ir_with_source_slice_count(Some(10))),
         10
@@ -436,7 +437,7 @@ fn requested_latest_version_count_defaults_and_caps() {
         requested_latest_version_count(&release_query_ir_with_source_slice_count(Some(0))),
         1
     );
-    assert_eq!(requested_latest_version_count(&release_query_ir_with_source_slice_count(None)), 5);
+    assert_eq!(requested_latest_version_count(&release_query_ir_with_source_slice_count(None)), 10);
 
     let mut source_slice_ir = release_query_ir(Some("3"), None);
     source_slice_ir.source_slice = Some(SourceSliceSpec {
@@ -835,7 +836,7 @@ fn latest_version_identity_chunk(
         document_id,
         document_label: format!("Release {document_rank}"),
         excerpt: format!("release {document_rank} chunk {chunk_rank}"),
-        score_kind: RuntimeChunkScoreKind::DocumentIdentity,
+        score_kind: RuntimeChunkScoreKind::LatestVersion,
         score: Some(score),
         source_text: format!("release {document_rank} chunk {chunk_rank}"),
     }
@@ -934,7 +935,7 @@ fn truncate_bundle_preserves_runtime_evidence_lanes() {
         chunks: high_scored_noise,
     };
 
-    truncate_bundle(&mut bundle, 4, None);
+    truncate_bundle(&mut bundle, 4, None, &std::collections::HashSet::new());
 
     assert!(bundle.chunks.iter().any(|chunk| chunk.chunk_id == graph_evidence.chunk_id));
     assert_eq!(bundle.chunks[0].chunk_id, graph_evidence.chunk_id);
@@ -959,9 +960,45 @@ fn truncate_bundle_orders_same_lane_by_score_before_insertion_order() {
     chunks.push(focused);
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
-    truncate_bundle(&mut bundle, 4, None);
+    truncate_bundle(&mut bundle, 4, None, &std::collections::HashSet::new());
 
     assert_eq!(bundle.chunks[0].chunk_id, focused_id);
+}
+
+#[test]
+fn truncate_bundle_demotes_attached_context_documents_below_peers() {
+    let attached_doc = Uuid::now_v7();
+    let primary_doc = Uuid::now_v7();
+    // The attached-context chunk has a far HIGHER raw score than the primary
+    // chunk, so absent demotion it would win the single context slot — exactly
+    // the OCR-screenshot-floods-the-answer failure this guards against.
+    let attached = runtime_chunk_for_document(attached_doc, "screenshot", 10_000.0);
+    let primary = runtime_chunk_for_document(primary_doc, "procedure", 1.0);
+    let attached_id = attached.chunk_id;
+    let primary_id = primary.chunk_id;
+
+    // Baseline (no demotion): the high-scored attached-context chunk wins.
+    let mut bundle = RetrievalBundle {
+        entities: Vec::new(),
+        relationships: Vec::new(),
+        chunks: vec![attached.clone(), primary.clone()],
+    };
+    truncate_bundle(&mut bundle, 1, None, &std::collections::HashSet::new());
+    assert_eq!(bundle.chunks.len(), 1);
+    assert_eq!(bundle.chunks[0].chunk_id, attached_id);
+
+    // With the attached-context document demoted, the lower-scored primary
+    // chunk takes the slot instead.
+    let mut demoted = std::collections::HashSet::new();
+    demoted.insert(attached_doc);
+    let mut bundle = RetrievalBundle {
+        entities: Vec::new(),
+        relationships: Vec::new(),
+        chunks: vec![attached, primary],
+    };
+    truncate_bundle(&mut bundle, 1, None, &demoted);
+    assert_eq!(bundle.chunks.len(), 1);
+    assert_eq!(bundle.chunks[0].chunk_id, primary_id);
 }
 
 #[test]
@@ -983,7 +1020,12 @@ fn truncate_bundle_reserves_source_context_for_exact_technical_queries() {
     chunks.push(source_context);
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
-    truncate_bundle(&mut bundle, 4, Some(&exact_error_code_query_ir()));
+    truncate_bundle(
+        &mut bundle,
+        4,
+        Some(&exact_error_code_query_ir()),
+        &std::collections::HashSet::new(),
+    );
 
     assert_eq!(bundle.chunks.len(), 4);
     assert!(bundle.chunks.iter().any(|chunk| chunk.chunk_id == source_context_id));
@@ -1009,7 +1051,12 @@ fn truncate_bundle_caps_error_code_source_context_reservation() {
     }
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
-    truncate_bundle(&mut bundle, 4, Some(&exact_error_code_query_ir()));
+    truncate_bundle(
+        &mut bundle,
+        4,
+        Some(&exact_error_code_query_ir()),
+        &std::collections::HashSet::new(),
+    );
 
     let source_context_count = bundle
         .chunks
@@ -1054,7 +1101,12 @@ fn truncate_bundle_reserves_setup_focus_anchor_for_configure_how() {
     chunks.push(anchor);
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
-    truncate_bundle(&mut bundle, 4, Some(&configure_how_focus_query_ir("Alpha Suite")));
+    truncate_bundle(
+        &mut bundle,
+        4,
+        Some(&configure_how_focus_query_ir("Alpha Suite")),
+        &std::collections::HashSet::new(),
+    );
 
     assert_eq!(bundle.chunks.len(), 4);
     assert!(
@@ -1080,7 +1132,7 @@ fn truncate_bundle_does_not_reserve_anchor_without_document_focus() {
 
     let mut query_ir = configure_how_focus_query_ir("Alpha Suite");
     query_ir.document_focus = None;
-    truncate_bundle(&mut bundle, 4, Some(&query_ir));
+    truncate_bundle(&mut bundle, 4, Some(&query_ir), &std::collections::HashSet::new());
 
     assert_eq!(bundle.chunks.len(), 4);
     assert!(!bundle.chunks.iter().any(|chunk| chunk.chunk_id == anchor_id));
@@ -1111,7 +1163,12 @@ fn truncate_bundle_reserves_source_context_for_transport_inventory_queries() {
     }
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
-    truncate_bundle(&mut bundle, 10, Some(&transport_inventory_query_ir()));
+    truncate_bundle(
+        &mut bundle,
+        10,
+        Some(&transport_inventory_query_ir()),
+        &std::collections::HashSet::new(),
+    );
 
     let source_context_count = bundle
         .chunks
@@ -1140,7 +1197,7 @@ fn truncate_bundle_expands_entity_budget_for_inventory_queries() {
     let mut bundle = RetrievalBundle { entities, relationships: Vec::new(), chunks };
     let query_ir = release_query_ir(None, Some("package-*"));
 
-    truncate_bundle(&mut bundle, 4, Some(&query_ir));
+    truncate_bundle(&mut bundle, 4, Some(&query_ir), &std::collections::HashSet::new());
 
     assert_eq!(bundle.entities.len(), 12);
     assert_eq!(bundle.chunks.len(), 4);
@@ -1166,7 +1223,12 @@ fn truncate_bundle_keeps_requested_latest_version_document_coverage() {
     let effective_top_k = source_slice_context_top_k(&query_ir, 8);
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
-    truncate_bundle(&mut bundle, effective_top_k, Some(&query_ir));
+    truncate_bundle(
+        &mut bundle,
+        effective_top_k,
+        Some(&query_ir),
+        &std::collections::HashSet::new(),
+    );
 
     let retained_documents =
         bundle.chunks.iter().map(|chunk| chunk.document_id).collect::<HashSet<_>>();
@@ -1227,7 +1289,7 @@ fn truncate_bundle_preserves_multi_document_relevant_coverage_for_compare_querie
         ],
     };
 
-    truncate_bundle(&mut bundle, 6, Some(&query_ir));
+    truncate_bundle(&mut bundle, 6, Some(&query_ir), &std::collections::HashSet::new());
 
     assert_eq!(bundle.chunks.len(), 6);
     assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == rust_document));
@@ -1271,7 +1333,7 @@ fn truncate_bundle_compare_fallback_keeps_second_document_when_terms_are_not_pre
         ],
     };
 
-    truncate_bundle(&mut bundle, 2, Some(&query_ir));
+    truncate_bundle(&mut bundle, 2, Some(&query_ir), &std::collections::HashSet::new());
 
     assert_eq!(bundle.chunks.len(), 2);
     assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == first_document));
@@ -1300,6 +1362,19 @@ fn entity_bio_lane_does_not_override_document_identity_priority() {
     let merged = merge_entity_bio_chunks(vec![identity.clone()], vec![entity_bio], 8);
 
     assert_eq!(merged[0].chunk_id, identity.chunk_id);
+    assert_eq!(merged[0].score, Some(DOCUMENT_IDENTITY_SCORE_FLOOR));
+}
+
+#[test]
+fn rrf_merge_preserves_latest_version_score_kind() {
+    let mut latest = runtime_chunk("latest", DOCUMENT_IDENTITY_SCORE_FLOOR);
+    latest.score_kind = RuntimeChunkScoreKind::LatestVersion;
+    let ordinary = runtime_chunk("ordinary", 0.02);
+
+    let merged = merge_chunks(vec![ordinary], vec![latest.clone()], 8);
+
+    assert_eq!(merged[0].chunk_id, latest.chunk_id);
+    assert_eq!(merged[0].score_kind, RuntimeChunkScoreKind::LatestVersion);
     assert_eq!(merged[0].score, Some(DOCUMENT_IDENTITY_SCORE_FLOOR));
 }
 
@@ -1656,14 +1731,40 @@ fn graph_evidence_source_document_ids_with_priority_prepend_target_documents() {
 }
 
 #[test]
+fn graph_evidence_text_search_document_scope_prefers_explicit_targets() {
+    let explicit_a = Uuid::now_v7();
+    let explicit_b = Uuid::now_v7();
+    let derived_a = Uuid::now_v7();
+    let derived_b = Uuid::now_v7();
+    let explicit = BTreeSet::from([explicit_a, explicit_b]);
+
+    let scoped =
+        graph_evidence_text_search_document_scope(&explicit, &[derived_a, derived_b, derived_a]);
+
+    assert_eq!(scoped, vec![explicit_a, explicit_b]);
+}
+
+#[test]
+fn graph_evidence_text_search_document_scope_dedupes_derived_targets() {
+    let first = Uuid::now_v7();
+    let second = Uuid::now_v7();
+
+    let scoped =
+        graph_evidence_text_search_document_scope(&BTreeSet::new(), &[first, second, first]);
+
+    assert_eq!(scoped, vec![first, second]);
+}
+
+#[test]
 fn graph_evidence_context_line_formats_delimited_row_fields() {
     let graph_index = graph_index_with_nodes(Vec::new());
+    let document_id = Uuid::now_v7();
     let row = RuntimeGraphEvidenceRow {
         id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
         target_kind: "node".to_string(),
         target_id: Uuid::now_v7(),
-        document_id: Some(Uuid::now_v7()),
+        document_id: Some(document_id),
         chunk_id: Some(Uuid::now_v7()),
         source_file_name: Some("alpha-source".to_string()),
         page_ref: None,
@@ -1671,10 +1772,14 @@ fn graph_evidence_context_line_formats_delimited_row_fields() {
         confidence_score: Some(1.0),
         created_at: Utc::now(),
     };
+    let source_labels =
+        HashMap::from([(document_id, "https://example.test/docs/alpha".to_string())]);
 
-    let line = graph_evidence_context_line(&row, &graph_index, &[]).expect("graph evidence line");
+    let line = graph_evidence_context_line(&row, &graph_index, &source_labels, &[])
+        .expect("graph evidence line");
 
-    assert!(line.contains("[graph-evidence source=\"alpha-source\"]"));
+    assert!(line.contains("[graph-evidence source=\"https://example.test/docs/alpha\"]"));
+    assert!(!line.contains("alpha-source"));
     assert!(line.contains("- Column Alpha: keep A"));
     assert!(line.contains("- Column Beta: keep B"));
 }
@@ -1697,6 +1802,7 @@ fn graph_evidence_context_line_focuses_long_mixed_rows() {
     let line = graph_evidence_context_line(
         &row,
         &graph_index,
+        &HashMap::new(),
         &["checkout".to_string(), "connectors".to_string(), "gateway".to_string()],
     )
     .expect("graph evidence line");
@@ -2178,10 +2284,14 @@ fn sample_document_row(file_name: &str, title: &str) -> KnowledgeDocumentRow {
         external_key: document_id.to_string(),
         file_name: Some(file_name.to_string()),
         title: Some(title.to_string()),
+        source_uri: None,
+        document_hint: None,
         document_state: "active".to_string(),
         active_revision_id: Some(Uuid::now_v7()),
         readable_revision_id: Some(Uuid::now_v7()),
         latest_revision_no: Some(1),
+        parent_document_id: None,
+        document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
         deleted_at: None,

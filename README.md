@@ -19,17 +19,17 @@
 ## What IronRAG provides
 
 - **Typed knowledge graph.** Documents are decomposed into entities, typed relationships, and chunk-level evidence references. Retrieval combines vector, lexical, graph-traversal, and technical-fact lanes; the answer pipeline returns citations to the underlying chunks.
-- **Native MCP server.** 21 tools across documents, graph, web ingest, and grounded `ask`. Connect it to MCP-compatible agents and clients such as Claude Desktop, Claude Code, Cursor, Codex, VS Code with Continue / Cline / Roo, Zed, OpenClaw, Hermes, Lobe-style chat agents, or a custom HTTP MCP client. Tools are scoped per IAM token.
-- **Provider-agnostic AI runtime.** Seven LLM providers ship in the catalog — OpenAI, DeepSeek, Qwen (DashScope-intl), GPTunnel, OpenRouter, RouterAI, Ollama. Each pipeline purpose (`extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `vision`) is bound independently, with an Arango vector rebuild utility for dimension-changing embedding switches.
+- **Native MCP server.** 23 tools across documents, graph, web ingest, and grounded `ask`. Connect it to MCP-compatible agents and clients such as Claude Desktop, Claude Code, Cursor, Codex, VS Code with Continue / Cline / Roo, Zed, OpenClaw, Hermes, Lobe-style chat agents, or a custom HTTP MCP client. Tools are scoped per IAM token.
+- **Provider-agnostic AI runtime.** Seven LLM providers ship in the catalog — OpenAI, DeepSeek, Qwen (DashScope-intl), GPTunnel, OpenRouter, RouterAI, Ollama. Each pipeline purpose (`extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`, `vision`) is bound independently, with a vector rebuild utility for dimension-changing embedding switches.
 - **USD cost catalog.** Every binding stores prices in USD. Per-call billing rows are written for every LLM request and rolled up per document and per query in the UI.
 - **Multi-tenant IAM.** Principals, scoped tokens (system / workspace / library), and permission groups gate every API surface. Audit log captures resource access.
-- **Self-hosted runtime.** Single `docker compose up -d` boots the full stack (PostgreSQL, ArangoDB, Redis, backend, worker, frontend). Helm chart available for Kubernetes.
+- **Self-hosted runtime.** The Docker Compose stack includes PostgreSQL with pgvector, Redis, backend, worker, and frontend services. Helm chart available for Kubernetes.
 - **Code-aware ingest.** 15-language tree-sitter AST parsing. Native parsers for JSON / YAML / TOML / CSV / XLSX. Technical-fact extraction for paths, params, endpoints, env vars, and error codes.
 - **CPU-first recognition.** Docling CPU runtime is baked into the backend image; PDF / DOCX / PPTX layout extraction, raster-image OCR, and embedded document-picture OCR run without a GPU. Stored PDFs are extracted through resumable page-range checkpoints, and image OCR can be switched per library to an active vision binding.
 - **Restart-safe processing.** Long document jobs keep durable extraction units, reusable embedding / graph outputs, and lease-guarded finalization, so stack restarts or transient network breaks resume from the last completed unit instead of discarding hours of work.
 - **Durable assistant turns.** UI answer streaming is an activity channel over the same persisted query execution; if the browser or proxy drops the stream after work starts, the frontend reloads the completed session result instead of submitting the question again. LLM debug snapshots are stored per execution for post-reload inspection.
 - **Backup and restore.** Streaming `tar.zst` archive with selective sections (catalog only, with blobs, with graph). Restore to the same or a different deployment.
-- **Pluggable source connectors.** Push content into IronRAG from any vendor system via a small Python adapter. Build your own on the [IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate), or run the production [BookStack connector](https://github.com/mlimarenko/IronRAG.BookStack) and [Confluence connector](https://github.com/mlimarenko/IronRAG.Confluence) (pages + attachments + images, periodic poll + webhook intake). With the default connector env + routing setup, you can turn an existing wiki into an agent-ready knowledge library in a few setup clicks.
+- **Pluggable source connectors.** Push content into IronRAG from a vendor system via a small Python adapter. Build your own on the [IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate), or run the [BookStack connector](https://github.com/mlimarenko/IronRAG.BookStack) and [Confluence connector](https://github.com/mlimarenko/IronRAG.Confluence) (pages + attachments + images, periodic poll + webhook intake).
 
 <p align="center">
   <img src="./docs/assets/readme-flow.gif" alt="IronRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="780">
@@ -45,6 +45,15 @@ Install or update:
 curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh | bash
 ```
 
+The installer is an interactive wizard: it inspects the host (CPU + RAM),
+recommends a resource profile (per-service memory/CPU caps and ingest
+parallelism), and prompts for the port, optional admin bootstrap, provider API
+keys, and telemetry — each with a default you accept with Enter. On a re-run it
+preserves the existing `.env` (secrets and tuned caps are not overwritten).
+Pipe-friendly: with no terminal, or with `--yes`, it runs non-interactively
+from environment variables and existing `.env` values. Use `--plan-only` to see
+the detected profile without writing or deploying anything.
+
 Or from source:
 
 ```bash
@@ -54,9 +63,19 @@ cp .env.example .env             # add IRONRAG_OPENAI_API_KEY=sk-...
 docker compose up -d
 ```
 
-Open [http://127.0.0.1:19000](http://127.0.0.1:19000), create an admin account, upload a document, ask a question. That's it.
+Open [http://127.0.0.1:19000](http://127.0.0.1:19000), create an admin account, upload a document, and ask a question.
 
-## Multi-provider in one line
+> **Telemetry.** By default the stack sends anonymous performance telemetry —
+> OpenTelemetry traces and metrics — to the project maintainers' collector to
+> help improve IronRAG. These signals carry request timings, stage durations,
+> counters and identifiers (library/document/chunk UUIDs), not your documents,
+> queries, answers or credentials; logs are the only content-bearing signal and
+> are off by default. Each deployment is labelled with a stable, auto-generated
+> `ironrag.deployment.id`. To opt out entirely set `IRONRAG_OTEL_ENABLED=false`,
+> or point telemetry at your own collector with `OTEL_EXPORTER_OTLP_ENDPOINT`
+> (see [`apps/api/observability.toml`](apps/api/observability.toml)).
+
+## Multi-provider configuration
 
 Set as many provider keys as you need in `.env` — credentials auto-register on the next restart, and every model preset becomes available in the admin UI.
 
@@ -81,9 +100,9 @@ IRONRAG_ROUTERAI_API_KEY=...
 | **Ollama**                | ✅    | ✅      | ✅         | Fully local, air-gapped, GPU optional                                |
 
 
-Bind any provider to any pipeline purpose under **Admin → AI → Bindings**: `extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `vision`. The bindings are scoped to instance, workspace, or library — a workspace can override the instance default for a single purpose.
+Bind any provider to any pipeline purpose under **Admin → AI → Bindings**: `extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`, `vision`. The bindings are scoped to instance, workspace, or library — a workspace can override the instance default for a single purpose.
 
-Optional bindings note: `vision` and `extract_text` are optional. Keep libraries on the Docling raster-image engine by default; switch a library to `vision` only when that library should use an active vision binding for image OCR. Selecting `vision` without a binding fails loudly.
+Recognition note: the default raster-image engine is `vision`, so image OCR runs through the active `vision` binding (seeded by default in the bundled stack). Switch a library to the `docling` engine to OCR images with the local Docling runtime and make no vision LLM calls. The `vision` and `extract_text` bindings are otherwise optional, but selecting the `vision` engine without a configured `vision` binding fails loudly.
 
 ## Common deployments
 
@@ -93,18 +112,6 @@ Optional bindings note: `vision` and `extract_text` are optional. Keep libraries
 - **Personal long-term memory.** A single-tenant deployment used as a long-lived second brain — papers, notes, code snippets, web clippings — queried from any MCP client. The graph grows as the library grows.
 - **On-prem / regulated AI.** Bind every purpose to Ollama for an air-gapped runtime. The deployment is inert outside its own network: no provider telemetry, IAM-scoped tokens, full backup archive for retention.
 
-## Star history
-
-<p align="center">
-  <a href="https://star-history.com/#mlimarenko/IronRAG&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" width="700" />
-    </picture>
-  </a>
-</p>
-
 ---
 
 ## Tech stack
@@ -112,56 +119,24 @@ Optional bindings note: `vision` and `extract_text` are optional. Keep libraries
 
 | Layer                    | Technology                                                      |
 | ------------------------ | --------------------------------------------------------------- |
-| Backend                  | Rust 1.95, axum, tokio, SQLx, tower                             |
-| Frontend                 | React 19, Vite 8, TypeScript 6, Tailwind 4, shadcn/ui           |
+| Backend                  | Rust 1.96, axum 0.8, tokio 1.52, SQLx 0.8, tower 0.5          |
+| Frontend                 | React 19.2, Vite 8.0, TypeScript 6.0, Tailwind 4.3, shadcn/ui |
 | Frontend build/runtime   | Node 24 (build), Nginx 1.30 (static serving)                    |
-| Graph rendering          | Sigma.js + Graphology (WebGL, Web Worker layout)                |
-| Knowledge graph store    | ArangoDB 3.12                                                   |
-| Document / catalog store | PostgreSQL 18                                                   |
-| Cache / job queue        | Redis 8                                                         |
+| Graph rendering          | Sigma.js 3 + Graphology 0.26 (WebGL, Web Worker layout)       |
+| Database                 | PostgreSQL 18 (pgvector image)                                  |
+| Knowledge-plane search   | pgvector, PostgreSQL full-text search, `pg_trgm`                |
+| Cache / job queue        | Redis 8.8                                                       |
 | Document recognition     | Docling CPU runtime, native parsers, tree-sitter (15 languages) |
-| MCP                      | model-context-protocol native server, 21 tools                  |
+| MCP                      | Streamable HTTP MCP server (2025-06-18), 23 tools               |
 | Deployment               | Docker Compose, Helm chart                                      |
-
 
 ## Pipeline overview
 
-```mermaid
-flowchart LR
-  classDef entry fill:#eef6ff,stroke:#2563eb,stroke-width:2px,color:#0f172a
-  classDef api fill:#f8fafc,stroke:#64748b,stroke-width:1.5px,color:#0f172a
-  classDef worker fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#052e16
-  classDef store fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#431407
-  classDef llm fill:#f5f3ff,stroke:#7c3aed,stroke-width:2px,color:#2e1065
+<p align="center">
+  <img src="./docs/assets/readme-architecture.png" alt="IronRAG architecture: ingest (sources, recognition, chunking, embed/graph/facts) writes to PostgreSQL with pgvector and Redis; query (ask, hybrid retrieval, grounded answer) reads back; LLM stages resolve through per-purpose provider bindings." width="980">
+</p>
 
-  Source["Documents · code · web crawl · MCP upload"]:::entry
-  Recog["Recognition router<br/>native · Docling · vision"]:::worker
-  Chunk["Chunk + structure"]:::worker
-  Provider["Provider binding<br/>per-purpose"]:::llm
-  Embed["embed_chunk"]:::llm
-  Graph["extract_graph<br/>entities + relations + evidence"]:::llm
-  Facts["extract_technical_facts"]:::llm
-  Stores["ArangoDB · Postgres · Redis"]:::store
-  Ask["UI / MCP `ask`"]:::entry
-  Retrieve["Hybrid retrieval<br/>vector + lexical + graph + facts"]:::worker
-  Answer["Grounded answer<br/>verifier + citations"]:::worker
-
-  Source --> Recog --> Chunk
-  Chunk --> Embed --> Stores
-  Chunk --> Graph --> Stores
-  Chunk --> Facts --> Stores
-  Embed -.- Provider
-  Graph -.- Provider
-  Facts -.- Provider
-  Ask --> Retrieve
-  Retrieve <--> Stores
-  Retrieve --> Answer
-  Answer -.- Provider
-```
-
-
-
-1. **Ingest.** Files, web pages, and API / MCP uploads enter the recognition router (`extract_text`), stored PDFs are checkpointed by page range, source text is split into structured chunks (`chunk_content` + structured-block preparation), and persisted to ArangoDB.
+1. **Ingest.** Files, web pages, and API / MCP uploads enter the recognition router (`extract_text`), stored PDFs are checkpointed by page range, source text is split into structured chunks (`chunk_content` + structured-block preparation), and persisted to PostgreSQL.
 2. **Build memory.** Each chunk is embedded (`embed_chunk`), scanned for technical literals (`extract_technical_facts`), and processed by `extract_graph` to write entities, typed relations, and evidence references.
 3. **Query.** A query session compiles the user request into typed IR (`query_compile`); vector, lexical, graph-traversal, and technical-fact lanes retrieve concurrently; the answer router selects between a grounded answer (`query_answer`) and a clarification, runs the verifier, and persists citations to the response.
 4. **Provider routing.** Every LLM call resolves through the binding for its purpose. Switching `query_answer` from OpenAI to a local Ollama model is a binding change at the matching scope (instance / workspace / library).
@@ -177,6 +152,8 @@ For deep dives:
 | IAM & tokens                 | [docs/en/IAM.md](./docs/en/IAM.md)               | [docs/ru/IAM.md](./docs/ru/IAM.md)               |
 | CLI reference                | [docs/en/CLI.md](./docs/en/CLI.md)               | [docs/ru/CLI.md](./docs/ru/CLI.md)               |
 | Frontend architecture        | [docs/en/FRONTEND.md](./docs/en/FRONTEND.md)     | [docs/ru/FRONTEND.md](./docs/ru/FRONTEND.md)     |
+| Frontend transport (TLS/QUIC)| [docs/en/FRONTEND-TRANSPORT.md](./docs/en/FRONTEND-TRANSPORT.md) | [docs/ru/FRONTEND-TRANSPORT.md](./docs/ru/FRONTEND-TRANSPORT.md) |
+| Capacity planning            | [docs/en/CAPACITY-PLANNING.md](./docs/en/CAPACITY-PLANNING.md) | [docs/ru/CAPACITY-PLANNING.md](./docs/ru/CAPACITY-PLANNING.md) |
 | Webhooks                     | [docs/en/WEBHOOK.md](./docs/en/WEBHOOK.md)       | [docs/ru/WEBHOOK.md](./docs/ru/WEBHOOK.md)       |
 | Benchmarks                   | [docs/en/BENCHMARKS.md](./docs/en/BENCHMARKS.md) | [docs/ru/BENCHMARKS.md](./docs/ru/BENCHMARKS.md) |
 | Changelog                    | [CHANGELOG.md](./CHANGELOG.md)                   | —                                                |
@@ -184,12 +161,27 @@ For deep dives:
 
 ## Other deployment options
 
+All variants live in the single `docker-compose.yml`, selected by env and one
+profile (see the file header for the full list):
+
 ```bash
-# With S3-compatible storage (bundled s4core)
-docker compose -f docker-compose-s4.yml up -d
+# With S3-compatible storage (bundled s4core), via the `s4` profile
+COMPOSE_PROFILES=s4 \
+  IRONRAG_CONTENT_STORAGE_PROVIDER=s3 \
+  IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE=bundled \
+  IRONRAG_CONTENT_STORAGE_TOPOLOGY=shared_cluster \
+  docker compose up -d
 
 # Local source build for development
-docker compose -f docker-compose-local.yml up --build -d
+IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
+  IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
+  docker compose up -d --build
+
+# Larger host (24-32 GiB): raise the per-role memory caps
+IRONRAG_DB_MEMORY_LIMIT=6144M \
+  IRONRAG_BACKEND_MEMORY_LIMIT=4096M \
+  IRONRAG_WORKER_MEMORY_LIMIT=4096M \
+  docker compose up -d
 ```
 
 Helm (Kubernetes):
@@ -204,7 +196,23 @@ helm upgrade --install ironrag charts/ironrag \
 By default the chart deploys the API, worker, and web images with the
 `v<appVersion>` image tag derived from `Chart.appVersion`. Override
 `api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning
-a different published image, for example `--set web.image.tag=v0.4.19`.
+a different published image, for example `--set web.image.tag=v0.5.0`.
+
+Bundled dependencies (same pins as Docker Compose): `pgvector/pgvector:pg18`
+for PostgreSQL and `redis:8.8` for Redis. Override via
+`dependencies.postgres.image.*` and `dependencies.redis.image.*` when needed.
+
+## Star history
+
+<p align="center">
+  <a href="https://star-history.com/#mlimarenko/IronRAG&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" width="700" />
+    </picture>
+  </a>
+</p>
 
 ## License
 

@@ -84,3 +84,42 @@ pub(crate) const DOCUMENT_IDENTITY_SCORE_FLOOR: f32 = 100_000.0;
 /// spreads; ordinary relevance differences must not collapse a
 /// multi-document answer into a single-document focus.
 pub(crate) const DOCUMENT_IDENTITY_DOMINANCE_RATIO: f32 = 1_000.0;
+
+/// Coverage floor for the P3 focus-broaden fallback. When a
+/// *compiler-inferred* single-document focus pin (the IR named a module /
+/// topic, not a document the user referenced verbatim) narrows retrieval to
+/// at most this many chunks, the pin is dropped for a single broad
+/// re-retrieval so a thin same-titled stub cannot hard-lock the answer and
+/// exclude the real procedure docs. Deliberately small: it must fire only on
+/// genuinely thin pins (the observed stub carried two chunks) and never on a
+/// small-but-sufficient focused document, so the fallback costs at most one
+/// extra retrieval and stays inside the 30s tool-call SLO.
+pub(crate) const FOCUS_BROADEN_MIN_CHUNKS: usize = 2;
+
+/// Minimum number of distinct source documents an entity must appear in
+/// (via `runtime_graph_evidence`) before it qualifies as a cross-document
+/// subject in the release-clarify probe. A single-doc entity is too
+/// narrow to be a product variant worth offering as a clarification choice.
+pub(crate) const RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN: usize = 2;
+
+/// Minimum number of qualifying entities required to fire the
+/// release-lane clarify-with-fallback. Fewer than this and the evidence
+/// does not span multiple distinct subjects, so a flat list is more
+/// useful than a clarifying question.
+pub(crate) const RELEASE_CLARIFY_MIN_ENTITIES: usize = 2;
+
+/// Sense-dominance ratio for the exact-label-term (short-identifier) graph
+/// matching path. When a short identifier-shaped mention (e.g. an all-uppercase
+/// token) matches multiple graph nodes by exact label or alias, the node set is
+/// pruned to those whose `support_count >= max_matched_support / RATIO` before
+/// the nodes seed neighborhood expansion. This removes incidental homographs
+/// (low-evidence fringe senses) while keeping the dominant sense family.
+///
+/// The ratio is calibrated so that on a set whose strongest sense has support S,
+/// any node with support >= S/150 survives. A sense family spanning up to ~150×
+/// the weakest member is preserved; isolated noise nodes far below the dominant
+/// sense are dropped. The value 150 is chosen to keep all members of a plausible
+/// multi-sense dominant family (the weakest legitimate sense may be ~150× below
+/// the strongest) while reliably excluding singletons with support ≤ a few
+/// documents.
+pub(crate) const EXACT_LABEL_TERM_SENSE_DOMINANCE_RATIO: f32 = 150.0;

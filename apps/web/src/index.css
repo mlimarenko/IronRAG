@@ -64,17 +64,105 @@
   --color-status-sparse: hsl(var(--status-sparse));
   --color-status-sparse-bg: hsl(var(--status-sparse-bg));
 
-  /* Border radius */
-  --radius-lg: var(--radius);
-  --radius-md: calc(var(--radius) - 2px);
+  /* ── Border radius scale ───────────────────────────────────────────
+     Anchored on --radius (0.625rem / 10px). Exposes a full xs→2xl ramp so
+     surfaces, controls, chips and pills all read from one coherent system
+     instead of ad-hoc rounded-* literals. */
+  --radius-xs: calc(var(--radius) - 6px);
   --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
 
-  /* Box shadows */
+  /* ── Spacing scale ─────────────────────────────────────────────────
+     A dense-but-breathable 4px base rhythm for an operator tool. Tailwind's
+     numeric spacing still applies; these named tokens give the shell and
+     future page chrome a shared vocabulary (gutters, control heights). */
+  --space-3xs: 0.125rem; /* 2px  hairline gaps */
+  --space-2xs: 0.25rem;  /* 4px  icon↔label */
+  --space-xs: 0.375rem;  /* 6px  intra-control */
+  --space-sm: 0.5rem;    /* 8px  control padding */
+  --space-md: 0.75rem;   /* 12px group gap */
+  --space-lg: 1rem;      /* 16px section gutter */
+  --space-xl: 1.5rem;    /* 24px page gutter */
+  --space-2xl: 2rem;     /* 32px major section */
+  --space-3xl: 3rem;     /* 48px page rhythm */
+
+  /* ── Typography scale ──────────────────────────────────────────────
+     Tight, information-dense ramp tuned for a back-office. Display sizes
+     pull their tracking negative; the micro sizes (label/caption) carry
+     positive tracking for legibility at small caps. */
+  --text-2xs: 0.6875rem;  /* 11px badges / micro-labels */
+  --text-xs: 0.75rem;     /* 12px captions / table meta */
+  --text-sm: 0.8125rem;   /* 13px nav / dense body */
+  --text-base: 0.875rem;  /* 14px default body */
+  --text-md: 1rem;        /* 16px emphasised body */
+  --text-lg: 1.125rem;    /* 18px card titles */
+  --text-xl: 1.375rem;    /* 22px page titles */
+  --text-2xl: 1.75rem;    /* 28px hero stats */
+  --leading-tight: 1.2;
+  --leading-snug: 1.4;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.7;
+  --tracking-tight: -0.02em;
+  --tracking-snug: -0.011em;
+  --tracking-wide: 0.04em;
+  --tracking-caps: 0.08em;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* ── Motion tokens ─────────────────────────────────────────────────
+     Subtle, purposeful timing. Fast for hover/press feedback, base for
+     state changes, slow for entrances. Standard easing for most moves,
+     emphasized (spring-ish) for entrances, exit for dismissals. */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* ── Border radius (legacy aliases kept for shadcn) ────────────────── */
+
+  /* ── Elevation / shadow tokens ─────────────────────────────────────
+     A 5-step ramp: hairline (1px ring), soft (resting card), lifted
+     (hover), elevated (popover/dropdown), overlay (modal). Plus a primary
+     glow for focal CTAs and an inner highlight for "lit" surfaces. */
+  --shadow-hairline: 0 0 0 1px hsl(var(--border) / 0.6);
   --shadow-soft: 0 1px 2px 0 hsl(var(--foreground) / 0.04), 0 0 0 1px hsl(var(--border) / 0.5);
   --shadow-lifted: 0 4px 16px -4px hsl(var(--foreground) / 0.1), 0 2px 4px -2px hsl(var(--foreground) / 0.04), 0 0 0 1px hsl(var(--border) / 0.4);
   --shadow-elevated: 0 12px 32px -8px hsl(var(--foreground) / 0.14), 0 4px 8px -4px hsl(var(--foreground) / 0.06), 0 0 0 1px hsl(var(--border) / 0.3);
+  --shadow-overlay: 0 24px 56px -16px hsl(var(--foreground) / 0.22), 0 8px 16px -8px hsl(var(--foreground) / 0.1), 0 0 0 1px hsl(var(--border) / 0.3);
   --shadow-glow-primary: 0 0 20px -4px hsl(var(--primary) / 0.2);
   --shadow-inner-top: inset 0 1px 0 hsl(0 0% 100% / 0.06);
+
+  /* Font families — exposes font-sans / font-mono utilities. */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  /* Type scale → text-2xs … text-2xl utilities mirroring the token ramp. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-md: 1rem;
+  --text-md--line-height: 1.5rem;
+
+  /* Neutral + accent ramp → color-neutral-500, bg-accent-soft, etc. */
+  --color-neutral-50: hsl(var(--neutral-50));
+  --color-neutral-100: hsl(var(--neutral-100));
+  --color-neutral-200: hsl(var(--neutral-200));
+  --color-neutral-300: hsl(var(--neutral-300));
+  --color-neutral-400: hsl(var(--neutral-400));
+  --color-neutral-500: hsl(var(--neutral-500));
+  --color-neutral-600: hsl(var(--neutral-600));
+  --color-neutral-700: hsl(var(--neutral-700));
+  --color-neutral-800: hsl(var(--neutral-800));
+  --color-neutral-900: hsl(var(--neutral-900));
+  --color-accent-subtle: hsl(var(--accent-subtle));
+  --color-accent-soft: hsl(var(--accent-soft));
+  --color-accent-strong: hsl(var(--accent-strong));
 
   /* Keyframes */
   --animate-accordion-down: accordion-down 0.2s ease-out;
@@ -122,33 +210,71 @@
 
 @layer base {
   :root {
-    --background: 225 20% 96%;
-    --foreground: 224 24% 10%;
+    /* ── Light theme ──────────────────────────────────────────────────
+       Cool-slate neutral spine (hue 222–226) with a single confident
+       indigo accent. Calm, low-chroma surfaces let status colour and the
+       primary CTA carry all the visual energy — a Linear/Vercel-grade
+       operator aesthetic, deliberately not the warm editorial default.
+       Backgrounds step background → card so panels lift off the canvas. */
+    --background: 220 24% 97%;
+    --foreground: 224 32% 9%;
 
     --card: 0 0% 100%;
-    --card-foreground: 224 24% 10%;
+    --card-foreground: 224 32% 9%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 224 24% 10%;
+    --popover-foreground: 224 32% 9%;
 
-    --primary: 224 76% 48%;
+    /* Indigo accent — vivid but not neon; AA on white. */
+    --primary: 230 78% 53%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 224 16% 93%;
-    --secondary-foreground: 224 24% 18%;
+    --secondary: 222 18% 94%;
+    --secondary-foreground: 224 28% 20%;
 
-    --muted: 225 16% 93%;
-    --muted-foreground: 224 10% 42%;
+    --muted: 222 18% 93%;
+    --muted-foreground: 223 12% 40%;
 
-    --accent: 224 20% 91%;
-    --accent-foreground: 224 24% 12%;
+    --accent: 224 26% 92%;
+    --accent-foreground: 224 30% 14%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 224 16% 89%;
-    --input: 224 16% 86%;
-    --ring: 224 76% 48%;
+    --border: 222 19% 88%;
+    --input: 222 18% 84%;
+    --ring: 230 78% 53%;
+
+    /* Neutral ramp — explicit steps for crafted, consistent text/dividers
+       across the shell and future pages (n-50 lightest → n-900 darkest). */
+    --neutral-50: 220 24% 98%;
+    --neutral-100: 220 20% 95%;
+    --neutral-200: 222 18% 90%;
+    --neutral-300: 222 16% 82%;
+    --neutral-400: 223 12% 62%;
+    --neutral-500: 223 12% 46%;
+    --neutral-600: 224 16% 34%;
+    --neutral-700: 224 22% 24%;
+    --neutral-800: 224 28% 15%;
+    --neutral-900: 224 32% 9%;
+
+    /* Accent ramp — for tints, hovers, focus halos around the primary. */
+    --accent-subtle: 230 70% 96%;
+    --accent-soft: 230 72% 92%;
+    --accent-strong: 230 80% 46%;
+
+    /* Type stack — a crafted, zero-dependency native stack. No webfont is
+       bundled or linked today, so referencing one (Inter/Geist) would just
+       render as a silent fallback with a FOUT risk in production. Instead we
+       lead with each platform's best modern UI face (SF Pro on Apple, Segoe
+       UI Variable on Windows, Roboto on Android/ChromeOS) — sharp, optically
+       sized, instant. Mono leads with the platform coding faces. If a brand
+       webfont is added later, prepend it here and nothing else changes. */
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+      'Segoe UI Variable Text', 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+      'Noto Sans', sans-serif;
+    --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, 'Menlo', 'Cascadia Code',
+      'Cascadia Mono', Consolas, 'Liberation Mono', 'Roboto Mono', monospace;
 
     --radius: 0.625rem;
 
@@ -175,23 +301,24 @@
     --status-stalled-bg: 14 70% 95%;
     --status-stalled-ring: 14 60% 82%;
 
-    /* Shell */
-    --shell-bg: 225 32% 10%;
-    --shell-foreground: 224 20% 94%;
-    --shell-muted: 224 14% 50%;
-    --shell-active: 224 76% 52%;
-    --shell-hover: 225 28% 16%;
-    --shell-border: 225 20% 18%;
+    /* Shell — a deep, near-black indigo-slate chrome that frames the calm
+       light canvas. Active nav glows in the primary indigo. */
+    --shell-bg: 226 36% 9%;
+    --shell-foreground: 220 22% 95%;
+    --shell-muted: 222 12% 56%;
+    --shell-active: 230 80% 62%;
+    --shell-hover: 226 30% 15%;
+    --shell-border: 226 22% 17%;
 
-    /* Surface system */
+    /* Surface system — background < sunken < card so panels visibly lift. */
     --surface: 0 0% 100%;
     --surface-raised: 0 0% 100%;
-    --surface-sunken: 225 18% 95%;
+    --surface-sunken: 220 22% 95%;
     --surface-overlay: 0 0% 100%;
 
     /* Ambient */
-    --ambient-glow: 224 76% 48%;
-    --ambient-warm: 38 92% 50%;
+    --ambient-glow: 230 78% 53%;
+    --ambient-warm: 262 70% 56%;
 
     --sidebar-background: 0 0% 98%;
     --sidebar-foreground: 240 5.3% 26.1%;
@@ -204,33 +331,55 @@
   }
 
   .dark {
-    --background: 225 28% 5%;
-    --foreground: 224 20% 94%;
+    /* ── Dark theme ───────────────────────────────────────────────────
+       Near-black indigo-slate canvas; cards lift one step. Accent shifts
+       brighter (lower-contrast backgrounds need a lighter indigo to stay
+       vivid). Same neutral spine, inverted. */
+    --background: 226 32% 5%;
+    --foreground: 220 20% 95%;
 
-    --card: 225 24% 8%;
-    --card-foreground: 224 20% 94%;
+    --card: 225 26% 8%;
+    --card-foreground: 220 20% 95%;
 
-    --popover: 225 24% 8%;
-    --popover-foreground: 224 20% 94%;
+    --popover: 225 26% 8%;
+    --popover-foreground: 220 20% 95%;
 
-    --primary: 224 72% 58%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 230 82% 66%;
+    --primary-foreground: 226 40% 6%;
 
-    --secondary: 225 20% 12%;
-    --secondary-foreground: 224 14% 82%;
+    --secondary: 225 22% 13%;
+    --secondary-foreground: 220 14% 84%;
 
-    --muted: 225 20% 11%;
-    --muted-foreground: 224 10% 50%;
+    --muted: 225 22% 12%;
+    --muted-foreground: 222 11% 54%;
 
-    --accent: 225 20% 14%;
-    --accent-foreground: 224 14% 92%;
+    --accent: 225 24% 15%;
+    --accent-foreground: 220 16% 92%;
 
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 225 16% 14%;
-    --input: 225 16% 14%;
-    --ring: 224 72% 58%;
+    --border: 225 18% 15%;
+    --input: 225 18% 16%;
+    --ring: 230 82% 66%;
+
+    /* Neutral ramp — inverted (n-50 darkest → n-900 lightest in dark mode
+       so semantic intent "50 = subtlest surface, 900 = strongest text"
+       holds across themes). */
+    --neutral-50: 226 30% 7%;
+    --neutral-100: 225 26% 10%;
+    --neutral-200: 225 22% 14%;
+    --neutral-300: 224 18% 22%;
+    --neutral-400: 223 12% 40%;
+    --neutral-500: 222 11% 54%;
+    --neutral-600: 221 14% 68%;
+    --neutral-700: 220 16% 80%;
+    --neutral-800: 220 18% 88%;
+    --neutral-900: 220 20% 95%;
+
+    --accent-subtle: 230 40% 14%;
+    --accent-soft: 230 44% 20%;
+    --accent-strong: 230 82% 70%;
 
     --status-ready-bg: 152 50% 9%;
     --status-ready-ring: 152 40% 20%;
@@ -247,20 +396,20 @@
     --status-stalled-bg: 14 60% 10%;
     --status-stalled-ring: 14 50% 24%;
 
-    --shell-bg: 225 32% 4%;
-    --shell-foreground: 224 14% 88%;
-    --shell-muted: 224 14% 45%;
-    --shell-active: 224 72% 58%;
-    --shell-hover: 225 28% 9%;
-    --shell-border: 225 20% 12%;
+    --shell-bg: 226 38% 4%;
+    --shell-foreground: 220 16% 90%;
+    --shell-muted: 222 12% 50%;
+    --shell-active: 230 82% 68%;
+    --shell-hover: 226 30% 9%;
+    --shell-border: 226 24% 12%;
 
-    --surface: 225 24% 8%;
-    --surface-raised: 225 24% 10%;
-    --surface-sunken: 225 28% 5%;
-    --surface-overlay: 225 24% 10%;
+    --surface: 225 26% 8%;
+    --surface-raised: 225 24% 11%;
+    --surface-sunken: 226 32% 5%;
+    --surface-overlay: 225 24% 11%;
 
-    --ambient-glow: 224 72% 58%;
-    --ambient-warm: 38 80% 50%;
+    --ambient-glow: 230 82% 60%;
+    --ambient-warm: 262 64% 56%;
 
     --sidebar-background: 240 5.9% 10%;
     --sidebar-foreground: 240 4.8% 95.9%;
@@ -701,14 +850,23 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    letter-spacing: -0.011em;
+    text-rendering: optimizeLegibility;
+    letter-spacing: var(--tracking-snug);
   }
   h1, h2, h3, h4, h5, h6 {
-    letter-spacing: -0.025em;
-    font-feature-settings: 'ss01', 'ss02', 'cv01';
+    letter-spacing: var(--tracking-tight);
+    line-height: var(--leading-tight);
+    font-feature-settings: 'ss01', 'ss02', 'cv01', 'cv11';
+    text-wrap: balance;
+  }
+  code, kbd, samp, pre {
+    font-family: var(--font-mono);
+    font-feature-settings: 'cv01', 'zero';
   }
   /* Make every interactive element show the hand cursor by default. */
   button:not(:disabled),
@@ -785,18 +943,27 @@
 
   /* Shell nav items */
   .shell-nav-item {
-    @apply px-3 py-1.5 text-[13px] rounded-lg transition-all duration-200;
+    @apply rounded-lg px-3 py-1.5;
+    font-size: var(--text-sm);
     color: hsl(var(--shell-muted));
+    transition: color var(--duration-fast) var(--ease-standard),
+      background-color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
+    outline: none;
   }
   .shell-nav-item:hover {
     color: hsl(var(--shell-foreground));
     background: hsl(var(--shell-hover));
   }
+  .shell-nav-item:focus-visible {
+    box-shadow: 0 0 0 2px hsl(var(--shell-active) / 0.6);
+  }
   .shell-nav-item.active {
     color: hsl(0 0% 100%);
     background: hsl(var(--shell-active) / 0.2);
-    font-weight: 500;
-    box-shadow: inset 0 0 0 1px hsl(var(--shell-active) / 0.15);
+    font-weight: var(--weight-medium);
+    box-shadow: inset 0 0 0 1px hsl(var(--shell-active) / 0.25),
+      0 0 16px -6px hsl(var(--shell-active) / 0.5);
   }
 
   /* Inspector panel */

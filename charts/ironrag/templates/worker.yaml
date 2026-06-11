@@ -80,7 +80,7 @@ spec:
             # to the pod memory cgroup and can OOM the worker on a large file.
             # Keeping it on disk lands the bytes in ephemeral-storage (capped
             # by the resource preset), off the memory budget. Mirrors the host
-            # tmpfs /tmp trap fixed for docker-compose; see CLAUDE.md.
+            # tmpfs /tmp trap fixed for docker-compose.
             sizeLimit: 1Gi
         {{- if eq .Values.storage.provider "filesystem" }}
         - name: content-storage

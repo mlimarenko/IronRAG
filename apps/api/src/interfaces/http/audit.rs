@@ -5,6 +5,7 @@ use axum::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::{
@@ -13,6 +14,7 @@ use crate::{
         AuditAssistantCallSummary, AuditAssistantModel, AuditEventInternalView,
         AuditEventRedactedView, AuditEventSubject,
     },
+    infra::repositories::iam_repository,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -68,6 +70,21 @@ pub struct AuditEventSubjectResponse {
     pub async_operation_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditActorPrincipalResponse {
+    pub id: Uuid,
+    pub principal_kind: String,
+    pub status: String,
+    pub display_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditAssistantModelResponse {
@@ -92,6 +109,8 @@ pub struct AuditAssistantCallResponse {
 pub struct AuditEventResponse {
     pub id: Uuid,
     pub actor_principal_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_principal: Option<AuditActorPrincipalResponse>,
     pub surface_kind: String,
     pub action_kind: String,
     pub result_kind: String,
@@ -222,6 +241,8 @@ pub async fn list_audit_events(
         .await?;
         total
     };
+
+    attach_actor_principals(&state, &mut response_items).await?;
 
     if query.include_assistant.unwrap_or(false) {
         attach_assistant_call_summaries(&state, &auth, &mut response_items).await?;
@@ -359,6 +380,53 @@ fn audit_scope_from_event(event: &AuditEventResponse) -> Option<(Uuid, Uuid)> {
     event.subjects.iter().find_map(|subject| Some((subject.workspace_id?, subject.library_id?)))
 }
 
+async fn attach_actor_principals(
+    state: &AppState,
+    items: &mut [AuditEventResponse],
+) -> Result<(), ApiError> {
+    let actor_ids = items
+        .iter()
+        .filter_map(|event| event.actor_principal_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if actor_ids.is_empty() {
+        return Ok(());
+    }
+
+    let profiles =
+        iam_repository::list_principal_profiles_by_ids(&state.persistence.postgres, &actor_ids)
+            .await
+            .map_err(|error| {
+                ApiError::internal_with_log(error, "failed to load audit actor principals")
+            })?
+            .into_iter()
+            .map(|row| (row.id, map_actor_principal(row)))
+            .collect::<HashMap<_, _>>();
+
+    for event in items {
+        if let Some(actor_id) = event.actor_principal_id
+            && let Some(profile) = profiles.get(&actor_id)
+        {
+            event.actor_principal = Some(profile.clone());
+        }
+    }
+
+    Ok(())
+}
+
+fn map_actor_principal(row: iam_repository::IamPrincipalProfileRow) -> AuditActorPrincipalResponse {
+    AuditActorPrincipalResponse {
+        id: row.id,
+        principal_kind: row.principal_kind,
+        status: row.status,
+        display_label: row.display_label,
+        login: row.login,
+        display_name: row.display_name,
+        role: row.role,
+    }
+}
+
 fn map_internal_event(
     event: AuditEventInternalView,
     subjects: Vec<AuditEventSubjectResponse>,
@@ -366,6 +434,7 @@ fn map_internal_event(
     AuditEventResponse {
         id: event.id,
         actor_principal_id: event.actor_principal_id,
+        actor_principal: None,
         surface_kind: event.surface_kind,
         action_kind: event.action_kind,
         result_kind: event.result_kind,
@@ -386,6 +455,7 @@ fn map_redacted_event(
     AuditEventResponse {
         id: event.id,
         actor_principal_id: event.actor_principal_id,
+        actor_principal: None,
         surface_kind: event.surface_kind,
         action_kind: event.action_kind,
         result_kind: event.result_kind,

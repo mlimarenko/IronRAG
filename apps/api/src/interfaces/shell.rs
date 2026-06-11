@@ -38,8 +38,10 @@ use ironrag_contracts::{
         ProviderStructuredOutputMode as ContractProviderStructuredOutputMode,
         ProviderTokenLimitParameter as ContractProviderTokenLimitParameter,
     },
-    shell::{LibrarySummary, ShellBootstrap, ShellViewer, WorkspaceSummary},
+    shell::{LibrarySummary, ShellBootstrap, ShellRole, ShellViewer, WorkspaceSummary},
 };
+
+use crate::infra::repositories::iam_repository::SystemRole;
 
 pub(crate) async fn build_shell_bootstrap(
     state: &AppState,
@@ -82,22 +84,21 @@ pub(crate) async fn build_shell_bootstrap(
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or(ApiError::Unauthorized)?;
 
+    // The shell role is the canonical system role stored on the user (it gates
+    // the UI capability matrix). `is_admin` mirrors the auth context's
+    // system-admin flag, which is grant-derived and remains the server-side
+    // authorization boundary.
+    let role = map_shell_role(user.system_role());
+    let is_admin = matches!(role, ShellRole::Admin);
+
     Ok(ShellBootstrap {
         viewer: ShellViewer {
             principal_id: auth.principal_id,
             login: user.login,
             display_name: user.display_name,
-            access_label: if auth.is_system_admin {
-                "Admin".to_string()
-            } else {
-                "Operator".to_string()
-            },
-            role: if auth.is_system_admin {
-                ironrag_contracts::shell::ShellRole::Admin
-            } else {
-                ironrag_contracts::shell::ShellRole::Operator
-            },
-            is_admin: auth.is_system_admin,
+            access_label: shell_role_access_label(role).to_string(),
+            role,
+            is_admin,
         },
         locale: parse_ui_locale(&state.ui_runtime.default_locale),
         workspaces: workspaces
@@ -141,6 +142,22 @@ pub(crate) async fn build_shell_bootstrap(
         capabilities: Vec::new(),
         warnings: Vec::new(),
     })
+}
+
+const fn map_shell_role(role: SystemRole) -> ShellRole {
+    match role {
+        SystemRole::Viewer => ShellRole::Viewer,
+        SystemRole::Operator => ShellRole::Operator,
+        SystemRole::Admin => ShellRole::Admin,
+    }
+}
+
+const fn shell_role_access_label(role: ShellRole) -> &'static str {
+    match role {
+        ShellRole::Admin => "Admin",
+        ShellRole::Operator => "Operator",
+        ShellRole::Viewer => "Viewer",
+    }
 }
 
 pub(crate) fn parse_ui_locale(locale: &str) -> UiLocale {

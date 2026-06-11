@@ -1,10 +1,16 @@
+use std::collections::HashSet;
+
 use anyhow::Context;
 use uuid::Uuid;
 
 use crate::{
     agent_runtime::pipeline::try_op::run_async_try_op,
     app::state::AppState,
-    domains::{provider_profiles::EffectiveProviderProfile, query::RuntimeQueryMode},
+    domains::{
+        provider_profiles::EffectiveProviderProfile,
+        query::RuntimeQueryMode,
+        query_ir::{QueryAct, QueryScope},
+    },
     infra::repositories,
     services::{
         ingest::runtime::resolve_effective_provider_profile,
@@ -557,7 +563,8 @@ async fn assemble_structured_query(
     rerank.retrieval.planning.technical_literal_intent = technical_literal_intent;
     let plan = &rerank.retrieval.planning.plan;
     let bundle = &mut rerank.retrieval.bundle;
-    let effective_top_k = structured_source_context_top_k(query_ir, plan.top_k);
+    let effective_top_k =
+        structured_source_context_top_k_for_chunks(query_ir, plan.top_k, &bundle.chunks);
     let retrieved_documents = load_retrieved_document_briefs(
         state,
         &bundle.chunks,
@@ -582,7 +589,24 @@ async fn assemble_structured_query(
         collect_technical_literal_groups(question, query_ir, &technical_literal_chunks);
     let technical_literals_text =
         render_exact_technical_literals_section(&technical_literal_groups);
-    truncate_bundle(bundle, effective_top_k, Some(query_ir));
+    // Documents whose chunks are attached context of a parent page (image
+    // attachments) are demoted below peer/primary content during truncation and
+    // excluded from clarify variant grouping. The query's explicitly focused
+    // document, if any, is never demoted so an exact attachment ask still
+    // surfaces it. Derived from the typed `document_role` only — no
+    // MIME/extension/filename signal at the retrieval layer.
+    let demoted_document_ids: HashSet<Uuid> = rerank
+        .retrieval
+        .planning
+        .document_index
+        .values()
+        .filter(|doc| crate::domains::content::role_is_attached_context(&doc.document_role))
+        .filter(|doc| doc.parent_document_id.is_some())
+        .map(|doc| doc.document_id)
+        .filter(|id| Some(*id) != focused_document_id)
+        .collect();
+
+    truncate_bundle(bundle, effective_top_k, Some(query_ir), &demoted_document_ids);
 
     let include_graph_context = !suppress_graph_context_for_query(query_ir);
     if !include_graph_context {
@@ -596,6 +620,7 @@ async fn assemble_structured_query(
             &bundle.relationships,
             &bundle.chunks,
             effective_top_k,
+            &demoted_document_ids,
         ),
         effective_top_k,
     );
@@ -648,7 +673,26 @@ fn effective_technical_literal_intent(
             super::technical_literals::detect_technical_literal_intent_from_query_ir(question, ir)
         })
         .unwrap_or_default();
-    merge_technical_literal_intent(fallback, query_ir_intent)
+    let mut intent = merge_technical_literal_intent(fallback, query_ir_intent);
+    if query_ir.is_some_and(query_ir_allows_short_technical_literal_inventory)
+        && super::technical_literals::technical_literal_focus_keywords(question, query_ir)
+            .iter()
+            .any(|keyword| keyword.chars().count() < 4)
+    {
+        intent.wants_parameters = true;
+    }
+    intent
+}
+
+fn query_ir_allows_short_technical_literal_inventory(
+    query_ir: &crate::domains::query_ir::QueryIR,
+) -> bool {
+    query_ir.confidence <= 0.3
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && matches!(query_ir.scope, QueryScope::SingleDocument)
+        && query_ir.source_slice.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.literal_constraints.is_empty()
 }
 
 fn merge_technical_literal_intent(
@@ -854,6 +898,41 @@ mod tests {
         assert!(intent.wants_paths);
         assert!(intent.wants_methods);
         assert!(intent.wants_parameters);
+    }
+
+    #[test]
+    fn low_confidence_short_technical_fallback_enables_parameter_inventory() {
+        let mut query_ir = QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.25,
+        };
+
+        let intent = effective_technical_literal_intent(
+            "Which QR setting should be used?",
+            Some(&query_ir),
+            TechnicalLiteralIntent::default(),
+        );
+        assert!(intent.wants_parameters);
+
+        query_ir.confidence = 0.9;
+        let ordinary_intent = effective_technical_literal_intent(
+            "Which QR setting should be used?",
+            Some(&query_ir),
+            TechnicalLiteralIntent::default(),
+        );
+        assert!(!ordinary_intent.any());
     }
 
     #[test]

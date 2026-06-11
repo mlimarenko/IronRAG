@@ -1,6 +1,7 @@
 import { act } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ShellFooter } from "@/app/components/ShellFooter";
@@ -52,7 +53,9 @@ describe("ShellFooter", () => {
       root = createRoot(container);
       root.render(
         <QueryClientProvider client={queryClient}>
-          <ShellFooter />
+          <MemoryRouter>
+            <ShellFooter />
+          </MemoryRouter>
         </QueryClientProvider>,
       );
     });

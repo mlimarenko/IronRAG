@@ -1,6 +1,6 @@
-import type { Dispatch, SetStateAction } from "react";
+import { memo, type Dispatch, type SetStateAction } from "react";
 import type { TFunction } from "i18next";
-import { ArrowDown, ArrowUp, File, Globe, Loader2, XCircle } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsUpDown, File, Globe, Loader2, XCircle } from "lucide-react";
 
 import type { DocumentListSortKey, DocumentListSortOrder } from "@/shared/api";
 import type { DocumentItem, Locale } from "@/shared/types";
@@ -31,10 +31,13 @@ type DocumentsTableProps = {
   selectedIds: Set<string>;
   selectionMode: boolean;
   setSelectedIds: Dispatch<SetStateAction<Set<string>>>;
+  showDetailColumns: boolean;
   sortBy: DocumentListSortKey;
   sortOrder: DocumentListSortOrder;
   t: TFunction;
 };
+
+const EMPTY_VALUE = "—";
 
 export function DocumentsTable({
   documents,
@@ -51,33 +54,30 @@ export function DocumentsTable({
   selectedIds,
   selectionMode,
   setSelectedIds,
+  showDetailColumns,
   sortBy,
   sortOrder,
   t,
 }: DocumentsTableProps) {
-  const statusBadgeConfig = buildDocumentStatusBadgeConfig(t);
-  const sortIcon =
-    sortOrder === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />;
-  const localSortIcon =
-    localSort?.direction === "asc" ? (
-      <ArrowUp className="h-3 w-3" />
-    ) : (
-      <ArrowDown className="h-3 w-3" />
-    );
   const allVisibleSelected =
     items.length > 0 && items.every((doc) => selectedIds.has(doc.id));
+  // The base table fits comfortably in ~760px (Name/Type/Uploaded/Status). The
+  // page-scoped detail columns (Cost/Pipeline/Finished) only widen the grid
+  // when the operator opts in, so laptops stop horizontally scrolling by default.
+  const minWidth = showDetailColumns ? "min-w-[1040px]" : "min-w-[760px]";
+  const detailColCount = showDetailColumns ? 3 : 0;
+  const placeholderSpan = 2 + detailColCount; // Type + Uploaded + opt-in detail columns
 
   return (
-    <table className="w-full min-w-[1100px] table-fixed text-sm">
+    <table className={`w-full ${minWidth} table-fixed text-sm`}>
       <colgroup>
         {selectionMode && <col className="w-12" />}
         <col />
         <col className="w-28" />
-        <col className="w-20" />
         <col className="w-36" />
-        <col className="w-24" />
-        <col className="w-24" />
-        <col className="w-36" />
+        {showDetailColumns && <col className="w-24" />}
+        {showDetailColumns && <col className="w-28" />}
+        {showDetailColumns && <col className="w-36" />}
         <col style={{ width: "13rem" }} />
       </colgroup>
       <thead
@@ -93,6 +93,7 @@ export function DocumentsTable({
             <th className="px-4 py-3 w-10">
               <input
                 type="checkbox"
+                aria-label={t("documents.selectAllVisible")}
                 checked={allVisibleSelected}
                 onChange={() =>
                   setSelectedIds((prev) => {
@@ -108,109 +109,242 @@ export function DocumentsTable({
               />
             </th>
           )}
-          <SortHeader active={sortBy === "file_name"} icon={sortIcon} label={t("documents.name")} onClick={() => onToggleSortDirection("file_name")} />
-          <SortHeader active={sortBy === "file_type"} icon={sortIcon} label={t("documents.type")} onClick={() => onToggleSortDirection("file_type")} />
-          <SortHeader active={sortBy === "file_size"} icon={sortIcon} label={t("documents.size")} onClick={() => onToggleSortDirection("file_size")} />
-          <SortHeader active={sortBy === "uploaded_at"} icon={sortIcon} label={t("documents.uploaded")} onClick={() => onToggleSortDirection("uploaded_at")} />
-          <SortHeader active={localSort?.key === "cost"} icon={localSortIcon} label={t("documents.cost")} title={t("documents.pageLocalSortHint")} onClick={() => onToggleLocalSort("cost")} />
-          <SortHeader active={localSort?.key === "time"} icon={localSortIcon} label={t("documents.pipelineTime")} title={t("documents.pageLocalSortHint")} onClick={() => onToggleLocalSort("time")} />
-          <SortHeader active={localSort?.key === "finished"} icon={localSortIcon} label={t("documents.finished")} title={t("documents.pageLocalSortHint")} onClick={() => onToggleLocalSort("finished")} />
-          <SortHeader active={sortBy === "status"} icon={sortIcon} label={t("documents.status")} onClick={() => onToggleSortDirection("status")} />
+          <SortHeader
+            active={sortBy === "file_name"}
+            order={sortOrder}
+            label={t("documents.name")}
+            onClick={() => onToggleSortDirection("file_name")}
+          />
+          <SortHeader
+            active={sortBy === "file_type"}
+            order={sortOrder}
+            label={t("documents.type")}
+            onClick={() => onToggleSortDirection("file_type")}
+          />
+          <SortHeader
+            active={sortBy === "uploaded_at"}
+            order={sortOrder}
+            label={t("documents.uploaded")}
+            onClick={() => onToggleSortDirection("uploaded_at")}
+          />
+          {showDetailColumns && (
+            <>
+              <LocalSortHeader
+                active={localSort?.key === "cost"}
+                order={localSort?.direction ?? null}
+                label={t("documents.cost")}
+                hint={t("documents.pageLocalSortHint")}
+                onClick={() => onToggleLocalSort("cost")}
+              />
+              <LocalSortHeader
+                active={localSort?.key === "time"}
+                order={localSort?.direction ?? null}
+                label={t("documents.pipelineTime")}
+                hint={t("documents.pageLocalSortHint")}
+                onClick={() => onToggleLocalSort("time")}
+              />
+              <LocalSortHeader
+                active={localSort?.key === "finished"}
+                order={localSort?.direction ?? null}
+                label={t("documents.finished")}
+                hint={t("documents.pageLocalSortHint")}
+                onClick={() => onToggleLocalSort("finished")}
+              />
+            </>
+          )}
+          <SortHeader
+            active={sortBy === "status"}
+            order={sortOrder}
+            label={t("documents.status")}
+            onClick={() => onToggleSortDirection("status")}
+          />
         </tr>
       </thead>
       <tbody>
-        {pendingUploads.map((upload) => (
-          <tr key={`upload-${upload.name}`} className="border-b opacity-80">
-            {selectionMode && <td className="px-4 py-3.5 w-10" />}
-            <td className="px-4 py-3.5">
-              <DocumentNameCell fileName={upload.name} />
-            </td>
-            <td className="px-4 py-3.5 text-muted-foreground text-[10px]" colSpan={6} />
-            <td className="px-4 py-3.5 max-w-[260px]">
-              {upload.state === "error" ? (
-                <span className="flex items-center gap-1.5 text-xs text-status-failed" title={upload.error ?? undefined}>
-                  <XCircle className="h-3 w-3 shrink-0" />
-                  <span className="truncate min-w-0">
-                    {upload.error ?? t("documents.uploadFailed")}
-                  </span>
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                  {t("documents.uploading")}
-                </span>
-              )}
-            </td>
-          </tr>
-        ))}
-        {documents.map((doc) => {
-          const isWebPage = isWebPageDocument(doc.sourceKind, doc.sourceUri, doc.fileName);
-          const typeLabel = formatDocumentTypeLabel(doc.fileType, doc.sourceKind, t, {
-            sourceUri: doc.sourceUri,
-            fileName: doc.fileName,
-          });
-          const processingDurationMs = getDocumentProcessingDurationMs(doc, processingClockMs);
+        {pendingUploads.map((upload) => {
+          const uploadErrorTitle = [
+            upload.error,
+            upload.errorAction,
+            upload.errorDiagnosticCode,
+            upload.errorDiagnosticMessage,
+          ]
+            .filter(Boolean)
+            .join('\n');
+
           return (
-            <tr
-              key={doc.id}
-              className={`border-b cursor-pointer transition-all duration-150 ${
-                selectedIds.has(doc.id)
-                  ? "bg-primary/10"
-                  : selectedDocId === doc.id
-                    ? "bg-primary/5 border-l-2 border-l-primary"
-                    : "hover:bg-accent/30"
-              }`}
-              onClick={() => (selectionMode ? onToggleSelection(doc.id) : onSelectDoc(doc))}
-            >
-              {selectionMode && (
-                <td className="px-4 py-3.5 w-10">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.has(doc.id)}
-                    onChange={(event) => {
-                      event.stopPropagation();
-                      onToggleSelection(doc.id);
-                    }}
-                    onClick={(event) => event.stopPropagation()}
-                    className="h-4 w-4 rounded border-gray-300"
-                  />
-                </td>
-              )}
+            <tr key={`upload-${upload.name}`} className="border-b opacity-80">
+              {selectionMode && <td className="px-4 py-3.5 w-10" />}
               <td className="px-4 py-3.5">
-                <DocumentNameCell
-                  fileName={doc.fileName}
-                  isWebPage={isWebPage}
-                  sourceUri={doc.sourceUri}
-                />
+                <DocumentNameCell fileName={upload.name} />
               </td>
-              <td className={`px-4 py-3.5 text-muted-foreground text-[10px] font-bold tracking-widest ${isWebPage ? "" : "uppercase"}`} title={typeLabel}>
-                {typeLabel}
-              </td>
-              <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
-                {formatSize(doc.fileSize)}
-              </td>
-              <td className="px-4 py-3.5 text-muted-foreground text-xs">
-                {formatDate(doc.uploadedAt, locale)}
-              </td>
-              <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
-                {doc.cost != null ? `$${doc.cost.toFixed(3)}` : "\u2014"}
-              </td>
-              <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
-                {processingDurationMs != null ? `${Math.floor(processingDurationMs / 1000)}s` : "\u2014"}
-              </td>
-              <td className="px-4 py-3.5 text-muted-foreground text-xs">
-                {doc.processingFinishedAt ? formatDate(doc.processingFinishedAt, locale) : "\u2014"}
-              </td>
-              <td className="px-4 py-3.5">
-                <DocumentStatusBadge doc={doc} t={t} />
+              <td className="px-4 py-3.5 text-muted-foreground text-[10px]" colSpan={placeholderSpan} />
+              <td className="px-4 py-3.5 max-w-[320px]">
+                {upload.state === "error" ? (
+                  <span
+                    className="flex items-start gap-1.5 text-xs text-status-failed"
+                    title={uploadErrorTitle || undefined}
+                  >
+                    <XCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                    <span className="min-w-0">
+                      <span className="block truncate">
+                        {upload.error ?? t("documents.uploadFailed")}
+                      </span>
+                      {upload.errorAction && (
+                        <span className="mt-0.5 block truncate text-muted-foreground">
+                          {upload.errorAction}
+                        </span>
+                      )}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                    {t("documents.uploading")}
+                  </span>
+                )}
               </td>
             </tr>
           );
         })}
+        {documents.map((doc) => (
+          <DocumentRow
+            key={doc.id}
+            doc={doc}
+            locale={locale}
+            processingClockMs={processingClockMs}
+            selected={selectedIds.has(doc.id)}
+            isCursor={selectedDocId === doc.id}
+            selectionMode={selectionMode}
+            showDetailColumns={showDetailColumns}
+            onSelectDoc={onSelectDoc}
+            onToggleSelection={onToggleSelection}
+            t={t}
+          />
+        ))}
       </tbody>
     </table>
   );
 }
+
+type DocumentRowProps = {
+  doc: DocumentItem;
+  locale: Locale;
+  processingClockMs: number;
+  selected: boolean;
+  isCursor: boolean;
+  selectionMode: boolean;
+  showDetailColumns: boolean;
+  onSelectDoc: (doc: DocumentItem) => void;
+  onToggleSelection: (id: string) => void;
+  t: TFunction;
+};
+
+function isActiveProcessingDoc(doc: DocumentItem): boolean {
+  return doc.status === "processing" || doc.status === "queued";
+}
+
+function DocumentRowImpl({
+  doc,
+  locale,
+  processingClockMs,
+  selected,
+  isCursor,
+  selectionMode,
+  showDetailColumns,
+  onSelectDoc,
+  onToggleSelection,
+  t,
+}: DocumentRowProps) {
+  const isWebPage = isWebPageDocument(doc.sourceKind, doc.sourceUri, doc.fileName);
+  const typeLabel = formatDocumentTypeLabel(doc.fileType, doc.sourceKind, t, {
+    sourceUri: doc.sourceUri,
+    fileName: doc.fileName,
+  });
+  const processingDurationMs = getDocumentProcessingDurationMs(doc, processingClockMs);
+  return (
+    <tr
+      className={`border-b cursor-pointer transition-all duration-150 ${
+        selected
+          ? "bg-primary/10"
+          : isCursor
+            ? "bg-primary/5 border-l-2 border-l-primary"
+            : "hover:bg-accent/30"
+      }`}
+      onClick={() => (selectionMode ? onToggleSelection(doc.id) : onSelectDoc(doc))}
+    >
+      {selectionMode && (
+        <td className="px-4 py-3.5 w-10">
+          <input
+            type="checkbox"
+            aria-label={t("documents.selectRow", { name: doc.fileName })}
+            checked={selected}
+            onChange={(event) => {
+              event.stopPropagation();
+              onToggleSelection(doc.id);
+            }}
+            onClick={(event) => event.stopPropagation()}
+            className="h-4 w-4 rounded border-gray-300"
+          />
+        </td>
+      )}
+      <td className="px-4 py-3.5">
+        <DocumentNameCell
+          fileName={doc.fileName}
+          isWebPage={isWebPage}
+          sourceUri={doc.sourceUri}
+        />
+      </td>
+      <td className={`px-4 py-3.5 text-muted-foreground text-[10px] font-bold tracking-widest ${isWebPage ? "" : "uppercase"}`} title={typeLabel}>
+        {typeLabel}
+      </td>
+      <td className="px-4 py-3.5 text-muted-foreground text-xs">
+        {formatDate(doc.uploadedAt, locale)}
+      </td>
+      {showDetailColumns && (
+        <>
+          <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
+            {doc.cost != null ? `$${doc.cost.toFixed(3)}` : EMPTY_VALUE}
+          </td>
+          <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
+            {processingDurationMs != null ? `${Math.floor(processingDurationMs / 1000)}s` : EMPTY_VALUE}
+          </td>
+          <td className="px-4 py-3.5 text-muted-foreground text-xs">
+            {doc.processingFinishedAt ? formatDate(doc.processingFinishedAt, locale) : EMPTY_VALUE}
+          </td>
+        </>
+      )}
+      <td className="px-4 py-3.5">
+        <DocumentStatusBadge doc={doc} t={t} />
+      </td>
+    </tr>
+  );
+}
+
+// The processing clock ticks every second while any document is ingesting,
+// which previously re-rendered every row in the (up to 1000-row) page each
+// second. Rows that are not actively processing render nothing clock-derived,
+// so we skip their re-render on a pure clock advance. Active rows still update
+// their live duration. All other props are compared by identity.
+const DocumentRow = memo(DocumentRowImpl, (prev, next) => {
+  if (
+    prev.doc !== next.doc ||
+    prev.locale !== next.locale ||
+    prev.selected !== next.selected ||
+    prev.isCursor !== next.isCursor ||
+    prev.selectionMode !== next.selectionMode ||
+    prev.showDetailColumns !== next.showDetailColumns ||
+    prev.onSelectDoc !== next.onSelectDoc ||
+    prev.onToggleSelection !== next.onToggleSelection ||
+    prev.t !== next.t
+  ) {
+    return false;
+  }
+  // Only the live duration column reads the clock, and only for active docs.
+  if (next.showDetailColumns && isActiveProcessingDoc(next.doc)) {
+    return prev.processingClockMs === next.processingClockMs;
+  }
+  return true;
+});
 
 function DocumentStatusBadge({ doc, t }: { doc: DocumentItem; t: TFunction }) {
   const statusBadgeConfig = buildDocumentStatusBadgeConfig(t);
@@ -254,28 +388,88 @@ function DocumentStatusBadge({ doc, t }: { doc: DocumentItem; t: TFunction }) {
   );
 }
 
+/**
+ * Server-sort header. The whole list re-queries and re-paginates, so the active
+ * column shows a solid up/down arrow; inactive columns show a faint
+ * "sortable" affordance so the operator knows a click does something.
+ */
 function SortHeader({
   active,
-  icon,
+  order,
   label,
   onClick,
-  title,
 }: {
   active: boolean;
-  icon: JSX.Element;
+  order: DocumentListSortOrder;
   label: string;
   onClick: () => void;
-  title?: string;
 }) {
   return (
     <th className="px-4 py-3 section-label">
       <button
-        className="flex items-center gap-1 hover:text-foreground transition-colors"
-        title={title}
+        type="button"
+        className={`group flex items-center gap-1 transition-colors ${
+          active ? "text-foreground" : "hover:text-foreground"
+        }`}
+        aria-sort={active ? (order === "asc" ? "ascending" : "descending") : "none"}
         onClick={onClick}
       >
         {label}
-        {active && icon}
+        {active ? (
+          order === "asc" ? (
+            <ArrowUp className="h-3 w-3 text-primary" />
+          ) : (
+            <ArrowDown className="h-3 w-3 text-primary" />
+          )
+        ) : (
+          <ChevronsUpDown className="h-3 w-3 opacity-0 transition-opacity group-hover:opacity-40" />
+        )}
+      </button>
+    </th>
+  );
+}
+
+/**
+ * Page-scoped (in-memory) sort header. Visually distinct from server-sort
+ * columns: a dashed underline + a "page" tag mark these as sorting only the
+ * rows currently loaded, so the silent reset on pagination is no longer a
+ * surprise. Pairs with the DocumentsFiltersBar "detail columns" toggle.
+ */
+function LocalSortHeader({
+  active,
+  order,
+  label,
+  hint,
+  onClick,
+}: {
+  active: boolean;
+  order: "asc" | "desc" | null;
+  label: string;
+  hint: string;
+  onClick: () => void;
+}) {
+  return (
+    <th className="px-4 py-3 section-label">
+      <button
+        type="button"
+        className={`group flex items-center gap-1.5 transition-colors ${
+          active ? "text-foreground" : "hover:text-foreground"
+        }`}
+        title={hint}
+        onClick={onClick}
+      >
+        <span className="border-b border-dashed border-muted-foreground/40 leading-4">
+          {label}
+        </span>
+        {active && order ? (
+          order === "asc" ? (
+            <ArrowUp className="h-3 w-3 text-accent-strong" />
+          ) : (
+            <ArrowDown className="h-3 w-3 text-accent-strong" />
+          )
+        ) : (
+          <ChevronsUpDown className="h-3 w-3 opacity-0 transition-opacity group-hover:opacity-40" />
+        )}
       </button>
     </th>
   );

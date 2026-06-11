@@ -42,6 +42,15 @@ pub(super) fn map_ai_write_error(error: sqlx::Error) -> ApiError {
     }
 }
 
+pub(super) fn map_ai_delete_error(error: sqlx::Error) -> ApiError {
+    match error {
+        sqlx::Error::Database(database_error) if database_error.is_foreign_key_violation() => {
+            ApiError::Conflict("AI catalog resource is still referenced".to_string())
+        }
+        _ => ApiError::Internal,
+    }
+}
+
 pub(super) fn parse_binding_purpose(value: &str) -> Result<AiBindingPurpose, ApiError> {
     match value {
         "extract_text" => Ok(AiBindingPurpose::ExtractText),

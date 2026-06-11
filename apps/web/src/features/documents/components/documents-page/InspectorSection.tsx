@@ -1,7 +1,8 @@
-import { useCallback, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { File, Loader2, Upload } from "lucide-react";
 import { toast } from "sonner";
+import { useNavigate } from "react-router-dom";
 
 import { documentsApi, type DocumentLifecycleDetail } from "@/shared/api";
 import { Button } from "@/shared/components/ui/button";
@@ -26,7 +27,15 @@ import {
   formatSize,
 } from "@/features/documents/model/documentAdapter";
 import { DocumentsInspectorPanel } from "@/features/documents/components/DocumentsInspectorPanel";
-import { DocumentEditorShell } from "@/features/documents/components/editor/DocumentEditorShell";
+// Tiptap (StarterKit + table/image/markdown extensions ≈ 485 KB) lives entirely
+// inside DocumentEditorShell. It is only needed once the operator opens the
+// editor overlay, so it is split out of the synchronous DocumentsPage chunk and
+// fetched on demand. Browsing the document list no longer pays the editor cost.
+const DocumentEditorShell = lazy(() =>
+  import("@/features/documents/components/editor/DocumentEditorShell").then(
+    (module) => ({ default: module.DocumentEditorShell }),
+  ),
+);
 import { isEditorEditableSourceFormat } from "@/features/documents/components/editor/editorSurfaceMode";
 import { useDocumentEditor } from "@/features/documents/components/editor/useDocumentEditor";
 import { DOCUMENT_FILE_INPUT_ACCEPT } from "@/features/documents/model/uploadAccept";
@@ -35,6 +44,8 @@ import type { UpdateSearchParamState } from "./documentsPageState";
 
 type InspectorSectionProps = {
   activateListPollGrace: () => void;
+  canEdit: boolean;
+  canDelete: boolean;
   clearSelectedDoc: () => void;
   documentHintEditable: boolean;
   errorMessage: (error: unknown, fallback: string) => string;
@@ -52,6 +63,8 @@ type InspectorSectionProps = {
 
 export function InspectorSection({
   activateListPollGrace,
+  canEdit,
+  canDelete,
   clearSelectedDoc,
   documentHintEditable,
   errorMessage,
@@ -66,6 +79,7 @@ export function InspectorSection({
   updateDocumentHintLocally,
   updateSearchParamState,
 }: InspectorSectionProps) {
+  const navigate = useNavigate();
   const isMobile = useIsMobile();
   const [deleteDocOpen, setDeleteDocOpen] = useState(false);
   const [replaceFileOpen, setReplaceFileOpen] = useState(false);
@@ -183,8 +197,14 @@ export function InspectorSection({
 
   if (!selectedDoc) return null;
   const availability = editorAvailability(selectedDoc);
+  const isGraphReady =
+    selectedDoc.readiness === "readable" ||
+    selectedDoc.readiness === "graph_sparse" ||
+    selectedDoc.readiness === "graph_ready";
   const inspectorPanel = (
     <DocumentsInspectorPanel
+      canEdit={canEdit}
+      canDelete={canDelete}
       documentHintEditable={documentHintEditable}
       editorActionDisabledReason={availability.reason}
       editorActionEnabled={availability.enabled}
@@ -201,6 +221,11 @@ export function InspectorSection({
       onDocumentHintUpdated={updateDocumentHintLocally}
       onOpenEditor={() => void documentEditor.openEditor(selectedDoc)}
       onRetry={handleRetry}
+      onViewInGraph={
+        isGraphReady
+          ? () => navigate(`/graph?nodeId=${encodeURIComponent(selectedDoc.id)}`)
+          : undefined
+      }
       presentation={isMobile ? "drawer" : "sidebar"}
     />
   );
@@ -214,7 +239,7 @@ export function InspectorSection({
           <DrawerContent className="h-[88dvh] max-h-[88dvh] rounded-t-xl p-0">
             <DrawerTitle className="sr-only">{selectedDoc.fileName}</DrawerTitle>
             <DrawerDescription className="sr-only">
-              {selectedDoc.failureMessage ?? selectedDoc.statusReason ?? selectedDoc.fileName}
+              {selectedDoc.failureNotice?.summary ?? selectedDoc.statusReason ?? selectedDoc.fileName}
             </DrawerDescription>
             {inspectorPanel}
           </DrawerContent>
@@ -317,20 +342,22 @@ export function InspectorSection({
         </DialogContent>
       </Dialog>
       {documentEditor.editorDocument && (
-        <DocumentEditorShell
-          documentName={documentEditor.editorDocument.fileName}
-          error={documentEditor.editorError}
-          loading={documentEditor.editorLoading}
-          markdown={documentEditor.editorMarkdown}
-          onOpenChange={documentEditor.handleEditorOpenChange}
-          onSave={documentEditor.saveEditor}
-          open={documentEditor.editorOpen}
-          readOnly={documentEditor.editorReadOnly}
-          saving={documentEditor.editorSaving}
-          sourceFormat={documentEditor.editorDocument.fileType}
-          sourceHref={documentEditor.editorDocument.sourceAccess?.href}
-          t={t}
-        />
+        <Suspense fallback={null}>
+          <DocumentEditorShell
+            documentName={documentEditor.editorDocument.fileName}
+            error={documentEditor.editorError}
+            loading={documentEditor.editorLoading}
+            markdown={documentEditor.editorMarkdown}
+            onOpenChange={documentEditor.handleEditorOpenChange}
+            onSave={documentEditor.saveEditor}
+            open={documentEditor.editorOpen}
+            readOnly={documentEditor.editorReadOnly}
+            saving={documentEditor.editorSaving}
+            sourceFormat={documentEditor.editorDocument.fileType}
+            sourceHref={documentEditor.editorDocument.sourceAccess?.href}
+            t={t}
+          />
+        </Suspense>
       )}
     </>
   );

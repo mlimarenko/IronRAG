@@ -32,16 +32,16 @@ export interface GraphLayoutRequestNode {
 export interface GraphLayoutRequest {
   type: 'compute';
   requestId: number;
+  topologyId?: number;
   layout: GraphLayoutType;
-  nodes: GraphLayoutRequestNode[];
-  edges: Array<{ sourceId: string; targetId: string }>;
+  nodes?: GraphLayoutRequestNode[];
+  edges?: Array<{ sourceId: string; targetId: string }>;
 }
 
 export interface GraphLayoutResponse {
   type: 'result';
   requestId: number;
-  ids: string[];
-  /** Interleaved `[x0, y0, x1, y1, ...]` matching `ids` element-wise. */
+  /** Interleaved `[x0, y0, x1, y1, ...]` matching request node order. */
   positions: Float32Array;
   elapsedMs: number;
 }
@@ -53,15 +53,31 @@ export interface GraphLayoutErrorResponse {
 }
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
+let cachedTopologyId: number | null = null;
+let cachedNodes: GraphLayoutRequestNode[] | null = null;
+let cachedEdges: Array<{ sourceId: string; targetId: string }> | null = null;
 
 ctx.addEventListener('message', (event: MessageEvent<GraphLayoutRequest>) => {
   const payload = event.data;
   if (!payload || payload.type !== 'compute') return;
   try {
+    if (payload.nodes && payload.edges) {
+      cachedTopologyId = payload.topologyId ?? null;
+      cachedNodes = payload.nodes;
+      cachedEdges = payload.edges;
+    }
+    if (
+      !cachedNodes ||
+      !cachedEdges ||
+      (payload.topologyId != null && cachedTopologyId !== payload.topologyId)
+    ) {
+      throw new Error('graph layout topology is not loaded');
+    }
+
     const started = performance.now();
     const graph = new Graph();
 
-    for (const node of payload.nodes) {
+    for (const node of cachedNodes) {
       graph.addNode(node.id, {
         x: 0,
         y: 0,
@@ -75,7 +91,7 @@ ctx.addEventListener('message', (event: MessageEvent<GraphLayoutRequest>) => {
     }
 
     const seen = new Set<string>();
-    for (const edge of payload.edges) {
+    for (const edge of cachedEdges) {
       if (edge.sourceId === edge.targetId) continue;
       if (!graph.hasNode(edge.sourceId) || !graph.hasNode(edge.targetId)) continue;
       const key = `${edge.sourceId}->${edge.targetId}`;
@@ -91,21 +107,17 @@ ctx.addEventListener('message', (event: MessageEvent<GraphLayoutRequest>) => {
 
     applyGraphLayout(graph, payload.layout);
 
-    const order = graph.order;
-    const ids = new Array<string>(order);
+    const order = cachedNodes.length;
     const positions = new Float32Array(order * 2);
-    let i = 0;
-    graph.forEachNode((nodeId, attrs) => {
-      ids[i] = nodeId;
+    for (let i = 0; i < cachedNodes.length; i += 1) {
+      const attrs = graph.getNodeAttributes(cachedNodes[i].id);
       positions[i * 2] = (attrs.x as number | undefined) ?? 0;
       positions[i * 2 + 1] = (attrs.y as number | undefined) ?? 0;
-      i += 1;
-    });
+    }
 
     const response: GraphLayoutResponse = {
       type: 'result',
       requestId: payload.requestId,
-      ids,
       positions,
       elapsedMs: performance.now() - started,
     };

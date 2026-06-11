@@ -16,6 +16,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use uuid::Uuid;
 
 mod decode;
+mod port_impl;
 mod technical_facts;
 mod types;
 
@@ -149,6 +150,8 @@ impl ArangoDocumentStore {
                     active_revision_id: @active_revision_id,
                     readable_revision_id: @readable_revision_id,
                     latest_revision_no: @latest_revision_no,
+                    parent_document_id: @parent_document_id,
+                    document_role: @document_role,
                     created_at: @created_at,
                     updated_at: @updated_at,
                     deleted_at: @deleted_at
@@ -163,6 +166,8 @@ impl ArangoDocumentStore {
                     active_revision_id: @active_revision_id,
                     readable_revision_id: @readable_revision_id,
                     latest_revision_no: @latest_revision_no,
+                    parent_document_id: @parent_document_id,
+                    document_role: @document_role,
                     updated_at: @updated_at,
                     deleted_at: @deleted_at
                  }
@@ -181,6 +186,8 @@ impl ArangoDocumentStore {
                     "active_revision_id": row.active_revision_id,
                     "readable_revision_id": row.readable_revision_id,
                     "latest_revision_no": row.latest_revision_no,
+                    "parent_document_id": row.parent_document_id,
+                    "document_role": row.document_role,
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
                     "deleted_at": row.deleted_at,
@@ -1147,6 +1154,71 @@ impl ArangoDocumentStore {
         decode_many_results(cursor)
     }
 
+    pub async fn list_chunks_by_revisions_matching_terms(
+        &self,
+        revision_ids: &[Uuid],
+        terms: &[String],
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        if revision_ids.is_empty() || limit == 0 || terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let terms = normalized_revision_chunk_terms(terms);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .client
+            .query_json(
+                "FOR revision_id IN @revision_ids
+                   LET rows = (
+                     FOR chunk IN @@collection
+                       FILTER chunk.revision_id == revision_id
+                         AND chunk.chunk_state == 'ready'
+                       FILTER chunk.chunk_kind != 'source_profile'
+                       FILTER !STARTS_WITH(chunk.normalized_text, '[source_profile ')
+                         AND !STARTS_WITH(chunk.content_text, '[source_profile ')
+                       LET normalized_lower = LOWER(chunk.normalized_text)
+                       LET content_lower = LOWER(chunk.content_text)
+                       LET window_lower = LOWER(chunk.window_text != null ? chunk.window_text : '')
+                       LET matched_terms = UNIQUE(
+                          FOR term IN @terms
+                            FILTER CONTAINS(normalized_lower, term)
+                               OR CONTAINS(content_lower, term)
+                               OR CONTAINS(window_lower, term)
+                            RETURN term
+                       )
+                       FILTER LENGTH(matched_terms) > 0
+                       LET earliest_pos = MIN(
+                          FOR term IN matched_terms
+                            LET normalized_pos = FIND_FIRST(normalized_lower, term)
+                            LET content_pos = FIND_FIRST(content_lower, term)
+                            LET window_pos = FIND_FIRST(window_lower, term)
+                            RETURN MIN([
+                              normalized_pos >= 0 ? normalized_pos : 2147483647,
+                              content_pos >= 0 ? content_pos : 2147483647,
+                              window_pos >= 0 ? window_pos : 2147483647
+                            ])
+                       )
+                       LET score = (LENGTH(matched_terms) * 10000) - earliest_pos
+                       SORT score DESC, chunk.chunk_index ASC, chunk.chunk_id ASC
+                       LIMIT @limit
+                       RETURN chunk
+                   )
+                   FOR row IN rows
+                     RETURN row",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_ids": revision_ids,
+                    "terms": terms,
+                    "limit": limit,
+                }),
+            )
+            .await
+            .context("failed to list knowledge chunks by revision terms")?;
+        decode_many_results(cursor)
+    }
+
     /// Range variant of [`Self::list_chunks_by_revision`]. Fetches only
     /// the chunks whose `chunk_index` falls in the inclusive window
     /// `[min_chunk_index, max_chunk_index]`. Used by the focused-
@@ -1259,6 +1331,68 @@ impl ArangoDocumentStore {
             );
         }
         Ok(rows)
+    }
+
+    pub async fn list_chunks_by_revisions_windows(
+        &self,
+        windows: &[(Uuid, i32, i32)],
+    ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+        let windows = normalized_revision_windows(windows);
+        if windows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut revision_ids = Vec::<Uuid>::new();
+        let mut seen_revision_ids = BTreeSet::new();
+        for (revision_id, _, _) in &windows {
+            if seen_revision_ids.insert(*revision_id) {
+                revision_ids.push(*revision_id);
+            }
+        }
+        let windows = windows
+            .iter()
+            .map(|(revision_id, min_index, max_index)| {
+                serde_json::json!({
+                    "revision_id": revision_id,
+                    "min_index": min_index,
+                    "max_index": max_index,
+                })
+            })
+            .collect::<Vec<_>>();
+        let cursor = self
+            .client
+            .query_json(
+                "FOR revision_id IN @revision_ids
+                   LET revision_windows = (
+                     FOR window IN @windows
+                       FILTER window.revision_id == revision_id
+                       RETURN window
+                   )
+                   LET rows = (
+                     FOR chunk IN @@collection
+                       FILTER chunk.revision_id == revision_id
+                       FILTER FIRST(
+                         FOR window IN revision_windows
+                           FILTER chunk.chunk_index >= window.min_index
+                             AND chunk.chunk_index <= window.max_index
+                           LIMIT 1
+                           RETURN true
+                       ) == true
+                       SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                       LIMIT @limit
+                       RETURN chunk
+                   )
+                   FOR row IN rows
+                     RETURN row",
+                serde_json::json!({
+                    "@collection": KNOWLEDGE_CHUNK_COLLECTION,
+                    "revision_ids": revision_ids,
+                    "windows": windows,
+                    "limit": KNOWLEDGE_CHUNK_WINDOW_FETCH_LIMIT,
+                }),
+            )
+            .await
+            .context("failed to list knowledge chunks by revision windows")?;
+        decode_many_results(cursor)
     }
 
     /// List the last ready chunks for a revision by `chunk_index`.
@@ -1438,7 +1572,7 @@ impl ArangoDocumentStore {
             .query_json(
                 "FOR chunk IN @@collection
                  FILTER chunk.chunk_id IN @chunk_ids
-                 SORT chunk.chunk_index ASC, chunk.chunk_id ASC
+                 SORT chunk.chunk_id ASC
                  RETURN chunk",
                 serde_json::json!({
                     "@collection": KNOWLEDGE_CHUNK_COLLECTION,
@@ -1970,6 +2104,15 @@ fn normalized_revision_chunk_terms(terms: &[String]) -> Vec<String> {
     normalized
 }
 
+fn normalized_revision_windows(windows: &[(Uuid, i32, i32)]) -> Vec<(Uuid, i32, i32)> {
+    windows
+        .iter()
+        .filter_map(|(revision_id, min_index, max_index)| {
+            (max_index >= min_index).then_some((*revision_id, *min_index, *max_index))
+        })
+        .collect()
+}
+
 fn structured_block_payload_json(row: &KnowledgeStructuredBlockRow) -> serde_json::Value {
     serde_json::json!({
         "_key": row.key,
@@ -2013,6 +2156,20 @@ mod tests {
         assert_eq!(terms[0].chars().count(), KNOWLEDGE_CHUNK_REVISION_TERM_MAX_CHARS);
         assert!(terms.contains(&"alpha".to_string()));
         assert!(terms.contains(&"beta".to_string()));
+    }
+
+    #[test]
+    fn revision_windows_drop_invalid_ranges_without_reordering_valid_requests() {
+        let revision_a = Uuid::from_u128(1);
+        let revision_b = Uuid::from_u128(2);
+
+        let windows = normalized_revision_windows(&[
+            (revision_a, 0, 2),
+            (revision_b, 4, 3),
+            (revision_b, 5, 6),
+        ]);
+
+        assert_eq!(windows, vec![(revision_a, 0, 2), (revision_b, 5, 6)]);
     }
 
     #[test]

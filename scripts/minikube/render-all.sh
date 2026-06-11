@@ -38,6 +38,17 @@ if ! rg -F -q "pipingspace/ironrag-frontend:${APP_IMAGE_TAG}" /tmp/ironrag-bundl
   exit 1
 fi
 
+for rendered in /tmp/ironrag-bundled.yaml /tmp/ironrag-filesystem.yaml; do
+  if ! rg -F -q 'image: "pgvector/pgvector:pg18"' "${rendered}"; then
+    echo "rendered Helm chart ${rendered} is missing bundled postgres image pgvector/pgvector:pg18" >&2
+    exit 1
+  fi
+  if ! rg -F -q 'image: "redis:8.8"' "${rendered}"; then
+    echo "rendered Helm chart ${rendered} is missing bundled redis image redis:8.8" >&2
+    exit 1
+  fi
+done
+
 printf 'rendered %s\n' /tmp/ironrag-bundled.yaml
 printf 'rendered %s\n' /tmp/ironrag-filesystem.yaml
 printf 'rendered %s\n' /tmp/ironrag-external.yaml

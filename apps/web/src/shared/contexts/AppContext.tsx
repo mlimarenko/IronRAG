@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, type ReactNode } from 'react';
+import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { authApi, ApiError } from '@/shared/api';
 import i18n from '@/shared/i18n';
 import type { BootstrapSetup, SessionResolveResponse } from '@/shared/api/auth';
@@ -68,7 +68,7 @@ function mapSessionToState(session: SessionResolveResponse, locale: Locale) {
       workspaceId: lib.workspaceId,
       name: localizedShellName(lib.slug, lib.name, locale),
       createdAt: '',
-      includeDocumentHintInMcpAnswers: lib.includeDocumentHintInMcpAnswers ?? false,
+      includeDocumentHintInMcpAnswers: lib.includeDocumentHintInMcpAnswers ?? true,
       ingestionReady: lib.ingestionReady,
       queryReady: libraryQueryReady(lib.ingestionReady, lib.queryReady, missingBindingPurposes),
       missingBindingPurposes,
@@ -209,7 +209,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     applySession(session);
   }, [applySession]);
 
-  const filteredLibraries = libraries.filter(l => l.workspaceId === activeWorkspace?.id);
+  const filteredLibraries = useMemo(
+    () => libraries.filter((l) => l.workspaceId === activeWorkspace?.id),
+    [libraries, activeWorkspace?.id],
+  );
 
   const persistedSetActiveWorkspace = useCallback((ws: Workspace | null) => {
     setActiveWorkspace(ws);
@@ -245,32 +248,59 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return true;
   }, [libraries, workspaces]);
 
-  const value: AppContextValue = {
-    user,
-    workspaces,
-    activeWorkspace,
-    libraries: filteredLibraries,
-    activeLibrary,
-    locale,
-    isAuthenticated: !!user,
-    isBootstrapMode,
-    isBootstrapRequired,
-    isLoading,
-    sessionError,
-    setUser,
-    setWorkspaces,
-    setActiveWorkspace: persistedSetActiveWorkspace,
-    setLibraries,
-    setActiveLibrary: persistedSetActiveLibrary,
-    setLocale,
-    setIsBootstrapMode,
-    setIsBootstrapRequired,
-    selectWorkspaceLibrary,
-    login,
-    logout,
-    bootstrapSetup,
-    refreshSession,
-  };
+  // Memoize the context value so the ~18 app-wide consumers only re-render when
+  // a slice they actually read changes. Without this, every provider render
+  // (session resolve, selection change, locale switch) minted a fresh value
+  // object and re-rendered the whole tree under the provider. The setters are
+  // all stable (useState dispatch + useCallback), so they are safe deps.
+  const value = useMemo<AppContextValue>(
+    () => ({
+      user,
+      workspaces,
+      activeWorkspace,
+      libraries: filteredLibraries,
+      activeLibrary,
+      locale,
+      isAuthenticated: !!user,
+      isBootstrapMode,
+      isBootstrapRequired,
+      isLoading,
+      sessionError,
+      setUser,
+      setWorkspaces,
+      setActiveWorkspace: persistedSetActiveWorkspace,
+      setLibraries,
+      setActiveLibrary: persistedSetActiveLibrary,
+      setLocale,
+      setIsBootstrapMode,
+      setIsBootstrapRequired,
+      selectWorkspaceLibrary,
+      login,
+      logout,
+      bootstrapSetup,
+      refreshSession,
+    }),
+    [
+      user,
+      workspaces,
+      activeWorkspace,
+      filteredLibraries,
+      activeLibrary,
+      locale,
+      isBootstrapMode,
+      isBootstrapRequired,
+      isLoading,
+      sessionError,
+      persistedSetActiveWorkspace,
+      persistedSetActiveLibrary,
+      setLocale,
+      selectWorkspaceLibrary,
+      login,
+      logout,
+      bootstrapSetup,
+      refreshSession,
+    ],
+  );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

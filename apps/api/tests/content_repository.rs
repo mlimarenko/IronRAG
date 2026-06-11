@@ -124,6 +124,9 @@ async fn content_repository_persists_logical_document_revision_head_and_chunks()
                 external_key: &external_key,
                 document_state: "active",
                 created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
             },
         )
         .await
@@ -328,6 +331,9 @@ async fn content_repository_keeps_one_logical_document_per_canonical_url_inside_
                 external_key: &canonical_url,
                 document_state: "active",
                 created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
             },
         )
         .await
@@ -403,6 +409,9 @@ async fn content_repository_keeps_one_logical_document_per_canonical_url_inside_
                 external_key: &canonical_url,
                 document_state: "active",
                 created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
             },
         )
         .await
@@ -447,6 +456,9 @@ async fn content_repository_keeps_one_logical_document_per_canonical_url_inside_
                 external_key: &canonical_url,
                 document_state: "active",
                 created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
             },
         )
         .await
@@ -478,6 +490,9 @@ async fn content_repository_tracks_mutation_idempotency_and_items() -> anyhow::R
                 external_key: &format!("mutation-doc-{}", Uuid::now_v7()),
                 document_state: "active",
                 created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
             },
         )
         .await

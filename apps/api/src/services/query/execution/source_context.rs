@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use uuid::Uuid;
@@ -28,13 +28,15 @@ use super::{
         is_source_profile_chunk_row, is_source_profile_runtime_chunk,
     },
     technical_literals::{
-        detect_technical_literal_intent_from_query_ir, extract_explicit_path_literals,
-        extract_package_command_literals, technical_chunk_selection_score,
+        detect_technical_literal_intent_from_query_ir, extract_config_section_literals,
+        extract_explicit_path_literals, extract_package_command_literals,
+        extract_parameter_literals, technical_chunk_selection_score,
         technical_literal_focus_keywords,
     },
 };
 
 const SOURCE_CONTEXT_DOCUMENT_LIMIT: usize = 3;
+const SOURCE_CONTEXT_FALLBACK_DOCUMENT_LIMIT: usize = SOURCE_CONTEXT_DOCUMENT_LIMIT * 8;
 const SOURCE_CONTEXT_ANCHOR_LIMIT_PER_DOCUMENT: usize = 2;
 const SOURCE_CONTEXT_DEFAULT_NEIGHBOR_BACKWARD: i32 = 1;
 const SOURCE_CONTEXT_DEFAULT_NEIGHBOR_FORWARD: i32 = 1;
@@ -48,7 +50,7 @@ const SOURCE_CONTEXT_PATH_MATCH_CANDIDATE_LIMIT_PER_DOCUMENT: usize = 16;
 const SOURCE_CONTEXT_PATH_MATCH_SCORE_BONUS: f32 = 0.8;
 const SOURCE_CONTEXT_SETUP_PATH_SCORE_BONUS: f32 = 4.0;
 const SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_FORWARD: i32 = 16;
-const SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_LIMIT_PER_DOCUMENT: usize = 12;
+const SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_LIMIT_PER_DOCUMENT: usize = 20;
 const SOURCE_CONTEXT_PROCEDURAL_SETUP_LIMIT_PER_DOCUMENT: usize = 6;
 const SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_SCORE_BONUS: f32 = 0.6;
 const SOURCE_CONTEXT_CODE_PATTERN_TERM_LIMIT: usize = 10;
@@ -57,6 +59,11 @@ const SOURCE_CONTEXT_CODE_PATTERN_SCORE_BONUS: f32 = 3.0;
 const SOURCE_CONTEXT_TRANSPORT_PATTERN_TERM_LIMIT: usize = 10;
 const SOURCE_CONTEXT_TRANSPORT_PATTERN_HIT_LIMIT: usize = 16;
 const SOURCE_CONTEXT_TRANSPORT_PATTERN_SCORE_BONUS: f32 = 2.5;
+const SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_TERM_LIMIT: usize = 3;
+const SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_HIT_LIMIT_PER_TERM: usize = 48;
+const SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_COMPANION_LIMIT: usize = 8;
+const SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_SCORE_BONUS: f32 = 2.25;
+const SOURCE_CONTEXT_FALLBACK_STRUCTURED_TOP_K_FLOOR: usize = 32;
 pub(crate) const SOURCE_SLICE_DEFAULT_COUNT: usize = 12;
 pub(crate) const SOURCE_SLICE_MAX_COUNT: usize = 30;
 pub(crate) const SOURCE_UNIT_CHUNK_KIND: &str = "source_unit";
@@ -128,6 +135,20 @@ struct StructuredSourceCompanion {
     kind: StructuredSourceCompanionKind,
 }
 
+#[derive(Debug, Clone)]
+struct ScoredSourceContextRow {
+    row: KnowledgeChunkRow,
+    score: f32,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSourceContextCandidate {
+    candidate: SourceContextCandidate,
+    neighbor_anchors: Vec<SourceContextAnchor>,
+    focused_rows: Vec<ScoredSourceContextRow>,
+    path_rows: Vec<ScoredSourceContextRow>,
+}
+
 pub(crate) async fn augment_structured_source_context(
     state: &AppState,
     library_id: Uuid,
@@ -139,7 +160,14 @@ pub(crate) async fn augment_structured_source_context(
     chunks: &mut Vec<RuntimeMatchedChunk>,
 ) -> anyhow::Result<StructuredSourceContextDiagnostics> {
     let mut companions = Vec::<StructuredSourceCompanion>::new();
-    let mut candidates = collect_source_context_candidates(chunks);
+    let fallback_structured_context_requested =
+        requests_fallback_structured_source_context(query_ir, chunks);
+    let fallback_structured_candidate_expansion_requested =
+        requests_fallback_structured_candidate_expansion(question, query_ir, chunks);
+    let candidate_document_limit =
+        source_context_candidate_document_limit(fallback_structured_candidate_expansion_requested);
+    let mut candidates =
+        collect_source_context_candidates_with_limit(chunks, candidate_document_limit);
     let focus_keywords = source_context_focus_keywords(question, query_ir, plan_keywords);
     let requests_expanded_source_context = query_ir.is_some_and(requests_expanded_source_context);
     if requests_expanded_source_context {
@@ -177,29 +205,74 @@ pub(crate) async fn augment_structured_source_context(
             ..diagnostics
         });
     }
-    for candidate in &candidates {
-        let focused_rows = state
+    let candidate_revision_ids = unique_candidate_revision_ids(&candidates);
+    let focused_rows_by_revision = chunks_by_revision(
+        state
             .arango_document_store
-            .list_chunks_by_revision_matching_terms(
-                candidate.revision_id,
+            .list_chunks_by_revisions_matching_terms(
+                &candidate_revision_ids,
                 &focus_keywords,
                 SOURCE_CONTEXT_FOCUSED_MATCH_CANDIDATE_LIMIT_PER_DOCUMENT,
             )
             .await
-            .with_context(|| {
-                format!(
-                    "failed to load query-focused source context chunks for revision {}",
-                    candidate.revision_id
+            .context(
+                "failed to load query-focused source context chunks for candidate revisions",
+            )?,
+    );
+    let path_context_requested = query_ir.is_some_and(requests_path_source_context);
+    let configuration_path_context =
+        query_ir.is_some_and(requests_configuration_file_path_source_context);
+    let path_terms = ["/".to_string()];
+    let path_rows_by_revision = if path_context_requested {
+        chunks_by_revision(
+            state
+                .arango_document_store
+                .list_chunks_by_revisions_matching_terms(
+                    &candidate_revision_ids,
+                    &path_terms,
+                    SOURCE_CONTEXT_PATH_MATCH_CANDIDATE_LIMIT_PER_DOCUMENT,
                 )
-            })?;
+                .await
+                .context(
+                    "failed to load path-bearing source context chunks for candidate revisions",
+                )?,
+        )
+    } else {
+        HashMap::new()
+    };
+    let path_head_rows_by_revision = if path_context_requested && configuration_path_context {
+        let windows = candidate_revision_ids
+            .iter()
+            .map(|revision_id| {
+                (
+                    *revision_id,
+                    SOURCE_CONTEXT_DOCUMENT_HEAD_CHUNK_INDEX,
+                    SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_FORWARD,
+                )
+            })
+            .collect::<Vec<_>>();
+        chunks_by_revision(
+            state.arango_document_store.list_chunks_by_revisions_windows(&windows).await.context(
+                "failed to load setup path source context chunks for candidate revisions",
+            )?,
+        )
+    } else {
+        HashMap::new()
+    };
+
+    let mut prepared_candidates = Vec::with_capacity(candidates.len());
+    for candidate in &candidates {
+        let focused_candidate_rows =
+            focused_rows_by_revision.get(&candidate.revision_id).cloned().unwrap_or_default();
         let focused_rows = select_query_focused_source_rows(
-            &focused_rows,
+            &focused_candidate_rows,
             &focus_keywords,
             false,
             &candidate.anchors,
             SOURCE_CONTEXT_FOCUSED_MATCH_LIMIT_PER_DOCUMENT,
         );
         let mut neighbor_anchors = candidate.anchors.clone();
+        let mut scored_focused_rows = Vec::with_capacity(focused_rows.len());
         for (rank, row) in focused_rows.into_iter().enumerate() {
             let score = candidate.best_score + SOURCE_CONTEXT_FOCUSED_MATCH_SCORE_BONUS
                 - rank as f32 * 0.01;
@@ -211,49 +284,18 @@ pub(crate) async fn augment_structured_source_context(
                     first_rank: usize::MAX.saturating_sub(rank),
                 },
             );
-            if let Some(focused) = map_companion_chunk(row, score, document_index, &focus_keywords)
-            {
-                companions.push(StructuredSourceCompanion {
-                    chunk: focused,
-                    kind: StructuredSourceCompanionKind::FocusedMatch,
-                });
-            }
+            scored_focused_rows.push(ScoredSourceContextRow { row, score });
         }
 
-        if query_ir.is_some_and(requests_path_source_context) {
-            let configuration_path_context =
-                query_ir.is_some_and(requests_configuration_file_path_source_context);
-            let path_terms = ["/".to_string()];
-            let mut path_rows = state
-                .arango_document_store
-                .list_chunks_by_revision_matching_terms(
-                    candidate.revision_id,
-                    &path_terms,
-                    SOURCE_CONTEXT_PATH_MATCH_CANDIDATE_LIMIT_PER_DOCUMENT,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load path-bearing source context chunks for revision {}",
-                        candidate.revision_id
-                    )
-                })?;
+        let mut scored_path_rows = Vec::new();
+        if path_context_requested {
+            let mut path_rows =
+                path_rows_by_revision.get(&candidate.revision_id).cloned().unwrap_or_default();
             if configuration_path_context {
-                let head_path_rows = state
-                    .arango_document_store
-                    .list_chunks_by_revision_range(
-                        candidate.revision_id,
-                        SOURCE_CONTEXT_DOCUMENT_HEAD_CHUNK_INDEX,
-                        SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_FORWARD,
-                    )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to load setup path source context chunks for revision {}",
-                            candidate.revision_id
-                        )
-                    })?;
-                path_rows.extend(head_path_rows);
+                if let Some(head_path_rows) = path_head_rows_by_revision.get(&candidate.revision_id)
+                {
+                    path_rows.extend(head_path_rows.iter().cloned());
+                }
             }
             let path_rows = select_path_source_rows(
                 &path_rows,
@@ -279,32 +321,97 @@ pub(crate) async fn augment_structured_source_context(
                         first_rank: usize::MAX.saturating_sub(rank),
                     },
                 );
-                if let Some(path_match) =
-                    map_companion_chunk(row, score, document_index, &focus_keywords)
-                {
-                    companions.push(StructuredSourceCompanion {
-                        chunk: path_match,
-                        kind: StructuredSourceCompanionKind::FocusedMatch,
-                    });
-                }
+                scored_path_rows.push(ScoredSourceContextRow { row, score });
             }
         }
 
-        if query_ir.is_some_and(requests_procedural_source_context) {
-            let structured_windows = procedural_structured_sibling_windows(&neighbor_anchors);
-            let rows = state
+        prepared_candidates.push(PreparedSourceContextCandidate {
+            candidate: candidate.clone(),
+            neighbor_anchors,
+            focused_rows: scored_focused_rows,
+            path_rows: scored_path_rows,
+        });
+    }
+
+    let procedural_context_requested = query_ir.is_some_and(requests_procedural_source_context)
+        || fallback_structured_context_requested;
+    let procedural_windows = if procedural_context_requested {
+        prepared_candidates
+            .iter()
+            .flat_map(|prepared| {
+                procedural_structured_sibling_windows(&prepared.neighbor_anchors).into_iter().map(
+                    |(min_index, max_index)| (prepared.candidate.revision_id, min_index, max_index),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let procedural_rows_by_revision = if procedural_context_requested {
+        chunks_by_revision(
+            state
                 .arango_document_store
-                .list_chunks_by_revision_windows(candidate.revision_id, &structured_windows)
+                .list_chunks_by_revisions_windows(&procedural_windows)
                 .await
-                .with_context(|| {
-                    format!(
-                        "failed to load procedural structured source siblings for revision {}",
-                        candidate.revision_id
-                    )
-                })?;
+                .context(
+                    "failed to load procedural structured source siblings for candidate revisions",
+                )?,
+        )
+    } else {
+        HashMap::new()
+    };
+
+    let neighbor_span =
+        source_context_neighbor_span_for_request(query_ir, fallback_structured_context_requested);
+    let neighbor_windows = prepared_candidates
+        .iter()
+        .flat_map(|prepared| {
+            source_context_neighbor_windows(&prepared.neighbor_anchors, neighbor_span)
+                .into_iter()
+                .map(|(min_index, max_index)| {
+                    (prepared.candidate.revision_id, min_index, max_index)
+                })
+        })
+        .collect::<Vec<_>>();
+    let neighbor_rows_by_revision = chunks_by_revision(
+        state
+            .arango_document_store
+            .list_chunks_by_revisions_windows(&neighbor_windows)
+            .await
+            .context("failed to load structured source neighbor chunks for candidate revisions")?,
+    );
+
+    for prepared in prepared_candidates {
+        let candidate = prepared.candidate;
+        for scored in prepared.focused_rows {
+            if let Some(focused) =
+                map_companion_chunk(scored.row, scored.score, document_index, &focus_keywords)
+            {
+                companions.push(StructuredSourceCompanion {
+                    chunk: focused,
+                    kind: StructuredSourceCompanionKind::FocusedMatch,
+                });
+            }
+        }
+        for scored in prepared.path_rows {
+            if let Some(path_match) =
+                map_companion_chunk(scored.row, scored.score, document_index, &focus_keywords)
+            {
+                companions.push(StructuredSourceCompanion {
+                    chunk: path_match,
+                    kind: StructuredSourceCompanionKind::FocusedMatch,
+                });
+            }
+        }
+
+        if procedural_context_requested {
+            let rows = procedural_rows_by_revision
+                .get(&candidate.revision_id)
+                .cloned()
+                .unwrap_or_default();
             let rows = select_procedural_structured_sibling_rows(
                 &rows,
-                &neighbor_anchors,
+                &prepared.neighbor_anchors,
                 SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_LIMIT_PER_DOCUMENT,
             );
             for (rank, row) in rows.into_iter().enumerate() {
@@ -343,24 +450,14 @@ pub(crate) async fn augment_structured_source_context(
             }
         }
 
-        let neighbor_span = source_context_neighbor_span(query_ir);
-        let neighbor_windows = source_context_neighbor_windows(&neighbor_anchors, neighbor_span);
-        let rows = state
-            .arango_document_store
-            .list_chunks_by_revision_windows(candidate.revision_id, &neighbor_windows)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load structured source neighbor chunks for revision {}",
-                    candidate.revision_id
-                )
-            })?;
+        let rows =
+            neighbor_rows_by_revision.get(&candidate.revision_id).cloned().unwrap_or_default();
         for row in rows {
             if is_source_profile_chunk_row(&row) {
                 continue;
             }
             let Some(score) = source_context_best_neighbor_score(
-                &neighbor_anchors,
+                &prepared.neighbor_anchors,
                 row.chunk_index,
                 neighbor_span,
             ) else {
@@ -399,6 +496,21 @@ pub(crate) async fn augment_structured_source_context(
         )
         .await?;
         companions.extend(transport_pattern_companions);
+    }
+
+    if fallback_structured_candidate_expansion_requested {
+        let fallback_structured_companions = load_fallback_structured_search_source_context(
+            state,
+            library_id,
+            document_index,
+            &focus_keywords,
+            chunks,
+            &companions,
+            slice_temporal_start,
+            slice_temporal_end,
+        )
+        .await?;
+        companions.extend(fallback_structured_companions);
     }
 
     if query_ir.is_some_and(requests_library_source_profile_context) {
@@ -449,6 +561,19 @@ pub(crate) fn structured_source_context_top_k(query_ir: &QueryIR, base_top_k: us
         return top_k;
     }
     top_k.max(procedural_source_context_chunk_floor())
+}
+
+#[must_use]
+pub(crate) fn structured_source_context_top_k_for_chunks(
+    query_ir: &QueryIR,
+    base_top_k: usize,
+    chunks: &[RuntimeMatchedChunk],
+) -> usize {
+    let top_k = structured_source_context_top_k(query_ir, base_top_k);
+    if !requests_fallback_structured_source_context(Some(query_ir), chunks) {
+        return top_k;
+    }
+    top_k.max(fallback_structured_source_context_chunk_floor())
 }
 
 #[must_use]
@@ -632,8 +757,16 @@ fn requests_library_source_profile_context(query_ir: &QueryIR) -> bool {
         )
 }
 
+#[cfg(test)]
 fn collect_source_context_candidates(
     chunks: &[RuntimeMatchedChunk],
+) -> Vec<SourceContextCandidate> {
+    collect_source_context_candidates_with_limit(chunks, SOURCE_CONTEXT_DOCUMENT_LIMIT)
+}
+
+fn collect_source_context_candidates_with_limit(
+    chunks: &[RuntimeMatchedChunk],
+    document_limit: usize,
 ) -> Vec<SourceContextCandidate> {
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut candidates = HashMap::<Uuid, SourceContextCandidate>::new();
@@ -699,7 +832,7 @@ fn collect_source_context_candidates(
             .cmp(&right.first_rank)
             .then_with(|| left.document_id.cmp(&right.document_id))
     });
-    selected.truncate(SOURCE_CONTEXT_DOCUMENT_LIMIT);
+    selected.truncate(document_limit);
     selected
 }
 
@@ -777,6 +910,22 @@ fn seed_document_head_source_context_anchors(candidates: &mut [SourceContextCand
     }
 }
 
+fn unique_candidate_revision_ids(candidates: &[SourceContextCandidate]) -> Vec<Uuid> {
+    let mut seen = HashSet::new();
+    candidates
+        .iter()
+        .filter_map(|candidate| seen.insert(candidate.revision_id).then_some(candidate.revision_id))
+        .collect()
+}
+
+fn chunks_by_revision(rows: Vec<KnowledgeChunkRow>) -> HashMap<Uuid, Vec<KnowledgeChunkRow>> {
+    let mut grouped = HashMap::<Uuid, Vec<KnowledgeChunkRow>>::new();
+    for row in rows {
+        grouped.entry(row.revision_id).or_default().push(row);
+    }
+    grouped
+}
+
 fn source_context_anchor_is_better(
     score: f32,
     rank: usize,
@@ -800,12 +949,22 @@ fn push_unique_source_context_anchor(
     }
 }
 
+#[cfg(test)]
 fn source_context_neighbor_span(query_ir: Option<&QueryIR>) -> SourceContextNeighborSpan {
+    source_context_neighbor_span_for_request(query_ir, false)
+}
+
+fn source_context_neighbor_span_for_request(
+    query_ir: Option<&QueryIR>,
+    fallback_structured_context_requested: bool,
+) -> SourceContextNeighborSpan {
     let mut span = SourceContextNeighborSpan {
         backward: SOURCE_CONTEXT_DEFAULT_NEIGHBOR_BACKWARD,
         forward: SOURCE_CONTEXT_DEFAULT_NEIGHBOR_FORWARD,
     };
-    if query_ir.is_some_and(requests_expanded_source_context) {
+    if fallback_structured_context_requested
+        || query_ir.is_some_and(requests_expanded_source_context)
+    {
         span.backward = SOURCE_CONTEXT_PROCEDURAL_NEIGHBOR_BACKWARD;
     }
     span
@@ -822,6 +981,138 @@ fn requests_procedural_source_context(query_ir: &QueryIR) -> bool {
         && query_ir.source_slice.is_none()
         && (matches!(query_ir.act, QueryAct::ConfigureHow)
             || query_ir_requests_focused_configuration_source_context(query_ir))
+}
+
+fn requests_fallback_structured_source_context(
+    query_ir: Option<&QueryIR>,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    let Some(query_ir) = query_ir else {
+        return false;
+    };
+    query_ir.confidence <= 0.3
+        && matches!(query_ir.scope, QueryScope::SingleDocument)
+        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+        && query_ir.source_slice.is_none()
+        && query_ir.document_focus.is_none()
+        && query_ir.target_types.is_empty()
+        && query_ir.literal_constraints.is_empty()
+        && chunks
+            .iter()
+            .filter(|chunk| !is_source_profile_runtime_chunk(chunk))
+            .any(runtime_chunk_has_structured_literal_surface)
+}
+
+fn requests_fallback_structured_candidate_expansion(
+    question: &str,
+    query_ir: Option<&QueryIR>,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    requests_fallback_structured_source_context(query_ir, chunks)
+        && technical_literal_focus_keywords(question, query_ir)
+            .iter()
+            .any(|keyword| keyword.chars().count() < 4)
+}
+
+fn source_context_candidate_document_limit(fallback_structured_candidate_expansion: bool) -> usize {
+    if fallback_structured_candidate_expansion {
+        SOURCE_CONTEXT_FALLBACK_DOCUMENT_LIMIT
+    } else {
+        SOURCE_CONTEXT_DOCUMENT_LIMIT
+    }
+}
+
+async fn load_fallback_structured_search_source_context(
+    state: &AppState,
+    library_id: Uuid,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    focus_keywords: &[String],
+    chunks: &[RuntimeMatchedChunk],
+    companions: &[StructuredSourceCompanion],
+    temporal_start: Option<chrono::DateTime<chrono::Utc>>,
+    temporal_end: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<Vec<StructuredSourceCompanion>> {
+    let search_terms = focus_keywords
+        .iter()
+        .filter(|keyword| keyword.chars().count() < 4)
+        .take(SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_TERM_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    if search_terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut score_by_chunk = HashMap::<Uuid, f32>::new();
+    for term in search_terms {
+        let rows = state
+            .arango_search_store
+            .search_chunks(
+                library_id,
+                &term,
+                SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_HIT_LIMIT_PER_TERM,
+                temporal_start,
+                temporal_end,
+            )
+            .await
+            .with_context(|| {
+                format!("failed to run fallback structured source context search for {term}")
+            })?;
+        for row in rows {
+            score_by_chunk
+                .entry(row.chunk_id)
+                .and_modify(|existing| {
+                    *existing = existing.max(row.score as f32);
+                })
+                .or_insert(row.score as f32);
+        }
+    }
+    if score_by_chunk.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let existing_chunk_ids = chunks
+        .iter()
+        .map(|chunk| chunk.chunk_id)
+        .chain(companions.iter().map(|companion| companion.chunk.chunk_id))
+        .collect::<HashSet<_>>();
+    let chunk_ids = score_by_chunk.keys().copied().collect::<Vec<_>>();
+    let rows = state
+        .arango_document_store
+        .list_chunks_by_ids(&chunk_ids)
+        .await
+        .context("failed to hydrate fallback structured source context chunks")?;
+    let candidates = rows
+        .into_iter()
+        .filter_map(|row| {
+            let search_score = score_by_chunk.get(&row.chunk_id).copied()?;
+            Some((row, search_score))
+        })
+        .collect::<Vec<_>>();
+    let selected = select_fallback_structured_search_rows(
+        candidates,
+        focus_keywords,
+        &existing_chunk_ids,
+        SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_COMPANION_LIMIT,
+    );
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let global_best_score = chunks.iter().map(|chunk| score_value(chunk.score)).fold(0.0, f32::max);
+    let mut companions = Vec::with_capacity(selected.len());
+    for (rank, (row, structural_score)) in selected.into_iter().enumerate() {
+        let score = global_best_score
+            + SOURCE_CONTEXT_FALLBACK_STRUCTURED_SEARCH_SCORE_BONUS
+            + structural_score as f32 * 0.001
+            - rank as f32 * 0.01;
+        if let Some(chunk) = map_companion_chunk(row, score, document_index, focus_keywords) {
+            companions.push(StructuredSourceCompanion {
+                chunk,
+                kind: StructuredSourceCompanionKind::FocusedMatch,
+            });
+        }
+    }
+    Ok(companions)
 }
 
 fn query_ir_requests_focused_configuration_source_context(query_ir: &QueryIR) -> bool {
@@ -1039,6 +1330,10 @@ fn procedural_source_context_chunk_floor() -> usize {
         .saturating_add(SOURCE_CONTEXT_PROCEDURAL_STRUCTURED_LIMIT_PER_DOCUMENT)
 }
 
+fn fallback_structured_source_context_chunk_floor() -> usize {
+    procedural_source_context_chunk_floor().max(SOURCE_CONTEXT_FALLBACK_STRUCTURED_TOP_K_FLOOR)
+}
+
 fn source_context_neighbor_windows(
     anchors: &[SourceContextAnchor],
     span: SourceContextNeighborSpan,
@@ -1145,6 +1440,60 @@ fn select_query_focused_source_rows(
     candidates.into_iter().take(limit).map(|(_, row)| row.clone()).collect()
 }
 
+fn select_fallback_structured_search_rows(
+    rows: Vec<(KnowledgeChunkRow, f32)>,
+    focus_keywords: &[String],
+    existing_chunk_ids: &HashSet<Uuid>,
+    limit: usize,
+) -> Vec<(KnowledgeChunkRow, isize)> {
+    if limit == 0 || rows.is_empty() || focus_keywords.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = rows
+        .into_iter()
+        .filter(|(row, _)| !existing_chunk_ids.contains(&row.chunk_id))
+        .filter(|(row, _)| !is_source_profile_chunk_row(row))
+        .filter_map(|(row, search_score)| {
+            let structural_score = fallback_structured_search_score(&row, focus_keywords)?;
+            Some((structural_score, search_score, row))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(
+        |(left_structural, left_search, left), (right_structural, right_search, right)| {
+            right_structural
+                .cmp(left_structural)
+                .then_with(|| right_search.total_cmp(left_search))
+                .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+        },
+    );
+    candidates
+        .into_iter()
+        .take(limit)
+        .map(|(structural_score, _, row)| (row, structural_score))
+        .collect()
+}
+
+fn fallback_structured_search_score(
+    row: &KnowledgeChunkRow,
+    focus_keywords: &[String],
+) -> Option<isize> {
+    let text = format!("{}\n{}", row.content_text, row.window_text.as_deref().unwrap_or_default());
+    if !text_has_structured_literal_surface(&text) {
+        return None;
+    }
+    let focus_score = technical_chunk_selection_score(&text, focus_keywords, false);
+    if focus_score == 0 {
+        return None;
+    }
+    let literal_score = extract_parameter_literals(&text, 8).len().saturating_mul(6)
+        + extract_config_section_literals(&text, 4).len().saturating_mul(4)
+        + extract_explicit_path_literals(&text, 4).len().saturating_mul(3)
+        + extract_package_command_literals(&text, 2).len().saturating_mul(2);
+    let literal_score = isize::try_from(literal_score).unwrap_or(isize::MAX);
+    Some(focus_score.saturating_add(literal_score))
+}
+
 fn select_procedural_structured_sibling_rows(
     rows: &[KnowledgeChunkRow],
     anchors: &[SourceContextAnchor],
@@ -1189,12 +1538,20 @@ fn select_procedural_structured_sibling_rows(
         }
     }
 
+    let non_head_anchors = anchors
+        .iter()
+        .copied()
+        .filter(|anchor| anchor.chunk_index != SOURCE_CONTEXT_DOCUMENT_HEAD_CHUNK_INDEX)
+        .collect::<Vec<_>>();
+    let distance_anchors =
+        if non_head_anchors.is_empty() { anchors } else { non_head_anchors.as_slice() };
+
     let mut candidates = eligible
         .iter()
         .copied()
         .filter(|row| !selected_ids.contains(&row.chunk_id))
         .filter_map(|row| {
-            let distance = anchors
+            let distance = distance_anchors
                 .iter()
                 .filter_map(|anchor| {
                     (row.chunk_index >= anchor.chunk_index)
@@ -1222,8 +1579,22 @@ fn select_procedural_structured_sibling_rows(
 }
 
 fn is_procedural_structured_sibling_row(row: &KnowledgeChunkRow) -> bool {
+    let text = format!("{}\n{}", row.content_text, row.window_text.as_deref().unwrap_or_default());
+    if row.chunk_kind.as_deref() == Some(METADATA_BLOCK_CHUNK_KIND) {
+        return text_has_structured_literal_surface(&text);
+    }
+    row_chunk_kind_is_structured(row.chunk_kind.as_deref())
+        || text_has_structured_literal_surface(&text)
+}
+
+fn runtime_chunk_has_structured_literal_surface(chunk: &RuntimeMatchedChunk) -> bool {
+    row_chunk_kind_is_structured(chunk.chunk_kind.as_deref())
+        || text_has_structured_literal_surface(&format!("{}\n{}", chunk.excerpt, chunk.source_text))
+}
+
+fn row_chunk_kind_is_structured(kind: Option<&str>) -> bool {
     matches!(
-        row.chunk_kind.as_deref(),
+        kind,
         Some(
             TABLE_ROW_CHUNK_KIND
                 | CODE_BLOCK_CHUNK_KIND
@@ -1231,6 +1602,13 @@ fn is_procedural_structured_sibling_row(row: &KnowledgeChunkRow) -> bool {
                 | METADATA_BLOCK_CHUNK_KIND
         )
     )
+}
+
+fn text_has_structured_literal_surface(text: &str) -> bool {
+    !extract_parameter_literals(text, 2).is_empty()
+        || !extract_config_section_literals(text, 2).is_empty()
+        || !extract_explicit_path_literals(text, 2).is_empty()
+        || !extract_package_command_literals(text, 1).is_empty()
 }
 
 fn select_path_source_rows(
@@ -1503,6 +1881,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn candidate_revision_ids_keep_first_seen_order_and_drop_duplicates() {
+        let revision_a = Uuid::from_u128(1);
+        let revision_b = Uuid::from_u128(2);
+        let document_a = Uuid::from_u128(10);
+        let document_b = Uuid::from_u128(11);
+        let document_c = Uuid::from_u128(12);
+        let candidates = vec![
+            SourceContextCandidate {
+                document_id: document_a,
+                revision_id: revision_a,
+                first_rank: 0,
+                best_score: 1.0,
+                anchors: Vec::new(),
+            },
+            SourceContextCandidate {
+                document_id: document_b,
+                revision_id: revision_b,
+                first_rank: 1,
+                best_score: 0.9,
+                anchors: Vec::new(),
+            },
+            SourceContextCandidate {
+                document_id: document_c,
+                revision_id: revision_a,
+                first_rank: 2,
+                best_score: 0.8,
+                anchors: Vec::new(),
+            },
+        ];
+
+        assert_eq!(unique_candidate_revision_ids(&candidates), vec![revision_a, revision_b]);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn chunk_row(
         document_id: Uuid,
@@ -1553,10 +1965,14 @@ mod tests {
             external_key: "event-stream.jsonl".to_string(),
             file_name: Some("event-stream.jsonl".to_string()),
             title: Some("event-stream.jsonl".to_string()),
+            source_uri: None,
+            document_hint: None,
             document_state: "active".to_string(),
             active_revision_id: Some(revision_id),
             readable_revision_id: Some(revision_id),
             latest_revision_no: Some(1),
+            parent_document_id: None,
+            document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             deleted_at: None,
@@ -1868,6 +2284,67 @@ mod tests {
     }
 
     #[test]
+    fn procedural_structured_siblings_include_literal_paragraphs_after_anchors() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let rows = vec![
+            chunk_row(document_id, revision_id, 0, "metadata_block", "[source_profile units=5]"),
+            chunk_row(
+                document_id,
+                revision_id,
+                1,
+                "paragraph",
+                "[UI.Alpha.Form]\nalphaFlag = true",
+            ),
+            chunk_row(document_id, revision_id, 2, "paragraph", "betaMode = 1"),
+            chunk_row(document_id, revision_id, 3, "paragraph", "alpha beta gamma"),
+        ];
+        let anchors = vec![SourceContextAnchor { chunk_index: 0, score: 10.0, first_rank: 0 }];
+
+        let selected = select_procedural_structured_sibling_rows(&rows, &anchors, 3);
+
+        assert_eq!(selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[test]
+    fn procedural_structured_siblings_skip_empty_metadata_blocks() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let rows = vec![
+            chunk_row(document_id, revision_id, 1, "metadata_block", ""),
+            chunk_row(document_id, revision_id, 2, "table_row", "alphaFlag | boolean | true"),
+            chunk_row(document_id, revision_id, 3, "code_block", "[Main]\nalphaFlag = true"),
+        ];
+        let anchors = vec![SourceContextAnchor { chunk_index: 0, score: 10.0, first_rank: 0 }];
+
+        let selected = select_procedural_structured_sibling_rows(&rows, &anchors, 3);
+
+        assert_eq!(selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>(), [2, 3]);
+    }
+
+    #[test]
+    fn low_confidence_fallback_expands_only_when_retrieved_chunks_have_structured_literals() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut query_ir = source_context_ir(QueryAct::Describe, QueryScope::SingleDocument);
+        query_ir.confidence = 0.25;
+        let mut structured = runtime_chunk(document_id, revision_id, 7);
+        structured.chunk_kind = Some("paragraph".to_string());
+        structured.excerpt = "[UI.Alpha.Form]\nalphaFlag = true".to_string();
+        structured.source_text = structured.excerpt.clone();
+        let mut plain = runtime_chunk(document_id, revision_id, 8);
+        plain.chunk_kind = Some("paragraph".to_string());
+        plain.excerpt = "alpha beta gamma".to_string();
+        plain.source_text = plain.excerpt.clone();
+
+        assert!(requests_fallback_structured_source_context(Some(&query_ir), &[structured]));
+        assert!(!requests_fallback_structured_source_context(Some(&query_ir), &[plain]));
+
+        query_ir.confidence = 0.9;
+        assert!(!requests_fallback_structured_source_context(Some(&query_ir), &[]));
+    }
+
+    #[test]
     fn procedural_structured_siblings_reserve_setup_rows_before_late_anchor_rows() {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
@@ -1892,6 +2369,47 @@ mod tests {
         let selected = select_procedural_structured_sibling_rows(&rows, &anchors, 3);
 
         assert_eq!(selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>(), [1, 4, 21]);
+    }
+
+    #[test]
+    fn procedural_structured_siblings_do_not_starve_late_example_blocks() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut rows = vec![chunk_row(
+            document_id,
+            revision_id,
+            0,
+            "metadata_block",
+            "[source_profile units=32]",
+        )];
+        rows.extend((1..=10).map(|index| {
+            chunk_row(
+                document_id,
+                revision_id,
+                index,
+                "table_row",
+                &format!("headParam{index} | value"),
+            )
+        }));
+        rows.extend([
+            chunk_row(document_id, revision_id, 20, "heading", "Detailed option group"),
+            chunk_row(document_id, revision_id, 21, "table_row", "lateFlag | boolean | true"),
+            chunk_row(document_id, revision_id, 22, "code_block", "[Main]\nlateFlag = true"),
+            chunk_row(document_id, revision_id, 23, "table_row", "printSlip | boolean | false"),
+            chunk_row(document_id, revision_id, 24, "code_block", "[Check]\nprintSlip = false"),
+            chunk_row(document_id, revision_id, 25, "table_row", "visible | boolean | true"),
+            chunk_row(document_id, revision_id, 26, "code_block", "[UI.Component]\nvisible = true"),
+        ]);
+        let anchors = vec![
+            SourceContextAnchor { chunk_index: 0, score: 10.0, first_rank: 0 },
+            SourceContextAnchor { chunk_index: 20, score: 9.0, first_rank: 1 },
+        ];
+
+        let selected = select_procedural_structured_sibling_rows(&rows, &anchors, 12);
+        let selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
+
+        assert!(selected_indexes.contains(&24), "{selected_indexes:?}");
+        assert!(selected_indexes.contains(&26), "{selected_indexes:?}");
     }
 
     #[test]
@@ -2007,6 +2525,26 @@ mod tests {
     }
 
     #[test]
+    fn fallback_structured_context_expands_top_k_when_structured_chunks_exist() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut query_ir = source_context_ir(QueryAct::Describe, QueryScope::SingleDocument);
+        query_ir.confidence = 0.25;
+        let mut structured = runtime_chunk(document_id, revision_id, 12);
+        structured.chunk_kind = Some("key_value_block".to_string());
+        structured.source_text = "alphaKey = true".to_string();
+        let mut plain = runtime_chunk(document_id, revision_id, 13);
+        plain.chunk_kind = None;
+        plain.source_text = "general overview".to_string();
+
+        assert_eq!(
+            structured_source_context_top_k_for_chunks(&query_ir, 24, &[structured]),
+            fallback_structured_source_context_chunk_floor()
+        );
+        assert_eq!(structured_source_context_top_k_for_chunks(&query_ir, 24, &[plain]), 24);
+    }
+
+    #[test]
     fn map_source_unit_block_preserves_record_ordinal_and_text() {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
@@ -2048,6 +2586,75 @@ mod tests {
             candidate.anchors.len() == SOURCE_CONTEXT_ANCHOR_LIMIT_PER_DOCUMENT
         }));
         assert_eq!(candidates[0].document_id, docs[0]);
+    }
+
+    #[test]
+    fn low_confidence_structured_candidate_expansion_reaches_lower_ranked_documents() {
+        let docs = [
+            (Uuid::now_v7(), Uuid::now_v7()),
+            (Uuid::now_v7(), Uuid::now_v7()),
+            (Uuid::now_v7(), Uuid::now_v7()),
+            (Uuid::now_v7(), Uuid::now_v7()),
+        ];
+        let chunks = docs
+            .iter()
+            .enumerate()
+            .map(|(rank, (document_id, revision_id))| {
+                let mut chunk = runtime_chunk(*document_id, *revision_id, rank as i32 + 10);
+                chunk.chunk_kind = Some("paragraph".to_string());
+                chunk.source_text = if rank == 3 {
+                    "[UI.Alpha.Form]\nalphaFlag = true".to_string()
+                } else {
+                    "unstructured filler".to_string()
+                };
+                chunk.excerpt = chunk.source_text.clone();
+                chunk
+            })
+            .collect::<Vec<_>>();
+        let mut query_ir = source_context_ir(QueryAct::Describe, QueryScope::SingleDocument);
+        query_ir.confidence = 0.25;
+
+        assert!(requests_fallback_structured_candidate_expansion(
+            "Which QR setting applies?",
+            Some(&query_ir),
+            &chunks
+        ));
+        let default_candidates = collect_source_context_candidates(&chunks);
+        assert!(!default_candidates.iter().any(|candidate| candidate.document_id == docs[3].0));
+
+        let expanded_candidates = collect_source_context_candidates_with_limit(
+            &chunks,
+            source_context_candidate_document_limit(true),
+        );
+        assert!(expanded_candidates.iter().any(|candidate| candidate.document_id == docs[3].0));
+    }
+
+    #[test]
+    fn fallback_structured_search_keeps_short_token_literal_rows() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let existing = chunk_row(
+            document_id,
+            revision_id,
+            1,
+            "paragraph",
+            "[UI.Alpha]\nexistingFlag = true\nQ1",
+        );
+        let plain = chunk_row(document_id, revision_id, 2, "paragraph", "Q1 filler text only");
+        let literal =
+            chunk_row(document_id, revision_id, 3, "paragraph", "[UI.Alpha]\nalphaFlag = true\nQ1");
+        let existing_chunk_ids = HashSet::from([existing.chunk_id]);
+
+        let selected = select_fallback_structured_search_rows(
+            vec![(existing, 20.0), (plain, 100.0), (literal, 10.0)],
+            &["q1".to_string()],
+            &existing_chunk_ids,
+            4,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.chunk_index, 3);
+        assert!(selected[0].1 > 0);
     }
 
     #[test]
@@ -2233,6 +2840,27 @@ mod tests {
         assert!(
             source_context_best_neighbor_score(&anchors, 19, span).is_some(),
             "procedural answers need the setup block that precedes the matching detail chunk"
+        );
+    }
+
+    #[test]
+    fn fallback_structured_context_expands_preceding_setup_context() {
+        let mut query_ir = source_context_ir(QueryAct::Describe, QueryScope::SingleDocument);
+        query_ir.confidence = 0.25;
+        let span = source_context_neighbor_span_for_request(Some(&query_ir), true);
+        let anchors = vec![SourceContextAnchor { chunk_index: 22, score: 11.0, first_rank: 0 }];
+
+        assert_eq!(
+            span,
+            SourceContextNeighborSpan {
+                backward: SOURCE_CONTEXT_PROCEDURAL_NEIGHBOR_BACKWARD,
+                forward: SOURCE_CONTEXT_DEFAULT_NEIGHBOR_FORWARD
+            }
+        );
+        assert!(source_context_neighbor_windows(&anchors, span).contains(&(19, 23)));
+        assert!(
+            source_context_best_neighbor_score(&anchors, 19, span).is_some(),
+            "fallback structured answers need preceding key/value blocks near the matching detail"
         );
     }
 

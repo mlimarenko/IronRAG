@@ -65,15 +65,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "macros", "rust_decimal"] }
 thiserror = "2.0.18"
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time", "io-util", "process"] }
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time", "io-util", "process"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip", "compression-br", "compression-zstd"] }
 axum-prometheus = "0.10"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
-uuid = { version = "1.23.1", features = ["v4", "v5", "v7", "serde"] }
-redis = { version = "1.2.1", features = ["tokio-comp"] }
+uuid = { version = "1.23.2", features = ["v4", "v5", "v7", "serde"] }
+redis = { version = "1.2.2", features = ["tokio-comp"] }
 anyhow = "1.0"
 futures = "0.3"
 http-body-util = "0.1"
@@ -82,13 +82,13 @@ hmac = "0.13.0"
 subtle = "2"
 hex = "0.4"
 async-trait = "0.1"
-aws-sdk-s3 = { version = "1.132", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.135", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
 rust_decimal = { version = "1", features = ["serde"] }
 cookie = "0.18"
 argon2 = "0.5"
 calamine = "0.34.0"
 csv = "1.4.0"
-tree-sitter = "0.26.8"
+tree-sitter = "0.26.9"
 # Tier 1: mainstream languages
 tree-sitter-python = "0.25.0"
 tree-sitter-javascript = "0.25.0"
@@ -102,14 +102,14 @@ tree-sitter-c-sharp = "0.23.5"
 tree-sitter-ruby = "0.23.1"
 tree-sitter-php = "0.24.2"
 # Tier 2: common in technical docs
-tree-sitter-swift = "0.7.2"
+tree-sitter-swift = "0.7.3"
 # tree-sitter-kotlin removed: depends on tree-sitter 0.20, incompatible with 0.25
 tree-sitter-scala = "0.26.0"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-proto = "0.4"
 # Config parsing (structural, not tree-sitter)
 serde_yaml = "0.9"
-toml_edit = { version = "0.25.11", features = ["serde"] }
+toml_edit = { version = "0.25.12", features = ["serde"] }
 async-tar = { version = "0.6.0", default-features = false, features = ["runtime-tokio"] }
 async-compression = { version = "0.4", features = ["zstd", "tokio"] }
 base64 = "0.22.1"

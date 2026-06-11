@@ -27,10 +27,3 @@ dependencies:
   redis:
     mode: external
     url: redis://redis.example.internal:6379
-  arangodb:
-    mode: external
-    host: arangodb.example.internal
-    port: 8529
-    database: ironrag
-    username: root
-    password: replace-me

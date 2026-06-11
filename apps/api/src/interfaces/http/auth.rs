@@ -9,8 +9,11 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState, domains::iam::PrincipalKind, infra::repositories::iam_repository,
-    interfaces::http::router_support::ApiError, shared::auth_tokens,
+    app::state::AppState,
+    domains::iam::PrincipalKind,
+    infra::repositories::iam_repository::{self, SystemRole},
+    interfaces::http::router_support::ApiError,
+    shared::auth_tokens,
 };
 
 const AUTH_ACTIVITY_REFRESH_INTERVAL_SECS: i64 = 30;
@@ -68,6 +71,14 @@ pub struct AuthContext {
     pub workspace_memberships: Vec<AuthWorkspaceMembership>,
     pub visible_workspace_ids: BTreeSet<Uuid>,
     pub is_system_admin: bool,
+    /// System role of the underlying user principal, when the caller is a user
+    /// (session or user-backed token). `None` for API tokens, workers and the
+    /// bootstrap principal, which keep the legacy grant-only behavior.
+    ///
+    /// The role decides *capability* (read vs write vs admin); grants decide
+    /// *which resource*. An operation is allowed iff the role permits the
+    /// capability AND (system-admin OR a grant covers the resource).
+    pub system_role: Option<SystemRole>,
 }
 
 impl AuthContext {
@@ -80,6 +91,37 @@ impl AuthContext {
     pub fn has_any_scope(&self, accepted: &[&str]) -> bool {
         self.is_system_admin
             || self.scopes.iter().any(|scope| accepted.iter().any(|wanted| scope == wanted))
+    }
+
+    /// Whether the caller's system role permits write/mutation capability.
+    ///
+    /// Non-user principals (API tokens, workers, bootstrap) carry no
+    /// [`SystemRole`] and keep the legacy grant-only behavior, so they are
+    /// considered write-capable here — their resource grants still gate them.
+    /// User principals must hold at least the `operator` role; a `viewer` can
+    /// never write even if a stray resource grant would otherwise match.
+    #[must_use]
+    pub fn role_permits_write(&self) -> bool {
+        match self.system_role {
+            Some(SystemRole::Admin | SystemRole::Operator) => true,
+            Some(SystemRole::Viewer) => false,
+            None => true,
+        }
+    }
+
+    /// Ensures the caller's system role permits write/mutation capability.
+    ///
+    /// This is the capability gate that keeps `viewer` users read-only even
+    /// when a grant covers the target resource. Resource scoping is enforced
+    /// separately by the grant checks.
+    ///
+    /// # Errors
+    /// Returns [`ApiError::Unauthorized`] when the caller is a `viewer`.
+    pub fn require_write_capability(&self) -> Result<(), ApiError> {
+        if self.role_permits_write() {
+            return Ok(());
+        }
+        Err(ApiError::Unauthorized)
     }
 
     /// Validates that the token has at least one accepted scope.
@@ -526,9 +568,21 @@ async fn build_auth_context_for_principal(
         memberships.retain(|membership| membership.workspace_id == token_workspace_id);
     }
 
-    let is_system_admin = grants
-        .iter()
-        .any(|grant| grant.resource_kind == "system" && grant.permission_kind == "iam_admin");
+    // The system role is a property of *user* principals. API tokens, workers
+    // and the bootstrap principal carry no `iam_user` row and therefore keep
+    // the legacy grant-only behavior (`system_role = None`). When the principal
+    // is a user we load its role and let the `admin` role short-circuit every
+    // authorization check exactly like the system `iam_admin` grant does.
+    let system_role =
+        iam_repository::get_user_by_principal_id(&state.persistence.postgres, principal_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .map(|user| user.system_role());
+
+    let is_system_admin = system_role == Some(SystemRole::Admin)
+        || grants
+            .iter()
+            .any(|grant| grant.resource_kind == "system" && grant.permission_kind == "iam_admin");
     let scopes = collect_permission_kinds(&grants);
     let workspace_memberships = memberships
         .into_iter()
@@ -572,6 +626,7 @@ async fn build_auth_context_for_principal(
         workspace_memberships,
         visible_workspace_ids,
         is_system_admin,
+        system_role,
     })
 }
 
@@ -622,6 +677,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: false,
+            system_role: None,
         }
     }
 
@@ -645,6 +701,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: std::iter::once(workspace_id).collect(),
             is_system_admin: false,
+            system_role: None,
         }
     }
 
@@ -668,6 +725,7 @@ mod tests {
                 .collect(),
             visible_workspace_ids,
             is_system_admin: false,
+            system_role: None,
         }
     }
 
@@ -702,6 +760,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: true,
+            system_role: Some(SystemRole::Admin),
         };
 
         assert!(auth.require_workspace_access(Uuid::now_v7()).is_ok());
@@ -723,6 +782,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: true,
+            system_role: Some(SystemRole::Admin),
         };
 
         assert!(matching_workspace_auth.can_access_workspace(workspace_id));
@@ -743,6 +803,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: false,
+            system_role: None,
         };
 
         assert!(auth.require_any_scope(&["workspace_admin", "query_run"]).is_ok());
@@ -761,6 +822,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: false,
+            system_role: None,
         };
 
         assert!(auth.has_scope("document_read"));
@@ -780,6 +842,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: false,
+            system_role: None,
         };
 
         assert!(matches!(
@@ -801,6 +864,7 @@ mod tests {
             workspace_memberships: Vec::new(),
             visible_workspace_ids: BTreeSet::new(),
             is_system_admin: true,
+            system_role: Some(SystemRole::Admin),
         };
 
         assert!(auth.require_any_scope(&["workspace_admin"]).is_ok());
@@ -823,6 +887,7 @@ mod tests {
             }],
             visible_workspace_ids: std::iter::once(workspace_id).collect(),
             is_system_admin: false,
+            system_role: None,
         };
         let writable = AuthContext {
             token_id: Uuid::now_v7(),
@@ -838,6 +903,7 @@ mod tests {
             }],
             visible_workspace_ids: std::iter::once(workspace_id).collect(),
             is_system_admin: false,
+            system_role: None,
         };
 
         assert!(read_only.is_read_only_for_library(workspace_id, &["document_write"]));
@@ -899,12 +965,37 @@ mod tests {
             }],
             visible_workspace_ids: std::iter::once(workspace_id).collect(),
             is_system_admin: false,
+            system_role: None,
         };
 
         assert!(auth.can_access_workspace(workspace_id));
         assert!(auth.can_discover_workspace(workspace_id, &["library_read"]));
         assert!(auth.can_discover_library(workspace_id, visible_library_id, &["library_read"]));
         assert!(!auth.can_discover_library(workspace_id, hidden_library_id, &["library_read"]));
+    }
+
+    #[test]
+    fn role_permits_write_follows_system_role_tiers() {
+        let workspace_id = Uuid::now_v7();
+        let mut admin = workspace_token(Some(workspace_id));
+        admin.system_role = Some(SystemRole::Admin);
+        let mut operator = workspace_token(Some(workspace_id));
+        operator.system_role = Some(SystemRole::Operator);
+        let mut viewer = workspace_token(Some(workspace_id));
+        viewer.system_role = Some(SystemRole::Viewer);
+        let mut token = workspace_token(Some(workspace_id));
+        token.system_role = None;
+
+        assert!(admin.role_permits_write());
+        assert!(operator.role_permits_write());
+        assert!(!viewer.role_permits_write());
+        // Non-user principals (no role) keep the legacy grant-only behavior.
+        assert!(token.role_permits_write());
+
+        assert!(viewer.require_write_capability().is_err());
+        assert!(operator.require_write_capability().is_ok());
+        assert!(admin.require_write_capability().is_ok());
+        assert!(token.require_write_capability().is_ok());
     }
 
     #[test]

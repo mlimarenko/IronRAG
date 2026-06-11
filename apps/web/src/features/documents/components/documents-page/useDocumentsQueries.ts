@@ -198,15 +198,48 @@ export function useDocumentsQueries({
     () => (listQuery.data?.items ?? []).map((raw) => mapListItem(raw, t)),
     [listQuery.data, t],
   );
+
+  // Deep-link fallback: when the URL carries a `documentId` that is not on
+  // the currently loaded list page (e.g. the Graph view's "open document"
+  // action on a document buried thousands of rows deep), resolve that one
+  // document through the *same* list endpoint — filtered by id — so it runs
+  // through the canonical `mapListItem` derivation. This is the single
+  // source of truth for a `DocumentItem`: no parallel detail→item mapper
+  // that would have to re-derive the server-side `status`/`readiness`
+  // buckets client-side.
+  const isSelectedOnPage =
+    !!selectedDocumentId && items.some((doc) => doc.id === selectedDocumentId);
+  const needsSelectedFallback =
+    !!activeLibraryId && !!selectedDocumentId && !isSelectedOnPage;
+  const selectedFallbackQuery = useQuery({
+    ...queries.listContentDocumentsOptions({
+      query: {
+        ...(activeLibraryId ? { libraryId: activeLibraryId } : {}),
+        ids: selectedDocumentId ?? "",
+        limit: 1,
+      },
+    }),
+    enabled: needsSelectedFallback,
+    staleTime: 0,
+  });
+  const selectedFallbackDoc = useMemo(() => {
+    if (!selectedDocumentId) return null;
+    const raw = (selectedFallbackQuery.data?.items ?? []).find(
+      (item) => item.id === selectedDocumentId,
+    );
+    return raw ? mapListItem(raw, t) : null;
+  }, [selectedDocumentId, selectedFallbackQuery.data, t]);
+
   const selectedDoc = useMemo(() => {
     if (!selectedDocumentId) return null;
     return (
       items.find((doc) => doc.id === selectedDocumentId) ??
       (selectedDocSnapshot?.id === selectedDocumentId
         ? selectedDocSnapshot
-        : null)
+        : null) ??
+      selectedFallbackDoc
     );
-  }, [items, selectedDocSnapshot, selectedDocumentId]);
+  }, [items, selectedDocSnapshot, selectedDocumentId, selectedFallbackDoc]);
   const inspector = useInspectorQueries(selectedDoc);
 
   const selectDoc = useCallback(

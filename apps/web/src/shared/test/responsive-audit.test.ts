@@ -47,12 +47,16 @@ const expectations: ResponsiveExpectation[] = [
     mustContain: [/w-12/, /w-64/, /aria-expanded/],
   },
   {
-    file: 'features/assistant/components/EvidencePanel.tsx',
-    mustContain: [/hidden lg:block/, /lg:w-80/],
+    // EvidencePanel is now mounted (it was dead code): its responsive sizing
+    // lives at the call site so it can be a mobile slide-over and an inline
+    // pane on lg+. Guard the call-site contract in AssistantPage instead of
+    // the old always-hidden-below-lg classes baked into the component.
+    file: 'features/assistant/AssistantPage.tsx',
+    mustContain: [/lg:static/, /lg:w-72/, /xl:w-80/],
   },
   {
     file: 'features/graph/components/GraphInspector.tsx',
-    mustContain: [/w-\[24rem\]/, /lg:w-\[30rem\]/, /xl:w-\[34rem\]/],
+    mustContain: [/md:w-\[24rem\]/, /lg:w-\[28rem\]/, /xl:w-\[30rem\]/],
   },
 ];
 

@@ -18,10 +18,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::knowledge::{KnowledgeLibraryGeneration, TypedTechnicalFact},
-    infra::arangodb::{
-        collections::KNOWLEDGE_CHUNK_COLLECTION, document_store::KnowledgeChunkRow,
-        graph_store::KnowledgeEvidenceRow,
-    },
+    infra::arangodb::{document_store::KnowledgeChunkRow, graph_store::KnowledgeEvidenceRow},
     infra::repositories,
     interfaces::http::{
         auth::AuthContext,
@@ -388,22 +385,11 @@ async fn load_chunks_by_ids(
     if chunk_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let cursor = state
+    state
         .arango_document_store
-        .client()
-        .query_json(
-            "FOR chunk IN @@collection
-             FILTER chunk.chunk_id IN @chunk_ids
-             SORT chunk.chunk_id ASC
-             RETURN chunk",
-            serde_json::json!({
-                "@collection": KNOWLEDGE_CHUNK_COLLECTION,
-                "chunk_ids": chunk_ids,
-            }),
-        )
+        .list_chunks_by_ids(chunk_ids)
         .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    decode_many_results(cursor).map_err(|e| ApiError::internal_with_log(e, "internal"))
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))
 }
 
 fn summarize_typed_technical_facts(
@@ -660,12 +646,4 @@ fn build_runtime_relation_evidence_support_edges(
             created_at: row.created_at,
         })
         .collect()
-}
-
-fn decode_many_results<T>(cursor: serde_json::Value) -> Result<Vec<T>, ApiError>
-where
-    T: for<'de> serde::Deserialize<'de>,
-{
-    let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
-    serde_json::from_value(result).map_err(|e| ApiError::internal_with_log(e, "internal"))
 }

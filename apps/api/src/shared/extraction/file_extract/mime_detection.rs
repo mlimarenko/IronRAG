@@ -9,7 +9,12 @@ use super::{
     UploadFileKind,
 };
 
-pub(super) fn detect_declared_upload_file_kind(
+/// Canonical structural media-class classifier from declared inputs only
+/// (`file_name` extension + `mime_type`), no byte sniffing. This is the
+/// no-payload variant of [`detect_upload_file_kind`], used by callers that
+/// only hold persisted document/revision metadata (admission resolution,
+/// document-parentage backfill) and never see the original bytes.
+pub fn detect_declared_upload_file_kind(
     file_name: Option<&str>,
     mime_type: Option<&str>,
 ) -> Option<UploadFileKind> {
